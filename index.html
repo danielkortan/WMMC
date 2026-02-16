@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Whit Merrifield Memorial Cup 2025</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="header-content">
+      <h1>The Whit Merrifield Memorial Cup</h1>
+      <p class="subtitle">2025 Season</p>
+    </div>
+  </header>
+
+  <nav id="main-nav">
+    <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+    <button class="nav-btn" data-tab="standings">Standings</button>
+    <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
+    <button class="nav-btn" data-tab="players">Player Stats</button>
+    <button class="nav-btn" data-tab="bracket">Bracket</button>
+    <button class="nav-btn" data-tab="swaps">Transactions</button>
+    <button class="nav-btn" data-tab="rules">Rules</button>
+  </nav>
+
+  <main id="app">
+    <!-- Dashboard -->
+    <section id="dashboard" class="tab-content active">
+      <div class="champion-banner" id="champion-banner"></div>
+      <div class="stats-grid" id="stats-grid"></div>
+      <div class="card">
+        <h2>Final Standings</h2>
+        <table id="final-standings-table" class="data-table"></table>
+      </div>
+    </section>
+
+    <!-- Standings -->
+    <section id="standings" class="tab-content">
+      <div class="card">
+        <h2>Pool Play Standings</h2>
+        <div class="pool-selector">
+          <button class="pool-btn active" data-pool="all">All Pools</button>
+          <button class="pool-btn" data-pool="Pool 1">Pool 1</button>
+          <button class="pool-btn" data-pool="Pool 2">Pool 2</button>
+          <button class="pool-btn" data-pool="Pool 3">Pool 3</button>
+        </div>
+        <table id="pool-play-table" class="data-table"></table>
+      </div>
+      <div class="two-col">
+        <div class="card">
+          <h2>Playoff Qualifiers</h2>
+          <div id="qualifiers-list"></div>
+        </div>
+        <div class="card">
+          <h2>Season Awards</h2>
+          <div id="awards-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Weekly Scores -->
+    <section id="weekly" class="tab-content">
+      <div class="card">
+        <h2>Weekly Team Scoring</h2>
+        <div class="filters">
+          <select id="weekly-round-filter">
+            <option value="all">All Rounds</option>
+          </select>
+          <select id="weekly-week-filter">
+            <option value="all">All Weeks</option>
+          </select>
+          <select id="weekly-manager-filter">
+            <option value="all">All Managers</option>
+          </select>
+        </div>
+        <table id="weekly-table" class="data-table"></table>
+      </div>
+    </section>
+
+    <!-- Player Stats -->
+    <section id="players" class="tab-content">
+      <div class="card">
+        <div class="player-type-toggle">
+          <button class="type-btn active" data-type="batting">Batting</button>
+          <button class="type-btn" data-type="pitching">Pitching</button>
+        </div>
+        <div class="filters">
+          <select id="player-round-filter">
+            <option value="all">All Rounds</option>
+          </select>
+          <select id="player-week-filter">
+            <option value="all">All Weeks</option>
+          </select>
+          <select id="player-manager-filter">
+            <option value="all">All Managers</option>
+          </select>
+        </div>
+        <table id="players-table" class="data-table"></table>
+      </div>
+    </section>
+
+    <!-- Bracket -->
+    <section id="bracket" class="tab-content">
+      <div class="card">
+        <h2>Elimination Bracket</h2>
+        <div class="bracket-container" id="bracket-container"></div>
+      </div>
+    </section>
+
+    <!-- Transactions -->
+    <section id="swaps" class="tab-content">
+      <div class="card">
+        <h2>Transactions</h2>
+        <div class="filters">
+          <select id="swap-type-filter">
+            <option value="all">All Types</option>
+            <option value="Free Swap (one per round)">Free Swap</option>
+            <option value="IL Swap">IL Swap</option>
+            <option value="Drop Swap">Drop Swap</option>
+            <option value="Trade Swap">Trade Swap</option>
+          </select>
+          <select id="swap-manager-filter">
+            <option value="all">All Managers</option>
+          </select>
+        </div>
+        <table id="swaps-table" class="data-table"></table>
+      </div>
+    </section>
+
+    <!-- Rules -->
+    <section id="rules" class="tab-content">
+      <div class="card">
+        <h2>Constitution & Rules</h2>
+        <div id="rules-content"></div>
+      </div>
+      <div class="two-col">
+        <div class="card">
+          <h2>Batting Scoring</h2>
+          <table id="batting-scoring-table" class="data-table scoring-table"></table>
+        </div>
+        <div class="card">
+          <h2>Pitching Scoring</h2>
+          <table id="pitching-scoring-table" class="data-table scoring-table"></table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>The Whit Merrifield Memorial Cup &copy; 2025</p>
+  </footer>
+
+  <script src="data.json" type="application/json" id="data-source"></script>
+  <script src="app.js"></script>
+</body>
+</html>
