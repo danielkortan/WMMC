@@ -3,14 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>The Whit Merrifield Memorial Cup 2025</title>
+  <title>The Whit Merrifield Memorial Cup</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header>
     <div class="header-content">
       <h1>The Whit Merrifield Memorial Cup</h1>
-      <p class="subtitle">2025 Season</p>
+      <div class="season-selector">
+        <select id="season-select"></select>
+      </div>
     </div>
   </header>
 
@@ -22,6 +24,8 @@
     <button class="nav-btn" data-tab="bracket">Bracket</button>
     <button class="nav-btn" data-tab="swaps">Transactions</button>
     <button class="nav-btn" data-tab="rules">Rules</button>
+    <button class="nav-btn" data-tab="schedule">Schedule</button>
+    <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
   </nav>
 
   <main id="app">
@@ -145,13 +149,82 @@
         </div>
       </div>
     </section>
+
+    <!-- Season Schedule -->
+    <section id="schedule" class="tab-content">
+      <div id="schedule-content"></div>
+    </section>
+
+    <!-- Commissioner Home -->
+    <section id="commissioner" class="tab-content">
+      <div id="commissioner-login" class="card">
+        <h2>Commissioner Login</h2>
+        <p>Enter your email to access commissioner tools.</p>
+        <div class="login-form">
+          <input type="email" id="commissioner-email" placeholder="Email address">
+          <button class="btn btn-primary" id="commissioner-login-btn">Login</button>
+        </div>
+        <p id="login-error" class="error-text" style="display:none;"></p>
+      </div>
+      <div id="commissioner-panel" style="display:none;">
+        <div class="card">
+          <h2>Commissioner Home</h2>
+          <p>Logged in as <strong id="commissioner-name"></strong></p>
+          <button class="btn btn-secondary" id="commissioner-logout-btn">Logout</button>
+        </div>
+
+        <!-- Manager Management -->
+        <div class="card">
+          <h2>Manage Managers</h2>
+          <table id="managers-table" class="data-table"></table>
+          <div class="add-manager-form" style="margin-top:1rem;">
+            <h3>Add / Edit Manager</h3>
+            <input type="text" id="mgr-name" placeholder="Full Name">
+            <input type="email" id="mgr-email" placeholder="Email">
+            <label class="checkbox-label">
+              <input type="checkbox" id="mgr-commissioner"> Commissioner
+            </label>
+            <button class="btn btn-primary" id="save-manager-btn">Save Manager</button>
+            <button class="btn btn-secondary" id="cancel-edit-btn" style="display:none;">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Season Setup -->
+        <div class="card">
+          <h2 id="season-setup-title">Season Setup</h2>
+          <div class="upload-section">
+            <h3>Upload Initial Player Pool (Names Only)</h3>
+            <p class="upload-hint">Upload CSV files with player names. Batter file should have a column named "Name" or "Player". Pitcher file should have a column named "Name" or "Player".</p>
+            <div class="two-col" style="margin-top:0.75rem;">
+              <div>
+                <label class="upload-label">Batters CSV</label>
+                <input type="file" id="upload-batters-pool" accept=".csv">
+                <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
+              </div>
+              <div>
+                <label class="upload-label">Pitchers CSV</label>
+                <input type="file" id="upload-pitchers-pool" accept=".csv">
+                <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
+              </div>
+            </div>
+            <div id="player-pool-status"></div>
+            <div id="player-pool-display" style="margin-top:1rem;"></div>
+          </div>
+        </div>
+
+        <!-- Weekly Stat Uploads -->
+        <div class="card">
+          <h2>Weekly Stat Uploads</h2>
+          <div id="weekly-upload-sections"></div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer>
-    <p>The Whit Merrifield Memorial Cup &copy; 2025</p>
+    <p>The Whit Merrifield Memorial Cup &copy; <span id="footer-year"></span></p>
   </footer>
 
-  <script src="data.json" type="application/json" id="data-source"></script>
   <script src="app.js"></script>
 </body>
 </html>
