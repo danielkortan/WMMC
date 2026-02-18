@@ -1000,6 +1000,11 @@ function renderRulesFromScoring() {
 // Active Season Display
 // ============================================================
 function showActiveSeason(seasonData) {
+  // Repair any data where manager was incorrectly set to MLB team abbreviation
+  if (repairManagerAssignments(seasonData)) {
+    saveSeason(SELECTED_SEASON, seasonData);
+  }
+
   const banner = document.getElementById('champion-banner');
   banner.innerHTML = `
     <div class="trophy">&#9918;</div>
@@ -1203,6 +1208,48 @@ function calculatePitchingScore(stats) {
   return Math.round(score * 100) / 100;
 }
 
+// Repair any weekly data where 'manager' is an MLB team abbreviation instead of a WMMC manager name
+function repairManagerAssignments(seasonData) {
+  if (!seasonData || seasonData.status === 'completed') return false;
+
+  const managers = getManagers();
+  const managerNames = new Set(managers.map(m => m.name));
+  const rosters = seasonData.rosters || {};
+  let repaired = false;
+
+  // Build player-to-manager lookup from rosters
+  const playerToManager = {};
+  for (const [managerName, roster] of Object.entries(rosters)) {
+    (roster.batters || []).forEach(b => { playerToManager[b] = managerName; });
+    (roster.pitchers || []).forEach(p => { playerToManager[p] = managerName; });
+  }
+
+  // Repair batting entries
+  (seasonData.weekly_batting || []).forEach(entry => {
+    if (!managerNames.has(entry.manager)) {
+      // Manager field doesn't match any registered manager - try roster lookup
+      const correctManager = playerToManager[entry.batter];
+      if (correctManager) {
+        entry.manager = correctManager;
+        repaired = true;
+      }
+    }
+  });
+
+  // Repair pitching entries
+  (seasonData.weekly_pitching || []).forEach(entry => {
+    if (!managerNames.has(entry.manager)) {
+      const correctManager = playerToManager[entry.pitcher];
+      if (correctManager) {
+        entry.manager = correctManager;
+        repaired = true;
+      }
+    }
+  });
+
+  return repaired;
+}
+
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
@@ -1228,19 +1275,24 @@ function computeManagerScores(seasonData) {
 function buildTeamWeekly(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
+  const managers = getManagers();
+
+  // Build manager-to-pool lookup
+  const managerPool = {};
+  managers.forEach(m => { if (m.pool) managerPool[m.name] = 'Pool ' + m.pool; });
 
   const key = (r, w, m) => `${r}|${w}|${m}`;
   const map = {};
 
   batting.forEach(b => {
     const k = key(b.round, b.week, b.manager);
-    if (!map[k]) map[k] = { round: b.round, week: b.week, manager: b.manager, pool: '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
+    if (!map[k]) map[k] = { round: b.round, week: b.week, manager: b.manager, pool: managerPool[b.manager] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
     map[k].weekly_batting += (b.weekly_score || 0);
   });
 
   pitching.forEach(p => {
     const k = key(p.round, p.week, p.manager);
-    if (!map[k]) map[k] = { round: p.round, week: p.week, manager: p.manager, pool: '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
+    if (!map[k]) map[k] = { round: p.round, week: p.week, manager: p.manager, pool: managerPool[p.manager] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
     map[k].weekly_pitching += (p.weekly_score || 0);
   });
 
@@ -2099,6 +2151,19 @@ function renderPlayerPoolDisplay() {
 }
 
 // ---- Weekly Stat Uploads ----
+
+// Helper: find which manager owns a player via roster assignments
+function findManagerForPlayer(seasonData, playerName, type) {
+  const rosters = seasonData.rosters || {};
+  const rosterKey = type === 'batting' ? 'batters' : 'pitchers';
+  for (const [managerName, roster] of Object.entries(rosters)) {
+    if ((roster[rosterKey] || []).includes(playerName)) {
+      return managerName;
+    }
+  }
+  return null;
+}
+
 function renderWeeklyUploadSections() {
   const container = document.getElementById('weekly-upload-sections');
   const seasons = getSeasons();
@@ -2174,10 +2239,18 @@ window.uploadWeeklyBatting = function(weekIndex) {
       batterTotals[b.batter] += (b.weekly_score || 0);
     });
 
+    let imported = 0;
+    let skipped = 0;
     rows.forEach(row => {
-      const manager = findColumn(row, ['manager', 'owner']);
       const batter = findColumn(row, ['batter', 'player', 'name']);
-      if (!manager || !batter) return;
+      if (!batter) return;
+
+      // Resolve manager: first try roster lookup, then CSV column fallback
+      let manager = findManagerForPlayer(sd, batter, 'batting');
+      if (!manager) {
+        manager = findColumn(row, ['manager', 'owner']);
+      }
+      if (!manager) { skipped++; return; }
 
       const stats = {
         '1b': parseNum(row['1b'] || row['1B'] || row['singles'] || 0),
@@ -2204,11 +2277,14 @@ window.uploadWeeklyBatting = function(weekIndex) {
         weekly_score: weeklyScore,
         total_score: Math.round((previousTotal + weeklyScore) * 100) / 100
       });
+      imported++;
     });
 
     saveSeason(SELECTED_SEASON, sd);
+    let statusMsg = `Uploaded ${imported} batter records. Scores calculated.`;
+    if (skipped > 0) statusMsg += ` ${skipped} rows skipped (player not found in any roster).`;
     document.getElementById(`upload-status-${weekIndex}`).innerHTML =
-      `<p class="success-text">Uploaded ${rows.length} batter records. Scores calculated.</p>`;
+      `<p class="success-text">${statusMsg}</p>`;
     renderWeeklyUploadSections();
     fileInput.value = '';
     init();
@@ -2229,10 +2305,18 @@ window.uploadWeeklyPitching = function(weekIndex) {
       !(p.round === scheduleWeek.round && p.week === scheduleWeek.week)
     );
 
+    let imported = 0;
+    let skipped = 0;
     rows.forEach(row => {
-      const manager = findColumn(row, ['manager', 'owner']);
       const pitcher = findColumn(row, ['pitcher', 'player', 'name']);
-      if (!manager || !pitcher) return;
+      if (!pitcher) return;
+
+      // Resolve manager: first try roster lookup, then CSV column fallback
+      let manager = findManagerForPlayer(sd, pitcher, 'pitching');
+      if (!manager) {
+        manager = findColumn(row, ['manager', 'owner']);
+      }
+      if (!manager) { skipped++; return; }
 
       const stats = {
         gs: parseNum(row['gs'] || row['GS'] || 0),
@@ -2259,11 +2343,14 @@ window.uploadWeeklyPitching = function(weekIndex) {
         ...stats,
         weekly_score: weeklyScore
       });
+      imported++;
     });
 
     saveSeason(SELECTED_SEASON, sd);
+    let statusMsg = `Uploaded ${imported} pitcher records. Scores calculated.`;
+    if (skipped > 0) statusMsg += ` ${skipped} rows skipped (player not found in any roster).`;
     document.getElementById(`upload-status-${weekIndex}`).innerHTML =
-      `<p class="success-text">Uploaded ${rows.length} pitcher records. Scores calculated.</p>`;
+      `<p class="success-text">${statusMsg}</p>`;
     renderWeeklyUploadSections();
     fileInput.value = '';
     init();
