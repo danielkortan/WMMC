@@ -140,28 +140,7 @@
         <p id="roster-login-error" class="error-text" style="display:none;"></p>
       </div>
       <div id="roster-panel" style="display:none;">
-        <div class="card">
-          <div class="roster-header">
-            <h2 id="roster-manager-name">My Roster</h2>
-            <div style="display:flex;gap:0.5rem;align-items:center;">
-              <select id="roster-team-selector" class="form-select" style="max-width:220px;width:auto;"></select>
-              <button class="btn btn-secondary btn-sm" id="roster-logout-btn">Logout</button>
-            </div>
-          </div>
-        </div>
-        <div class="card">
-          <h2>Current Roster</h2>
-          <div id="roster-current"></div>
-          <div id="roster-mgmt-inline" style="display:none;"></div>
-        </div>
-        <div class="card">
-          <h2>Player Stats by Week</h2>
-          <div id="roster-player-stats"></div>
-        </div>
-        <div class="card">
-          <h2>My Transactions</h2>
-          <div id="roster-transactions"></div>
-        </div>
+        <div id="roster-content"></div>
         <!-- Manual Update (Commissioner Only) -->
         <div class="card" id="manual-update-section" style="display:none;">
           <h2>Manual Update (Commissioner)</h2>
