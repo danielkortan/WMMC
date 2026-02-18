@@ -1360,10 +1360,282 @@ footer {
 }
 
 /* ============================================================ */
+/* Roster Scoring Summary Grid */
+/* ============================================================ */
+
+.roster-score-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.roster-score-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  text-align: center;
+}
+
+.roster-score-total {
+  border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.roster-score-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.25rem;
+}
+
+.roster-score-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.roster-score-detail {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+}
+
+/* ============================================================ */
+/* Roster Count Cards */
+/* ============================================================ */
+
+.roster-counts {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.roster-count-card {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+}
+
+.roster-count-num {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.roster-count-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* ============================================================ */
+/* Roster Add Row */
+/* ============================================================ */
+
+.roster-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.roster-add-row .form-select {
+  max-width: 300px;
+  flex: 1;
+}
+
+/* ============================================================ */
+/* Team Stats Breakdown Accordion */
+/* ============================================================ */
+
+.team-stats-breakdown {
+  margin-top: 1rem;
+}
+
+.period-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+
+.period-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  transition: opacity 0.15s;
+}
+
+.period-header:hover {
+  opacity: 0.9;
+}
+
+.period-header-label {
+  font-size: 0.9rem;
+  letter-spacing: 0.03em;
+}
+
+/* Arrow indicator: rotates when open */
+.period-header .period-header-label::before {
+  content: '›';
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-size: 1.1rem;
+  transition: transform 0.2s;
+}
+
+.period-header.period-open .period-header-label::before {
+  transform: rotate(90deg);
+}
+
+.period-header-pts {
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Period color themes */
+.period-pp1 { background: #1d4ed8; color: #fff; }
+.period-pp2 { background: #15803d; color: #fff; }
+.period-qf  { background: #c2410c; color: #fff; }
+.period-sf  { background: #9a3412; color: #fff; }
+.period-finals { background: #7e22ce; color: #fff; }
+
+.period-body {
+  padding: 1rem;
+  background: var(--card-bg);
+}
+
+/* Weekly Breakdown */
+.period-weekly-section {
+  margin-bottom: 1rem;
+}
+
+.period-weekly-section h4,
+.period-players-section h4 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25rem;
+}
+
+.period-week-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 0.5rem;
+}
+
+.period-week-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  text-align: center;
+}
+
+.week-card-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.week-card-pts {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0.1rem 0;
+}
+
+.week-card-detail {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+/* Player Performance */
+.period-players-groups {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.period-player-group-header {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--primary);
+  margin-bottom: 0.4rem;
+}
+
+.period-player-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.period-player-row:last-child {
+  border-bottom: none;
+}
+
+.period-player-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.period-player-type {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+}
+
+.period-player-pts {
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* ============================================================ */
 /* Responsive additions for new components */
 /* ============================================================ */
 
 @media (max-width: 768px) {
+  .roster-score-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .period-players-groups {
+    grid-template-columns: 1fr;
+  }
+
   .pool-play-grid {
     grid-template-columns: 1fr;
   }
