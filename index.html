@@ -18,13 +18,13 @@
 
   <nav id="main-nav">
     <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
+    <button class="nav-btn" data-tab="my-roster">My Roster</button>
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
     <button class="nav-btn" data-tab="players">Player Stats</button>
     <button class="nav-btn" data-tab="bracket">Bracket</button>
     <button class="nav-btn" data-tab="swaps">Transactions</button>
     <button class="nav-btn" data-tab="rules">Rules</button>
     <button class="nav-btn" data-tab="schedule">Schedule</button>
-    <button class="nav-btn" data-tab="my-roster">My Roster</button>
     <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
   </nav>
 
@@ -143,24 +143,20 @@
         <div class="card">
           <div class="roster-header">
             <h2 id="roster-manager-name">My Roster</h2>
-            <button class="btn btn-secondary btn-sm" id="roster-logout-btn">Switch User</button>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+              <select id="roster-team-selector" class="form-select" style="max-width:220px;width:auto;"></select>
+              <button class="btn btn-secondary btn-sm" id="roster-logout-btn">Logout</button>
+            </div>
           </div>
         </div>
         <div class="card">
           <h2>Current Roster</h2>
           <div id="roster-current"></div>
+          <div id="roster-mgmt-inline" style="display:none;"></div>
         </div>
         <div class="card">
           <h2>Player Stats by Week</h2>
           <div id="roster-player-stats"></div>
-        </div>
-        <div class="card">
-          <h2>Previously Rostered Players</h2>
-          <div id="roster-former"></div>
-        </div>
-        <div class="card">
-          <h2>Request Add/Drop</h2>
-          <div id="swap-request-form"></div>
         </div>
         <div class="card">
           <h2>My Transactions</h2>
@@ -246,21 +242,6 @@
           <button class="btn btn-secondary" id="commissioner-logout-btn">Logout</button>
         </div>
 
-        <!-- Season Schedule Date -->
-        <div class="card">
-          <h2>Season Schedule Dates</h2>
-          <div class="asg-date-section">
-            <label class="upload-label">Date of All-Star Game</label>
-            <p class="upload-hint">Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the prior Monday as Week 1 start.</p>
-            <div class="asg-date-row">
-              <input type="date" id="asg-date-input">
-              <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
-            </div>
-            <div id="asg-date-status"></div>
-          </div>
-          <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
-        </div>
-
         <!-- Manager Management -->
         <div class="card">
           <h2>Manage Managers</h2>
@@ -283,52 +264,59 @@
           </div>
         </div>
 
-        <!-- Roster Management -->
-        <div class="card">
-          <h2>Manage Rosters</h2>
-          <div class="roster-mgmt-section">
-            <div class="filters">
-              <select id="roster-mgmt-manager">
-                <option value="">Select Manager</option>
-              </select>
-            </div>
-            <div id="roster-mgmt-content"></div>
-          </div>
-        </div>
-
         <!-- Pending Swap Requests -->
         <div class="card">
           <h2>Pending Swap Requests</h2>
           <div id="pending-swaps-list"></div>
         </div>
 
-        <!-- Season Setup -->
+        <!-- Season Schedule Date -->
         <div class="card">
-          <h2 id="season-setup-title">Season Setup</h2>
-          <div class="upload-section">
-            <h3>Upload Initial Player Pool (Names Only)</h3>
-            <p class="upload-hint">Upload CSV files with player names. Batter file should have a column named "Name" or "Player". Pitcher file should have a column named "Name" or "Player".</p>
-            <div class="two-col" style="margin-top:0.75rem;">
-              <div>
-                <label class="upload-label">Batters CSV</label>
-                <input type="file" id="upload-batters-pool" accept=".csv">
-                <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
-              </div>
-              <div>
-                <label class="upload-label">Pitchers CSV</label>
-                <input type="file" id="upload-pitchers-pool" accept=".csv">
-                <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
-              </div>
+          <h2>Season Schedule Dates</h2>
+          <div class="asg-date-section">
+            <label class="upload-label">Date of All-Star Game</label>
+            <p class="upload-hint">Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the prior Monday as Week 1 start.</p>
+            <div class="asg-date-row">
+              <input type="date" id="asg-date-input">
+              <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
             </div>
-            <div id="player-pool-status"></div>
-            <div id="player-pool-display" style="margin-top:1rem;"></div>
+            <div id="asg-date-status"></div>
           </div>
+          <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
         </div>
 
         <!-- Weekly Stat Uploads -->
         <div class="card">
           <h2>Weekly Stat Uploads</h2>
           <div id="weekly-upload-sections"></div>
+        </div>
+
+        <!-- Season Setup (collapsible) -->
+        <div class="card">
+          <div class="roster-header" style="cursor:pointer;" id="season-setup-toggle">
+            <h2 id="season-setup-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Season Setup</h2>
+            <span class="btn btn-sm btn-secondary" id="season-setup-toggle-btn">Show</span>
+          </div>
+          <div id="season-setup-body" style="display:none;margin-top:1rem;">
+            <div class="upload-section">
+              <h3>Upload Initial Player Pool (Names Only)</h3>
+              <p class="upload-hint">Upload CSV files with player names. Batter file should have a column named "Name" or "Player". Pitcher file should have a column named "Name" or "Player".</p>
+              <div class="two-col" style="margin-top:0.75rem;">
+                <div>
+                  <label class="upload-label">Batters CSV</label>
+                  <input type="file" id="upload-batters-pool" accept=".csv">
+                  <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
+                </div>
+                <div>
+                  <label class="upload-label">Pitchers CSV</label>
+                  <input type="file" id="upload-pitchers-pool" accept=".csv">
+                  <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
+                </div>
+              </div>
+              <div id="player-pool-status"></div>
+              <div id="player-pool-display" style="margin-top:1rem;"></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
