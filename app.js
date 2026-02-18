@@ -241,16 +241,16 @@ function renderScoreboardContent() {
   // Scoring period tabs
   html += `<div class="card scoreboard-card">
     <div class="scoreboard-tabs" id="scoreboard-tabs">
-      <button class="sb-tab active" data-period="pp1">Pool Play 1</button>
+      <button class="sb-tab active" data-period="pp-overall">Pool Play Overall</button>
+      <button class="sb-tab" data-period="pp1">Pool Play 1</button>
       <button class="sb-tab" data-period="pp2">Pool Play 2</button>
-      <button class="sb-tab" data-period="pp-overall">Pool Play Overall</button>
       <button class="sb-tab" data-period="qf">Quarterfinals</button>
       <button class="sb-tab" data-period="sf">Semifinals</button>
       <button class="sb-tab" data-period="finals">Finals</button>
     </div>
-    <div class="sb-period" id="sb-pp1">${renderPoolPeriodContent('pp1')}</div>
+    <div class="sb-period" id="sb-pp-overall">${renderPPOverallContent(leaders, seeding)}</div>
+    <div class="sb-period" id="sb-pp1" style="display:none">${renderPoolPeriodContent('pp1')}</div>
     <div class="sb-period" id="sb-pp2" style="display:none">${renderPoolPeriodContent('pp2')}</div>
-    <div class="sb-period" id="sb-pp-overall" style="display:none">${renderPPOverallContent(leaders, seeding)}</div>
     <div class="sb-period" id="sb-qf" style="display:none">${renderQFContent()}</div>
     <div class="sb-period" id="sb-sf" style="display:none">${renderSFContent()}</div>
     <div class="sb-period" id="sb-finals" style="display:none">${renderFinalsContent()}</div>
@@ -1059,32 +1059,79 @@ function showActiveSeason(seasonData) {
   const scoreboardContent = document.getElementById('scoreboard-content');
   if (managerScores.length > 0) {
     const sorted = [...managerScores].sort((a, b) => b.total - a.total);
-    scoreboardContent.innerHTML = `
-      <div class="card">
-        <h2>Current Standings</h2>
-        <div class="table-wrapper">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Rank</th><th>Manager</th>
-              <th>Batting</th><th>Pitching</th><th>Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${sorted.map((m, i) => `
+
+    // Check if managers have pool assignments
+    const poolGroups = {};
+    managers.forEach(m => {
+      if (m.pool) {
+        if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
+        poolGroups[m.pool].push(m.name);
+      }
+    });
+    const hasPools = Object.keys(poolGroups).length > 0;
+
+    let html = '';
+
+    // Overall standings
+    html += `<div class="card">
+      <h2>Current Standings</h2>
+      <div class="table-wrapper">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Rank</th><th>Manager</th>${hasPools ? '<th>Pool</th>' : ''}
+            <th>Batting</th><th>Pitching</th><th>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sorted.map((m, i) => {
+            const mgr = managers.find(mg => mg.name === m.manager);
+            const pool = mgr && mgr.pool ? 'Pool ' + mgr.pool : '-';
+            return `
               <tr>
                 <td class="rank ${i < 3 ? 'rank-' + (i + 1) : ''}">${i + 1}</td>
-                <td><strong>${m.manager}</strong></td>
+                <td><strong>${m.manager}</strong></td>${hasPools ? `<td>${pool}</td>` : ''}
                 <td class="num">${fmt(m.batting)}</td>
                 <td class="num">${fmt(m.pitching)}</td>
                 <td class="num"><strong>${fmt(m.total)}</strong></td>
               </tr>
-            `).join('')}
-          </tbody>
-        </table>
-        </div>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
       </div>
-    `;
+    </div>`;
+
+    // Pool breakdown if pools are assigned
+    if (hasPools) {
+      html += '<div class="card"><h2>Pool Standings</h2><div class="pool-play-grid">';
+      Object.keys(poolGroups).sort().forEach(poolNum => {
+        const poolMembers = poolGroups[poolNum];
+        const poolScores = sorted.filter(m => poolMembers.includes(m.manager));
+        html += `<div class="pool-card">
+          <h3>Pool ${poolNum}</h3>
+          <div class="table-wrapper">
+          <table class="data-table">
+            <thead><tr><th>Rank</th><th>Manager</th><th>Batting</th><th>Pitching</th><th>Total</th></tr></thead>
+            <tbody>
+              ${poolScores.map((m, i) => `
+                <tr class="${i === 0 ? 'pool-leader-row' : ''}">
+                  <td class="rank">${i + 1}</td>
+                  <td><strong>${m.manager}</strong></td>
+                  <td class="num">${fmt(m.batting)}</td>
+                  <td class="num">${fmt(m.pitching)}</td>
+                  <td class="num"><strong>${fmt(m.total)}</strong></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          </div>
+        </div>`;
+      });
+      html += '</div></div>';
+    }
+
+    scoreboardContent.innerHTML = html;
   } else {
     scoreboardContent.innerHTML = '<div class="card"><p>No scoring data yet. Upload weekly stats to see standings.</p></div>';
   }
@@ -1331,6 +1378,63 @@ function setupMyRoster() {
 }
 
 function renderRosterData(managerName) {
+  // Current Roster
+  const rosterContainer = document.getElementById('roster-current');
+  const formerContainer = document.getElementById('roster-former');
+  const swapFormContainer = document.getElementById('swap-request-form');
+
+  // Determine current roster from season data
+  const seasons = getSeasons();
+  const seasonData = seasons[SELECTED_SEASON];
+
+  if (seasonData && seasonData.status === 'active' && seasonData.rosters && seasonData.rosters[managerName]) {
+    const roster = seasonData.rosters[managerName];
+    let html = '';
+    if (roster.batters && roster.batters.length > 0) {
+      html += '<h3>Batters</h3><div class="pool-list">' + roster.batters.map(b => `<span class="pool-tag">${b}</span>`).join('') + '</div>';
+    }
+    if (roster.pitchers && roster.pitchers.length > 0) {
+      html += '<h3 style="margin-top:0.75rem;">Pitchers</h3><div class="pool-list">' + roster.pitchers.map(p => `<span class="pool-tag">${p}</span>`).join('') + '</div>';
+    }
+    rosterContainer.innerHTML = html || '<p class="text-muted">No players assigned yet. Contact the commissioner to set up your roster.</p>';
+  } else if (DATA && (DATA.batting_weekly || DATA.pitching_weekly)) {
+    // Historical season - derive roster from weekly data (unique current players)
+    const batters = [...new Set((DATA.batting_weekly || []).filter(b => b.manager === managerName).map(b => b.batter))];
+    const pitchers = [...new Set((DATA.pitching_weekly || []).filter(p => p.manager === managerName).map(p => p.pitcher))];
+    let html = '';
+    if (batters.length > 0) {
+      html += '<h3>Batters</h3><div class="pool-list">' + batters.map(b => `<span class="pool-tag">${b}</span>`).join('') + '</div>';
+    }
+    if (pitchers.length > 0) {
+      html += '<h3 style="margin-top:0.75rem;">Pitchers</h3><div class="pool-list">' + pitchers.map(p => `<span class="pool-tag">${p}</span>`).join('') + '</div>';
+    }
+    rosterContainer.innerHTML = html || '<p class="text-muted">No roster data available.</p>';
+  } else {
+    rosterContainer.innerHTML = '<p class="text-muted">No roster data available for this season.</p>';
+  }
+
+  // Former players (from swap data)
+  if (DATA && DATA.swaps && DATA.email_map) {
+    const email = ROSTER_EMAIL;
+    const mySwaps = DATA.swaps.filter(s => s.email === email);
+    const droppedPlayers = [...new Set(mySwaps.filter(s => s.player_out).map(s => s.player_out))];
+    const currentPlayers = [...new Set([
+      ...(DATA.batting_weekly || []).filter(b => b.manager === managerName).map(b => b.batter),
+      ...(DATA.pitching_weekly || []).filter(p => p.manager === managerName).map(p => p.pitcher),
+    ])];
+    const former = droppedPlayers.filter(p => !currentPlayers.includes(p));
+    if (former.length > 0) {
+      formerContainer.innerHTML = '<div class="pool-list">' + former.map(p => `<span class="pool-tag">${p}</span>`).join('') + '</div>';
+    } else {
+      formerContainer.innerHTML = '<p class="text-muted">No previously rostered players.</p>';
+    }
+  } else {
+    formerContainer.innerHTML = '<p class="text-muted">No transaction data available.</p>';
+  }
+
+  // Swap request form placeholder
+  swapFormContainer.innerHTML = '<p class="text-muted">Contact the commissioner to request add/drop transactions.</p>';
+
   // Player Stats by Week
   const statsContainer = document.getElementById('roster-player-stats');
   const transContainer = document.getElementById('roster-transactions');
@@ -1403,6 +1507,53 @@ function renderRosterData(managerName) {
     } else {
       transContainer.innerHTML = '<p class="text-muted">No transaction data available.</p>';
     }
+  } else if (seasonData && seasonData.status === 'active') {
+    // Active season - show player stats from uploaded weekly data
+    const batting = (seasonData.weekly_batting || []).filter(b => b.manager === managerName);
+    const pitching = (seasonData.weekly_pitching || []).filter(p => p.manager === managerName);
+    let html = '';
+    if (batting.length > 0) {
+      html += '<h3>Batting</h3><div class="table-wrapper"><table class="data-table"><thead><tr>';
+      html += '<th>Round</th><th>Week</th><th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th>';
+      html += '</tr></thead><tbody>';
+      batting.forEach(b => {
+        html += `<tr>
+          <td>${b.round || ''}</td><td>${b.week || ''}</td><td>${b.batter}</td>
+          <td class="num">${b.abs || 0}</td><td class="num">${b['1b'] || 0}</td><td class="num">${b['2b'] || 0}</td>
+          <td class="num">${b['3b'] || 0}</td><td class="num">${b.hr || 0}</td><td class="num">${b.r || 0}</td>
+          <td class="num">${b.rbi || 0}</td><td class="num">${b.sb || 0}</td><td class="num">${b.bb || 0}</td>
+          <td class="num"><strong>${fmt(b.weekly_score)}</strong></td>
+        </tr>`;
+      });
+      html += '</tbody></table></div>';
+    }
+    if (pitching.length > 0) {
+      html += '<h3 style="margin-top:1rem;">Pitching</h3><div class="table-wrapper"><table class="data-table"><thead><tr>';
+      html += '<th>Round</th><th>Week</th><th>Player</th><th>GS</th><th>W</th><th>QS</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th>';
+      html += '</tr></thead><tbody>';
+      pitching.forEach(p => {
+        html += `<tr>
+          <td>${p.round || ''}</td><td>${p.week || ''}</td><td>${p.pitcher}</td>
+          <td class="num">${p.gs || 0}</td><td class="num">${p.w || 0}</td><td class="num">${fmtDec(p.qs)}</td>
+          <td class="num">${fmtDec(p.ip)}</td><td class="num">${p.h || 0}</td><td class="num">${p.er || 0}</td>
+          <td class="num">${p.bb || 0}</td><td class="num">${p.k || 0}</td>
+          <td class="num"><strong>${fmt(p.weekly_score)}</strong></td>
+        </tr>`;
+      });
+      html += '</tbody></table></div>';
+    }
+    statsContainer.innerHTML = html || '<p class="text-muted">No stats available for this season yet.</p>';
+
+    // Manager total score
+    const batTotal = batting.reduce((sum, b) => sum + (b.weekly_score || 0), 0);
+    const pitTotal = pitching.reduce((sum, p) => sum + (p.weekly_score || 0), 0);
+    if (batTotal > 0 || pitTotal > 0) {
+      statsContainer.innerHTML = `<div class="advancement-info" style="margin-bottom:1rem;">
+        <strong>Season Totals:</strong> Batting: ${fmt(Math.round(batTotal * 100) / 100)} | Pitching: ${fmt(Math.round(pitTotal * 100) / 100)} | <strong>Total: ${fmt(Math.round((batTotal + pitTotal) * 100) / 100)}</strong>
+      </div>` + statsContainer.innerHTML;
+    }
+
+    transContainer.innerHTML = '<p class="text-muted">No transactions yet.</p>';
   } else {
     statsContainer.innerHTML = '<p class="text-muted">No stats available for this season yet.</p>';
     transContainer.innerHTML = '<p class="text-muted">No transactions yet.</p>';
@@ -1654,6 +1805,7 @@ function showCommissionerPanel() {
   document.getElementById('season-setup-title').textContent = `${SELECTED_SEASON} Season Setup`;
 
   renderManagersTable();
+  setupRosterMgmt();
   renderPlayerPoolDisplay();
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
@@ -1669,7 +1821,7 @@ function renderManagersTable() {
   table.innerHTML = `
     <thead>
       <tr>
-        <th>Name</th><th>Email</th><th>Commissioner</th><th>Actions</th>
+        <th>Name</th><th>Email</th><th>Pool</th><th>Commissioner</th><th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -1677,6 +1829,7 @@ function renderManagersTable() {
         <tr>
           <td><strong>${m.name}</strong></td>
           <td>${m.email}</td>
+          <td>${m.pool ? 'Pool ' + m.pool : '-'}</td>
           <td>${m.commissioner ? '<span class="badge badge-winner">Yes</span>' : 'No'}</td>
           <td>
             <button class="btn btn-sm btn-secondary" onclick="editManager(${i})">Edit</button>
@@ -1691,6 +1844,7 @@ function renderManagersTable() {
     const name = document.getElementById('mgr-name').value.trim();
     const email = document.getElementById('mgr-email').value.trim().toLowerCase();
     const isCommissioner = document.getElementById('mgr-commissioner').checked;
+    const pool = parseInt(document.getElementById('mgr-pool').value) || null;
 
     if (!name || !email) {
       alert('Name and email are required.');
@@ -1700,7 +1854,7 @@ function renderManagersTable() {
     const managers = getManagers();
 
     if (editingManagerIndex >= 0) {
-      managers[editingManagerIndex] = { name, email, commissioner: isCommissioner };
+      managers[editingManagerIndex] = { name, email, commissioner: isCommissioner, pool };
       editingManagerIndex = -1;
       document.getElementById('cancel-edit-btn').style.display = 'none';
     } else {
@@ -1708,13 +1862,14 @@ function renderManagersTable() {
         alert('A manager with this email already exists.');
         return;
       }
-      managers.push({ name, email, commissioner: isCommissioner });
+      managers.push({ name, email, commissioner: isCommissioner, pool });
     }
 
     saveManagers(managers);
     document.getElementById('mgr-name').value = '';
     document.getElementById('mgr-email').value = '';
     document.getElementById('mgr-commissioner').checked = false;
+    document.getElementById('mgr-pool').value = '';
     renderManagersTable();
   };
 
@@ -1723,6 +1878,7 @@ function renderManagersTable() {
     document.getElementById('mgr-name').value = '';
     document.getElementById('mgr-email').value = '';
     document.getElementById('mgr-commissioner').checked = false;
+    document.getElementById('mgr-pool').value = '';
     document.getElementById('cancel-edit-btn').style.display = 'none';
   };
 }
@@ -1733,6 +1889,7 @@ window.editManager = function(index) {
   document.getElementById('mgr-name').value = m.name;
   document.getElementById('mgr-email').value = m.email;
   document.getElementById('mgr-commissioner').checked = m.commissioner;
+  document.getElementById('mgr-pool').value = m.pool || '';
   editingManagerIndex = index;
   document.getElementById('cancel-edit-btn').style.display = 'inline-block';
 };
@@ -1743,6 +1900,133 @@ window.deleteManager = function(index) {
   managers.splice(index, 1);
   saveManagers(managers);
   renderManagersTable();
+};
+
+// ---- Roster Management (Commissioner) ----
+function setupRosterMgmt() {
+  const managerSelect = document.getElementById('roster-mgmt-manager');
+  const managers = getManagers();
+
+  managerSelect.innerHTML = '<option value="">Select Manager</option>' +
+    managers.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+
+  managerSelect.onchange = () => {
+    const managerName = managerSelect.value;
+    if (!managerName) {
+      document.getElementById('roster-mgmt-content').innerHTML = '';
+      return;
+    }
+    renderRosterMgmtContent(managerName);
+  };
+}
+
+function renderRosterMgmtContent(managerName) {
+  const container = document.getElementById('roster-mgmt-content');
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+
+  if (!sd || sd.status === 'completed') {
+    container.innerHTML = '<p>Cannot modify rosters for a completed season.</p>';
+    return;
+  }
+
+  if (!sd.rosters) sd.rosters = {};
+  if (!sd.rosters[managerName]) sd.rosters[managerName] = { batters: [], pitchers: [] };
+
+  const roster = sd.rosters[managerName];
+  const allRosters = sd.rosters;
+
+  // Get all players already rostered by any manager
+  const rosteredBatters = new Set();
+  const rosteredPitchers = new Set();
+  Object.values(allRosters).forEach(r => {
+    (r.batters || []).forEach(b => rosteredBatters.add(b));
+    (r.pitchers || []).forEach(p => rosteredPitchers.add(p));
+  });
+
+  // Available players (in pool but not rostered)
+  const availBatters = (sd.batters_pool || []).filter(b => !rosteredBatters.has(b));
+  const availPitchers = (sd.pitchers_pool || []).filter(p => !rosteredPitchers.has(p));
+
+  let html = `<h3 style="margin-top:1rem;">${managerName}'s Roster</h3>`;
+
+  // Current batters
+  html += '<h4 style="margin-top:0.75rem;">Batters</h4>';
+  if (roster.batters.length > 0) {
+    html += '<div class="pool-list">';
+    roster.batters.forEach(b => {
+      const safeName = b.replace(/'/g, "\\'");
+      html += `<span class="pool-tag">${b} <button class="btn btn-sm btn-danger" style="padding:0 0.25rem;margin-left:0.25rem;font-size:0.7rem;line-height:1;" onclick="removeFromRoster('${managerName.replace(/'/g, "\\'")}', 'batters', '${safeName}')">&times;</button></span>`;
+    });
+    html += '</div>';
+  } else {
+    html += '<p class="text-muted">No batters assigned.</p>';
+  }
+
+  // Add batter
+  if (availBatters.length > 0) {
+    html += `<div style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center;">
+      <select id="add-batter-select" class="form-select" style="max-width:300px;">
+        <option value="">Add batter...</option>
+        ${availBatters.map(b => `<option value="${b}">${b}</option>`).join('')}
+      </select>
+      <button class="btn btn-sm btn-primary" onclick="addToRoster('${managerName.replace(/'/g, "\\'")}', 'batters', 'add-batter-select')">Add</button>
+    </div>`;
+  }
+
+  // Current pitchers
+  html += '<h4 style="margin-top:1rem;">Pitchers</h4>';
+  if (roster.pitchers.length > 0) {
+    html += '<div class="pool-list">';
+    roster.pitchers.forEach(p => {
+      const safeName = p.replace(/'/g, "\\'");
+      html += `<span class="pool-tag">${p} <button class="btn btn-sm btn-danger" style="padding:0 0.25rem;margin-left:0.25rem;font-size:0.7rem;line-height:1;" onclick="removeFromRoster('${managerName.replace(/'/g, "\\'")}', 'pitchers', '${safeName}')">&times;</button></span>`;
+    });
+    html += '</div>';
+  } else {
+    html += '<p class="text-muted">No pitchers assigned.</p>';
+  }
+
+  // Add pitcher
+  if (availPitchers.length > 0) {
+    html += `<div style="margin-top:0.5rem;display:flex;gap:0.5rem;align-items:center;">
+      <select id="add-pitcher-select" class="form-select" style="max-width:300px;">
+        <option value="">Add pitcher...</option>
+        ${availPitchers.map(p => `<option value="${p}">${p}</option>`).join('')}
+      </select>
+      <button class="btn btn-sm btn-primary" onclick="addToRoster('${managerName.replace(/'/g, "\\'")}', 'pitchers', 'add-pitcher-select')">Add</button>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+window.addToRoster = function(manager, type, selectId) {
+  const select = document.getElementById(selectId);
+  const player = select.value;
+  if (!player) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.rosters) sd.rosters = {};
+  if (!sd.rosters[manager]) sd.rosters[manager] = { batters: [], pitchers: [] };
+
+  if (!sd.rosters[manager][type].includes(player)) {
+    sd.rosters[manager][type].push(player);
+    saveSeason(SELECTED_SEASON, sd);
+  }
+
+  renderRosterMgmtContent(manager);
+};
+
+window.removeFromRoster = function(manager, type, player) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.rosters || !sd.rosters[manager]) return;
+
+  sd.rosters[manager][type] = sd.rosters[manager][type].filter(p => p !== player);
+  saveSeason(SELECTED_SEASON, sd);
+  renderRosterMgmtContent(manager);
 };
 
 // ---- Player Pool Upload ----
@@ -1891,7 +2175,7 @@ window.uploadWeeklyBatting = function(weekIndex) {
     });
 
     rows.forEach(row => {
-      const manager = findColumn(row, ['manager', 'owner', 'team']);
+      const manager = findColumn(row, ['manager', 'owner']);
       const batter = findColumn(row, ['batter', 'player', 'name']);
       if (!manager || !batter) return;
 
@@ -1946,7 +2230,7 @@ window.uploadWeeklyPitching = function(weekIndex) {
     );
 
     rows.forEach(row => {
-      const manager = findColumn(row, ['manager', 'owner', 'team']);
+      const manager = findColumn(row, ['manager', 'owner']);
       const pitcher = findColumn(row, ['pitcher', 'player', 'name']);
       if (!manager || !pitcher) return;
 
