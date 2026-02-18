@@ -1624,6 +1624,271 @@ footer {
 }
 
 /* ============================================================ */
+/* Player Swaps Section */
+/* ============================================================ */
+
+.swap-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.swap-stat-card {
+  text-align: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.swap-stat-num {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.swap-stat-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.swap-stat-pending .swap-stat-num { color: #ca8a04; }
+.swap-stat-approved .swap-stat-num { color: #16a34a; }
+
+/* Swap Request Form */
+.swap-form-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.swap-form-card h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.swap-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.swap-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.swap-form-field label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.swap-type-toggle {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.swap-type-btn {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 0.3rem 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+
+.swap-type-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.success-text {
+  color: #16a34a;
+  font-size: 0.85rem;
+}
+
+.error-text {
+  color: #dc2626;
+  font-size: 0.85rem;
+}
+
+/* Pending Approvals (Commissioner) */
+.swap-pending-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.swap-pending-card h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.swap-pending-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--card-bg);
+}
+
+.swap-pending-item:last-child {
+  margin-bottom: 0;
+}
+
+.swap-pending-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.swap-pending-details {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.swap-detail-reason {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+
+.swap-detail-date {
+  font-size: 0.8rem;
+}
+
+.swap-pending-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.btn-success {
+  background: #16a34a;
+  color: #fff;
+  border: none;
+}
+
+.btn-success:hover {
+  background: #15803d;
+}
+
+.swap-edit-form {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.swap-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+/* Swap Badges */
+.swap-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.swap-badge-approved {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.swap-badge-pending {
+  background: #fef9c3;
+  color: #a16207;
+}
+
+.swap-badge-denied {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+/* All Swaps List */
+.swap-list-section {
+  margin-top: 1rem;
+}
+
+.swap-list-section h3 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.swap-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.swap-list-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg);
+}
+
+.swap-list-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.2rem;
+}
+
+.swap-list-players {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.swap-list-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.swap-list-reason {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+/* ============================================================ */
 /* Responsive additions for new components */
 /* ============================================================ */
 
@@ -1634,6 +1899,15 @@ footer {
 
   .period-players-groups {
     grid-template-columns: 1fr;
+  }
+
+  .swap-form-grid,
+  .swap-edit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .swap-stats-grid {
+    grid-template-columns: repeat(3, 1fr);
   }
 
   .pool-play-grid {

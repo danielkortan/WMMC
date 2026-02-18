@@ -1715,6 +1715,9 @@ function renderRosterData(managerName, isCommissioner) {
   // ---- Team Stats Breakdown ----
   html += buildTeamStatsBreakdown(managerName, seasonData, p2m);
 
+  // ---- Player Swaps ----
+  html += buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m);
+
   container.innerHTML = html;
 }
 
@@ -1942,6 +1945,412 @@ window.togglePeriodSection = function(periodKey) {
   body.style.display = isOpen ? 'none' : 'block';
   const header = body.previousElementSibling;
   if (header) header.classList.toggle('period-open', !isOpen);
+};
+
+// ---- Player Swaps Section ----
+const SWAP_REASONS = [
+  'Free Swap (one per round)',
+  'IL Swap',
+  'Drop Swap',
+  'Trade Swap',
+];
+
+function getSeasonSwaps(seasonData) {
+  if (DATA && DATA.swaps) return DATA.swaps; // historical
+  if (seasonData && seasonData.swaps) return seasonData.swaps; // active
+  return [];
+}
+
+function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
+  const isActive = !!(seasonData && seasonData.status === 'active');
+  const isHistorical = !!(DATA && DATA.swaps);
+
+  // Gather all swaps for this manager
+  const allSwaps = getSeasonSwaps(seasonData);
+  const emailMap = (DATA && DATA.email_map) ? DATA.email_map : {};
+  const managers = getManagers();
+  const managerEmail = ROSTER_EMAIL;
+
+  // For active season swaps, filter by manager field; for historical, filter by email
+  const mySwaps = allSwaps.filter(s => {
+    if (s.manager) return s.manager === managerName;
+    return (emailMap[s.email] || s.email) === managerName;
+  });
+
+  const pendingCount = mySwaps.filter(s => s.status === 'pending').length;
+  const approvedCount = mySwaps.filter(s => !s.status || s.status === 'approved').length;
+
+  let html = `<div class="card player-swaps-section">
+    <h2>Player Swaps</h2>
+    <p class="text-muted" style="margin-bottom:1rem;">Request and track player transactions</p>`;
+
+  // Stats cards
+  html += `<div class="swap-stats-grid">
+    <div class="swap-stat-card">
+      <div class="swap-stat-num">${mySwaps.length}</div>
+      <div class="swap-stat-label">Total Swaps</div>
+    </div>
+    <div class="swap-stat-card swap-stat-pending">
+      <div class="swap-stat-num">${pendingCount}</div>
+      <div class="swap-stat-label">Pending</div>
+    </div>
+    <div class="swap-stat-card swap-stat-approved">
+      <div class="swap-stat-num">${approvedCount}</div>
+      <div class="swap-stat-label">Approved</div>
+    </div>
+  </div>`;
+
+  // Swap Request Form (active season only)
+  if (isActive) {
+    const roster = (seasonData.rosters && seasonData.rosters[managerName]) || { batters: [], pitchers: [] };
+
+    // Build available (non-rostered) players from pool
+    const rosteredBatters = new Set();
+    const rosteredPitchers = new Set();
+    Object.values(seasonData.rosters || {}).forEach(r => {
+      (r.batters || []).forEach(b => rosteredBatters.add(b));
+      (r.pitchers || []).forEach(p => rosteredPitchers.add(p));
+    });
+    const availBatters = (seasonData.batters_pool || []).filter(b => !rosteredBatters.has(b)).sort();
+    const availPitchers = (seasonData.pitchers_pool || []).filter(p => !rosteredPitchers.has(p)).sort();
+
+    html += `<div class="swap-form-card">
+      <h3>Request a Swap</h3>
+      <div class="swap-form-grid">
+        <div class="swap-form-field">
+          <label>Player Type</label>
+          <div class="swap-type-toggle">
+            <button class="btn btn-sm swap-type-btn active" id="swap-type-batter" onclick="swapTypeToggle('batter')">Batter</button>
+            <button class="btn btn-sm swap-type-btn" id="swap-type-pitcher" onclick="swapTypeToggle('pitcher')">Pitcher</button>
+          </div>
+        </div>
+        <div class="swap-form-field">
+          <label for="swap-player-out">Player Out (from your roster)</label>
+          <select id="swap-player-out" class="form-select">
+            <option value="">Select player to swap out...</option>
+            ${roster.batters.sort().map(b => `<option value="${b}" data-type="batter">${b}</option>`).join('')}
+          </select>
+        </div>
+        <div class="swap-form-field">
+          <label for="swap-player-in">Player In (available)</label>
+          <select id="swap-player-in" class="form-select">
+            <option value="">Select replacement player...</option>
+            ${availBatters.map(b => `<option value="${b}">${b}</option>`).join('')}
+          </select>
+        </div>
+        <div class="swap-form-field">
+          <label for="swap-reason">Transaction Reason</label>
+          <select id="swap-reason" class="form-select">
+            <option value="">Select reason...</option>
+            ${SWAP_REASONS.map(r => `<option value="${r}">${r}</option>`).join('')}
+          </select>
+        </div>
+        <div class="swap-form-field">
+          <label for="swap-date">Swap Date</label>
+          <input type="date" id="swap-date" class="form-select" value="${new Date().toISOString().split('T')[0]}">
+        </div>
+      </div>
+      <div style="margin-top:0.75rem;">
+        <button class="btn btn-primary" onclick="submitSwapRequest('${managerName.replace(/'/g, "\\'")}')">Submit Request</button>
+      </div>
+      <p id="swap-form-error" class="error-text" style="display:none;margin-top:0.5rem;"></p>
+      <p id="swap-form-success" class="success-text" style="display:none;margin-top:0.5rem;"></p>
+    </div>`;
+
+    // Store roster data as data attributes for the type toggle to use
+    html += `<script type="application/json" id="swap-roster-data">${JSON.stringify({
+      batters: roster.batters.sort(),
+      pitchers: roster.pitchers.sort(),
+      availBatters: availBatters,
+      availPitchers: availPitchers
+    })}</script>`;
+  }
+
+  // Commissioner: pending swaps from ALL managers
+  if (isCommissioner && isActive) {
+    const pendingSwaps = allSwaps.filter(s => s.status === 'pending');
+    if (pendingSwaps.length > 0) {
+      html += `<div class="swap-pending-card">
+        <h3>Pending Approvals</h3>`;
+      pendingSwaps.forEach(s => {
+        html += `<div class="swap-pending-item" id="swap-item-${s.id}">
+          <div class="swap-pending-header">
+            <strong>${s.manager}</strong>
+            <span class="swap-badge swap-badge-pending">Pending</span>
+          </div>
+          <div class="swap-pending-details">
+            <span>${s.player_out} &rarr; ${s.player_in}</span>
+            <span class="swap-detail-reason">${s.reason}</span>
+            <span class="swap-detail-date">${s.swap_date || ''}</span>
+          </div>
+          <div class="swap-pending-actions" id="swap-actions-${s.id}">
+            <button class="btn btn-sm btn-success" onclick="approveSwap('${s.id}')">Approve</button>
+            <button class="btn btn-sm btn-secondary" onclick="editSwapInline('${s.id}')">Edit</button>
+            <button class="btn btn-sm btn-danger" onclick="denySwap('${s.id}')">Deny</button>
+          </div>
+          <div class="swap-edit-form" id="swap-edit-${s.id}" style="display:none;"></div>
+        </div>`;
+      });
+      html += `</div>`;
+    }
+  }
+
+  // All Swaps list
+  html += `<div class="swap-list-section">
+    <h3>All Swaps</h3>`;
+  if (mySwaps.length > 0) {
+    const sorted = [...mySwaps].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    html += '<div class="swap-list">';
+    sorted.forEach(s => {
+      const status = s.status || 'approved'; // historical swaps have no status field
+      const badgeClass = status === 'approved' ? 'swap-badge-approved'
+        : status === 'pending' ? 'swap-badge-pending'
+        : 'swap-badge-denied';
+      const badgeLabel = status.charAt(0).toUpperCase() + status.slice(1);
+      const date = s.swap_date || (s.timestamp ? s.timestamp.split(' ')[0] : '');
+      html += `<div class="swap-list-item">
+        <div class="swap-list-main">
+          <span class="swap-list-players">${s.player_out || '?'} &rarr; ${s.player_in || '?'}</span>
+          <span class="swap-badge ${badgeClass}">${badgeLabel}</span>
+        </div>
+        <div class="swap-list-meta">
+          <span class="swap-list-reason">${s.reason || ''}</span>
+          <span class="swap-list-date">${date}</span>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  } else {
+    html += '<p class="text-muted">No swaps recorded.</p>';
+  }
+  html += '</div>';
+
+  html += '</div>'; // .player-swaps-section
+  return html;
+}
+
+// Swap form: toggle between Batter and Pitcher
+window.swapTypeToggle = function(type) {
+  const batterBtn = document.getElementById('swap-type-batter');
+  const pitcherBtn = document.getElementById('swap-type-pitcher');
+  const outSelect = document.getElementById('swap-player-out');
+  const inSelect = document.getElementById('swap-player-in');
+  const dataEl = document.getElementById('swap-roster-data');
+  if (!dataEl) return;
+
+  const data = JSON.parse(dataEl.textContent);
+
+  if (type === 'batter') {
+    batterBtn.classList.add('active');
+    pitcherBtn.classList.remove('active');
+    outSelect.innerHTML = '<option value="">Select player to swap out...</option>'
+      + data.batters.map(b => `<option value="${b}">${b}</option>`).join('');
+    inSelect.innerHTML = '<option value="">Select replacement player...</option>'
+      + data.availBatters.map(b => `<option value="${b}">${b}</option>`).join('');
+  } else {
+    pitcherBtn.classList.add('active');
+    batterBtn.classList.remove('active');
+    outSelect.innerHTML = '<option value="">Select player to swap out...</option>'
+      + data.pitchers.map(p => `<option value="${p}">${p}</option>`).join('');
+    inSelect.innerHTML = '<option value="">Select replacement player...</option>'
+      + data.availPitchers.map(p => `<option value="${p}">${p}</option>`).join('');
+  }
+};
+
+// Submit a swap request
+window.submitSwapRequest = function(managerName) {
+  const errEl = document.getElementById('swap-form-error');
+  const succEl = document.getElementById('swap-form-success');
+  errEl.style.display = 'none';
+  succEl.style.display = 'none';
+
+  const playerOut = document.getElementById('swap-player-out').value;
+  const playerIn = document.getElementById('swap-player-in').value;
+  const reason = document.getElementById('swap-reason').value;
+  const swapDate = document.getElementById('swap-date').value;
+
+  if (!playerOut || !playerIn || !reason || !swapDate) {
+    errEl.textContent = 'All fields are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || sd.status !== 'active') {
+    errEl.textContent = 'No active season.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  if (!sd.swaps) sd.swaps = [];
+
+  const swap = {
+    id: Date.now().toString(),
+    timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    email: ROSTER_EMAIL,
+    manager: managerName,
+    player_out: playerOut,
+    player_in: playerIn,
+    reason: reason,
+    swap_date: swapDate,
+    status: 'pending',
+  };
+
+  sd.swaps.push(swap);
+  saveSeason(SELECTED_SEASON, sd);
+
+  // Re-render entire roster view
+  const isComm = getManagers().some(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase() && m.commissioner);
+  renderRosterData(managerName, isComm);
+};
+
+// Commissioner: approve a swap
+window.approveSwap = function(swapId) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.swaps) return;
+
+  const swap = sd.swaps.find(s => s.id === swapId);
+  if (!swap) return;
+
+  // Execute the roster swap
+  if (sd.rosters && sd.rosters[swap.manager]) {
+    const roster = sd.rosters[swap.manager];
+    // Determine if player_out is a batter or pitcher
+    const isBatter = roster.batters.includes(swap.player_out);
+    const isPitcher = roster.pitchers.includes(swap.player_out);
+
+    if (isBatter) {
+      roster.batters = roster.batters.filter(b => b !== swap.player_out);
+      if (!roster.batters.includes(swap.player_in)) roster.batters.push(swap.player_in);
+    } else if (isPitcher) {
+      roster.pitchers = roster.pitchers.filter(p => p !== swap.player_out);
+      if (!roster.pitchers.includes(swap.player_in)) roster.pitchers.push(swap.player_in);
+    }
+  }
+
+  swap.status = 'approved';
+  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  saveSeason(SELECTED_SEASON, sd);
+
+  // Find logged-in manager name and re-render
+  const mgrs = getManagers();
+  const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
+  if (mgr) renderRosterData(mgr.name, true);
+};
+
+// Commissioner: deny a swap
+window.denySwap = function(swapId) {
+  if (!confirm('Deny this swap request?')) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.swaps) return;
+
+  const swap = sd.swaps.find(s => s.id === swapId);
+  if (!swap) return;
+
+  swap.status = 'denied';
+  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  saveSeason(SELECTED_SEASON, sd);
+
+  const mgrs = getManagers();
+  const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
+  if (mgr) renderRosterData(mgr.name, true);
+};
+
+// Commissioner: show inline edit form for a swap
+window.editSwapInline = function(swapId) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.swaps) return;
+
+  const swap = sd.swaps.find(s => s.id === swapId);
+  if (!swap) return;
+
+  const editDiv = document.getElementById(`swap-edit-${swapId}`);
+  const actionsDiv = document.getElementById(`swap-actions-${swapId}`);
+  if (!editDiv) return;
+
+  // Build available players for the swap target manager
+  const roster = (sd.rosters && sd.rosters[swap.manager]) || { batters: [], pitchers: [] };
+  const isBatter = roster.batters.includes(swap.player_out);
+  const rosterPlayers = isBatter ? roster.batters : roster.pitchers;
+
+  const rosteredAll = new Set();
+  Object.values(sd.rosters || {}).forEach(r => {
+    (r.batters || []).forEach(b => rosteredAll.add(b));
+    (r.pitchers || []).forEach(p => rosteredAll.add(p));
+  });
+  const pool = isBatter ? (sd.batters_pool || []) : (sd.pitchers_pool || []);
+  const availPlayers = pool.filter(p => !rosteredAll.has(p) || p === swap.player_in).sort();
+
+  editDiv.innerHTML = `
+    <div class="swap-edit-grid">
+      <div class="swap-form-field">
+        <label>Player Out</label>
+        <select id="edit-out-${swapId}" class="form-select">
+          ${rosterPlayers.sort().map(p => `<option value="${p}" ${p === swap.player_out ? 'selected' : ''}>${p}</option>`).join('')}
+        </select>
+      </div>
+      <div class="swap-form-field">
+        <label>Player In</label>
+        <select id="edit-in-${swapId}" class="form-select">
+          ${availPlayers.map(p => `<option value="${p}" ${p === swap.player_in ? 'selected' : ''}>${p}</option>`).join('')}
+        </select>
+      </div>
+      <div class="swap-form-field">
+        <label>Reason</label>
+        <select id="edit-reason-${swapId}" class="form-select">
+          ${SWAP_REASONS.map(r => `<option value="${r}" ${r === swap.reason ? 'selected' : ''}>${r}</option>`).join('')}
+        </select>
+      </div>
+      <div class="swap-form-field">
+        <label>Swap Date</label>
+        <input type="date" id="edit-date-${swapId}" class="form-select" value="${swap.swap_date || ''}">
+      </div>
+    </div>
+    <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
+      <button class="btn btn-sm btn-primary" onclick="saveSwapEdit('${swapId}')">Save Changes</button>
+      <button class="btn btn-sm btn-secondary" onclick="cancelSwapEdit('${swapId}')">Cancel</button>
+    </div>`;
+  editDiv.style.display = 'block';
+  if (actionsDiv) actionsDiv.style.display = 'none';
+};
+
+// Commissioner: save edited swap
+window.saveSwapEdit = function(swapId) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.swaps) return;
+
+  const swap = sd.swaps.find(s => s.id === swapId);
+  if (!swap) return;
+
+  const newOut = document.getElementById(`edit-out-${swapId}`).value;
+  const newIn = document.getElementById(`edit-in-${swapId}`).value;
+  const newReason = document.getElementById(`edit-reason-${swapId}`).value;
+  const newDate = document.getElementById(`edit-date-${swapId}`).value;
+
+  if (newOut) swap.player_out = newOut;
+  if (newIn) swap.player_in = newIn;
+  if (newReason) swap.reason = newReason;
+  if (newDate) swap.swap_date = newDate;
+
+  saveSeason(SELECTED_SEASON, sd);
+
+  const mgrs = getManagers();
+  const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
+  if (mgr) renderRosterData(mgr.name, true);
+};
+
+// Commissioner: cancel editing a swap
+window.cancelSwapEdit = function(swapId) {
+  const editDiv = document.getElementById(`swap-edit-${swapId}`);
+  const actionsDiv = document.getElementById(`swap-actions-${swapId}`);
+  if (editDiv) editDiv.style.display = 'none';
+  if (actionsDiv) actionsDiv.style.display = 'flex';
 };
 
 // ============================================================
