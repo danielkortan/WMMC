@@ -7,6 +7,7 @@ let DATA = null;           // Data for the currently viewed season
 let CURRENT_YEAR = new Date().getFullYear();
 let SELECTED_SEASON = null;
 let COMMISSIONER_EMAIL = null;
+let ROSTER_EMAIL = null;
 
 // Scoring rubric (constant)
 const SCORING = {
@@ -77,7 +78,6 @@ async function loadData() {
       email,
       commissioner: email === 'daniel.kortan@gmail.com'
     }));
-    // Add Edgar Rivas if missing (he's in the data but may not have email)
     saveManagers(mgrs);
   }
 
@@ -106,7 +106,6 @@ function buildSeasonSelector() {
   const select = document.getElementById('season-select');
   select.innerHTML = '';
 
-  // Sort years descending
   const years = Object.keys(seasons).sort((a, b) => b - a);
   years.forEach(year => {
     const opt = document.createElement('option');
@@ -116,7 +115,6 @@ function buildSeasonSelector() {
     select.appendChild(opt);
   });
 
-  // Default to current year
   select.value = String(CURRENT_YEAR);
   SELECTED_SEASON = String(CURRENT_YEAR);
 
@@ -133,16 +131,15 @@ function init() {
   if (!seasonData) return;
 
   if (seasonData.status === 'completed' && seasonData.data) {
-    // Historical season - use the legacy data format
     DATA = seasonData.data;
     showHistoricalSeason();
   } else {
-    // Active season - use the new data format
     DATA = null;
     showActiveSeason(seasonData);
   }
 
   setupNav();
+  setupMyRoster();
   renderSchedule();
   renderCommissioner();
   renderRulesFromScoring();
@@ -163,28 +160,32 @@ function setupNav() {
 }
 
 // ============================================================
-// Historical Season (2025 completed)
+// Historical Season (completed)
 // ============================================================
 function showHistoricalSeason() {
-  renderDashboard();
-  renderStandings();
+  renderScoreboard();
   renderWeekly();
   renderPlayers();
   renderBracket();
   renderSwaps();
 }
 
-function renderDashboard() {
+// ============================================================
+// SCOREBOARD - Combined Dashboard + Standings
+// ============================================================
+function renderScoreboard() {
+  renderChampionBanner();
+  renderStatsGrid();
+  renderScoreboardContent();
+}
+
+function renderChampionBanner() {
   const banner = document.getElementById('champion-banner');
-  const grid = document.getElementById('stats-grid');
-  const table = document.getElementById('final-standings-table');
 
   if (!DATA || !DATA.bracket || !DATA.bracket.finals) {
     banner.innerHTML = `<div class="trophy">&#127942;</div>
       <div class="champion-label">${SELECTED_SEASON} WMMC Season</div>
       <div class="champion-name">Season In Progress</div>`;
-    grid.innerHTML = '';
-    table.innerHTML = '<tbody><tr><td>No final standings yet.</td></tr></tbody>';
     return;
   }
 
@@ -198,6 +199,15 @@ function renderDashboard() {
       Batting: ${finals.batting2} | Pitching: ${finals.pitching2}
     </div>
   `;
+}
+
+function renderStatsGrid() {
+  const grid = document.getElementById('stats-grid');
+
+  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.stats) {
+    grid.innerHTML = '';
+    return;
+  }
 
   const stats = DATA.scoreboard.stats;
   const statCards = [
@@ -213,134 +223,402 @@ function renderDashboard() {
       <div class="stat-detail">${s.detail}</div>
     </div>
   `).join('');
-
-  const poolPlay = [...DATA.scoreboard.pool_play].sort((a, b) => a.overall_rank - b.overall_rank);
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Rank</th><th>Manager</th><th>Pool</th>
-        <th>PP1 Total</th><th>PP2 Total</th>
-        <th>Batting</th><th>Pitching</th><th>PP Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${poolPlay.map(p => {
-        const pool = getPool(p.manager);
-        const rankClass = p.overall_rank <= 3 ? `rank-${p.overall_rank}` : '';
-        return `<tr>
-          <td class="rank ${rankClass}">${p.overall_rank}</td>
-          <td><strong>${p.manager}</strong></td>
-          <td>${pool}</td>
-          <td class="num">${fmt(p.pp1_total)}</td>
-          <td class="num">${fmt(p.pp2_total)}</td>
-          <td class="num">${fmt(p.batting_total)}</td>
-          <td class="num">${fmt(p.pitching_total)}</td>
-          <td class="num"><strong>${fmt(p.pp_total)}</strong></td>
-        </tr>`;
-      }).join('')}
-    </tbody>
-  `;
 }
 
-function renderStandings() {
-  if (!DATA || !DATA.scoreboard) return;
+function renderScoreboardContent() {
+  const container = document.getElementById('scoreboard-content');
 
-  const poolBtns = document.querySelectorAll('.pool-btn');
-  poolBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      poolBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      renderPoolTable(btn.dataset.pool);
+  if (!DATA || !DATA.scoreboard) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const leaders = getPoolPlayLeaders();
+  const seeding = computePlayoffSeeding(leaders);
+
+  let html = '';
+
+  // Scoring period tabs
+  html += `<div class="card scoreboard-card">
+    <div class="scoreboard-tabs" id="scoreboard-tabs">
+      <button class="sb-tab active" data-period="pp1">Pool Play 1</button>
+      <button class="sb-tab" data-period="pp2">Pool Play 2</button>
+      <button class="sb-tab" data-period="pp-overall">Pool Play Overall</button>
+      <button class="sb-tab" data-period="qf">Quarterfinals</button>
+      <button class="sb-tab" data-period="sf">Semifinals</button>
+      <button class="sb-tab" data-period="finals">Finals</button>
+    </div>
+    <div class="sb-period" id="sb-pp1">${renderPoolPeriodContent('pp1')}</div>
+    <div class="sb-period" id="sb-pp2" style="display:none">${renderPoolPeriodContent('pp2')}</div>
+    <div class="sb-period" id="sb-pp-overall" style="display:none">${renderPPOverallContent(leaders, seeding)}</div>
+    <div class="sb-period" id="sb-qf" style="display:none">${renderQFContent()}</div>
+    <div class="sb-period" id="sb-sf" style="display:none">${renderSFContent()}</div>
+    <div class="sb-period" id="sb-finals" style="display:none">${renderFinalsContent()}</div>
+  </div>`;
+
+  // Awards
+  html += renderAwardsContent();
+
+  container.innerHTML = html;
+  setupScoreboardTabs();
+}
+
+function setupScoreboardTabs() {
+  const tabs = document.querySelectorAll('.sb-tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.sb-period').forEach(p => p.style.display = 'none');
+      tab.classList.add('active');
+      const target = document.getElementById('sb-' + tab.dataset.period);
+      if (target) target.style.display = 'block';
     });
   });
-  renderPoolTable('all');
-  renderQualifiers();
-  renderAwards();
 }
 
-function renderPoolTable(poolFilter) {
-  const table = document.getElementById('pool-play-table');
-  if (!DATA || !DATA.scoreboard) { table.innerHTML = ''; return; }
+// ---- Pool Play Leaders & Seeding Logic ----
 
-  let entries = DATA.scoreboard.pool_play;
-  if (poolFilter !== 'all') {
-    const poolMembers = DATA.scoreboard.pools[poolFilter];
-    entries = entries.filter(p => poolMembers.includes(p.manager));
+function getPoolPlayLeaders() {
+  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.pools) {
+    return { pp1Leaders: new Set(), pp2Leaders: new Set(), allLeaders: new Set(), wildcards: [], uniqueLeaderCount: 0, wildcardsNeeded: 0 };
   }
-  entries = [...entries].sort((a, b) => {
-    if (poolFilter !== 'all') return a.pool_rank - b.pool_rank;
-    return a.overall_rank - b.overall_rank;
+
+  const pools = DATA.scoreboard.pools;
+  const poolPlay = DATA.scoreboard.pool_play;
+
+  const pp1Leaders = new Set();
+  const pp2Leaders = new Set();
+
+  for (const [, members] of Object.entries(pools)) {
+    const poolEntries = poolPlay.filter(p => members.includes(p.manager));
+
+    // PP1 leader - lowest pp1_pool_rank (1 = best)
+    const pp1Sorted = [...poolEntries].sort((a, b) => a.pp1_pool_rank - b.pp1_pool_rank);
+    if (pp1Sorted.length > 0) pp1Leaders.add(pp1Sorted[0].manager);
+
+    // PP2 leader - lowest pp2_pool_rank (1 = best)
+    const pp2Sorted = [...poolEntries].sort((a, b) => a.pp2_pool_rank - b.pp2_pool_rank);
+    if (pp2Sorted.length > 0) pp2Leaders.add(pp2Sorted[0].manager);
+  }
+
+  const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
+  const uniqueLeaderCount = allLeaders.size;
+  const wildcardsNeeded = Math.max(0, 8 - uniqueLeaderCount);
+
+  // Wildcards: next highest scoring non-leaders
+  const nonLeaders = [...poolPlay]
+    .filter(p => !allLeaders.has(p.manager))
+    .sort((a, b) => b.pp_total - a.pp_total);
+  const wildcards = nonLeaders.slice(0, wildcardsNeeded).map(p => p.manager);
+
+  return { pp1Leaders, pp2Leaders, allLeaders, wildcards, uniqueLeaderCount, wildcardsNeeded };
+}
+
+function computePlayoffSeeding(leaders) {
+  if (!DATA || !DATA.scoreboard) return [];
+
+  const poolPlay = DATA.scoreboard.pool_play;
+
+  // Pool leaders sorted by overall PP score (highest first)
+  const poolWinnerEntries = [...leaders.allLeaders]
+    .map(name => poolPlay.find(p => p.manager === name))
+    .filter(Boolean)
+    .sort((a, b) => b.pp_total - a.pp_total);
+
+  // Wildcards sorted by overall PP score (highest first)
+  const wildcardEntries = leaders.wildcards
+    .map(name => poolPlay.find(p => p.manager === name))
+    .filter(Boolean)
+    .sort((a, b) => b.pp_total - a.pp_total);
+
+  const seeded = [...poolWinnerEntries, ...wildcardEntries];
+  return seeded.map((p, i) => ({
+    ...p,
+    seed: i + 1,
+    isPoolWinner: leaders.allLeaders.has(p.manager),
+    isPP1Leader: leaders.pp1Leaders.has(p.manager),
+    isPP2Leader: leaders.pp2Leaders.has(p.manager),
+    isWildcard: leaders.wildcards.includes(p.manager),
+  }));
+}
+
+// ---- Pool Play Period Content (PP1 / PP2) ----
+
+function renderPoolPeriodContent(period) {
+  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.pools) return '<p>No pool play data available.</p>';
+
+  const pools = DATA.scoreboard.pools;
+  const poolPlay = DATA.scoreboard.pool_play;
+  const battingKey = period === 'pp1' ? 'pp1_batting' : 'pp2_batting';
+  const pitchingKey = period === 'pp1' ? 'pp1_pitching' : 'pp2_pitching';
+  const totalKey = period === 'pp1' ? 'pp1_total' : 'pp2_total';
+  const rankKey = period === 'pp1' ? 'pp1_pool_rank' : 'pp2_pool_rank';
+  const periodLabel = period === 'pp1' ? 'Pool Play 1' : 'Pool Play 2';
+
+  let html = `<h3>${periodLabel} Standings</h3>`;
+  html += '<div class="pool-play-grid">';
+
+  for (const [poolName, members] of Object.entries(pools)) {
+    const poolEntries = poolPlay
+      .filter(p => members.includes(p.manager))
+      .sort((a, b) => a[rankKey] - b[rankKey]);
+
+    html += `<div class="pool-card">
+      <h4>${poolName}</h4>
+      <div class="table-wrapper">
+      <table class="data-table">
+        <thead><tr>
+          <th>Rank</th><th>Manager</th><th>Batting</th><th>Pitching</th><th>Total</th>
+        </tr></thead>
+        <tbody>
+          ${poolEntries.map((p, i) => `
+            <tr class="${i === 0 ? 'pool-leader-row' : ''}">
+              <td class="rank">${i + 1}</td>
+              <td><strong>${p.manager}</strong></td>
+              <td class="num">${fmt(p[battingKey])}</td>
+              <td class="num">${fmt(p[pitchingKey])}</td>
+              <td class="num"><strong>${fmt(p[totalKey])}</strong></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      </div>
+    </div>`;
+  }
+
+  html += '</div>';
+  return html;
+}
+
+// ---- Pool Play Overall Content ----
+
+function renderPPOverallContent(leaders, seeding) {
+  if (!DATA || !DATA.scoreboard) return '<p>No pool play data available.</p>';
+
+  const poolPlay = [...DATA.scoreboard.pool_play].sort((a, b) => b.pp_total - a.pp_total);
+
+  let html = '<h3>Overall Pool Play Standings</h3>';
+  html += '<div class="table-wrapper"><table class="data-table"><thead><tr>';
+  html += '<th>Rank</th><th>Manager</th><th>Pool</th><th>PP1 Total</th><th>PP2 Total</th>';
+  html += '<th>Batting</th><th>Pitching</th><th>PP Total</th><th>Status</th>';
+  html += '</tr></thead><tbody>';
+
+  poolPlay.forEach((p, i) => {
+    const pool = getPool(p.manager);
+    const isPP1Leader = leaders.pp1Leaders.has(p.manager);
+    const isPP2Leader = leaders.pp2Leaders.has(p.manager);
+    const isWildcard = leaders.wildcards.includes(p.manager);
+
+    let rowClass = '';
+    let statusBadge = '';
+
+    if (isPP1Leader && isPP2Leader) {
+      rowClass = 'highlight-both-leader';
+      statusBadge = '<span class="badge badge-both">PP1 & PP2 Leader</span>';
+    } else if (isPP1Leader) {
+      rowClass = 'highlight-pp1-leader';
+      statusBadge = '<span class="badge badge-pp1">PP1 Pool Leader</span>';
+    } else if (isPP2Leader) {
+      rowClass = 'highlight-pp2-leader';
+      statusBadge = '<span class="badge badge-pp2">PP2 Pool Leader</span>';
+    } else if (isWildcard) {
+      rowClass = 'highlight-wildcard';
+      statusBadge = '<span class="badge badge-wildcard">Wildcard</span>';
+    }
+
+    html += `<tr class="${rowClass}">
+      <td class="rank">${i + 1}</td>
+      <td><strong>${p.manager}</strong></td>
+      <td>${pool}</td>
+      <td class="num">${fmt(p.pp1_total)}</td>
+      <td class="num">${fmt(p.pp2_total)}</td>
+      <td class="num">${fmt(p.batting_total)}</td>
+      <td class="num">${fmt(p.pitching_total)}</td>
+      <td class="num"><strong>${fmt(p.pp_total)}</strong></td>
+      <td>${statusBadge}</td>
+    </tr>`;
   });
 
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>${poolFilter !== 'all' ? 'Pool Rank' : 'Overall Rank'}</th>
-        <th>Manager</th><th>Pool</th>
-        <th>PP1 Bat</th><th>PP1 Pitch</th><th>PP1 Total</th>
-        <th>PP2 Bat</th><th>PP2 Pitch</th><th>PP2 Total</th>
-        <th>Total Bat</th><th>Total Pitch</th><th>PP Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${entries.map(p => {
-        const pool = getPool(p.manager);
-        const rank = poolFilter !== 'all' ? p.pool_rank : p.overall_rank;
-        return `<tr>
-          <td class="rank">${rank}</td>
-          <td><strong>${p.manager}</strong></td>
-          <td>${pool}</td>
-          <td class="num">${fmt(p.pp1_batting)}</td>
-          <td class="num">${fmt(p.pp1_pitching)}</td>
-          <td class="num">${fmt(p.pp1_total)}</td>
-          <td class="num">${fmt(p.pp2_batting)}</td>
-          <td class="num">${fmt(p.pp2_pitching)}</td>
-          <td class="num">${fmt(p.pp2_total)}</td>
-          <td class="num">${fmt(p.batting_total)}</td>
-          <td class="num">${fmt(p.pitching_total)}</td>
-          <td class="num"><strong>${fmt(p.pp_total)}</strong></td>
-        </tr>`;
-      }).join('')}
-    </tbody>
-  `;
-}
+  html += '</tbody></table></div>';
 
-function renderQualifiers() {
-  const container = document.getElementById('qualifiers-list');
-  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.wildcards) { container.innerHTML = ''; return; }
+  // Legend
+  html += `<div class="highlight-legend">
+    <span class="legend-item"><span class="legend-swatch swatch-pp1"></span> PP1 Pool Leader (Advances)</span>
+    <span class="legend-item"><span class="legend-swatch swatch-pp2"></span> PP2 Pool Leader (Advances)</span>
+    <span class="legend-item"><span class="legend-swatch swatch-both"></span> PP1 & PP2 Pool Leader (Advances)</span>
+    <span class="legend-item"><span class="legend-swatch swatch-wildcard"></span> Wildcard (Advances)</span>
+  </div>`;
 
-  const wildcards = DATA.scoreboard.wildcards;
-  const qualifiedAsWinner = new Set();
-  // Determine pool winners from pool_play data
-  if (DATA.scoreboard.pools) {
-    for (const [, members] of Object.entries(DATA.scoreboard.pools)) {
-      const poolEntries = DATA.scoreboard.pool_play.filter(p => members.includes(p.manager));
-      const sorted = [...poolEntries].sort((a, b) => a.pool_rank - b.pool_rank);
-      if (sorted.length > 0) qualifiedAsWinner.add(sorted[0].manager);
+  // Advancement explanation
+  html += `<div class="advancement-info">
+    <p><strong>Advancement:</strong> ${leaders.uniqueLeaderCount} unique pool leaders from PP1 and PP2 automatically advance.
+    8 - ${leaders.uniqueLeaderCount} = ${leaders.wildcardsNeeded} wildcard spot${leaders.wildcardsNeeded !== 1 ? 's' : ''} awarded to the next highest scoring non-leader${leaders.wildcardsNeeded !== 1 ? 's' : ''}.</p>
+  </div>`;
+
+  // Playoff Seeding
+  if (seeding.length > 0) {
+    html += '<h3 style="margin-top:1.5rem;">Playoff Seeding</h3>';
+    html += '<div class="seeding-list">';
+    seeding.forEach(s => {
+      const pool = getPool(s.manager);
+      let seedType = '';
+      if (s.isPP1Leader && s.isPP2Leader) seedType = 'PP1 & PP2 Pool Leader';
+      else if (s.isPP1Leader) seedType = 'PP1 Pool Leader';
+      else if (s.isPP2Leader) seedType = 'PP2 Pool Leader';
+      else seedType = 'Wildcard';
+
+      html += `<div class="seed-item">
+        <span class="seed-number">${s.seed}</span>
+        <span class="seed-manager"><strong>${s.manager}</strong></span>
+        <span class="seed-pool">${pool}</span>
+        <span class="seed-type">${seedType}</span>
+        <span class="seed-score num">${fmt(s.pp_total)}</span>
+      </div>`;
+    });
+    html += '</div>';
+
+    // Matchup preview
+    if (seeding.length >= 8) {
+      html += '<h3 style="margin-top:1.5rem;">Quarterfinal Matchups</h3>';
+      html += '<div class="matchup-preview-grid">';
+      const matchups = [
+        { label: 'QF1', s1: seeding[0], s2: seeding[7] },
+        { label: 'QF2', s1: seeding[1], s2: seeding[6] },
+        { label: 'QF3', s1: seeding[2], s2: seeding[5] },
+        { label: 'QF4', s1: seeding[3], s2: seeding[4] },
+      ];
+      matchups.forEach(m => {
+        html += `<div class="matchup-preview">
+          <div class="matchup-label">${m.label}</div>
+          <div class="matchup-team">
+            <span class="seed">${m.s1.seed}</span>
+            <span class="team-name">${m.s1.manager}</span>
+          </div>
+          <div class="matchup-vs">vs</div>
+          <div class="matchup-team">
+            <span class="seed">${m.s2.seed}</span>
+            <span class="team-name">${m.s2.manager}</span>
+          </div>
+        </div>`;
+      });
+      html += '</div>';
     }
   }
 
-  const top8 = wildcards.filter(w => w.overall_rank <= 8);
-  container.innerHTML = top8.map(w => {
-    const isWinner = qualifiedAsWinner.has(w.manager);
-    const badgeClass = isWinner ? 'badge-winner' : 'badge-wildcard';
-    const badgeText = isWinner ? 'Pool Winner' : 'Wildcard';
-    return `
-      <div class="qualifier-item">
-        <div class="qualifier-badge">
-          <strong>#${w.overall_rank}</strong>
-          <span>${w.manager}</span>
-          <span class="badge ${badgeClass}">${badgeText}</span>
-        </div>
-        <span class="num">${fmt(w.overall_score)}</span>
-      </div>
-    `;
-  }).join('');
+  return html;
 }
 
-function renderAwards() {
-  const container = document.getElementById('awards-list');
-  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.stats) { container.innerHTML = ''; return; }
+// ---- Quarterfinals Content ----
+
+function renderQFContent() {
+  if (!DATA || !DATA.bracket || !DATA.bracket.qf_matchups) return '<p>No quarterfinal data available.</p>';
+
+  let html = '<h3>Quarterfinal Results</h3>';
+  html += '<div class="matchup-results-grid">';
+  DATA.bracket.qf_matchups.forEach(m => {
+    html += renderMatchupResultCard(m);
+  });
+  html += '</div>';
+
+  return html;
+}
+
+// ---- Semifinals Content ----
+
+function renderSFContent() {
+  if (!DATA || !DATA.bracket || !DATA.bracket.sf_matchups) return '<p>No semifinal data available.</p>';
+
+  let html = '<h3>Semifinal Results</h3>';
+  html += '<div class="matchup-results-grid">';
+  DATA.bracket.sf_matchups.forEach(m => {
+    html += renderMatchupResultCard(m);
+  });
+  html += '</div>';
+
+  return html;
+}
+
+// ---- Finals Content ----
+
+function renderFinalsContent() {
+  if (!DATA || !DATA.bracket || !DATA.bracket.finals) return '<p>No finals data available.</p>';
+
+  const f = DATA.bracket.finals;
+  let html = '<h3>Championship</h3>';
+  html += '<div class="matchup-results-grid">';
+  html += renderMatchupResultCard({
+    label: 'Finals',
+    manager1: f.manager1,
+    manager2: f.manager2,
+    score1: f.score1,
+    score2: f.score2,
+    winner: f.winner,
+    diff: f.diff,
+  });
+  html += '</div>';
+
+  if (f.batting1 != null) {
+    html += `<div class="finals-detail-grid">
+      <div class="finals-detail-card">
+        <div class="finals-detail-name">${f.manager1}</div>
+        <div class="finals-detail-stats">Batting: ${fmt(f.batting1)} | Pitching: ${fmt(f.pitching1)}</div>
+        <div class="finals-detail-total">Total: ${fmt(f.score1)}</div>
+      </div>
+      <div class="finals-detail-card ${f.winner === f.manager2 ? 'finals-winner' : ''}">
+        <div class="finals-detail-name">${f.manager2}</div>
+        <div class="finals-detail-stats">Batting: ${fmt(f.batting2)} | Pitching: ${fmt(f.pitching2)}</div>
+        <div class="finals-detail-total">Total: ${fmt(f.score2)}</div>
+      </div>
+    </div>`;
+  }
+
+  // 3rd Place
+  if (DATA.bracket.consolation) {
+    const c = DATA.bracket.consolation;
+    html += '<h3 style="margin-top:1.5rem;">3rd Place Game</h3>';
+    html += '<div class="matchup-results-grid">';
+    html += renderMatchupResultCard({
+      label: '3rd Place',
+      manager1: c.manager1,
+      manager2: c.manager2,
+      score1: c.score1,
+      score2: c.score2,
+      winner: c.winner,
+      diff: c.diff,
+    });
+    html += '</div>';
+  }
+
+  return html;
+}
+
+// ---- Matchup Result Card ----
+
+function renderMatchupResultCard(m) {
+  if (!m) return '';
+  const label = m.label ? `<div class="matchup-label">${m.label}</div>` : '';
+  const w = m.winner;
+  return `
+    <div class="matchup">
+      ${label}
+      <div class="matchup-team ${w === m.manager1 ? 'winner' : ''}">
+        ${m.seed1 ? `<span class="seed">${m.seed1}</span>` : ''}
+        <span class="team-name">${m.manager1}</span>
+        <span class="team-score">${m.score1 != null ? fmt(m.score1) : '-'}</span>
+      </div>
+      <div class="matchup-team ${w === m.manager2 ? 'winner' : ''}">
+        ${m.seed2 ? `<span class="seed">${m.seed2}</span>` : ''}
+        <span class="team-name">${m.manager2}</span>
+        <span class="team-score">${m.score2 != null ? fmt(m.score2) : '-'}</span>
+      </div>
+    </div>
+  `;
+}
+
+// ---- Awards Content ----
+
+function renderAwardsContent() {
+  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.stats) return '';
 
   const stats = DATA.scoreboard.stats;
   const awards = [
@@ -351,21 +629,30 @@ function renderAwards() {
     { label: 'Best Overall Batting', ...stats.overall.best_batting },
     { label: 'Best Overall Pitching', ...stats.overall.best_pitching },
     { label: 'Best Single Round', ...stats.overall.best_round },
-    { label: 'Best QF Batting', ...stats.quarterfinal.best_batting },
-    { label: 'Best QF Total', ...stats.quarterfinal.best_total },
-    { label: 'Best SF Batting', ...stats.semifinal.best_batting },
-    { label: 'Best SF Total', ...stats.semifinal.best_total },
   ];
 
-  container.innerHTML = awards.map(a => `
-    <div class="award-item">
-      <div class="award-label">${a.label}</div>
-      <div class="award-value">
-        <div class="award-manager">${a.manager}</div>
-        <div class="award-score">${fmt(a.score)}</div>
+  // Add playoff awards if available
+  if (stats.quarterfinal) {
+    awards.push({ label: 'Best QF Batting', ...stats.quarterfinal.best_batting });
+    awards.push({ label: 'Best QF Total', ...stats.quarterfinal.best_total });
+  }
+  if (stats.semifinal) {
+    awards.push({ label: 'Best SF Batting', ...stats.semifinal.best_batting });
+    awards.push({ label: 'Best SF Total', ...stats.semifinal.best_total });
+  }
+
+  return `<div class="card">
+    <h2>Season Awards</h2>
+    ${awards.map(a => `
+      <div class="award-item">
+        <div class="award-label">${a.label}</div>
+        <div class="award-value">
+          <div class="award-manager">${a.manager}</div>
+          <div class="award-score">${fmt(a.score)}</div>
+        </div>
       </div>
-    </div>
-  `).join('');
+    `).join('')}
+  </div>`;
 }
 
 // ---- Weekly Scores ----
@@ -453,8 +740,12 @@ function renderPlayers() {
 
   const typeBtns = document.querySelectorAll('.type-btn');
   typeBtns.forEach(btn => {
+    if (btn.id && btn.id.startsWith('manual-')) return; // Skip manual update buttons
     btn.onclick = () => {
-      typeBtns.forEach(b => b.classList.remove('active'));
+      typeBtns.forEach(b => {
+        if (b.id && b.id.startsWith('manual-')) return;
+        b.classList.remove('active');
+      });
       btn.classList.add('active');
       currentType = btn.dataset.type;
       updatePlayers();
@@ -666,7 +957,6 @@ function renderSwaps() {
 
 // ---- Rules ----
 function renderRulesFromScoring() {
-  // Always render the scoring tables from the constant SCORING
   const batTable = document.getElementById('batting-scoring-table');
   const pitchTable = document.getElementById('pitching-scoring-table');
 
@@ -688,7 +978,6 @@ function renderRulesFromScoring() {
     </tbody>
   `;
 
-  // Render rules text if available
   const container = document.getElementById('rules-content');
   if (DATA && DATA.rules_text) {
     const headings = ['Purpose', 'Format', 'Player Selection', 'Schedule', 'Pool Play', 'Elimination Play', 'Scoring'];
@@ -766,31 +1055,38 @@ function showActiveSeason(seasonData) {
     `;
   }
 
-  // Standings table for active season
-  const table = document.getElementById('final-standings-table');
+  // Scoreboard content for active season
+  const scoreboardContent = document.getElementById('scoreboard-content');
   if (managerScores.length > 0) {
     const sorted = [...managerScores].sort((a, b) => b.total - a.total);
-    table.innerHTML = `
-      <thead>
-        <tr>
-          <th>Rank</th><th>Manager</th>
-          <th>Batting</th><th>Pitching</th><th>Total</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${sorted.map((m, i) => `
-          <tr>
-            <td class="rank ${i < 3 ? 'rank-' + (i + 1) : ''}">${i + 1}</td>
-            <td><strong>${m.manager}</strong></td>
-            <td class="num">${fmt(m.batting)}</td>
-            <td class="num">${fmt(m.pitching)}</td>
-            <td class="num"><strong>${fmt(m.total)}</strong></td>
-          </tr>
-        `).join('')}
-      </tbody>
+    scoreboardContent.innerHTML = `
+      <div class="card">
+        <h2>Current Standings</h2>
+        <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Rank</th><th>Manager</th>
+              <th>Batting</th><th>Pitching</th><th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sorted.map((m, i) => `
+              <tr>
+                <td class="rank ${i < 3 ? 'rank-' + (i + 1) : ''}">${i + 1}</td>
+                <td><strong>${m.manager}</strong></td>
+                <td class="num">${fmt(m.batting)}</td>
+                <td class="num">${fmt(m.pitching)}</td>
+                <td class="num"><strong>${fmt(m.total)}</strong></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        </div>
+      </div>
     `;
   } else {
-    table.innerHTML = '<tbody><tr><td>No scoring data yet. Upload weekly stats to see standings.</td></tr></tbody>';
+    scoreboardContent.innerHTML = '<div class="card"><p>No scoring data yet. Upload weekly stats to see standings.</p></div>';
   }
 
   // Render active season weekly/player data
@@ -798,9 +1094,6 @@ function showActiveSeason(seasonData) {
   renderActivePlayers(seasonData);
 
   // Clear historical-only sections
-  document.getElementById('pool-play-table').innerHTML = '';
-  document.getElementById('qualifiers-list').innerHTML = '';
-  document.getElementById('awards-list').innerHTML = '';
   document.getElementById('bracket-container').innerHTML = '<p>Bracket will be available during playoff rounds.</p>';
   document.getElementById('swaps-table').innerHTML = '';
 }
@@ -812,7 +1105,6 @@ function renderActiveWeekly(seasonData) {
     return;
   }
 
-  // Temporarily set DATA so the existing renderWeekly can work
   const origData = DATA;
   DATA = { team_weekly: teamWeekly };
   renderWeekly();
@@ -890,7 +1182,6 @@ function buildTeamWeekly(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  // Group by manager + round + week
   const key = (r, w, m) => `${r}|${w}|${m}`;
   const map = {};
 
@@ -936,7 +1227,6 @@ function renderSchedule() {
   let html = `<div class="card"><h2>${SELECTED_SEASON} Season Schedule</h2>`;
 
   if (!isActive && seasonData.data && seasonData.data.team_weekly) {
-    // Historical: show which weeks had data
     const weekSet = new Set(seasonData.data.team_weekly.map(t => `${t.round}|${t.week}`));
     html += '<div class="schedule-grid">';
     SEASON_SCHEDULE.forEach((s, i) => {
@@ -973,6 +1263,344 @@ function renderSchedule() {
 
   html += '</div>';
   container.innerHTML = html;
+}
+
+// ============================================================
+// My Roster Page
+// ============================================================
+function setupMyRoster() {
+  const loginBtn = document.getElementById('roster-login-btn');
+  const logoutBtn = document.getElementById('roster-logout-btn');
+  const emailInput = document.getElementById('roster-email');
+
+  loginBtn.onclick = () => {
+    const email = emailInput.value.trim().toLowerCase();
+    if (!email) return;
+
+    // Check against managers list
+    const managers = getManagers();
+    let managerName = null;
+
+    // First check managers list
+    const mgr = managers.find(m => m.email.toLowerCase() === email);
+    if (mgr) {
+      managerName = mgr.name;
+    }
+    // Also check historical email_map
+    if (!managerName && DATA && DATA.email_map) {
+      managerName = DATA.email_map[email];
+    }
+
+    if (managerName) {
+      ROSTER_EMAIL = email;
+      document.getElementById('roster-login-error').style.display = 'none';
+      document.getElementById('roster-login-section').style.display = 'none';
+      document.getElementById('roster-panel').style.display = 'block';
+      document.getElementById('roster-manager-name').textContent = managerName + "'s Roster";
+
+      // Show manual update section if commissioner
+      const isCommissioner = managers.find(m => m.email.toLowerCase() === email && m.commissioner);
+      const manualSection = document.getElementById('manual-update-section');
+      if (isCommissioner) {
+        manualSection.style.display = 'block';
+        setupManualUpdate();
+      } else {
+        manualSection.style.display = 'none';
+      }
+
+      // Render roster data
+      renderRosterData(managerName);
+    } else {
+      const err = document.getElementById('roster-login-error');
+      err.textContent = 'Email not found. Please use the email registered with your team.';
+      err.style.display = 'block';
+    }
+  };
+
+  emailInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loginBtn.click();
+  });
+
+  logoutBtn.onclick = () => {
+    ROSTER_EMAIL = null;
+    document.getElementById('roster-login-section').style.display = 'block';
+    document.getElementById('roster-panel').style.display = 'none';
+    document.getElementById('manual-update-section').style.display = 'none';
+    emailInput.value = '';
+  };
+}
+
+function renderRosterData(managerName) {
+  // Player Stats by Week
+  const statsContainer = document.getElementById('roster-player-stats');
+  const transContainer = document.getElementById('roster-transactions');
+
+  if (DATA) {
+    // Historical season - show player stats for this manager
+    if (DATA.batting_weekly || DATA.pitching_weekly) {
+      const batting = (DATA.batting_weekly || []).filter(b => b.manager === managerName);
+      const pitching = (DATA.pitching_weekly || []).filter(p => p.manager === managerName);
+
+      let html = '';
+      if (batting.length > 0) {
+        html += '<h3>Batting</h3><div class="table-wrapper"><table class="data-table"><thead><tr>';
+        html += '<th>Round</th><th>Week</th><th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th>';
+        html += '</tr></thead><tbody>';
+        batting.forEach(b => {
+          html += `<tr>
+            <td>${b.round || ''}</td><td>${b.week || ''}</td><td>${b.batter}</td>
+            <td class="num">${b.abs || 0}</td><td class="num">${b['1b'] || 0}</td><td class="num">${b['2b'] || 0}</td>
+            <td class="num">${b['3b'] || 0}</td><td class="num">${b.hr || 0}</td><td class="num">${b.r || 0}</td>
+            <td class="num">${b.rbi || 0}</td><td class="num">${b.sb || 0}</td><td class="num">${b.bb || 0}</td>
+            <td class="num"><strong>${fmt(b.weekly_score)}</strong></td>
+          </tr>`;
+        });
+        html += '</tbody></table></div>';
+      }
+      if (pitching.length > 0) {
+        html += '<h3 style="margin-top:1rem;">Pitching</h3><div class="table-wrapper"><table class="data-table"><thead><tr>';
+        html += '<th>Round</th><th>Week</th><th>Player</th><th>GS</th><th>W</th><th>QS</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th>';
+        html += '</tr></thead><tbody>';
+        pitching.forEach(p => {
+          html += `<tr>
+            <td>${p.round || ''}</td><td>${p.week || ''}</td><td>${p.pitcher}</td>
+            <td class="num">${p.gs || 0}</td><td class="num">${p.w || 0}</td><td class="num">${fmtDec(p.qs)}</td>
+            <td class="num">${fmtDec(p.ip)}</td><td class="num">${p.h || 0}</td><td class="num">${p.er || 0}</td>
+            <td class="num">${p.bb || 0}</td><td class="num">${p.k || 0}</td>
+            <td class="num"><strong>${fmt(p.weekly_score)}</strong></td>
+          </tr>`;
+        });
+        html += '</tbody></table></div>';
+      }
+      statsContainer.innerHTML = html || '<p class="text-muted">No stats available.</p>';
+    } else {
+      statsContainer.innerHTML = '<p class="text-muted">No stats available.</p>';
+    }
+
+    // Transactions for this manager
+    if (DATA.swaps && DATA.email_map) {
+      const email = ROSTER_EMAIL;
+      const mySwaps = DATA.swaps.filter(s => s.email === email);
+      if (mySwaps.length > 0) {
+        let html = '<div class="table-wrapper"><table class="data-table"><thead><tr>';
+        html += '<th>Date</th><th>Type</th><th>Player Out</th><th>Player In</th>';
+        html += '</tr></thead><tbody>';
+        mySwaps.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).forEach(s => {
+          const typeClass = s.reason.includes('Free') ? 'swap-free' : s.reason.includes('IL') ? 'swap-il' : s.reason.includes('Drop') ? 'swap-drop' : 'swap-trade';
+          const typeLabel = s.reason.includes('Free') ? 'Free Swap' : s.reason.includes('IL') ? 'IL Swap' : s.reason.includes('Drop') ? 'Drop Swap' : 'Trade Swap';
+          html += `<tr>
+            <td>${formatDate(s.timestamp)}</td>
+            <td><span class="swap-type ${typeClass}">${typeLabel}</span></td>
+            <td class="player-out">${s.player_out || ''}</td>
+            <td class="player-in">${s.player_in || ''}</td>
+          </tr>`;
+        });
+        html += '</tbody></table></div>';
+        transContainer.innerHTML = html;
+      } else {
+        transContainer.innerHTML = '<p class="text-muted">No transactions found.</p>';
+      }
+    } else {
+      transContainer.innerHTML = '<p class="text-muted">No transaction data available.</p>';
+    }
+  } else {
+    statsContainer.innerHTML = '<p class="text-muted">No stats available for this season yet.</p>';
+    transContainer.innerHTML = '<p class="text-muted">No transactions yet.</p>';
+  }
+}
+
+// ============================================================
+// Manual Update (Commissioner)
+// ============================================================
+function setupManualUpdate() {
+  const managers = getManagers();
+  const managerSelect = document.getElementById('manual-manager');
+  const weekSelect = document.getElementById('manual-week');
+  const battingBtn = document.getElementById('manual-type-batting');
+  const pitchingBtn = document.getElementById('manual-type-pitching');
+  const saveBtn = document.getElementById('manual-save-btn');
+
+  // Populate manager dropdown
+  managerSelect.innerHTML = managers.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+
+  // Populate week dropdown
+  weekSelect.innerHTML = SEASON_SCHEDULE.map((s, i) => `<option value="${i}">${s.label}</option>`).join('');
+
+  // Type toggle
+  let manualType = 'batting';
+
+  battingBtn.onclick = () => {
+    manualType = 'batting';
+    battingBtn.classList.add('active');
+    pitchingBtn.classList.remove('active');
+    document.getElementById('manual-batting-fields').style.display = 'block';
+    document.getElementById('manual-pitching-fields').style.display = 'none';
+    document.getElementById('manual-score-preview').innerHTML = '';
+  };
+
+  pitchingBtn.onclick = () => {
+    manualType = 'pitching';
+    pitchingBtn.classList.add('active');
+    battingBtn.classList.remove('active');
+    document.getElementById('manual-batting-fields').style.display = 'none';
+    document.getElementById('manual-pitching-fields').style.display = 'block';
+    document.getElementById('manual-score-preview').innerHTML = '';
+  };
+
+  // Live score preview on input change
+  const allInputs = document.querySelectorAll('#manual-batting-fields input, #manual-pitching-fields input');
+  allInputs.forEach(input => {
+    input.addEventListener('input', () => {
+      const score = calculateManualScore(manualType);
+      document.getElementById('manual-score-preview').innerHTML =
+        `<strong>Calculated Score: ${fmt(score)}</strong>`;
+    });
+  });
+
+  // Save button
+  saveBtn.onclick = () => {
+    const manager = managerSelect.value;
+    const playerName = document.getElementById('manual-player-name').value.trim();
+    const weekIndex = parseInt(weekSelect.value);
+
+    if (!playerName) {
+      document.getElementById('manual-update-status').innerHTML = '<p class="error-text">Please enter a player name.</p>';
+      return;
+    }
+
+    const scheduleWeek = SEASON_SCHEDULE[weekIndex];
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+
+    if (!sd || sd.status === 'completed') {
+      document.getElementById('manual-update-status').innerHTML = '<p class="error-text">Cannot update a completed season.</p>';
+      return;
+    }
+
+    if (manualType === 'batting') {
+      if (!sd.weekly_batting) sd.weekly_batting = [];
+
+      const stats = {
+        '1b': parseNum(document.getElementById('manual-1b').value),
+        '2b': parseNum(document.getElementById('manual-2b').value),
+        '3b': parseNum(document.getElementById('manual-3b').value),
+        hr: parseNum(document.getElementById('manual-hr').value),
+        r: parseNum(document.getElementById('manual-r').value),
+        rbi: parseNum(document.getElementById('manual-rbi').value),
+        sb: parseNum(document.getElementById('manual-sb').value),
+        bb: parseNum(document.getElementById('manual-bb-bat').value),
+        abs: parseNum(document.getElementById('manual-ab').value),
+      };
+
+      const weeklyScore = calculateBattingScore(stats);
+
+      // Compute cumulative total for this batter
+      const batterTotals = {};
+      sd.weekly_batting.forEach(b => {
+        if (!batterTotals[b.batter]) batterTotals[b.batter] = 0;
+        batterTotals[b.batter] += (b.weekly_score || 0);
+      });
+      const previousTotal = batterTotals[playerName] || 0;
+
+      // Remove existing entry for same player/manager/week if any
+      sd.weekly_batting = sd.weekly_batting.filter(b =>
+        !(b.round === scheduleWeek.round && b.week === scheduleWeek.week && b.manager === manager && b.batter === playerName)
+      );
+
+      sd.weekly_batting.push({
+        round: scheduleWeek.round,
+        week: scheduleWeek.week,
+        manager: manager,
+        batter: playerName,
+        status: 'Manual',
+        ...stats,
+        weekly_score: weeklyScore,
+        total_score: Math.round((previousTotal + weeklyScore) * 100) / 100
+      });
+
+      saveSeason(SELECTED_SEASON, sd);
+      document.getElementById('manual-update-status').innerHTML =
+        `<p class="success-text">Saved batting stats for ${playerName} (${manager}) - ${scheduleWeek.label}. Score: ${fmt(weeklyScore)}</p>`;
+
+    } else {
+      if (!sd.weekly_pitching) sd.weekly_pitching = [];
+
+      const stats = {
+        gs: parseNum(document.getElementById('manual-gs').value),
+        w: parseNum(document.getElementById('manual-w').value),
+        qs: parseNum(document.getElementById('manual-qs').value),
+        cg: parseNum(document.getElementById('manual-cg').value),
+        cgso: parseNum(document.getElementById('manual-cgso').value),
+        nh: parseNum(document.getElementById('manual-nh').value),
+        ip: parseNum(document.getElementById('manual-ip').value),
+        h: parseNum(document.getElementById('manual-h').value),
+        er: parseNum(document.getElementById('manual-er').value),
+        bb: parseNum(document.getElementById('manual-bb-pitch').value),
+        k: parseNum(document.getElementById('manual-k').value),
+      };
+
+      const weeklyScore = calculatePitchingScore(stats);
+
+      // Remove existing entry for same player/manager/week if any
+      sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+        !(p.round === scheduleWeek.round && p.week === scheduleWeek.week && p.manager === manager && p.pitcher === playerName)
+      );
+
+      sd.weekly_pitching.push({
+        round: scheduleWeek.round,
+        week: scheduleWeek.week,
+        manager: manager,
+        pitcher: playerName,
+        status: 'Manual',
+        ...stats,
+        weekly_score: weeklyScore
+      });
+
+      saveSeason(SELECTED_SEASON, sd);
+      document.getElementById('manual-update-status').innerHTML =
+        `<p class="success-text">Saved pitching stats for ${playerName} (${manager}) - ${scheduleWeek.label}. Score: ${fmt(weeklyScore)}</p>`;
+    }
+
+    // Clear form fields
+    document.getElementById('manual-player-name').value = '';
+    document.querySelectorAll('#manual-batting-fields input, #manual-pitching-fields input').forEach(input => {
+      input.value = '0';
+    });
+    document.getElementById('manual-score-preview').innerHTML = '';
+
+    // Refresh displays
+    init();
+  };
+}
+
+function calculateManualScore(type) {
+  if (type === 'batting') {
+    const stats = {
+      '1b': parseNum(document.getElementById('manual-1b').value),
+      '2b': parseNum(document.getElementById('manual-2b').value),
+      '3b': parseNum(document.getElementById('manual-3b').value),
+      hr: parseNum(document.getElementById('manual-hr').value),
+      r: parseNum(document.getElementById('manual-r').value),
+      rbi: parseNum(document.getElementById('manual-rbi').value),
+      sb: parseNum(document.getElementById('manual-sb').value),
+      bb: parseNum(document.getElementById('manual-bb-bat').value),
+    };
+    return calculateBattingScore(stats);
+  } else {
+    const stats = {
+      w: parseNum(document.getElementById('manual-w').value),
+      qs: parseNum(document.getElementById('manual-qs').value),
+      cg: parseNum(document.getElementById('manual-cg').value),
+      cgso: parseNum(document.getElementById('manual-cgso').value),
+      nh: parseNum(document.getElementById('manual-nh').value),
+      ip: parseNum(document.getElementById('manual-ip').value),
+      h: parseNum(document.getElementById('manual-h').value),
+      er: parseNum(document.getElementById('manual-er').value),
+      bb: parseNum(document.getElementById('manual-bb-pitch').value),
+      k: parseNum(document.getElementById('manual-k').value),
+    };
+    return calculatePitchingScore(stats);
+  }
 }
 
 // ============================================================
@@ -1059,7 +1687,6 @@ function renderManagersTable() {
     </tbody>
   `;
 
-  // Save manager button
   document.getElementById('save-manager-btn').onclick = () => {
     const name = document.getElementById('mgr-name').value.trim();
     const email = document.getElementById('mgr-email').value.trim().toLowerCase();
@@ -1201,7 +1828,6 @@ function renderWeeklyUploadSections() {
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
 
-  // Determine which weeks have data
   const uploadedBatting = new Set();
   const uploadedPitching = new Set();
   batting.forEach(b => uploadedBatting.add(`${b.round}|${b.week}`));
@@ -1254,16 +1880,10 @@ window.uploadWeeklyBatting = function(weekIndex) {
     const sd = seasons[SELECTED_SEASON];
     if (!sd.weekly_batting) sd.weekly_batting = [];
 
-    // Remove existing data for this week
     sd.weekly_batting = sd.weekly_batting.filter(b =>
       !(b.round === scheduleWeek.round && b.week === scheduleWeek.week)
     );
 
-    // Process each row - expects columns like: Manager, Batter/Player/Name, AB, 1B, 2B, 3B, HR, R, RBI, SB, BB
-    const managers = getManagers();
-    const managerNames = managers.map(m => m.name.toLowerCase());
-
-    // Compute cumulative totals for each batter
     const batterTotals = {};
     sd.weekly_batting.forEach(b => {
       if (!batterTotals[b.batter]) batterTotals[b.batter] = 0;
@@ -1307,8 +1927,6 @@ window.uploadWeeklyBatting = function(weekIndex) {
       `<p class="success-text">Uploaded ${rows.length} batter records. Scores calculated.</p>`;
     renderWeeklyUploadSections();
     fileInput.value = '';
-
-    // Refresh displays
     init();
   });
 };
@@ -1323,7 +1941,6 @@ window.uploadWeeklyPitching = function(weekIndex) {
     const sd = seasons[SELECTED_SEASON];
     if (!sd.weekly_pitching) sd.weekly_pitching = [];
 
-    // Remove existing data for this week
     sd.weekly_pitching = sd.weekly_pitching.filter(p =>
       !(p.round === scheduleWeek.round && p.week === scheduleWeek.week)
     );
@@ -1365,8 +1982,6 @@ window.uploadWeeklyPitching = function(weekIndex) {
       `<p class="success-text">Uploaded ${rows.length} pitcher records. Scores calculated.</p>`;
     renderWeeklyUploadSections();
     fileInput.value = '';
-
-    // Refresh displays
     init();
   });
 };
@@ -1387,7 +2002,6 @@ function parseCSVFile(file, callback) {
     );
 
     if (nameCol === -1) {
-      // Assume the first column is the name
       const names = [];
       for (let i = 1; i < lines.length; i++) {
         const cols = parseCSVLine(lines[i]);
@@ -1509,7 +2123,6 @@ function getPool(manager) {
 function resetSelect(id, options) {
   const select = document.getElementById(id);
   const current = select.value;
-  // Keep the "all" option and re-populate
   select.innerHTML = `<option value="all">${select.querySelector('option').textContent}</option>`;
   options.forEach(opt => {
     if (opt) {
@@ -1519,7 +2132,6 @@ function resetSelect(id, options) {
       select.appendChild(el);
     }
   });
-  // Restore selection if still valid
   if ([...select.options].some(o => o.value === current)) {
     select.value = current;
   }

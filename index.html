@@ -17,50 +17,23 @@
   </header>
 
   <nav id="main-nav">
-    <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
-    <button class="nav-btn" data-tab="standings">Standings</button>
+    <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
     <button class="nav-btn" data-tab="players">Player Stats</button>
     <button class="nav-btn" data-tab="bracket">Bracket</button>
     <button class="nav-btn" data-tab="swaps">Transactions</button>
     <button class="nav-btn" data-tab="rules">Rules</button>
     <button class="nav-btn" data-tab="schedule">Schedule</button>
+    <button class="nav-btn" data-tab="my-roster">My Roster</button>
     <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
   </nav>
 
   <main id="app">
-    <!-- Dashboard -->
+    <!-- Scoreboard (Home) -->
     <section id="dashboard" class="tab-content active">
       <div class="champion-banner" id="champion-banner"></div>
       <div class="stats-grid" id="stats-grid"></div>
-      <div class="card">
-        <h2>Final Standings</h2>
-        <table id="final-standings-table" class="data-table"></table>
-      </div>
-    </section>
-
-    <!-- Standings -->
-    <section id="standings" class="tab-content">
-      <div class="card">
-        <h2>Pool Play Standings</h2>
-        <div class="pool-selector">
-          <button class="pool-btn active" data-pool="all">All Pools</button>
-          <button class="pool-btn" data-pool="Pool 1">Pool 1</button>
-          <button class="pool-btn" data-pool="Pool 2">Pool 2</button>
-          <button class="pool-btn" data-pool="Pool 3">Pool 3</button>
-        </div>
-        <table id="pool-play-table" class="data-table"></table>
-      </div>
-      <div class="two-col">
-        <div class="card">
-          <h2>Playoff Qualifiers</h2>
-          <div id="qualifiers-list"></div>
-        </div>
-        <div class="card">
-          <h2>Season Awards</h2>
-          <div id="awards-list"></div>
-        </div>
-      </div>
+      <div id="scoreboard-content"></div>
     </section>
 
     <!-- Weekly Scores -->
@@ -155,6 +128,106 @@
       <div id="schedule-content"></div>
     </section>
 
+    <!-- My Roster -->
+    <section id="my-roster" class="tab-content">
+      <div id="roster-login-section" class="card">
+        <h2>My Roster</h2>
+        <p>Enter your email to view your roster.</p>
+        <div class="login-form">
+          <input type="email" id="roster-email" placeholder="Email address">
+          <button class="btn btn-primary" id="roster-login-btn">View Roster</button>
+        </div>
+        <p id="roster-login-error" class="error-text" style="display:none;"></p>
+      </div>
+      <div id="roster-panel" style="display:none;">
+        <div class="card">
+          <div class="roster-header">
+            <h2 id="roster-manager-name">My Roster</h2>
+            <button class="btn btn-secondary btn-sm" id="roster-logout-btn">Switch User</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Current Roster</h2>
+          <div id="roster-current"></div>
+        </div>
+        <div class="card">
+          <h2>Player Stats by Week</h2>
+          <div id="roster-player-stats"></div>
+        </div>
+        <div class="card">
+          <h2>Previously Rostered Players</h2>
+          <div id="roster-former"></div>
+        </div>
+        <div class="card">
+          <h2>Request Add/Drop</h2>
+          <div id="swap-request-form"></div>
+        </div>
+        <div class="card">
+          <h2>My Transactions</h2>
+          <div id="roster-transactions"></div>
+        </div>
+        <!-- Manual Update (Commissioner Only) -->
+        <div class="card" id="manual-update-section" style="display:none;">
+          <h2>Manual Update (Commissioner)</h2>
+          <p class="upload-hint">Manually enter stats for a player for a specific week. Score will be calculated automatically.</p>
+          <div class="manual-update-form">
+            <div class="form-row">
+              <label class="upload-label">Manager</label>
+              <select id="manual-manager" class="form-select"></select>
+            </div>
+            <div class="form-row">
+              <label class="upload-label">Round / Week</label>
+              <select id="manual-week" class="form-select"></select>
+            </div>
+            <div class="form-row">
+              <label class="upload-label">Player Type</label>
+              <div class="player-type-toggle">
+                <button class="type-btn active" id="manual-type-batting">Batting</button>
+                <button class="type-btn" id="manual-type-pitching">Pitching</button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="upload-label">Player Name</label>
+              <input type="text" id="manual-player-name" placeholder="Enter player name" class="form-input">
+            </div>
+            <div id="manual-batting-fields">
+              <div class="stats-input-grid">
+                <div><label>AB</label><input type="number" id="manual-ab" value="0" min="0"></div>
+                <div><label>1B</label><input type="number" id="manual-1b" value="0" min="0"></div>
+                <div><label>2B</label><input type="number" id="manual-2b" value="0" min="0"></div>
+                <div><label>3B</label><input type="number" id="manual-3b" value="0" min="0"></div>
+                <div><label>HR</label><input type="number" id="manual-hr" value="0" min="0"></div>
+                <div><label>R</label><input type="number" id="manual-r" value="0" min="0"></div>
+                <div><label>RBI</label><input type="number" id="manual-rbi" value="0" min="0"></div>
+                <div><label>SB</label><input type="number" id="manual-sb" value="0" min="0"></div>
+                <div><label>BB</label><input type="number" id="manual-bb-bat" value="0" min="0"></div>
+              </div>
+            </div>
+            <div id="manual-pitching-fields" style="display:none;">
+              <div class="stats-input-grid">
+                <div><label>GS</label><input type="number" id="manual-gs" value="0" min="0"></div>
+                <div><label>W</label><input type="number" id="manual-w" value="0" min="0"></div>
+                <div><label>QS</label><input type="number" id="manual-qs" value="0" min="0"></div>
+                <div><label>CG</label><input type="number" id="manual-cg" value="0" min="0"></div>
+                <div><label>CGSO</label><input type="number" id="manual-cgso" value="0" min="0"></div>
+                <div><label>NH</label><input type="number" id="manual-nh" value="0" min="0"></div>
+                <div><label>IP</label><input type="number" id="manual-ip" value="0" min="0" step="0.1"></div>
+                <div><label>H</label><input type="number" id="manual-h" value="0" min="0"></div>
+                <div><label>ER</label><input type="number" id="manual-er" value="0" min="0"></div>
+                <div><label>BB</label><input type="number" id="manual-bb-pitch" value="0" min="0"></div>
+                <div><label>K</label><input type="number" id="manual-k" value="0" min="0"></div>
+              </div>
+            </div>
+            <div id="manual-score-preview" class="manual-score-preview"></div>
+            <div class="manual-update-actions">
+              <button class="btn btn-primary" id="manual-save-btn">Calculate & Save</button>
+            </div>
+            <div id="manual-update-status"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Commissioner Home -->
     <section id="commissioner" class="tab-content">
       <div id="commissioner-login" class="card">
@@ -173,6 +246,21 @@
           <button class="btn btn-secondary" id="commissioner-logout-btn">Logout</button>
         </div>
 
+        <!-- Season Schedule Date -->
+        <div class="card">
+          <h2>Season Schedule Dates</h2>
+          <div class="asg-date-section">
+            <label class="upload-label">Date of All-Star Game</label>
+            <p class="upload-hint">Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the prior Monday as Week 1 start.</p>
+            <div class="asg-date-row">
+              <input type="date" id="asg-date-input">
+              <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
+            </div>
+            <div id="asg-date-status"></div>
+          </div>
+          <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
+        </div>
+
         <!-- Manager Management -->
         <div class="card">
           <h2>Manage Managers</h2>
@@ -187,6 +275,25 @@
             <button class="btn btn-primary" id="save-manager-btn">Save Manager</button>
             <button class="btn btn-secondary" id="cancel-edit-btn" style="display:none;">Cancel</button>
           </div>
+        </div>
+
+        <!-- Roster Management -->
+        <div class="card">
+          <h2>Manage Rosters</h2>
+          <div class="roster-mgmt-section">
+            <div class="filters">
+              <select id="roster-mgmt-manager">
+                <option value="">Select Manager</option>
+              </select>
+            </div>
+            <div id="roster-mgmt-content"></div>
+          </div>
+        </div>
+
+        <!-- Pending Swap Requests -->
+        <div class="card">
+          <h2>Pending Swap Requests</h2>
+          <div id="pending-swaps-list"></div>
         </div>
 
         <!-- Season Setup -->

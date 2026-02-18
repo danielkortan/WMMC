@@ -904,7 +904,509 @@ footer {
   .schedule-grid { grid-template-columns: 1fr; }
 }
 
+/* ============================================================ */
+/* Scoreboard Tabs */
+/* ============================================================ */
+
+.scoreboard-card {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: var(--shadow);
+}
+
+.scoreboard-tabs {
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 2px solid var(--border);
+}
+
+.sb-tab {
+  padding: 0.625rem 1rem;
+  border: none;
+  background: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-light);
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 3px solid transparent;
+  transition: all 0.2s;
+  margin-bottom: -2px;
+}
+
+.sb-tab:hover {
+  color: var(--primary);
+  background: rgba(26, 58, 92, 0.04);
+}
+
+.sb-tab.active {
+  color: var(--primary);
+  border-bottom-color: var(--accent);
+}
+
+.sb-period {
+  display: none;
+}
+
+.sb-period.active {
+  display: block;
+}
+
+/* ============================================================ */
+/* Pool Play Grid */
+/* ============================================================ */
+
+.pool-play-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.25rem;
+}
+
+.pool-card {
+  background: var(--card-bg);
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pool-card h3 {
+  background: var(--primary);
+  color: white;
+  padding: 0.625rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.pool-leader-row {
+  background: #f0fdf4;
+  font-weight: 600;
+}
+
+/* ============================================================ */
+/* Pool Play Overall Highlighting */
+/* ============================================================ */
+
+.highlight-pp1-leader {
+  background: rgba(16, 185, 129, 0.15) !important;
+}
+
+.highlight-pp2-leader {
+  background: rgba(59, 130, 246, 0.15) !important;
+}
+
+.highlight-both-leader {
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.18) 0%, rgba(59, 130, 246, 0.18) 100%) !important;
+}
+
+.highlight-wildcard {
+  background: rgba(200, 169, 81, 0.15) !important;
+}
+
+/* ============================================================ */
+/* Highlight Legend */
+/* ============================================================ */
+
+.highlight-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  background: var(--bg);
+  border-radius: 8px;
+  font-size: 0.8rem;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.legend-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  flex-shrink: 0;
+}
+
+.swatch-pp1 {
+  background: rgba(16, 185, 129, 0.35);
+}
+
+.swatch-pp2 {
+  background: rgba(59, 130, 246, 0.35);
+}
+
+.swatch-both {
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.35), rgba(59, 130, 246, 0.35));
+}
+
+.swatch-wildcard {
+  background: rgba(200, 169, 81, 0.35);
+}
+
+/* ============================================================ */
+/* Badges for PP Leaders */
+/* ============================================================ */
+
+.badge-pp1 {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge-pp2 {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.badge-both {
+  background: linear-gradient(90deg, #dcfce7, #dbeafe);
+  color: #1a4a5c;
+}
+
+/* ============================================================ */
+/* Advancement Info */
+/* ============================================================ */
+
+.advancement-info {
+  margin: 1rem 0;
+  padding: 0.875rem 1rem;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #1e40af;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+/* ============================================================ */
+/* Seeding List */
+/* ============================================================ */
+
+.seeding-list {
+  list-style: none;
+  margin: 1rem 0;
+}
+
+.seed-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.seed-item:last-child {
+  border-bottom: none;
+}
+
+.seed-number {
+  background: var(--primary);
+  color: white;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.seed-manager {
+  font-weight: 700;
+  color: var(--text);
+  flex: 1;
+}
+
+.seed-pool {
+  font-size: 0.75rem;
+  color: var(--text-light);
+  font-weight: 500;
+}
+
+.seed-type {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.seed-score {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+  min-width: 50px;
+  text-align: right;
+}
+
+/* ============================================================ */
+/* Matchup Grids (Results & Preview) */
+/* ============================================================ */
+
+.matchup-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.matchup-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.matchup-preview {
+  background: white;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.matchup-vs {
+  text-align: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-light);
+  padding: 0.125rem 0;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* ============================================================ */
+/* Finals Detail */
+/* ============================================================ */
+
+.finals-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-top: 1rem;
+}
+
+.finals-detail-card {
+  background: white;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.finals-detail-card.finals-winner {
+  border-color: var(--accent);
+  background: var(--winner);
+  box-shadow: 0 0 0 2px rgba(200, 169, 81, 0.2);
+}
+
+.finals-detail-name {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 0.5rem;
+}
+
+.finals-detail-stats {
+  font-size: 0.85rem;
+  color: var(--text-light);
+  margin-bottom: 0.25rem;
+}
+
+.finals-detail-total {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--primary);
+  margin-top: 0.5rem;
+}
+
+/* ============================================================ */
+/* Manual Update Form (My Roster - Commissioner) */
+/* ============================================================ */
+
+.manual-update-form {
+  margin-top: 0.5rem;
+}
+
+.form-row {
+  margin-bottom: 1rem;
+}
+
+.form-select {
+  width: 100%;
+  padding: 0.5rem 2rem 0.5rem 0.75rem;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  background: white;
+  cursor: pointer;
+  color: var(--text);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M6 8L1 3h10z' fill='%236b7280'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+}
+
+.form-select:focus {
+  outline: none;
+  border-color: var(--primary-light);
+}
+
+.form-input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--primary-light);
+}
+
+.stats-input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.stats-input-grid div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stats-input-grid label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-light);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.25rem;
+}
+
+.stats-input-grid input[type="number"] {
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border: 2px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-input-grid input[type="number"]:focus {
+  outline: none;
+  border-color: var(--primary-light);
+}
+
+.manual-score-preview {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: var(--bg);
+  border-radius: 8px;
+  text-align: center;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--primary);
+  min-height: 2.5rem;
+}
+
+.manual-update-actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.75rem;
+}
+
+/* ============================================================ */
+/* Roster Header */
+/* ============================================================ */
+
+.roster-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.roster-header h2 {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* ============================================================ */
 /* Table wrapper for horizontal scroll */
+/* ============================================================ */
+
 .table-wrapper {
   overflow-x: auto;
+}
+
+/* ============================================================ */
+/* Responsive additions for new components */
+/* ============================================================ */
+
+@media (max-width: 768px) {
+  .pool-play-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .matchup-results-grid,
+  .matchup-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .finals-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scoreboard-tabs {
+    gap: 0;
+  }
+
+  .sb-tab {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+  }
+
+  .stats-input-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .highlight-legend {
+    gap: 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .seed-item {
+    gap: 0.5rem;
+    font-size: 0.85rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-input-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .scoreboard-tabs {
+    flex-wrap: nowrap;
+  }
 }
