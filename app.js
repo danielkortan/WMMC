@@ -1063,10 +1063,36 @@ function showActiveSeason(seasonData) {
   // Scoreboard content for active season with scoring period tabs
   const scoreboardContent = document.getElementById('scoreboard-content');
   if (managerScores.length > 0) {
-    scoreboardContent.innerHTML = renderActiveScoreboardTabs(seasonData, managerScores, managers);
+    // Check for any unassigned player records (uploaded but not yet in any roster)
+    const p2mCheck = buildPlayerToManagerMap(seasonData);
+    const unassignedBat = (seasonData.weekly_batting || []).filter(b => !p2mCheck[b.batter]).length;
+    const unassignedPit = (seasonData.weekly_pitching || []).filter(p => !p2mCheck[p.pitcher]).length;
+    const unassignedTotal = unassignedBat + unassignedPit;
+    let warningHtml = '';
+    if (unassignedTotal > 0) {
+      warningHtml = `<div class="card"><div class="advancement-info" style="background:var(--warning-bg,#fff3cd);border-color:var(--warning-border,#ffc107);">
+        <strong>Note:</strong> ${unassignedTotal} player stat record${unassignedTotal !== 1 ? 's are' : ' is'} not assigned to any manager roster and excluded from scores.
+        Log in as Commissioner on the My Roster page to assign players to rosters.
+      </div></div>`;
+    }
+    scoreboardContent.innerHTML = warningHtml + renderActiveScoreboardTabs(seasonData, managerScores, managers);
     setupScoreboardTabs();
   } else {
-    scoreboardContent.innerHTML = '<div class="card"><p>No scoring data yet. Upload weekly stats to see standings.</p></div>';
+    // Determine why there are no scores
+    const hasUploadedData = (seasonData.weekly_batting || []).length + (seasonData.weekly_pitching || []).length > 0;
+    const hasRosters = Object.keys(seasonData.rosters || {}).some(k => {
+      const r = seasonData.rosters[k];
+      return (r.batters || []).length > 0 || (r.pitchers || []).length > 0;
+    });
+    let msg = 'No scoring data yet. Upload weekly stats via the Commissioner page to track scores.';
+    if (hasUploadedData && !hasRosters) {
+      msg = 'Player stat data has been uploaded, but no players are assigned to manager rosters yet. ' +
+            'Log in as Commissioner on the My Roster page to assign players — scores will appear once rosters are configured.';
+    } else if (hasUploadedData && hasRosters) {
+      msg = 'Player stat data has been uploaded and rosters are configured, but no uploaded players match any roster assignment. ' +
+            'Check that player names in the uploaded CSV match exactly the names in each manager\'s roster.';
+    }
+    scoreboardContent.innerHTML = `<div class="card"><p>${msg}</p></div>`;
   }
 
   // Render active season weekly/player data
@@ -1083,16 +1109,18 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  // Compute per-period per-manager scores
+  // Compute per-period per-manager scores using roster lookup only
   function periodScores(roundFilter) {
     const mgrMap = {};
     batting.filter(b => roundFilter.includes(b.round)).forEach(b => {
-      const mgr = resolveManager(b.manager, b.batter, p2m);
+      const mgr = p2m[b.batter]; // roster-only — no fallback
+      if (!mgr) return;           // skip unassigned players
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].batting += (b.weekly_score || 0);
     });
-    pitching.filter(p => roundFilter.includes(p.round) || roundFilter.includes(p.round.replace('P', ''))).forEach(p => {
-      const mgr = resolveManager(p.manager, p.pitcher, p2m);
+    pitching.filter(p => roundFilter.includes(p.round)).forEach(p => {
+      const mgr = p2m[p.pitcher]; // roster-only
+      if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].pitching += (p.weekly_score || 0);
     });
@@ -1207,10 +1235,10 @@ function renderActivePlayers(seasonData) {
     return;
   }
 
-  // Resolve manager names from rosters before passing to renderPlayers
+  // Resolve manager names from rosters ONLY — never fall back to stored field (which may be an MLB team)
   const p2m = buildPlayerToManagerMap(seasonData);
-  const fixedBatting = batting.map(b => ({ ...b, manager: resolveManager(b.manager, b.batter, p2m) }));
-  const fixedPitching = pitching.map(p => ({ ...p, manager: resolveManager(p.manager, p.pitcher, p2m) }));
+  const fixedBatting = batting.map(b => ({ ...b, manager: p2m[b.batter] || '(Unassigned)' }));
+  const fixedPitching = pitching.map(p => ({ ...p, manager: p2m[p.pitcher] || '(Unassigned)' }));
 
   const origData = DATA;
   DATA = { batting_weekly: fixedBatting, pitching_weekly: fixedPitching };
@@ -1302,11 +1330,6 @@ function buildPlayerToManagerMap(seasonData) {
   return map;
 }
 
-// Resolve a manager name: first check roster lookup, fall back to stored value
-function resolveManager(storedManager, playerName, p2m) {
-  if (p2m[playerName]) return p2m[playerName];
-  return storedManager;
-}
 
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
@@ -1315,12 +1338,14 @@ function computeManagerScores(seasonData) {
 
   const managerMap = {};
   batting.forEach(b => {
-    const mgr = resolveManager(b.manager, b.batter, p2m);
+    const mgr = p2m[b.batter]; // roster-only lookup — no fallback to stored field
+    if (!mgr) return;           // skip players not assigned to any manager roster
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].batting += (b.weekly_score || 0);
   });
   pitching.forEach(p => {
-    const mgr = resolveManager(p.manager, p.pitcher, p2m);
+    const mgr = p2m[p.pitcher]; // roster-only lookup
+    if (!mgr) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].pitching += (p.weekly_score || 0);
   });
@@ -1347,14 +1372,16 @@ function buildTeamWeekly(seasonData) {
   const map = {};
 
   batting.forEach(b => {
-    const mgr = resolveManager(b.manager, b.batter, p2m);
+    const mgr = p2m[b.batter]; // roster-only lookup — no fallback
+    if (!mgr) return;           // skip unassigned players
     const k = key(b.round, b.week, mgr);
     if (!map[k]) map[k] = { round: b.round, week: b.week, manager: mgr, pool: managerPool[mgr] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
     map[k].weekly_batting += (b.weekly_score || 0);
   });
 
   pitching.forEach(p => {
-    const mgr = resolveManager(p.manager, p.pitcher, p2m);
+    const mgr = p2m[p.pitcher]; // roster-only lookup
+    if (!mgr) return;
     const k = key(p.round, p.week, mgr);
     if (!map[k]) map[k] = { round: p.round, week: p.week, manager: mgr, pool: managerPool[mgr] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
     map[k].weekly_pitching += (p.weekly_score || 0);
@@ -1657,8 +1684,8 @@ function renderRosterData(managerName, isCommissioner) {
     // Active season - show player stats; use roster lookup for manager matching
     const allBatting = seasonData.weekly_batting || [];
     const allPitching = seasonData.weekly_pitching || [];
-    const batting = allBatting.filter(b => resolveManager(b.manager, b.batter, p2m) === managerName);
-    const pitching = allPitching.filter(p => resolveManager(p.manager, p.pitcher, p2m) === managerName);
+    const batting = allBatting.filter(b => p2m[b.batter] === managerName);   // roster-only match
+    const pitching = allPitching.filter(p => p2m[p.pitcher] === managerName); // roster-only match
     let html = '';
     if (batting.length > 0) {
       html += '<h3>Batting</h3><div class="table-wrapper"><table class="data-table"><thead><tr>';
