@@ -8,6 +8,11 @@ let CURRENT_YEAR = new Date().getFullYear();
 let SELECTED_SEASON = null;
 let COMMISSIONER_EMAIL = null;
 let ROSTER_EMAIL = null;
+let LOGGED_IN_EMAIL = null;
+
+// Google Sign-In Client ID — set this to enable Google login
+const GOOGLE_CLIENT_ID = '';
+const LOGIN_PASSWORD = '123';
 
 // Scoring rubric (constant)
 const SCORING = {
@@ -95,10 +100,166 @@ async function loadData() {
     localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
   }
 
-  document.getElementById('footer-year').textContent = CURRENT_YEAR;
+  // Check for existing auth session
+  const savedAuth = localStorage.getItem('wmmc_logged_in_email');
+  if (savedAuth) {
+    const mgr = findManagerByEmail(savedAuth);
+    if (mgr) {
+      LOGGED_IN_EMAIL = savedAuth.toLowerCase();
+      enterApp(mgr);
+    } else {
+      localStorage.removeItem('wmmc_logged_in_email');
+    }
+  }
 
+  // If not logged in, show login screen
+  if (!LOGGED_IN_EMAIL) {
+    document.getElementById('login-screen').style.display = 'flex';
+  }
+
+  setupLoginHandlers();
+  initGoogleSignIn();
+}
+
+// ============================================================
+// Authentication
+// ============================================================
+function findManagerByEmail(email) {
+  const managers = getManagers();
+  return managers.find(m => m.email && m.email.toLowerCase() === email.toLowerCase());
+}
+
+function enterApp(mgr) {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('user-bar').style.display = 'flex';
+  document.getElementById('user-display-name').textContent = mgr.name;
+
+  // Auto-auth roster page
+  ROSTER_EMAIL = LOGGED_IN_EMAIL;
+  localStorage.setItem('wmmc_roster_email', LOGGED_IN_EMAIL);
+
+  // Auto-auth commissioner if applicable
+  if (mgr.commissioner) {
+    COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
+    localStorage.setItem('wmmc_commissioner_logged_in', LOGGED_IN_EMAIL);
+  }
+
+  // Show/hide commissioner nav based on role
+  const commBtn = document.getElementById('commissioner-nav-btn');
+  if (commBtn) {
+    commBtn.style.display = mgr.commissioner ? '' : 'none';
+  }
+
+  document.getElementById('footer-year').textContent = CURRENT_YEAR;
   buildSeasonSelector();
   init();
+}
+
+function handleLogin(email, password) {
+  email = email.trim().toLowerCase();
+  const errEl = document.getElementById('login-error-msg');
+
+  if (!email) {
+    errEl.textContent = 'Please enter your email address.';
+    return;
+  }
+
+  const mgr = findManagerByEmail(email);
+  if (!mgr) {
+    errEl.textContent = 'Email not found. Contact the commissioner.';
+    return;
+  }
+
+  if (password !== LOGIN_PASSWORD) {
+    errEl.textContent = 'Incorrect password.';
+    return;
+  }
+
+  errEl.textContent = '';
+  LOGGED_IN_EMAIL = email;
+  localStorage.setItem('wmmc_logged_in_email', email);
+  enterApp(mgr);
+}
+
+function handleGoogleCredential(response) {
+  const errEl = document.getElementById('google-signin-error');
+  try {
+    // Decode the JWT payload (base64url)
+    const payload = JSON.parse(atob(response.credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    const email = (payload.email || '').toLowerCase();
+
+    if (!email) {
+      errEl.textContent = 'Could not read email from Google account.';
+      return;
+    }
+
+    const mgr = findManagerByEmail(email);
+    if (!mgr) {
+      errEl.textContent = 'This Google account is not registered. Contact the commissioner.';
+      return;
+    }
+
+    errEl.textContent = '';
+    LOGGED_IN_EMAIL = email;
+    localStorage.setItem('wmmc_logged_in_email', email);
+    enterApp(mgr);
+  } catch (e) {
+    errEl.textContent = 'Google sign-in failed. Please try email login.';
+  }
+}
+
+function handleLogout() {
+  LOGGED_IN_EMAIL = null;
+  COMMISSIONER_EMAIL = null;
+  ROSTER_EMAIL = null;
+  localStorage.removeItem('wmmc_logged_in_email');
+  localStorage.removeItem('wmmc_roster_email');
+  localStorage.removeItem('wmmc_commissioner_logged_in');
+  window.location.reload();
+}
+
+function setupLoginHandlers() {
+  document.getElementById('login-submit-btn').onclick = () => {
+    const email = document.getElementById('login-email').value;
+    const password = document.getElementById('login-password').value;
+    handleLogin(email, password);
+  };
+
+  document.getElementById('login-password').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('login-submit-btn').click();
+  });
+  document.getElementById('login-email').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('login-password').focus();
+  });
+
+  document.getElementById('logout-btn').onclick = handleLogout;
+}
+
+function initGoogleSignIn() {
+  if (!GOOGLE_CLIENT_ID) {
+    // Hide the divider and container if no Google client ID
+    const container = document.getElementById('google-signin-container');
+    const divider = container ? container.previousElementSibling : null;
+    if (container) container.style.display = 'none';
+    if (divider && divider.classList.contains('login-divider')) divider.style.display = 'none';
+    return;
+  }
+
+  // Google GIS may load after this script; retry if not ready
+  if (typeof google === 'undefined' || !google.accounts) {
+    setTimeout(initGoogleSignIn, 500);
+    return;
+  }
+
+  google.accounts.id.initialize({
+    client_id: GOOGLE_CLIENT_ID,
+    callback: handleGoogleCredential,
+  });
+
+  google.accounts.id.renderButton(
+    document.getElementById('google-signin-container'),
+    { theme: 'outline', size: 'large', width: '100%', text: 'signin_with' }
+  );
 }
 
 function buildSeasonSelector() {
@@ -1953,11 +2114,11 @@ function setupMyRoster() {
   const loginBtn = document.getElementById('roster-login-btn');
   const emailInput = document.getElementById('roster-email');
 
-  // Auto-login from localStorage
-  const savedEmail = localStorage.getItem('wmmc_roster_email');
-  if (savedEmail) {
-    emailInput.value = savedEmail;
-    rosterLogin(savedEmail);
+  // Auto-login from app-level auth or localStorage
+  const autoEmail = LOGGED_IN_EMAIL || localStorage.getItem('wmmc_roster_email');
+  if (autoEmail) {
+    emailInput.value = autoEmail;
+    rosterLogin(autoEmail);
   }
 
   loginBtn.onclick = () => {
@@ -3154,10 +3315,15 @@ function calculateManualScore(type) {
 // Commissioner Page
 // ============================================================
 function renderCommissioner() {
-  const loggedIn = localStorage.getItem('wmmc_commissioner_logged_in');
-  if (loggedIn) {
-    COMMISSIONER_EMAIL = loggedIn;
-    showCommissionerPanel();
+  // Auto-auth from app-level login or localStorage
+  const autoEmail = LOGGED_IN_EMAIL || localStorage.getItem('wmmc_commissioner_logged_in');
+  if (autoEmail) {
+    const managers = getManagers();
+    const mgr = managers.find(m => m.email.toLowerCase() === autoEmail.toLowerCase() && m.commissioner);
+    if (mgr) {
+      COMMISSIONER_EMAIL = autoEmail;
+      showCommissionerPanel();
+    }
   }
 
   document.getElementById('commissioner-login-btn').onclick = () => {

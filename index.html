@@ -5,11 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>The Whit Merrifield Memorial Cup</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
+  <!-- Login Screen -->
+  <div id="login-screen">
+    <div class="login-screen-inner">
+      <div class="login-brand">
+        <div class="login-baseball">&#9918;</div>
+        <h1>The Whit Merrifield<br>Memorial Cup</h1>
+        <p class="login-tagline">Fantasy Baseball League</p>
+      </div>
+      <div class="login-card">
+        <h2>Sign In</h2>
+        <div class="login-fields">
+          <input type="email" id="login-email" placeholder="Email address" autocomplete="email">
+          <input type="password" id="login-password" placeholder="Password" autocomplete="current-password">
+          <button class="btn btn-accent" id="login-submit-btn">Sign In</button>
+        </div>
+        <p class="login-error-msg" id="login-error-msg"></p>
+        <div class="login-divider"><span>or</span></div>
+        <div id="google-signin-container"></div>
+        <p id="google-signin-error" class="login-error-msg"></p>
+      </div>
+    </div>
+  </div>
+
   <header>
     <div class="header-content">
-      <h1>The Whit Merrifield Memorial Cup</h1>
+      <div class="header-top">
+        <h1><span class="header-ball">&#9918;</span> The Whit Merrifield Memorial Cup</h1>
+        <div class="user-bar" id="user-bar" style="display:none;">
+          <span id="user-display-name"></span>
+          <button class="btn btn-sm btn-header-outline" id="logout-btn">Sign Out</button>
+        </div>
+      </div>
       <div class="season-selector">
         <select id="season-select"></select>
       </div>
