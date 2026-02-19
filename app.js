@@ -1225,13 +1225,36 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     return html;
   }
 
+  // Render a single combined table (not grouped by pool)
+  function renderOverallTable(scores) {
+    if (scores.length === 0) return '<p>No pool play data yet.</p>';
+    // Look up pool for each manager
+    const mgrPool = {};
+    managers.forEach(m => { if (m.pool) mgrPool[m.name] = m.pool; });
+    let tbl = `<table class="data-table compact-table">
+      <thead><tr><th>#</th><th>Manager</th><th>Pool</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead><tbody>`;
+    scores.forEach((m, i) => {
+      const cls = hlClass(m.manager, 'overall');
+      tbl += `<tr>
+        <td class="rank">${i + 1}</td>
+        <td><strong class="${cls}">${m.manager}</strong></td>
+        <td>${mgrPool[m.manager] || ''}</td>
+        <td class="num">${fmt(m.batting)}</td>
+        <td class="num">${fmt(m.pitching)}</td>
+        <td class="num"><strong>${fmt(m.total)}</strong></td>
+      </tr>`;
+    });
+    tbl += '</tbody></table>';
+    return tbl;
+  }
+
   // ---- Build full HTML ----
   let html = '';
 
-  // Pool Play Overall (combined PP1 + PP2)
+  // Pool Play Overall (combined PP1 + PP2, single list sorted by total)
   html += `<div class="card scoreboard-section">
     <h2>Pool Play Overall</h2>
-    ${renderPoolSection(overallScores, 'Pool Play Overall', 'overall')}
+    ${renderOverallTable(overallScores)}
   </div>`;
 
   // Pool Play 1
