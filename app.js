@@ -155,6 +155,7 @@ function setupNav() {
       document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById(btn.dataset.tab).classList.add('active');
+      if (btn.dataset.tab === 'trends') renderTrends();
     });
   });
 }
@@ -1364,6 +1365,376 @@ function renderActivePlayers(seasonData) {
   DATA = { batting_weekly: fixedBatting, pitching_weekly: fixedPitching };
   renderPlayers();
   DATA = origData;
+}
+
+// ============================================================
+// Trends / Analytics
+// ============================================================
+const _trendsCharts = {};
+
+function destroyTrendsCharts() {
+  Object.values(_trendsCharts).forEach(c => { try { c.destroy(); } catch(e) {} });
+  Object.keys(_trendsCharts).forEach(k => delete _trendsCharts[k]);
+}
+
+const CHART_COLORS = [
+  '#1a3a5c','#ef4444','#10b981','#f59e0b','#8b5cf6',
+  '#06b6d4','#f97316','#ec4899','#84cc16','#6366f1',
+  '#14b8a6','#e11d48','#fb923c','#a78bfa','#34d399',
+];
+
+function renderTrends() {
+  const seasons = getSeasons();
+  const seasonData = seasons[SELECTED_SEASON];
+  const container = document.getElementById('trends-content');
+  if (!seasonData || !container) return;
+
+  destroyTrendsCharts();
+
+  // ---- Gather unified data ----
+  let teamWeekly, battingData, pitchingData;
+
+  if (seasonData.status === 'completed' && seasonData.data) {
+    teamWeekly = seasonData.data.team_weekly || [];
+    battingData = (seasonData.data.batting_weekly || []).map(b => ({
+      player: b.batter, manager: b.manager, round: b.round, week: b.week, weekly_score: b.weekly_score || 0
+    }));
+    pitchingData = (seasonData.data.pitching_weekly || []).map(p => ({
+      player: p.pitcher, manager: p.manager, round: p.round, week: p.week, weekly_score: p.weekly_score || 0
+    }));
+  } else {
+    teamWeekly = buildTeamWeekly(seasonData);
+    const p2m = buildPlayerToManagerMap(seasonData);
+    battingData = (seasonData.weekly_batting || []).filter(b => p2m[b.batter]).map(b => ({
+      player: b.batter, manager: p2m[b.batter], round: b.round, week: b.week, weekly_score: b.weekly_score || 0
+    }));
+    pitchingData = (seasonData.weekly_pitching || []).filter(p => p2m[p.pitcher]).map(p => ({
+      player: p.pitcher, manager: p2m[p.pitcher], round: p.round, week: p.week, weekly_score: p.weekly_score || 0
+    }));
+  }
+
+  if (teamWeekly.length === 0 && battingData.length === 0 && pitchingData.length === 0) {
+    container.innerHTML = '<div class="card"><p>No scoring data available yet. Upload weekly stats via the Commissioner page.</p></div>';
+    return;
+  }
+
+  // ---- Ordered weeks (chronological via SEASON_SCHEDULE) ----
+  const allWeekKeys = new Set([
+    ...teamWeekly.map(t => `${t.round}|${t.week}`),
+    ...battingData.map(b => `${b.round}|${b.week}`),
+    ...pitchingData.map(p => `${p.round}|${p.week}`),
+  ]);
+
+  // Map schedule entries to keyed objects, filter to present weeks
+  const scheduleOrdered = SEASON_SCHEDULE
+    .map(s => ({ key: `${s.round}|${s.week}`, round: s.round, week: s.week }))
+    .filter(s => allWeekKeys.has(s.key));
+
+  // Any rounds not in SEASON_SCHEDULE go at end
+  const unknownKeys = [...allWeekKeys].filter(k => !scheduleOrdered.find(s => s.key === k));
+  unknownKeys.forEach(k => {
+    const [round, week] = k.split('|');
+    scheduleOrdered.push({ key: k, round, week });
+  });
+
+  const orderedWeeks = scheduleOrdered;
+  const rShort = { PP1: 'PP1', PP1P: 'PP1+', PP2: 'PP2', PP2P: 'PP2+', QF: 'QF', SF: 'SF', Finals: 'Fnls' };
+  const chartLabels = orderedWeeks.map(w => `${rShort[w.round] || w.round} ${w.week.replace('Week ', 'W')}`);
+
+  // ---- Unique sets ----
+  const allManagers = [...new Set([
+    ...teamWeekly.map(t => t.manager),
+    ...battingData.map(b => b.manager),
+    ...pitchingData.map(p => p.manager),
+  ])].sort();
+  const allBatters = [...new Set(battingData.map(b => b.player))].sort();
+  const allPitchers = [...new Set(pitchingData.map(p => p.player))].sort();
+
+  // ---- State ----
+  let selectedManagers = new Set(allManagers);
+  let managerMode = 'weekly';
+  let mgrsForBatters = new Set(allManagers);
+  let mgrsForPitchers = new Set(allManagers);
+  let selectedBatters = new Set();
+  let selectedPitchers = new Set();
+
+  // ---- Build HTML ----
+  container.innerHTML = `
+    <div class="card">
+      <div class="player-type-toggle trends-view-toggle">
+        <button class="type-btn active" data-view="managers">Manager Trends</button>
+        <button class="type-btn" data-view="batters">Batters</button>
+        <button class="type-btn" data-view="pitchers">Pitchers</button>
+      </div>
+
+      <!-- Manager Trends -->
+      <div id="trends-managers-panel" class="trends-panel">
+        <div class="trends-controls">
+          <div class="trends-control-row">
+            <span class="trends-label">View Mode</span>
+            <div class="player-type-toggle" style="display:inline-flex;">
+              <button class="type-btn active" id="mode-weekly">Weekly</button>
+              <button class="type-btn" id="mode-cumulative">Cumulative</button>
+            </div>
+          </div>
+          <div class="trends-control-row">
+            <span class="trends-label">Managers</span>
+            <button class="btn btn-sm btn-secondary" id="mgr-all-btn">All</button>
+            <button class="btn btn-sm btn-secondary" id="mgr-none-btn">None</button>
+            <div class="chip-select" id="manager-chips"></div>
+          </div>
+        </div>
+        <div class="chart-wrapper"><canvas id="trends-manager-chart"></canvas></div>
+      </div>
+
+      <!-- Batters -->
+      <div id="trends-batters-panel" class="trends-panel" style="display:none;">
+        <div class="trends-controls">
+          <div class="trends-control-row">
+            <span class="trends-label">By Manager</span>
+            <button class="btn btn-sm btn-secondary" id="bat-mgr-all-btn">All</button>
+            <button class="btn btn-sm btn-secondary" id="bat-mgr-none-btn">None</button>
+            <div class="chip-select" id="batter-mgr-chips"></div>
+          </div>
+          <div class="trends-control-row">
+            <span class="trends-label">Players</span>
+            <button class="btn btn-sm btn-secondary" id="bat-all-btn">All</button>
+            <button class="btn btn-sm btn-secondary" id="bat-none-btn">None</button>
+            <div class="chip-select" id="batter-chips"></div>
+          </div>
+        </div>
+        <div class="chart-wrapper"><canvas id="trends-batter-chart"></canvas></div>
+      </div>
+
+      <!-- Pitchers -->
+      <div id="trends-pitchers-panel" class="trends-panel" style="display:none;">
+        <div class="trends-controls">
+          <div class="trends-control-row">
+            <span class="trends-label">By Manager</span>
+            <button class="btn btn-sm btn-secondary" id="pit-mgr-all-btn">All</button>
+            <button class="btn btn-sm btn-secondary" id="pit-mgr-none-btn">None</button>
+            <div class="chip-select" id="pitcher-mgr-chips"></div>
+          </div>
+          <div class="trends-control-row">
+            <span class="trends-label">Players</span>
+            <button class="btn btn-sm btn-secondary" id="pit-all-btn">All</button>
+            <button class="btn btn-sm btn-secondary" id="pit-none-btn">None</button>
+            <div class="chip-select" id="pitcher-chips"></div>
+          </div>
+        </div>
+        <div class="chart-wrapper"><canvas id="trends-pitcher-chart"></canvas></div>
+      </div>
+    </div>
+  `;
+
+  // ---- Chart drawing helpers ----
+  function makeChart(canvasId, datasets, yLabel) {
+    if (_trendsCharts[canvasId]) { try { _trendsCharts[canvasId].destroy(); } catch(e) {} }
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !window.Chart) return;
+    _trendsCharts[canvasId] = new Chart(canvas, {
+      type: 'line',
+      data: { labels: chartLabels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 }, padding: 10 } },
+          tooltip: { callbacks: {
+            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y != null ? fmt(ctx.parsed.y) : '—'}`
+          }},
+        },
+        scales: {
+          x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 30 } },
+          y: { title: { display: !!yLabel, text: yLabel }, ticks: { font: { size: 10 } } },
+        },
+      },
+    });
+  }
+
+  function buildManagerDatasets() {
+    return [...selectedManagers].map(mgr => {
+      const colorIdx = allManagers.indexOf(mgr);
+      const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
+      const weekly = orderedWeeks.map(w => {
+        const entry = teamWeekly.find(t => t.manager === mgr && t.round === w.round && t.week === w.week);
+        return entry ? entry.weekly_total : null;
+      });
+      let data = weekly;
+      if (managerMode === 'cumulative') {
+        let cum = 0;
+        data = weekly.map(v => { if (v !== null) cum += v; return v !== null ? Math.round(cum * 100) / 100 : null; });
+      }
+      return { label: mgr, data, borderColor: color, backgroundColor: color + '28', tension: 0.3, spanGaps: true, pointRadius: 4, pointHoverRadius: 6 };
+    });
+  }
+
+  function buildPlayerDatasets(sourceData, allPlayerList, selectedPlayers) {
+    return [...selectedPlayers].map(player => {
+      const colorIdx = allPlayerList.indexOf(player);
+      const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
+      const data = orderedWeeks.map(w => {
+        const rows = sourceData.filter(d => d.player === player && d.round === w.round && d.week === w.week);
+        return rows.length > 0 ? Math.round(rows.reduce((s, r) => s + r.weekly_score, 0) * 100) / 100 : null;
+      });
+      return { label: player, data, borderColor: color, backgroundColor: color + '28', tension: 0.3, spanGaps: true, pointRadius: 4, pointHoverRadius: 6 };
+    });
+  }
+
+  function drawManagerChart() {
+    const label = managerMode === 'cumulative' ? 'Cumulative Points' : 'Weekly Points';
+    makeChart('trends-manager-chart', buildManagerDatasets(), label);
+  }
+
+  function getVisibleBatters() {
+    return [...new Set(battingData.filter(b => mgrsForBatters.has(b.manager)).map(b => b.player))].sort();
+  }
+
+  function getVisiblePitchers() {
+    return [...new Set(pitchingData.filter(p => mgrsForPitchers.has(p.manager)).map(p => p.player))].sort();
+  }
+
+  function drawBatterChart() {
+    const visible = getVisibleBatters();
+    const active = new Set([...selectedBatters].filter(p => visible.includes(p)));
+    selectedBatters = active;
+    const filtered = battingData.filter(b => mgrsForBatters.has(b.manager));
+    makeChart('trends-batter-chart', buildPlayerDatasets(filtered, allBatters, selectedBatters), 'Weekly Points');
+  }
+
+  function drawPitcherChart() {
+    const visible = getVisiblePitchers();
+    const active = new Set([...selectedPitchers].filter(p => visible.includes(p)));
+    selectedPitchers = active;
+    const filtered = pitchingData.filter(p => mgrsForPitchers.has(p.manager));
+    makeChart('trends-pitcher-chart', buildPlayerDatasets(filtered, allPitchers, selectedPitchers), 'Weekly Points');
+  }
+
+  // ---- Chip rendering ----
+  function renderChips(containerId, items, selectedSet, onChange) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = items.map(item =>
+      `<button class="chip ${selectedSet.has(item) ? 'chip-active' : ''}" data-item="${item.replace(/"/g, '&quot;')}">${item.replace(/</g, '&lt;')}</button>`
+    ).join('');
+    el.querySelectorAll('.chip').forEach(chip => {
+      chip.onclick = () => {
+        const val = chip.dataset.item;
+        if (selectedSet.has(val)) selectedSet.delete(val); else selectedSet.add(val);
+        chip.classList.toggle('chip-active');
+        onChange();
+      };
+    });
+  }
+
+  function refreshBatterPlayerChips() {
+    const visible = getVisibleBatters();
+    // Initialise selectedBatters with first 8 if empty
+    if (selectedBatters.size === 0) visible.slice(0, 8).forEach(p => selectedBatters.add(p));
+    renderChips('batter-chips', visible, selectedBatters, drawBatterChart);
+  }
+
+  function refreshPitcherPlayerChips() {
+    const visible = getVisiblePitchers();
+    if (selectedPitchers.size === 0) visible.slice(0, 8).forEach(p => selectedPitchers.add(p));
+    renderChips('pitcher-chips', visible, selectedPitchers, drawPitcherChart);
+  }
+
+  // ---- Initial chip renders ----
+  renderChips('manager-chips', allManagers, selectedManagers, drawManagerChart);
+
+  renderChips('batter-mgr-chips', allManagers, mgrsForBatters, () => {
+    refreshBatterPlayerChips();
+    drawBatterChart();
+  });
+  refreshBatterPlayerChips();
+
+  renderChips('pitcher-mgr-chips', allManagers, mgrsForPitchers, () => {
+    refreshPitcherPlayerChips();
+    drawPitcherChart();
+  });
+  refreshPitcherPlayerChips();
+
+  // Initial chart draws
+  drawManagerChart();
+
+  // ---- View toggle ----
+  container.querySelectorAll('.trends-view-toggle .type-btn').forEach(btn => {
+    btn.onclick = () => {
+      container.querySelectorAll('.trends-view-toggle .type-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const view = btn.dataset.view;
+      document.getElementById('trends-managers-panel').style.display = view === 'managers' ? '' : 'none';
+      document.getElementById('trends-batters-panel').style.display = view === 'batters' ? '' : 'none';
+      document.getElementById('trends-pitchers-panel').style.display = view === 'pitchers' ? '' : 'none';
+      if (view === 'managers') drawManagerChart();
+      else if (view === 'batters') { refreshBatterPlayerChips(); drawBatterChart(); }
+      else if (view === 'pitchers') { refreshPitcherPlayerChips(); drawPitcherChart(); }
+    };
+  });
+
+  // ---- Mode toggle ----
+  document.getElementById('mode-weekly').onclick = () => {
+    managerMode = 'weekly';
+    document.getElementById('mode-weekly').classList.add('active');
+    document.getElementById('mode-cumulative').classList.remove('active');
+    drawManagerChart();
+  };
+  document.getElementById('mode-cumulative').onclick = () => {
+    managerMode = 'cumulative';
+    document.getElementById('mode-cumulative').classList.add('active');
+    document.getElementById('mode-weekly').classList.remove('active');
+    drawManagerChart();
+  };
+
+  // ---- All/None buttons ----
+  document.getElementById('mgr-all-btn').onclick = () => {
+    allManagers.forEach(m => selectedManagers.add(m));
+    renderChips('manager-chips', allManagers, selectedManagers, drawManagerChart);
+    drawManagerChart();
+  };
+  document.getElementById('mgr-none-btn').onclick = () => {
+    selectedManagers.clear();
+    renderChips('manager-chips', allManagers, selectedManagers, drawManagerChart);
+    drawManagerChart();
+  };
+
+  document.getElementById('bat-mgr-all-btn').onclick = () => {
+    allManagers.forEach(m => mgrsForBatters.add(m));
+    renderChips('batter-mgr-chips', allManagers, mgrsForBatters, () => { refreshBatterPlayerChips(); drawBatterChart(); });
+    refreshBatterPlayerChips(); drawBatterChart();
+  };
+  document.getElementById('bat-mgr-none-btn').onclick = () => {
+    mgrsForBatters.clear();
+    renderChips('batter-mgr-chips', allManagers, mgrsForBatters, () => { refreshBatterPlayerChips(); drawBatterChart(); });
+    selectedBatters.clear(); refreshBatterPlayerChips(); drawBatterChart();
+  };
+  document.getElementById('bat-all-btn').onclick = () => {
+    getVisibleBatters().forEach(p => selectedBatters.add(p));
+    refreshBatterPlayerChips(); drawBatterChart();
+  };
+  document.getElementById('bat-none-btn').onclick = () => {
+    selectedBatters.clear(); refreshBatterPlayerChips(); drawBatterChart();
+  };
+
+  document.getElementById('pit-mgr-all-btn').onclick = () => {
+    allManagers.forEach(m => mgrsForPitchers.add(m));
+    renderChips('pitcher-mgr-chips', allManagers, mgrsForPitchers, () => { refreshPitcherPlayerChips(); drawPitcherChart(); });
+    refreshPitcherPlayerChips(); drawPitcherChart();
+  };
+  document.getElementById('pit-mgr-none-btn').onclick = () => {
+    mgrsForPitchers.clear();
+    renderChips('pitcher-mgr-chips', allManagers, mgrsForPitchers, () => { refreshPitcherPlayerChips(); drawPitcherChart(); });
+    selectedPitchers.clear(); refreshPitcherPlayerChips(); drawPitcherChart();
+  };
+  document.getElementById('pit-all-btn').onclick = () => {
+    getVisiblePitchers().forEach(p => selectedPitchers.add(p));
+    refreshPitcherPlayerChips(); drawPitcherChart();
+  };
+  document.getElementById('pit-none-btn').onclick = () => {
+    selectedPitchers.clear(); refreshPitcherPlayerChips(); drawPitcherChart();
+  };
 }
 
 // ============================================================

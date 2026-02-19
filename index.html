@@ -21,6 +21,7 @@
     <button class="nav-btn" data-tab="my-roster">My Roster</button>
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
     <button class="nav-btn" data-tab="players">Player Stats</button>
+    <button class="nav-btn" data-tab="trends">Trends</button>
     <button class="nav-btn" data-tab="bracket">Bracket</button>
     <button class="nav-btn" data-tab="swaps">Transactions</button>
     <button class="nav-btn" data-tab="rules">Rules</button>
@@ -75,6 +76,11 @@
         </div>
         <table id="players-table" class="data-table"></table>
       </div>
+    </section>
+
+    <!-- Trends / Analytics -->
+    <section id="trends" class="tab-content">
+      <div id="trends-content"></div>
     </section>
 
     <!-- Bracket -->
@@ -305,6 +311,7 @@
     <p>The Whit Merrifield Memorial Cup &copy; <span id="footer-year"></span></p>
   </footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
