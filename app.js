@@ -1027,7 +1027,6 @@ function showActiveSeason(seasonData) {
       { label: 'Current Leader', value: fmt(top.total), detail: top.manager },
       { label: 'Best Batting', value: fmt(bestBat.batting), detail: bestBat.manager },
       { label: 'Best Pitching', value: fmt(bestPitch.pitching), detail: bestPitch.manager },
-      { label: 'Active Managers', value: managers.length, detail: '' },
     ].map(s => `
       <div class="stat-card">
         <div class="stat-label">${s.label}</div>
@@ -1060,22 +1059,10 @@ function showActiveSeason(seasonData) {
     `;
   }
 
-  // Scoreboard content for active season with scoring period tabs
+  // Scoreboard content for active season
   const scoreboardContent = document.getElementById('scoreboard-content');
-  if (managerScores.length > 0) {
-    // Check for any unassigned player records (uploaded but not yet in any roster)
-    const p2mCheck = buildPlayerToManagerMap(seasonData);
-    const unassignedBat = (seasonData.weekly_batting || []).filter(b => !p2mCheck[b.batter]).length;
-    const unassignedPit = (seasonData.weekly_pitching || []).filter(p => !p2mCheck[p.pitcher]).length;
-    const unassignedTotal = unassignedBat + unassignedPit;
-    let warningHtml = '';
-    if (unassignedTotal > 0) {
-      warningHtml = `<div class="card"><div class="advancement-info" style="background:var(--warning-bg,#fff3cd);border-color:var(--warning-border,#ffc107);">
-        <strong>Note:</strong> ${unassignedTotal} player stat record${unassignedTotal !== 1 ? 's are' : ' is'} not assigned to any manager roster and excluded from scores.
-        Log in as Commissioner on the My Roster page to assign players to rosters.
-      </div></div>`;
-    }
-    scoreboardContent.innerHTML = warningHtml + renderActiveScoreboardTabs(seasonData, managerScores, managers);
+  if (managerScores.length > 0 || managers.some(m => m.pool)) {
+    scoreboardContent.innerHTML = renderActiveScoreboardTabs(seasonData, managerScores, managers);
     setupScoreboardTabs();
   } else {
     // Determine why there are no scores
@@ -1109,17 +1096,30 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  // Compute per-period per-manager scores using roster lookup only
+  // Pool groups from manager pool assignments
+  const poolGroups = {};
+  managers.forEach(m => {
+    if (m.pool) {
+      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
+      poolGroups[m.pool].push(m.name);
+    }
+  });
+  const hasPools = Object.keys(poolGroups).length > 0;
+
+  // Compute per-period scores — include ALL pool-assigned managers at 0
   function periodScores(roundFilter) {
     const mgrMap = {};
+    managers.forEach(m => {
+      if (m.pool) mgrMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
+    });
     batting.filter(b => roundFilter.includes(b.round)).forEach(b => {
-      const mgr = p2m[b.batter]; // roster-only — no fallback
-      if (!mgr) return;           // skip unassigned players
+      const mgr = p2m[b.batter];
+      if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].batting += (b.weekly_score || 0);
     });
     pitching.filter(p => roundFilter.includes(p.round)).forEach(p => {
-      const mgr = p2m[p.pitcher]; // roster-only
+      const mgr = p2m[p.pitcher];
       if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].pitching += (p.weekly_score || 0);
@@ -1134,82 +1134,178 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
 
   const pp1Scores = periodScores(['PP1', 'PP1P']);
   const pp2Scores = periodScores(['PP2', 'PP2P']);
-  const overallSorted = [...managerScores].sort((a, b) => b.total - a.total);
 
-  // Pool groups
-  const poolGroups = {};
+  // Pool Play Overall = combined PP1 + PP2
+  const overallMap = {};
   managers.forEach(m => {
-    if (m.pool) {
-      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
-      poolGroups[m.pool].push(m.name);
-    }
+    if (m.pool) overallMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
   });
-  const hasPools = Object.keys(poolGroups).length > 0;
+  [...pp1Scores, ...pp2Scores].forEach(s => {
+    if (!overallMap[s.manager]) overallMap[s.manager] = { manager: s.manager, batting: 0, pitching: 0, total: 0 };
+    overallMap[s.manager].batting += s.batting;
+    overallMap[s.manager].pitching += s.pitching;
+  });
+  const overallScores = Object.values(overallMap).map(m => {
+    m.batting = Math.round(m.batting * 100) / 100;
+    m.pitching = Math.round(m.pitching * 100) / 100;
+    m.total = Math.round((m.batting + m.pitching) * 100) / 100;
+    return m;
+  }).sort((a, b) => b.total - a.total);
 
-  // Determine which periods have data
-  const rounds = new Set([...batting.map(b => b.round), ...pitching.map(p => p.round)]);
-  const hasPP1 = rounds.has('PP1') || rounds.has('PP1P');
-  const hasPP2 = rounds.has('PP2') || rounds.has('PP2P');
-  const hasQF = rounds.has('QF');
-  const hasSF = rounds.has('SF');
-  const hasFinals = rounds.has('Finals');
+  // ---- Determine PP1 and PP2 pool winners ----
+  const pp1Winners = {}; // poolNum → manager name
+  const pp2Winners = {};
+  Object.keys(poolGroups).forEach(poolNum => {
+    const poolMembers = poolGroups[poolNum];
+    const pp1Pool = pp1Scores.filter(s => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
+    if (pp1Pool.length > 0 && pp1Pool[0].total > 0) pp1Winners[poolNum] = pp1Pool[0].manager;
+    const pp2Pool = pp2Scores.filter(s => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
+    if (pp2Pool.length > 0 && pp2Pool[0].total > 0) pp2Winners[poolNum] = pp2Pool[0].manager;
+  });
 
-  // Build tabs
-  let tabsHtml = '<button class="sb-tab active" data-period="pp-overall">Pool Play Overall</button>';
-  if (hasPP1) tabsHtml += '<button class="sb-tab" data-period="pp1">Pool Play 1</button>';
-  if (hasPP2) tabsHtml += '<button class="sb-tab" data-period="pp2">Pool Play 2</button>';
-  if (hasQF) tabsHtml += '<button class="sb-tab" data-period="qf">Quarterfinals</button>';
-  if (hasSF) tabsHtml += '<button class="sb-tab" data-period="sf">Semifinals</button>';
-  if (hasFinals) tabsHtml += '<button class="sb-tab" data-period="finals">Finals</button>';
+  const pp1WinnerSet = new Set(Object.values(pp1Winners));
+  const pp2WinnerSet = new Set(Object.values(pp2Winners));
+  const allPPWinners = new Set([...pp1WinnerSet, ...pp2WinnerSet]);
 
-  function renderPeriodTable(scores, title) {
-    if (scores.length === 0) return `<p>No data for ${title}.</p>`;
+  // Wildcards: 8 - unique_pool_play_winners = wildcard spots
+  const numWildcards = Math.max(0, 8 - allPPWinners.size);
+  const wildcardSet = new Set();
+  let wcCount = 0;
+  for (const m of overallScores) {
+    if (wcCount >= numWildcards) break;
+    if (!allPPWinners.has(m.manager) && m.total > 0) {
+      wildcardSet.add(m.manager);
+      wcCount++;
+    }
+  }
+
+  // Highlight class for a manager name in a given section
+  function hlClass(name, section) {
+    const wonPP1 = pp1WinnerSet.has(name);
+    const wonPP2 = pp2WinnerSet.has(name);
+    if (section === 'overall') {
+      if (wonPP1 && wonPP2) return 'hl-both';
+      if (wonPP1) return 'hl-pp1';
+      if (wonPP2) return 'hl-pp2';
+      if (wildcardSet.has(name)) return 'hl-wildcard';
+    } else if (section === 'pp1') {
+      if (wonPP1) return 'hl-pp1';
+    } else if (section === 'pp2') {
+      if (wonPP2) return 'hl-pp2';
+    }
+    return '';
+  }
+
+  // Render pool tables for a section
+  function renderPoolSection(scores, title, section) {
     let html = '';
-    // Overall table
-    html += `<h3>${title} Standings</h3><div class="table-wrapper"><table class="data-table">
-      <thead><tr><th>Rank</th><th>Manager</th>${hasPools ? '<th>Pool</th>' : ''}<th>Batting</th><th>Pitching</th><th>Total</th></tr></thead>
-      <tbody>${scores.map((m, i) => {
-        const mgr = managers.find(mg => mg.name === m.manager);
-        const pool = mgr && mgr.pool ? 'Pool ' + mgr.pool : '-';
-        return `<tr>
-          <td class="rank ${i < 3 ? 'rank-' + (i + 1) : ''}">${i + 1}</td>
-          <td><strong>${m.manager}</strong></td>${hasPools ? `<td>${pool}</td>` : ''}
+    if (!hasPools) return '<p>No pools configured. Assign managers to pools on the Commissioner page.</p>';
+    html += '<div class="pool-play-grid">';
+    Object.keys(poolGroups).sort().forEach(poolNum => {
+      const poolMembers = poolGroups[poolNum];
+      const poolScores = scores.filter(s => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
+      html += `<div class="pool-card"><h3>Pool ${poolNum}</h3>
+        <table class="data-table compact-table">
+          <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
+          <tbody>`;
+      poolScores.forEach((m, i) => {
+        const cls = hlClass(m.manager, section);
+        html += `<tr>
+          <td class="rank">${i + 1}</td>
+          <td><strong class="${cls}">${m.manager}</strong></td>
           <td class="num">${fmt(m.batting)}</td>
           <td class="num">${fmt(m.pitching)}</td>
           <td class="num"><strong>${fmt(m.total)}</strong></td>
         </tr>`;
-      }).join('')}</tbody></table></div>`;
-
-    // Pool breakdown
-    if (hasPools) {
-      html += '<div class="pool-play-grid" style="margin-top:1rem;">';
-      Object.keys(poolGroups).sort().forEach(poolNum => {
-        const poolMembers = poolGroups[poolNum];
-        const poolScores = scores.filter(m => poolMembers.includes(m.manager));
-        html += `<div class="pool-card"><h3>Pool ${poolNum}</h3>
-          <div class="table-wrapper"><table class="data-table">
-            <thead><tr><th>Rank</th><th>Manager</th><th>Batting</th><th>Pitching</th><th>Total</th></tr></thead>
-            <tbody>${poolScores.map((m, i) => `
-              <tr class="${i === 0 ? 'pool-leader-row' : ''}">
-                <td class="rank">${i + 1}</td><td><strong>${m.manager}</strong></td>
-                <td class="num">${fmt(m.batting)}</td><td class="num">${fmt(m.pitching)}</td>
-                <td class="num"><strong>${fmt(m.total)}</strong></td>
-              </tr>`).join('')}</tbody></table></div></div>`;
       });
-      html += '</div>';
-    }
+      html += '</tbody></table></div>';
+    });
+    html += '</div>';
     return html;
   }
 
-  let html = `<div class="card scoreboard-card">
-    <div class="scoreboard-tabs" id="scoreboard-tabs">${tabsHtml}</div>
-    <div class="sb-period" id="sb-pp-overall">${renderPeriodTable(overallSorted, 'Pool Play Overall')}</div>`;
-  if (hasPP1) html += `<div class="sb-period" id="sb-pp1" style="display:none">${renderPeriodTable(pp1Scores, 'Pool Play 1')}</div>`;
-  if (hasPP2) html += `<div class="sb-period" id="sb-pp2" style="display:none">${renderPeriodTable(pp2Scores, 'Pool Play 2')}</div>`;
-  if (hasQF) html += `<div class="sb-period" id="sb-qf" style="display:none">${renderPeriodTable(periodScores(['QF']), 'Quarterfinals')}</div>`;
-  if (hasSF) html += `<div class="sb-period" id="sb-sf" style="display:none">${renderPeriodTable(periodScores(['SF']), 'Semifinals')}</div>`;
-  if (hasFinals) html += `<div class="sb-period" id="sb-finals" style="display:none">${renderPeriodTable(periodScores(['Finals']), 'Finals')}</div>`;
-  html += '</div>';
+  // ---- Build full HTML ----
+  let html = '';
+
+  // Pool Play Overall (combined PP1 + PP2)
+  html += `<div class="card scoreboard-section">
+    <h2>Pool Play Overall</h2>
+    ${renderPoolSection(overallScores, 'Pool Play Overall', 'overall')}
+  </div>`;
+
+  // Pool Play 1
+  html += `<div class="card scoreboard-section">
+    <h2>Pool Play 1</h2>
+    ${renderPoolSection(pp1Scores, 'Pool Play 1', 'pp1')}
+  </div>`;
+
+  // Pool Play 2
+  html += `<div class="card scoreboard-section">
+    <h2>Pool Play 2</h2>
+    ${renderPoolSection(pp2Scores, 'Pool Play 2', 'pp2')}
+  </div>`;
+
+  // Playoff Advancement summary
+  if (allPPWinners.size > 0 || wildcardSet.size > 0) {
+    html += `<div class="card scoreboard-section">
+      <h2>Playoff Advancement</h2>
+      <div class="advancement-summary">
+        <p><strong>Pool Play Winners (${allPPWinners.size}):</strong> ${[...allPPWinners].sort().join(', ') || 'TBD'}</p>
+        <p><strong>Wild Cards (${numWildcards} spot${numWildcards !== 1 ? 's' : ''}):</strong> ${[...wildcardSet].sort().join(', ') || 'TBD'}</p>
+        <p><strong>Total Playoff Qualifiers:</strong> ${allPPWinners.size + wildcardSet.size} of 8</p>
+      </div>
+      <div class="highlight-legend">
+        <span class="legend-item"><span class="legend-swatch hl-pp1">&nbsp;&nbsp;</span> PP1 Winner</span>
+        <span class="legend-item"><span class="legend-swatch hl-pp2">&nbsp;&nbsp;</span> PP2 Winner</span>
+        <span class="legend-item"><span class="legend-swatch hl-both">&nbsp;&nbsp;</span> Both Periods</span>
+        <span class="legend-item"><span class="legend-swatch hl-wildcard">&nbsp;&nbsp;</span> Wild Card</span>
+      </div>
+    </div>`;
+  }
+
+  // Playoff period tabs (QF / SF / Finals) — only if data exists
+  const rounds = new Set([...batting.map(b => b.round), ...pitching.map(p => p.round)]);
+  const hasQF = rounds.has('QF');
+  const hasSF = rounds.has('SF');
+  const hasFinals = rounds.has('Finals');
+
+  if (hasQF || hasSF || hasFinals) {
+    let tabsHtml = '';
+    let first = true;
+    [{ key: 'qf', has: hasQF, label: 'Quarterfinals' },
+     { key: 'sf', has: hasSF, label: 'Semifinals' },
+     { key: 'finals', has: hasFinals, label: 'Finals' }
+    ].forEach(t => {
+      if (!t.has) return;
+      tabsHtml += `<button class="sb-tab ${first ? 'active' : ''}" data-period="${t.key}">${t.label}</button>`;
+      first = false;
+    });
+
+    function renderPlayoffTable(scores) {
+      if (scores.length === 0) return '<p>No data.</p>';
+      let tbl = `<table class="data-table compact-table">
+        <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead><tbody>`;
+      scores.forEach((m, i) => {
+        tbl += `<tr>
+          <td class="rank ${i < 3 ? 'rank-' + (i + 1) : ''}">${i + 1}</td>
+          <td><strong>${m.manager}</strong></td>
+          <td class="num">${fmt(m.batting)}</td>
+          <td class="num">${fmt(m.pitching)}</td>
+          <td class="num"><strong>${fmt(m.total)}</strong></td>
+        </tr>`;
+      });
+      tbl += '</tbody></table>';
+      return tbl;
+    }
+
+    html += `<div class="card scoreboard-card">
+      <div class="scoreboard-tabs" id="scoreboard-tabs">${tabsHtml}</div>`;
+    let firstPeriod = true;
+    if (hasQF) { html += `<div class="sb-period" id="sb-qf" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['QF']))}</div>`; firstPeriod = false; }
+    if (hasSF) { html += `<div class="sb-period" id="sb-sf" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['SF']))}</div>`; firstPeriod = false; }
+    if (hasFinals) { html += `<div class="sb-period" id="sb-finals" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['Finals']))}</div>`; firstPeriod = false; }
+    html += '</div>';
+  }
 
   return html;
 }

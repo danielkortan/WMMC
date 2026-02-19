@@ -983,29 +983,77 @@ footer {
   margin: 0;
 }
 
-.pool-leader-row {
-  background: #f0fdf4;
-  font-weight: 600;
+/* ============================================================ */
+/* Pool Play Name Highlighting */
+/* ============================================================ */
+
+/* PP1 Winner — Green */
+.hl-pp1 {
+  color: #15803d;
+  background: rgba(16, 185, 129, 0.12);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+/* PP2 Winner — Blue */
+.hl-pp2 {
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.12);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+/* Both Periods Winner — Green/Blue striped gradient */
+.hl-both {
+  color: #1e3a5f;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(16, 185, 129, 0.2) 0px,
+    rgba(16, 185, 129, 0.2) 4px,
+    rgba(59, 130, 246, 0.2) 4px,
+    rgba(59, 130, 246, 0.2) 8px
+  );
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+/* Wild Card — Gold */
+.hl-wildcard {
+  color: #92400e;
+  background: rgba(234, 179, 8, 0.18);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
 }
 
 /* ============================================================ */
-/* Pool Play Overall Highlighting */
+/* Scoreboard Sections */
 /* ============================================================ */
 
-.highlight-pp1-leader {
-  background: rgba(16, 185, 129, 0.15) !important;
+.scoreboard-section {
+  margin-bottom: 0.5rem;
 }
 
-.highlight-pp2-leader {
-  background: rgba(59, 130, 246, 0.15) !important;
+.scoreboard-section h2 {
+  margin-bottom: 0.5rem;
 }
 
-.highlight-both-leader {
-  background: linear-gradient(90deg, rgba(16, 185, 129, 0.18) 0%, rgba(59, 130, 246, 0.18) 100%) !important;
+.advancement-summary {
+  margin-bottom: 0.75rem;
 }
 
-.highlight-wildcard {
-  background: rgba(200, 169, 81, 0.15) !important;
+.advancement-summary p {
+  margin: 0.25rem 0;
+}
+
+/* Compact tables for pool cards */
+.compact-table {
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.compact-table th,
+.compact-table td {
+  padding: 0.3rem 0.5rem;
 }
 
 /* ============================================================ */
@@ -1016,8 +1064,8 @@ footer {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem;
-  margin: 1rem 0;
-  padding: 0.75rem 1rem;
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
   background: var(--bg);
   border-radius: 8px;
   font-size: 0.8rem;
@@ -1032,6 +1080,7 @@ footer {
 }
 
 .legend-swatch {
+  display: inline-block;
   width: 16px;
   height: 16px;
   border-radius: 4px;
@@ -1039,21 +1088,18 @@ footer {
   flex-shrink: 0;
 }
 
-.swatch-pp1 {
-  background: rgba(16, 185, 129, 0.35);
+.legend-swatch.hl-pp1 { background: rgba(16, 185, 129, 0.35); }
+.legend-swatch.hl-pp2 { background: rgba(59, 130, 246, 0.35); }
+.legend-swatch.hl-both {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(16, 185, 129, 0.35) 0px,
+    rgba(16, 185, 129, 0.35) 4px,
+    rgba(59, 130, 246, 0.35) 4px,
+    rgba(59, 130, 246, 0.35) 8px
+  );
 }
-
-.swatch-pp2 {
-  background: rgba(59, 130, 246, 0.35);
-}
-
-.swatch-both {
-  background: linear-gradient(90deg, rgba(16, 185, 129, 0.35), rgba(59, 130, 246, 0.35));
-}
-
-.swatch-wildcard {
-  background: rgba(200, 169, 81, 0.35);
-}
+.legend-swatch.hl-wildcard { background: rgba(234, 179, 8, 0.35); }
 
 /* ============================================================ */
 /* Badges for PP Leaders */
