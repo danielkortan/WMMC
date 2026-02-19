@@ -681,15 +681,16 @@ function renderWeekly() {
     if (managerF !== 'all') filtered = filtered.filter(t => t.manager === managerF);
 
     const table = document.getElementById('weekly-table');
+    table.classList.add('compact-table');
     table.innerHTML = `
       <thead>
         <tr>
-          <th>Round</th><th>Week</th><th>Manager</th><th>Pool</th>
-          <th>Batting</th><th>Bat Rank</th>
-          <th>Pitching</th><th>Pitch Rank</th>
-          <th>Total</th><th>Total Rank</th>
-          <th>Cumul. Batting</th><th>Cumul. Pitching</th><th>Cumul. Total</th>
-          <th>Pool Rank</th>
+          <th>Rnd</th><th>Wk</th><th>Manager</th><th>Pool</th>
+          <th>Bat</th><th>Bat Rk</th>
+          <th>Pit</th><th>Pit Rk</th>
+          <th>Total</th><th>Tot Rk</th>
+          <th>Cum Bat</th><th>Cum Pit</th><th>Cum Tot</th>
+          <th>Pool Rk</th>
         </tr>
       </thead>
       <tbody>
@@ -1645,9 +1646,11 @@ function renderRosterData(managerName, isCommissioner) {
   // Compute per-period scores for this manager
   const periodScores = computeRosterPeriodScores(managerName, seasonData, p2m);
 
-  // Compute per-player total scores
-  const batterScores = computePlayerTotals(managerName, 'batting', seasonData, p2m);
-  const pitcherScores = computePlayerTotals(managerName, 'pitching', seasonData, p2m);
+  // Compute per-player stat totals and rankings
+  const batterStatTotals = computePlayerStatTotals(managerName, 'batting', seasonData, p2m);
+  const pitcherStatTotals = computePlayerStatTotals(managerName, 'pitching', seasonData, p2m);
+  const batterRankings = computePlayerRankings('batting', seasonData, p2m);
+  const pitcherRankings = computePlayerRankings('pitching', seasonData, p2m);
 
   // Available players for commissioner add (active season only)
   let availBatters = [];
@@ -1719,16 +1722,30 @@ function renderRosterData(managerName, isCommissioner) {
   html += '<div class="card">';
   html += '<h2>Batters</h2>';
   if (batters.length > 0) {
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr>';
-    html += '<th>Player</th><th>Points</th>';
+    html += '<div class="table-wrapper"><table class="data-table compact-table"><thead><tr>';
+    html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th><th>Rank</th>';
     if (isCommissioner && isActive) html += '<th></th>';
     html += '</tr></thead><tbody>';
     batters.forEach(b => {
-      const pts = batterScores[b] || 0;
+      const s = batterStatTotals[b] || {};
+      const pts = s.points || 0;
+      const rk = batterRankings[b];
+      const rkStr = rk ? `#${rk.overallRank}/${rk.totalPlayers}` : '-';
       const safeName = b.replace(/'/g, "\\'");
-      html += `<tr><td>${b}</td><td class="num"><strong>${fmt(pts)}</strong></td>`;
+      html += `<tr><td>${b}</td>`;
+      html += `<td class="num">${s.abs || 0}</td>`;
+      html += `<td class="num">${s['1b'] || 0}</td>`;
+      html += `<td class="num">${s['2b'] || 0}</td>`;
+      html += `<td class="num">${s['3b'] || 0}</td>`;
+      html += `<td class="num">${s.hr || 0}</td>`;
+      html += `<td class="num">${s.r || 0}</td>`;
+      html += `<td class="num">${s.rbi || 0}</td>`;
+      html += `<td class="num">${s.sb || 0}</td>`;
+      html += `<td class="num">${s.bb || 0}</td>`;
+      html += `<td class="num"><strong>${fmt(pts)}</strong></td>`;
+      html += `<td class="rank">${rkStr}</td>`;
       if (isCommissioner && isActive) {
-        html += `<td class="num"><button class="btn btn-sm btn-danger" onclick="removeFromRoster('${managerName.replace(/'/g, "\\'")}', 'batters', '${safeName}')">Remove</button></td>`;
+        html += `<td class="num"><button class="btn btn-sm btn-danger" onclick="showDropForm('${managerName.replace(/'/g, "\\'")}', 'batters', '${safeName}', this)">Remove</button></td>`;
       }
       html += '</tr>';
     });
@@ -1742,7 +1759,8 @@ function renderRosterData(managerName, isCommissioner) {
       <select id="add-batter-select" class="form-select"><option value="">Add batter...</option>
         ${availBatters.map(b => `<option value="${b}">${b}</option>`).join('')}
       </select>
-      <button class="btn btn-sm btn-primary" onclick="addToRoster('${managerName.replace(/'/g, "\\'")}', 'batters', 'add-batter-select')">Add</button>
+      <input type="date" id="add-batter-date" class="form-select" value="${new Date().toISOString().split('T')[0]}" style="max-width:160px;">
+      <button class="btn btn-sm btn-primary" onclick="addToRoster('${managerName.replace(/'/g, "\\'")}', 'batters', 'add-batter-select', 'add-batter-date')">Add</button>
     </div>`;
   }
   html += '</div>';
@@ -1751,16 +1769,32 @@ function renderRosterData(managerName, isCommissioner) {
   html += '<div class="card">';
   html += '<h2>Pitchers</h2>';
   if (pitchers.length > 0) {
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr>';
-    html += '<th>Player</th><th>Points</th>';
+    html += '<div class="table-wrapper"><table class="data-table compact-table"><thead><tr>';
+    html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th><th>Rank</th>';
     if (isCommissioner && isActive) html += '<th></th>';
     html += '</tr></thead><tbody>';
     pitchers.forEach(p => {
-      const pts = pitcherScores[p] || 0;
+      const s = pitcherStatTotals[p] || {};
+      const pts = s.points || 0;
+      const rk = pitcherRankings[p];
+      const rkStr = rk ? `#${rk.overallRank}/${rk.totalPlayers}` : '-';
       const safeName = p.replace(/'/g, "\\'");
-      html += `<tr><td>${p}</td><td class="num"><strong>${fmt(pts)}</strong></td>`;
+      html += `<tr><td>${p}</td>`;
+      html += `<td class="num">${s.gs || 0}</td>`;
+      html += `<td class="num">${s.w || 0}</td>`;
+      html += `<td class="num">${fmtDec(s.qs || 0)}</td>`;
+      html += `<td class="num">${s.cg || 0}</td>`;
+      html += `<td class="num">${s.cgso || 0}</td>`;
+      html += `<td class="num">${s.nh || 0}</td>`;
+      html += `<td class="num">${fmtDec(s.ip || 0)}</td>`;
+      html += `<td class="num">${s.h || 0}</td>`;
+      html += `<td class="num">${s.er || 0}</td>`;
+      html += `<td class="num">${s.bb || 0}</td>`;
+      html += `<td class="num">${s.k || 0}</td>`;
+      html += `<td class="num"><strong>${fmt(pts)}</strong></td>`;
+      html += `<td class="rank">${rkStr}</td>`;
       if (isCommissioner && isActive) {
-        html += `<td class="num"><button class="btn btn-sm btn-danger" onclick="removeFromRoster('${managerName.replace(/'/g, "\\'")}', 'pitchers', '${safeName}')">Remove</button></td>`;
+        html += `<td class="num"><button class="btn btn-sm btn-danger" onclick="showDropForm('${managerName.replace(/'/g, "\\'")}', 'pitchers', '${safeName}', this)">Remove</button></td>`;
       }
       html += '</tr>';
     });
@@ -1774,37 +1808,9 @@ function renderRosterData(managerName, isCommissioner) {
       <select id="add-pitcher-select" class="form-select"><option value="">Add pitcher...</option>
         ${availPitchers.map(p => `<option value="${p}">${p}</option>`).join('')}
       </select>
-      <button class="btn btn-sm btn-primary" onclick="addToRoster('${managerName.replace(/'/g, "\\'")}', 'pitchers', 'add-pitcher-select')">Add</button>
+      <input type="date" id="add-pitcher-date" class="form-select" value="${new Date().toISOString().split('T')[0]}" style="max-width:160px;">
+      <button class="btn btn-sm btn-primary" onclick="addToRoster('${managerName.replace(/'/g, "\\'")}', 'pitchers', 'add-pitcher-select', 'add-pitcher-date')">Add</button>
     </div>`;
-  }
-  html += '</div>';
-
-  // ---- Transactions ----
-  html += '<div class="card"><h2>Transactions</h2>';
-  if (DATA && DATA.swaps && DATA.email_map) {
-    const viewedEmail = Object.entries(DATA.email_map).find(([, name]) => name === managerName);
-    const email = viewedEmail ? viewedEmail[0] : ROSTER_EMAIL;
-    const mySwaps = DATA.swaps.filter(s => s.email === email);
-    if (mySwaps.length > 0) {
-      html += '<div class="table-wrapper"><table class="data-table"><thead><tr>';
-      html += '<th>Date</th><th>Type</th><th>Player Out</th><th>Player In</th>';
-      html += '</tr></thead><tbody>';
-      mySwaps.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).forEach(s => {
-        const typeClass = s.reason.includes('Free') ? 'swap-free' : s.reason.includes('IL') ? 'swap-il' : s.reason.includes('Drop') ? 'swap-drop' : 'swap-trade';
-        const typeLabel = s.reason.includes('Free') ? 'Free Swap' : s.reason.includes('IL') ? 'IL Swap' : s.reason.includes('Drop') ? 'Drop Swap' : 'Trade Swap';
-        html += `<tr>
-          <td>${formatDate(s.timestamp)}</td>
-          <td><span class="swap-type ${typeClass}">${typeLabel}</span></td>
-          <td class="player-out">${s.player_out || ''}</td>
-          <td class="player-in">${s.player_in || ''}</td>
-        </tr>`;
-      });
-      html += '</tbody></table></div>';
-    } else {
-      html += '<p class="text-muted">No transactions found.</p>';
-    }
-  } else {
-    html += '<p class="text-muted">No transactions yet.</p>';
   }
   html += '</div>';
 
@@ -1890,6 +1896,69 @@ function computePlayerTotals(managerName, type, seasonData, p2m) {
     scores[key] = Math.round(scores[key] * 100) / 100;
   }
   return scores;
+}
+
+// Compute per-player stat totals (all individual stats aggregated across weeks)
+function computePlayerStatTotals(managerName, type, seasonData, p2m) {
+  const totals = {};
+  const battingKeys = ['abs', '1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb'];
+  const pitchingKeys = ['gs', 'w', 'qs', 'cg', 'cgso', 'nh', 'ip', 'h', 'er', 'bb', 'k'];
+  const statKeys = type === 'batting' ? battingKeys : pitchingKeys;
+  const nameKey = type === 'batting' ? 'batter' : 'pitcher';
+
+  let weekly, filterFn;
+  if (DATA) {
+    weekly = type === 'batting' ? (DATA.batting_weekly || []) : (DATA.pitching_weekly || []);
+    filterFn = e => e.manager === managerName;
+  } else if (seasonData && seasonData.status === 'active') {
+    weekly = type === 'batting' ? (seasonData.weekly_batting || []) : (seasonData.weekly_pitching || []);
+    filterFn = e => p2m[e[nameKey]] === managerName;
+  } else {
+    return totals;
+  }
+
+  weekly.filter(filterFn).forEach(e => {
+    const name = e[nameKey];
+    if (!totals[name]) {
+      totals[name] = {};
+      statKeys.forEach(k => { totals[name][k] = 0; });
+      totals[name].points = 0;
+    }
+    statKeys.forEach(k => { totals[name][k] += parseFloat(e[k]) || 0; });
+    totals[name].points += (e.weekly_score || 0);
+  });
+
+  for (const player of Object.keys(totals)) {
+    statKeys.forEach(k => { totals[player][k] = Math.round(totals[player][k] * 100) / 100; });
+    totals[player].points = Math.round(totals[player].points * 100) / 100;
+  }
+  return totals;
+}
+
+// Compute season-total rank for each player among ALL players of same type
+function computePlayerRankings(type, seasonData, p2m) {
+  const nameKey = type === 'batting' ? 'batter' : 'pitcher';
+  let weekly;
+  if (DATA) {
+    weekly = type === 'batting' ? (DATA.batting_weekly || []) : (DATA.pitching_weekly || []);
+  } else if (seasonData && seasonData.status === 'active') {
+    weekly = type === 'batting' ? (seasonData.weekly_batting || []) : (seasonData.weekly_pitching || []);
+  } else {
+    return {};
+  }
+
+  const seasonScores = {};
+  weekly.forEach(e => {
+    const name = e[nameKey];
+    seasonScores[name] = (seasonScores[name] || 0) + (e.weekly_score || 0);
+  });
+
+  const sorted = Object.entries(seasonScores).sort((a, b) => b[1] - a[1]);
+  const rankings = {};
+  sorted.forEach(([name], i) => {
+    rankings[name] = { overallRank: i + 1, totalPlayers: sorted.length };
+  });
+  return rankings;
 }
 
 // ---- Team Stats Breakdown (accordion by scoring period) ----
@@ -2469,6 +2538,29 @@ function setupManualUpdate() {
   // Type toggle
   let manualType = 'batting';
 
+  function populateManualPlayerDropdown() {
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    const playerSelect = document.getElementById('manual-player-name');
+    if (!sd || sd.status !== 'active' || !playerSelect) return;
+
+    const rosteredBatters = new Set();
+    const rosteredPitchers = new Set();
+    Object.values(sd.rosters || {}).forEach(r => {
+      (r.batters || []).forEach(b => rosteredBatters.add(b));
+      (r.pitchers || []).forEach(p => rosteredPitchers.add(p));
+    });
+
+    let availPlayers;
+    if (manualType === 'batting') {
+      availPlayers = (sd.batters_pool || []).filter(b => !rosteredBatters.has(b)).sort();
+    } else {
+      availPlayers = (sd.pitchers_pool || []).filter(p => !rosteredPitchers.has(p)).sort();
+    }
+    playerSelect.innerHTML = '<option value="">Select player...</option>'
+      + availPlayers.map(p => `<option value="${p}">${p}</option>`).join('');
+  }
+
   battingBtn.onclick = () => {
     manualType = 'batting';
     battingBtn.classList.add('active');
@@ -2476,6 +2568,7 @@ function setupManualUpdate() {
     document.getElementById('manual-batting-fields').style.display = 'block';
     document.getElementById('manual-pitching-fields').style.display = 'none';
     document.getElementById('manual-score-preview').innerHTML = '';
+    populateManualPlayerDropdown();
   };
 
   pitchingBtn.onclick = () => {
@@ -2485,7 +2578,10 @@ function setupManualUpdate() {
     document.getElementById('manual-batting-fields').style.display = 'none';
     document.getElementById('manual-pitching-fields').style.display = 'block';
     document.getElementById('manual-score-preview').innerHTML = '';
+    populateManualPlayerDropdown();
   };
+
+  managerSelect.onchange = populateManualPlayerDropdown;
 
   // Live score preview on input change
   const allInputs = document.querySelectorAll('#manual-batting-fields input, #manual-pitching-fields input');
@@ -2500,11 +2596,11 @@ function setupManualUpdate() {
   // Save button
   saveBtn.onclick = () => {
     const manager = managerSelect.value;
-    const playerName = document.getElementById('manual-player-name').value.trim();
+    const playerName = document.getElementById('manual-player-name').value;
     const weekIndex = parseInt(weekSelect.value);
 
     if (!playerName) {
-      document.getElementById('manual-update-status').innerHTML = '<p class="error-text">Please enter a player name.</p>';
+      document.getElementById('manual-update-status').innerHTML = '<p class="error-text">Please select a player.</p>';
       return;
     }
 
@@ -2558,6 +2654,13 @@ function setupManualUpdate() {
         total_score: Math.round((previousTotal + weeklyScore) * 100) / 100
       });
 
+      // Auto-add player to roster if not already rostered
+      if (!sd.rosters) sd.rosters = {};
+      if (!sd.rosters[manager]) sd.rosters[manager] = { batters: [], pitchers: [] };
+      if (!sd.rosters[manager].batters.includes(playerName)) {
+        sd.rosters[manager].batters.push(playerName);
+      }
+
       saveSeason(SELECTED_SEASON, sd);
       document.getElementById('manual-update-status').innerHTML =
         `<p class="success-text">Saved batting stats for ${playerName} (${manager}) - ${scheduleWeek.label}. Score: ${fmt(weeklyScore)}</p>`;
@@ -2596,6 +2699,13 @@ function setupManualUpdate() {
         weekly_score: weeklyScore
       });
 
+      // Auto-add player to roster if not already rostered
+      if (!sd.rosters) sd.rosters = {};
+      if (!sd.rosters[manager]) sd.rosters[manager] = { batters: [], pitchers: [] };
+      if (!sd.rosters[manager].pitchers.includes(playerName)) {
+        sd.rosters[manager].pitchers.push(playerName);
+      }
+
       saveSeason(SELECTED_SEASON, sd);
       document.getElementById('manual-update-status').innerHTML =
         `<p class="success-text">Saved pitching stats for ${playerName} (${manager}) - ${scheduleWeek.label}. Score: ${fmt(weeklyScore)}</p>`;
@@ -2611,6 +2721,9 @@ function setupManualUpdate() {
     // Refresh displays
     init();
   };
+
+  // Initial population of player dropdown
+  populateManualPlayerDropdown();
 }
 
 function calculateManualScore(type) {
@@ -2805,10 +2918,14 @@ window.deleteManager = function(index) {
   renderManagersTable();
 };
 
-window.addToRoster = function(manager, type, selectId) {
+window.addToRoster = function(manager, type, selectId, dateSelectId) {
   const select = document.getElementById(selectId);
   const player = select.value;
   if (!player) return;
+
+  const dateInput = dateSelectId ? document.getElementById(dateSelectId) : null;
+  const addDate = dateInput ? dateInput.value : new Date().toISOString().split('T')[0];
+  if (!addDate) { alert('Please select an add date.'); return; }
 
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -2817,22 +2934,79 @@ window.addToRoster = function(manager, type, selectId) {
 
   if (!sd.rosters[manager][type].includes(player)) {
     sd.rosters[manager][type].push(player);
+
+    // Create swap log entry for the add
+    if (!sd.swaps) sd.swaps = [];
+    sd.swaps.push({
+      id: Date.now().toString(),
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      email: ROSTER_EMAIL,
+      manager: manager,
+      player_out: null,
+      player_in: player,
+      reason: 'Commissioner Add',
+      swap_date: addDate,
+      status: 'approved',
+    });
+
     saveSeason(SELECTED_SEASON, sd);
   }
 
-  // Refresh both the roster display and the inline management
   renderRosterData(manager, true);
 };
 
-window.removeFromRoster = function(manager, type, player) {
+window.showDropForm = function(manager, type, player, btnElement) {
+  const td = btnElement.parentElement;
+  const safeKey = player.replace(/[^a-zA-Z0-9]/g, '_');
+  td.innerHTML = `
+    <div style="display:flex;gap:0.25rem;align-items:center;flex-wrap:wrap;">
+      <input type="date" id="drop-date-${safeKey}" value="${new Date().toISOString().split('T')[0]}" style="font-size:0.75rem;padding:0.2rem;max-width:130px;">
+      <select id="drop-reason-${safeKey}" style="font-size:0.75rem;padding:0.2rem;">
+        ${SWAP_REASONS.map(r => `<option value="${r}">${r}</option>`).join('')}
+      </select>
+      <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${manager.replace(/'/g, "\\'")}', '${type}', '${player.replace(/'/g, "\\'")}', '${safeKey}')">Drop</button>
+      <button class="btn btn-sm btn-secondary" onclick="cancelDrop('${manager.replace(/'/g, "\\'")}')">Cancel</button>
+    </div>`;
+};
+
+window.cancelDrop = function(manager) {
+  renderRosterData(manager, true);
+};
+
+window.removeFromRoster = function(manager, type, player, safeKey) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.rosters || !sd.rosters[manager]) return;
 
-  sd.rosters[manager][type] = sd.rosters[manager][type].filter(p => p !== player);
-  saveSeason(SELECTED_SEASON, sd);
+  let dropDate, dropReason;
+  if (safeKey) {
+    const dateEl = document.getElementById('drop-date-' + safeKey);
+    const reasonEl = document.getElementById('drop-reason-' + safeKey);
+    dropDate = dateEl ? dateEl.value : new Date().toISOString().split('T')[0];
+    dropReason = reasonEl ? reasonEl.value : 'Drop Swap';
+    if (!dropDate) { alert('Please select a drop date.'); return; }
+  } else {
+    dropDate = new Date().toISOString().split('T')[0];
+    dropReason = 'Drop Swap';
+  }
 
-  // Refresh both the roster display and the inline management
+  sd.rosters[manager][type] = sd.rosters[manager][type].filter(p => p !== player);
+
+  // Create swap log entry for the drop
+  if (!sd.swaps) sd.swaps = [];
+  sd.swaps.push({
+    id: Date.now().toString(),
+    timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    email: ROSTER_EMAIL,
+    manager: manager,
+    player_out: player,
+    player_in: null,
+    reason: dropReason,
+    swap_date: dropDate,
+    status: 'approved',
+  });
+
+  saveSeason(SELECTED_SEASON, sd);
   renderRosterData(manager, true);
 };
 
