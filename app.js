@@ -329,7 +329,6 @@ function showHistoricalSeason() {
   renderWeekly();
   renderPlayers();
   renderBracket();
-  renderSwaps();
 }
 
 // ============================================================
@@ -1059,65 +1058,6 @@ function renderBracket() {
 }
 
 // ---- Swaps ----
-function renderSwaps() {
-  if (!DATA || !DATA.swaps) {
-    document.getElementById('swaps-table').innerHTML = '<tbody><tr><td>No transaction data available for this season.</td></tr></tbody>';
-    return;
-  }
-
-  const managers = [...new Set(DATA.swaps.map(s => {
-    return DATA.email_map[s.email] || s.email;
-  }))].sort();
-  resetSelect('swap-manager-filter', managers);
-
-  const update = () => {
-    const typeF = document.getElementById('swap-type-filter').value;
-    const managerF = document.getElementById('swap-manager-filter').value;
-
-    let filtered = DATA.swaps.map(s => ({
-      ...s,
-      manager: DATA.email_map[s.email] || s.email,
-    }));
-
-    if (typeF !== 'all') filtered = filtered.filter(s => s.reason === typeF);
-    if (managerF !== 'all') filtered = filtered.filter(s => s.manager === managerF);
-    filtered.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-    const table = document.getElementById('swaps-table');
-    table.innerHTML = `
-      <thead>
-        <tr>
-          <th>Date</th><th>Manager</th><th>Type</th>
-          <th>Player Out</th><th>Player In</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${filtered.map(s => {
-          const typeClass = s.reason.includes('Free') ? 'swap-free' :
-                           s.reason.includes('IL') ? 'swap-il' :
-                           s.reason.includes('Drop') ? 'swap-drop' : 'swap-trade';
-          const typeLabel = s.reason.includes('Free') ? 'Free Swap' :
-                           s.reason.includes('IL') ? 'IL Swap' :
-                           s.reason.includes('Drop') ? 'Drop Swap' : 'Trade Swap';
-          return `
-            <tr>
-              <td>${formatDate(s.timestamp)}</td>
-              <td><strong>${s.manager}</strong></td>
-              <td><span class="swap-type ${typeClass}">${typeLabel}</span></td>
-              <td class="player-out">${s.player_out || ''}</td>
-              <td class="player-in">${s.player_in || ''}</td>
-            </tr>
-          `;
-        }).join('')}
-      </tbody>
-    `;
-  };
-
-  document.getElementById('swap-type-filter').onchange = update;
-  document.getElementById('swap-manager-filter').onchange = update;
-  update();
-}
-
 // ---- Rules ----
 function renderRulesFromScoring() {
   const batTable = document.getElementById('batting-scoring-table');
@@ -1251,7 +1191,6 @@ function showActiveSeason(seasonData) {
 
   // Clear historical-only sections
   document.getElementById('bracket-container').innerHTML = '<p>Bracket will be available during playoff rounds.</p>';
-  document.getElementById('swaps-table').innerHTML = '';
 }
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {

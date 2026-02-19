@@ -53,7 +53,6 @@
     <button class="nav-btn" data-tab="players">Player Stats</button>
     <button class="nav-btn" data-tab="trends">Trends</button>
     <button class="nav-btn" data-tab="bracket">Bracket</button>
-    <button class="nav-btn" data-tab="swaps">Transactions</button>
     <button class="nav-btn" data-tab="rules">Rules</button>
     <button class="nav-btn" data-tab="schedule">Schedule</button>
     <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
@@ -118,26 +117,6 @@
       <div class="card">
         <h2>Elimination Bracket</h2>
         <div class="bracket-container" id="bracket-container"></div>
-      </div>
-    </section>
-
-    <!-- Transactions -->
-    <section id="swaps" class="tab-content">
-      <div class="card">
-        <h2>Transactions</h2>
-        <div class="filters">
-          <select id="swap-type-filter">
-            <option value="all">All Types</option>
-            <option value="Free Swap (one per round)">Free Swap</option>
-            <option value="IL Swap">IL Swap</option>
-            <option value="Drop Swap">Drop Swap</option>
-            <option value="Trade Swap">Trade Swap</option>
-          </select>
-          <select id="swap-manager-filter">
-            <option value="all">All Managers</option>
-          </select>
-        </div>
-        <table id="swaps-table" class="data-table"></table>
       </div>
     </section>
 
