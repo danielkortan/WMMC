@@ -342,6 +342,7 @@ function renderScoreboard() {
 
 function renderChampionBanner() {
   const banner = document.getElementById('champion-banner');
+  banner.className = 'champion-banner';
 
   if (!DATA || !DATA.bracket || !DATA.bracket.finals) {
     banner.innerHTML = `<div class="trophy">&#127942;</div>
@@ -1109,9 +1110,9 @@ function showActiveSeason(seasonData) {
   }
 
   const banner = document.getElementById('champion-banner');
+  banner.className = 'champion-banner banner-compact';
   banner.innerHTML = `
-    <div class="trophy">&#9918;</div>
-    <div class="champion-label">${SELECTED_SEASON} WMMC Season</div>
+    <div class="champion-label"><span class="trophy">&#9918;</span> ${SELECTED_SEASON} WMMC Season</div>
     <div class="champion-name">Season Active</div>
     <div class="champion-details">Upload weekly stats via Commissioner page to track scores.</div>
   `;
@@ -2047,75 +2048,49 @@ function renderSchedule() {
 }
 
 // ============================================================
-// My Roster Page
+// Rosters Page
 // ============================================================
+let ROSTER_VIEWING_MANAGER = null; // name of the manager currently being viewed
+
 function setupMyRoster() {
-  const loginBtn = document.getElementById('roster-login-btn');
-  const emailInput = document.getElementById('roster-email');
+  if (!LOGGED_IN_EMAIL) return;
 
-  // Auto-login from app-level auth or localStorage
-  const autoEmail = LOGGED_IN_EMAIL || localStorage.getItem('wmmc_roster_email');
-  if (autoEmail) {
-    emailInput.value = autoEmail;
-    rosterLogin(autoEmail);
-  }
-
-  loginBtn.onclick = () => {
-    const email = emailInput.value.trim().toLowerCase();
-    if (!email) return;
-    rosterLogin(email);
-  };
-
-  emailInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') loginBtn.click();
-  });
-}
-
-function rosterLogin(email) {
-  email = email.trim().toLowerCase();
   const managers = getManagers();
-  let managerName = null;
+  const loggedInMgr = managers.find(m => m.email && m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
+  if (!loggedInMgr) return;
 
-  const mgr = managers.find(m => m.email.toLowerCase() === email);
-  if (mgr) {
-    managerName = mgr.name;
-  }
-  if (!managerName && DATA && DATA.email_map) {
-    managerName = DATA.email_map[email];
-  }
+  const isCommissioner = !!loggedInMgr.commissioner;
+  const managerBar = document.getElementById('roster-manager-bar');
+  const managerSelect = document.getElementById('roster-manager-select');
+  const titleEl = document.getElementById('roster-title');
 
-  if (managerName) {
-    ROSTER_EMAIL = email;
-    localStorage.setItem('wmmc_roster_email', email);
-    document.getElementById('roster-login-error').style.display = 'none';
-    document.getElementById('roster-login-section').style.display = 'none';
-    document.getElementById('roster-panel').style.display = 'block';
+  managerBar.style.display = 'block';
 
-    const isCommissioner = !!managers.find(m => m.email.toLowerCase() === email && m.commissioner);
+  if (isCommissioner) {
+    // Commissioner: show dropdown to switch between any manager's roster
+    managerSelect.style.display = '';
+    managerSelect.innerHTML = managers.map(m =>
+      `<option value="${m.name}"${m.name === loggedInMgr.name ? ' selected' : ''}>${m.name}${m.commissioner ? ' (Commissioner)' : ''}</option>`
+    ).join('');
 
-    const manualSection = document.getElementById('manual-update-section');
-    if (isCommissioner) {
-      manualSection.style.display = 'block';
-      setupManualUpdate();
-    } else {
-      manualSection.style.display = 'none';
-    }
+    managerSelect.onchange = () => {
+      const selectedName = managerSelect.value;
+      ROSTER_VIEWING_MANAGER = selectedName;
+      titleEl.textContent = selectedName + "'s Roster";
+      renderRosterData(selectedName, true);
+    };
 
-    renderRosterData(managerName, isCommissioner);
+    document.getElementById('manual-update-section').style.display = 'block';
+    setupManualUpdate();
   } else {
-    const err = document.getElementById('roster-login-error');
-    err.textContent = 'Email not found. Please use the email registered with your team.';
-    err.style.display = 'block';
+    // Regular manager: no dropdown needed
+    managerSelect.style.display = 'none';
   }
-}
 
-function rosterLogout() {
-  ROSTER_EMAIL = null;
-  localStorage.removeItem('wmmc_roster_email');
-  document.getElementById('roster-login-section').style.display = 'block';
-  document.getElementById('roster-panel').style.display = 'none';
-  document.getElementById('manual-update-section').style.display = 'none';
-  document.getElementById('roster-email').value = '';
+  // Show the logged-in user's roster by default
+  ROSTER_VIEWING_MANAGER = loggedInMgr.name;
+  titleEl.textContent = loggedInMgr.name + "'s Roster";
+  renderRosterData(loggedInMgr.name, isCommissioner);
 }
 
 function renderRosterData(managerName, isCommissioner) {
@@ -2162,13 +2137,7 @@ function renderRosterData(managerName, isCommissioner) {
 
   let html = '';
 
-  // ---- Header ----
-  html += `<div class="card">
-    <div class="roster-header">
-      <h2>${managerName}</h2>
-      <button class="btn btn-secondary btn-sm" onclick="rosterLogout()">Logout</button>
-    </div>
-  </div>`;
+  // ---- Scoring Summary ----
 
   // ---- Scoring Summary Cards ----
   html += '<div class="roster-score-grid">';

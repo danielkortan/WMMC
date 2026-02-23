@@ -35,20 +35,20 @@
     <div class="header-content">
       <div class="header-top">
         <h1><span class="header-ball">&#9918;</span> The Whit Merrifield Memorial Cup</h1>
+        <div class="season-selector">
+          <select id="season-select"></select>
+        </div>
         <div class="user-bar" id="user-bar" style="display:none;">
           <span id="user-display-name"></span>
           <button class="btn btn-sm btn-header-outline" id="logout-btn">Sign Out</button>
         </div>
-      </div>
-      <div class="season-selector">
-        <select id="season-select"></select>
       </div>
     </div>
   </header>
 
   <nav id="main-nav">
     <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
-    <button class="nav-btn" data-tab="my-roster">My Roster</button>
+    <button class="nav-btn" data-tab="my-roster">Rosters</button>
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
     <button class="nav-btn" data-tab="players">Player Stats</button>
     <button class="nav-btn" data-tab="trends">Trends</button>
@@ -143,18 +143,15 @@
       <div id="schedule-content"></div>
     </section>
 
-    <!-- My Roster -->
+    <!-- Rosters -->
     <section id="my-roster" class="tab-content">
-      <div id="roster-login-section" class="card">
-        <h2>My Roster</h2>
-        <p>Enter your email to view your roster.</p>
-        <div class="login-form">
-          <input type="email" id="roster-email" placeholder="Email address">
-          <button class="btn btn-primary" id="roster-login-btn">View Roster</button>
+      <div id="roster-manager-bar" class="card" style="display:none;">
+        <div class="roster-manager-bar-inner">
+          <h2 id="roster-title">Roster</h2>
+          <select id="roster-manager-select" class="form-select" style="display:none;max-width:260px;"></select>
         </div>
-        <p id="roster-login-error" class="error-text" style="display:none;"></p>
       </div>
-      <div id="roster-panel" style="display:none;">
+      <div id="roster-panel">
         <div id="roster-content"></div>
         <!-- Manual Update (Commissioner Only) -->
         <div class="card" id="manual-update-section" style="display:none;">
