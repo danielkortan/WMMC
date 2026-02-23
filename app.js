@@ -41,7 +41,7 @@ const SEASON_SCHEDULE = [
 ];
 
 // ============================================================
-// localStorage helpers
+// Data helpers (localStorage cache + server persistence)
 // ============================================================
 function getSeasons() {
   return JSON.parse(localStorage.getItem('wmmc_seasons') || '{}');
@@ -50,18 +50,53 @@ function saveSeason(year, data) {
   const seasons = getSeasons();
   seasons[year] = data;
   localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+  // Persist to server in background
+  fetch('/api/seasons/' + year, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  }).catch(() => {});
 }
 function getManagers() {
   return JSON.parse(localStorage.getItem('wmmc_managers') || '[]');
 }
 function saveManagers(managers) {
   localStorage.setItem('wmmc_managers', JSON.stringify(managers));
+  // Persist to server in background
+  fetch('/api/managers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(managers)
+  }).catch(() => {});
 }
 
 // ============================================================
 // Initialization
 // ============================================================
 async function loadData() {
+  // ---- Sync from server (shared database) ----
+  try {
+    const [seasonsResp, managersResp] = await Promise.all([
+      fetch('/api/seasons'),
+      fetch('/api/managers')
+    ]);
+    if (seasonsResp.ok) {
+      const serverSeasons = await seasonsResp.json();
+      if (serverSeasons && Object.keys(serverSeasons).length > 0) {
+        localStorage.setItem('wmmc_seasons', JSON.stringify(serverSeasons));
+      }
+    }
+    if (managersResp.ok) {
+      const serverManagers = await managersResp.json();
+      if (serverManagers && serverManagers.length > 0) {
+        localStorage.setItem('wmmc_managers', JSON.stringify(serverManagers));
+      }
+    }
+  } catch (e) {
+    // Server unavailable — fall back to localStorage
+    console.warn('Server sync unavailable, using local data:', e.message);
+  }
+
   // Ensure we always have 2025 as a historical season
   const seasons = getSeasons();
   if (!seasons['2025']) {
@@ -70,6 +105,12 @@ async function loadData() {
       const legacy = await resp.json();
       seasons['2025'] = { status: 'completed', data: legacy };
       localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+      // Push to server
+      fetch('/api/seasons/2025', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(seasons['2025'])
+      }).catch(() => {});
     } catch (e) {
       // data.json might not exist
     }
@@ -98,6 +139,12 @@ async function loadData() {
       team_weekly: []
     };
     localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+    // Push to server
+    fetch('/api/seasons/' + CURRENT_YEAR, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(seasons[CURRENT_YEAR])
+    }).catch(() => {});
   }
 
   // Check for existing auth session
