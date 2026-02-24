@@ -2423,6 +2423,15 @@ function renderRosterData(managerName, isCommissioner) {
   }
   html += '</div>';
 
+  // ---- Commissioner: Recalculate Stats button ----
+  if (isCommissioner && isActive) {
+    html += `<div class="roster-recalc-row">
+      <button class="btn btn-sm btn-secondary" id="recalc-stats-btn" onclick="recalculateRosterStats('${managerName.replace(/'/g, "\\'")}')">Recalculate Stats</button>
+      <span class="text-muted" style="font-size:0.8rem;">Force lookup of weekly stats for all rostered players</span>
+      <span id="recalc-status"></span>
+    </div>`;
+  }
+
   // ---- Weekly Roster Scoring (all weeks, including historical players) ----
   html += buildWeeklyRosterScoring(managerName, seasonData);
 
@@ -3791,6 +3800,54 @@ window.addToRoster = function(manager, type, selectId, dateSelectId) {
   }
 
   renderRosterData(manager, true);
+};
+
+// Commissioner: force recalculate stats for all rostered players of a manager.
+// Scans weekly_batting/weekly_pitching for any records matching rostered players
+// that have a null manager, and assigns them to this manager.
+window.recalculateRosterStats = function(managerName) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || sd.status !== 'active') return;
+
+  const roster = (sd.rosters && sd.rosters[managerName]) || {};
+  const batters = roster.batters || [];
+  const pitchers = roster.pitchers || [];
+  let assigned = 0;
+
+  // Assign unclaimed batting records for rostered batters
+  batters.forEach(playerName => {
+    (sd.weekly_batting || []).forEach(b => {
+      if (b.batter === playerName && !b.manager) {
+        b.manager = managerName;
+        assigned++;
+      }
+    });
+  });
+
+  // Assign unclaimed pitching records for rostered pitchers
+  pitchers.forEach(playerName => {
+    (sd.weekly_pitching || []).forEach(p => {
+      if (p.pitcher === playerName && !p.manager) {
+        p.manager = managerName;
+        assigned++;
+      }
+    });
+  });
+
+  saveSeason(SELECTED_SEASON, sd);
+
+  const statusEl = document.getElementById('recalc-status');
+  if (statusEl) {
+    if (assigned > 0) {
+      statusEl.innerHTML = `<span class="success-text" style="font-size:0.8rem;">Assigned ${assigned} stat record${assigned > 1 ? 's' : ''}.</span>`;
+    } else {
+      statusEl.innerHTML = `<span class="text-muted" style="font-size:0.8rem;">All stats already assigned.</span>`;
+    }
+  }
+
+  // Re-render the roster view with updated data
+  renderRosterData(managerName, true);
 };
 
 window.showDropForm = function(manager, type, player, btnElement) {
