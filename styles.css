@@ -362,7 +362,7 @@ main {
   background: var(--primary);
   color: white;
   padding: 0.75rem 0.75rem;
-  text-align: left;
+  text-align: center;
   font-weight: 600;
   font-size: 0.8rem;
   text-transform: uppercase;
@@ -389,6 +389,7 @@ main {
   padding: 0.625rem 0.75rem;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+  text-align: center;
 }
 
 .data-table tbody tr:hover {
@@ -404,7 +405,7 @@ main {
 }
 
 .data-table .num {
-  text-align: right;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1327,6 +1328,7 @@ footer {
 .compact-table th,
 .compact-table td {
   padding: 0.3rem 0.5rem;
+  text-align: center;
 }
 
 #weekly-table.compact-table th,
