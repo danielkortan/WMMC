@@ -2423,6 +2423,9 @@ function renderRosterData(managerName, isCommissioner) {
   }
   html += '</div>';
 
+  // ---- Weekly Roster Scoring (all weeks, including historical players) ----
+  html += buildWeeklyRosterScoring(managerName, seasonData);
+
   // ---- Team Stats Breakdown ----
   html += buildTeamStatsBreakdown(managerName, seasonData, p2m);
 
@@ -2569,6 +2572,178 @@ function computePlayerRankings(type, seasonData, p2m) {
   });
   return rankings;
 }
+
+// ---- Weekly Roster Scoring ----
+// Shows every week's individual player stats for a manager, including historical/dropped players.
+// Current week is expanded at top; previous weeks are collapsed below.
+function buildWeeklyRosterScoring(managerName, seasonData) {
+  const isHistorical = !!(DATA && DATA.batting_weekly);
+  const isActive = !!(seasonData && seasonData.status === 'active');
+  if (!isHistorical && !isActive) return '';
+
+  const batting = isHistorical ? (DATA.batting_weekly || []) : (seasonData.weekly_batting || []);
+  const pitching = isHistorical ? (DATA.pitching_weekly || []) : (seasonData.weekly_pitching || []);
+
+  // Build set of currently rostered players for active seasons
+  const currentBatters = new Set();
+  const currentPitchers = new Set();
+  if (isActive && seasonData.rosters && seasonData.rosters[managerName]) {
+    (seasonData.rosters[managerName].batters || []).forEach(b => currentBatters.add(b));
+    (seasonData.rosters[managerName].pitchers || []).forEach(p => currentPitchers.add(p));
+  }
+
+  // Collect per-week data for this manager across all schedule weeks
+  // Key: "round|week" → { batters: [{player, stats, score}], pitchers: [...], batTotal, pitTotal }
+  const weekData = {};
+
+  batting.filter(b => b.manager === managerName).forEach(b => {
+    const wk = `${b.round}|${b.week}`;
+    if (!weekData[wk]) weekData[wk] = { round: b.round, week: b.week, batters: [], pitchers: [], batTotal: 0, pitTotal: 0 };
+    weekData[wk].batters.push({
+      name: b.batter,
+      stats: {
+        abs: b.abs || 0, '1b': b['1b'] || 0, '2b': b['2b'] || 0, '3b': b['3b'] || 0,
+        hr: b.hr || 0, r: b.r || 0, rbi: b.rbi || 0, sb: b.sb || 0, bb: b.bb || 0
+      },
+      score: b.weekly_score || 0,
+      onRoster: currentBatters.has(b.batter)
+    });
+    weekData[wk].batTotal += (b.weekly_score || 0);
+  });
+
+  pitching.filter(p => p.manager === managerName).forEach(p => {
+    const wk = `${p.round}|${p.week}`;
+    if (!weekData[wk]) weekData[wk] = { round: p.round, week: p.week, batters: [], pitchers: [], batTotal: 0, pitTotal: 0 };
+    weekData[wk].pitchers.push({
+      name: p.pitcher,
+      stats: {
+        gs: p.gs || 0, w: p.w || 0, qs: p.qs || 0, cg: p.cg || 0, cgso: p.cgso || 0,
+        nh: p.nh || 0, ip: p.ip || 0, h: p.h || 0, er: p.er || 0, bb: p.bb || 0, k: p.k || 0
+      },
+      score: p.weekly_score || 0,
+      onRoster: currentPitchers.has(p.pitcher)
+    });
+    weekData[wk].pitTotal += (p.weekly_score || 0);
+  });
+
+  if (Object.keys(weekData).length === 0) return '';
+
+  // Order weeks by SEASON_SCHEDULE index (most recent first)
+  const scheduleOrder = {};
+  SEASON_SCHEDULE.forEach((s, i) => { scheduleOrder[`${s.round}|${s.week}`] = i; });
+  const sortedKeys = Object.keys(weekData).sort((a, b) => {
+    const ia = scheduleOrder[a] !== undefined ? scheduleOrder[a] : 999;
+    const ib = scheduleOrder[b] !== undefined ? scheduleOrder[b] : 999;
+    return ib - ia; // most recent first
+  });
+
+  // Find label for a week key
+  function weekLabel(round, week) {
+    const entry = SEASON_SCHEDULE.find(s => s.round === round && s.week === week);
+    return entry ? entry.label : `${round} - ${week}`;
+  }
+
+  // Latest (current) week key
+  const latestKey = sortedKeys[0];
+
+  let html = `<div class="card weekly-roster-scoring">
+    <h2>Weekly Scoring</h2>
+    <p class="text-muted" style="margin-bottom:1rem;">Points earned per week, including all players who contributed</p>`;
+
+  sortedKeys.forEach(wk => {
+    const d = weekData[wk];
+    const isCurrent = wk === latestKey;
+    const weekTotal = Math.round((d.batTotal + d.pitTotal) * 100) / 100;
+    const safeId = wk.replace(/[^a-zA-Z0-9]/g, '_');
+
+    // Sort players by score descending within each week
+    d.batters.sort((a, b) => b.score - a.score);
+    d.pitchers.sort((a, b) => b.score - a.score);
+
+    const headerClass = isCurrent ? 'wrs-header wrs-current' : 'wrs-header';
+    const bodyDisplay = isCurrent ? 'block' : 'none';
+    const openClass = isCurrent ? ' wrs-open' : '';
+
+    html += `<div class="wrs-section">
+      <div class="${headerClass}${openClass}" onclick="toggleWeeklyScoring('${safeId}')">
+        <span class="wrs-header-label">${isCurrent ? '(Latest) ' : ''}${weekLabel(d.round, d.week)}</span>
+        <span class="wrs-header-pts">${fmt(weekTotal)} PTS</span>
+      </div>
+      <div class="wrs-body" id="wrs-body-${safeId}" style="display:${bodyDisplay};">`;
+
+    // Batters table
+    if (d.batters.length > 0) {
+      html += `<div class="wrs-group-label">BATTERS <span class="wrs-group-pts">${fmt(Math.round(d.batTotal * 100) / 100)} pts</span></div>`;
+      html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
+      html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th>';
+      html += '</tr></thead><tbody>';
+      d.batters.forEach(b => {
+        const rosterTag = (!isActive || b.onRoster) ? '' : ' <span class="wrs-hist-tag">dropped</span>';
+        html += `<tr${!isActive || b.onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        html += `<td>${b.name}${rosterTag}</td>`;
+        html += `<td class="num">${b.stats.abs}</td>`;
+        html += `<td class="num">${b.stats['1b']}</td>`;
+        html += `<td class="num">${b.stats['2b']}</td>`;
+        html += `<td class="num">${b.stats['3b']}</td>`;
+        html += `<td class="num">${b.stats.hr}</td>`;
+        html += `<td class="num">${b.stats.r}</td>`;
+        html += `<td class="num">${b.stats.rbi}</td>`;
+        html += `<td class="num">${b.stats.sb}</td>`;
+        html += `<td class="num">${b.stats.bb}</td>`;
+        html += `<td class="num"><strong>${fmt(b.score)}</strong></td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+
+    // Pitchers table
+    if (d.pitchers.length > 0) {
+      html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS <span class="wrs-group-pts">${fmt(Math.round(d.pitTotal * 100) / 100)} pts</span></div>`;
+      html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
+      html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th>';
+      html += '</tr></thead><tbody>';
+      d.pitchers.forEach(p => {
+        const rosterTag = (!isActive || p.onRoster) ? '' : ' <span class="wrs-hist-tag">dropped</span>';
+        html += `<tr${!isActive || p.onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        html += `<td>${p.name}${rosterTag}</td>`;
+        html += `<td class="num">${p.stats.gs}</td>`;
+        html += `<td class="num">${p.stats.w}</td>`;
+        html += `<td class="num">${fmtDec(p.stats.qs)}</td>`;
+        html += `<td class="num">${p.stats.cg}</td>`;
+        html += `<td class="num">${p.stats.cgso}</td>`;
+        html += `<td class="num">${p.stats.nh}</td>`;
+        html += `<td class="num">${fmtDec(p.stats.ip)}</td>`;
+        html += `<td class="num">${p.stats.h}</td>`;
+        html += `<td class="num">${p.stats.er}</td>`;
+        html += `<td class="num">${p.stats.bb}</td>`;
+        html += `<td class="num">${p.stats.k}</td>`;
+        html += `<td class="num"><strong>${fmt(p.score)}</strong></td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+
+    // Week total footer
+    html += `<div class="wrs-week-total">
+      <span>Week Total</span>
+      <span><strong>${fmt(weekTotal)}</strong> <span class="wrs-total-detail">(Bat: ${fmt(Math.round(d.batTotal * 100) / 100)} | Pit: ${fmt(Math.round(d.pitTotal * 100) / 100)})</span></span>
+    </div>`;
+
+    html += '</div></div>'; // .wrs-body, .wrs-section
+  });
+
+  html += '</div>'; // .weekly-roster-scoring
+  return html;
+}
+
+window.toggleWeeklyScoring = function(safeId) {
+  const body = document.getElementById(`wrs-body-${safeId}`);
+  if (!body) return;
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  const header = body.previousElementSibling;
+  if (header) header.classList.toggle('wrs-open', !isOpen);
+};
 
 // ---- Team Stats Breakdown (accordion by scoring period) ----
 const BREAKDOWN_PERIODS = [
