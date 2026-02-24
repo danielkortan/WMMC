@@ -939,6 +939,12 @@ input[type="file"] {
   margin: 0.25rem 0;
 }
 
+.schedule-week-dates {
+  font-size: 0.75rem;
+  color: var(--text-light);
+  margin-bottom: 0.15rem;
+}
+
 .schedule-week-status {
   font-size: 0.8rem;
   font-weight: 600;
@@ -968,6 +974,19 @@ input[type="file"] {
 }
 
 .schedule-empty .schedule-week-status {
+  color: var(--text-light);
+}
+
+/* Week date labels in tables and headers */
+.week-dates {
+  font-size: 0.8rem;
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+.week-dates-inline {
+  font-weight: 400;
+  font-size: 0.85rem;
   color: var(--text-light);
 }
 

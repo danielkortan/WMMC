@@ -41,6 +41,86 @@ const SEASON_SCHEDULE = [
 ];
 
 // ============================================================
+// Schedule date helpers
+// ============================================================
+
+// Compute Mon–Sun date ranges for all 16 weeks from the ASG date.
+// PP1 (5 wks) → PP2 (5 wks) → ASG break → QF (2) → SF (2) → Finals (2)
+function computeScheduleDates(asgDateStr) {
+  const asg = new Date(asgDateStr + 'T12:00:00');
+  // Find Monday of ASG week (or prior Monday)
+  const day = asg.getDay(); // 0=Sun … 6=Sat
+  const asgMonday = new Date(asg);
+  asgMonday.setDate(asg.getDate() - ((day + 6) % 7));
+
+  // Week 1 starts 10 weeks before ASG Monday
+  const week1Start = new Date(asgMonday);
+  week1Start.setDate(asgMonday.getDate() - 70);
+
+  const weeks = [];
+  const cur = new Date(week1Start);
+
+  // PP1 (5 weeks) + PP2 (5 weeks) = 10 weeks before break
+  for (let i = 0; i < 10; i++) {
+    const start = new Date(cur);
+    const end = new Date(cur);
+    end.setDate(end.getDate() + 6);
+    weeks.push({ start: fmtDateISO(start), end: fmtDateISO(end) });
+    cur.setDate(cur.getDate() + 7);
+  }
+
+  // Skip ASG break week
+  cur.setDate(cur.getDate() + 7);
+
+  // QF (2) + SF (2) + Finals (2) = 6 weeks after break
+  for (let i = 0; i < 6; i++) {
+    const start = new Date(cur);
+    const end = new Date(cur);
+    end.setDate(end.getDate() + 6);
+    weeks.push({ start: fmtDateISO(start), end: fmtDateISO(end) });
+    cur.setDate(cur.getDate() + 7);
+  }
+
+  return weeks; // 16 entries: { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD' }
+}
+
+function fmtDateISO(d) {
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
+// Short display:  "May 5 – 11" or "Jun 30 – Jul 6"
+function fmtDateRangeShort(startStr, endStr) {
+  const s = new Date(startStr + 'T12:00:00');
+  const e = new Date(endStr + 'T12:00:00');
+  const mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  if (s.getMonth() === e.getMonth()) {
+    return `${mo[s.getMonth()]} ${s.getDate()} – ${e.getDate()}`;
+  }
+  return `${mo[s.getMonth()]} ${s.getDate()} – ${mo[e.getMonth()]} ${e.getDate()}`;
+}
+
+// Get schedule_dates array for the selected season (or null)
+function getScheduleDates() {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  return (sd && sd.schedule_dates) || null;
+}
+
+// Get date range string for a week index, or '' if dates not set
+function weekDateLabel(weekIndex) {
+  const dates = getScheduleDates();
+  if (!dates || !dates[weekIndex]) return '';
+  return fmtDateRangeShort(dates[weekIndex].start, dates[weekIndex].end);
+}
+
+// Look up week index from a round|week key
+function weekIndexFromKey(round, week) {
+  return SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
+}
+
+// ============================================================
 // Data helpers (localStorage cache + server persistence)
 // ============================================================
 function getSeasons() {
@@ -889,12 +969,13 @@ function renderWeekly() {
     if (weekF !== 'all') filtered = filtered.filter(t => t.week === weekF);
     if (managerF !== 'all') filtered = filtered.filter(t => t.manager === managerF);
 
+    const dates = getScheduleDates();
     const table = document.getElementById('weekly-table');
     table.classList.add('compact-table');
     table.innerHTML = `
       <thead>
         <tr>
-          <th>Rnd</th><th>Wk</th><th>Manager</th><th>Pool</th>
+          <th>Rnd</th><th>Wk</th>${dates ? '<th>Dates</th>' : ''}<th>Manager</th><th>Pool</th>
           <th>Bat</th><th>Bat Rk</th>
           <th>Pit</th><th>Pit Rk</th>
           <th>Total</th><th>Tot Rk</th>
@@ -903,10 +984,14 @@ function renderWeekly() {
         </tr>
       </thead>
       <tbody>
-        ${filtered.map(t => `
+        ${filtered.map(t => {
+          const wi = weekIndexFromKey(t.round, t.week);
+          const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+          return `
           <tr>
             <td>${t.round || ''}</td>
             <td>${t.week || ''}</td>
+            ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
             <td><strong>${t.manager}</strong></td>
             <td>${t.pool || ''}</td>
             <td class="num">${fmt(t.weekly_batting)}</td>
@@ -920,7 +1005,7 @@ function renderWeekly() {
             <td class="num">${fmt(t.team_score_by_round)}</td>
             <td class="rank">${t.pool_rank_by_week || ''}</td>
           </tr>
-        `).join('')}
+        `}).join('')}
       </tbody>
     `;
   };
@@ -967,6 +1052,7 @@ function renderPlayers() {
     const weekF = document.getElementById('player-week-filter').value;
     const managerF = document.getElementById('player-manager-filter').value;
     const table = document.getElementById('players-table');
+    const dates = getScheduleDates();
 
     if (currentType === 'batting') {
       let filtered = DATA.batting_weekly;
@@ -977,16 +1063,20 @@ function renderPlayers() {
       table.innerHTML = `
         <thead>
           <tr>
-            <th>Week</th><th>Manager</th><th>Batter</th><th>Status</th>
+            <th>Week</th>${dates ? '<th>Dates</th>' : ''}<th>Manager</th><th>Batter</th><th>Status</th>
             <th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th>
             <th>R</th><th>RBI</th><th>SB</th><th>BB</th>
             <th>Week Pts</th><th>Total Pts</th>
           </tr>
         </thead>
         <tbody>
-          ${filtered.map(b => `
+          ${filtered.map(b => {
+            const wi = weekIndexFromKey(b.round, b.week);
+            const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+            return `
             <tr>
               <td>${b.week || ''}</td>
+              ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
               <td><strong>${b.manager}</strong></td>
               <td>${b.batter}</td>
               <td>${b.status ? `<span class="swap-type swap-il">${b.status}</span>` : ''}</td>
@@ -1002,7 +1092,7 @@ function renderPlayers() {
               <td class="num"><strong>${fmt(b.weekly_score)}</strong></td>
               <td class="num">${fmt(b.total_score)}</td>
             </tr>
-          `).join('')}
+          `}).join('')}
         </tbody>
       `;
     } else {
@@ -1014,16 +1104,20 @@ function renderPlayers() {
       table.innerHTML = `
         <thead>
           <tr>
-            <th>Week</th><th>Manager</th><th>Pitcher</th><th>Status</th>
+            <th>Week</th>${dates ? '<th>Dates</th>' : ''}<th>Manager</th><th>Pitcher</th><th>Status</th>
             <th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th>
             <th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th>
             <th>Week Pts</th>
           </tr>
         </thead>
         <tbody>
-          ${filtered.map(p => `
+          ${filtered.map(p => {
+            const wi = weekIndexFromKey(p.round, p.week);
+            const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+            return `
             <tr>
               <td>${p.week || ''}</td>
+              ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
               <td><strong>${p.manager}</strong></td>
               <td>${p.pitcher}</td>
               <td>${p.status ? `<span class="swap-type swap-il">${p.status}</span>` : ''}</td>
@@ -1040,7 +1134,7 @@ function renderPlayers() {
               <td class="num">${p.k || 0}</td>
               <td class="num"><strong>${fmt(p.weekly_score)}</strong></td>
             </tr>
-          `).join('')}
+          `}).join('')}
         </tbody>
       `;
     }
@@ -1587,7 +1681,14 @@ function renderTrends() {
 
   const orderedWeeks = scheduleOrdered;
   const rShort = { PP1: 'PP1', PP1P: 'PP1+', PP2: 'PP2', PP2P: 'PP2+', QF: 'QF', SF: 'SF', Finals: 'Fnls' };
-  const chartLabels = orderedWeeks.map(w => `${rShort[w.round] || w.round} ${w.week.replace('Week ', 'W')}`);
+  const dates = getScheduleDates();
+  const chartLabels = orderedWeeks.map(w => {
+    const base = `${rShort[w.round] || w.round} ${w.week.replace('Week ', 'W')}`;
+    if (!dates) return base;
+    const wi = weekIndexFromKey(w.round, w.week);
+    if (wi < 0 || !dates[wi]) return base;
+    return `${base} (${fmtDateRangeShort(dates[wi].start, dates[wi].end)})`;
+  });
 
   // ---- Unique sets ----
   const allManagers = [...new Set([
@@ -2057,13 +2158,16 @@ function renderSchedule() {
 
   if (!isActive && seasonData.data && seasonData.data.team_weekly) {
     const weekSet = new Set(seasonData.data.team_weekly.map(t => `${t.round}|${t.week}`));
+    const dates = (seasonData.schedule_dates) || null;
     html += '<div class="schedule-grid">';
     SEASON_SCHEDULE.forEach((s, i) => {
       const hasData = weekSet.has(`${s.round}|${s.week}`);
+      const dateStr = dates && dates[i] ? fmtDateRangeShort(dates[i].start, dates[i].end) : '';
       html += `
         <div class="schedule-week ${hasData ? 'schedule-completed' : 'schedule-empty'}">
           <div class="schedule-week-num">Week ${i + 1}</div>
           <div class="schedule-week-label">${s.label}</div>
+          ${dateStr ? `<div class="schedule-week-dates">${dateStr}</div>` : ''}
           <div class="schedule-week-status">${hasData ? 'Completed' : 'No Data'}</div>
         </div>
       `;
@@ -2073,14 +2177,17 @@ function renderSchedule() {
     const batting = seasonData.weekly_batting || [];
     const uploadedWeeks = new Set();
     batting.forEach(b => uploadedWeeks.add(`${b.round}|${b.week}`));
+    const dates = getScheduleDates();
 
     html += '<div class="schedule-grid">';
     SEASON_SCHEDULE.forEach((s, i) => {
       const hasData = uploadedWeeks.has(`${s.round}|${s.week}`);
+      const dateStr = dates && dates[i] ? fmtDateRangeShort(dates[i].start, dates[i].end) : '';
       html += `
         <div class="schedule-week ${hasData ? 'schedule-completed' : 'schedule-pending'}">
           <div class="schedule-week-num">Week ${i + 1}</div>
           <div class="schedule-week-label">${s.label}</div>
+          ${dateStr ? `<div class="schedule-week-dates">${dateStr}</div>` : ''}
           <div class="schedule-week-status">${hasData ? 'Stats Uploaded' : 'Pending'}</div>
         </div>
       `;
@@ -3043,7 +3150,11 @@ function setupManualUpdate() {
   managerSelect.innerHTML = managers.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
 
   // Populate week dropdown
-  weekSelect.innerHTML = SEASON_SCHEDULE.map((s, i) => `<option value="${i}">${s.label}</option>`).join('');
+  const _manualDates = getScheduleDates();
+  weekSelect.innerHTML = SEASON_SCHEDULE.map((s, i) => {
+    const d = _manualDates && _manualDates[i] ? ` (${fmtDateRangeShort(_manualDates[i].start, _manualDates[i].end)})` : '';
+    return `<option value="${i}">${s.label}${d}</option>`;
+  }).join('');
 
   // Type toggle
   let manualType = 'batting';
@@ -3326,6 +3437,7 @@ function showCommissionerPanel() {
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
+  setupASGDateInput();
 }
 
 // ---- Season Setup Toggle ----
@@ -3340,6 +3452,59 @@ function setupSeasonSetupToggle() {
     body.style.display = isHidden ? 'block' : 'none';
     btn.textContent = isHidden ? 'Hide' : 'Show';
   };
+}
+
+// ---- ASG Date Input ----
+function setupASGDateInput() {
+  const input = document.getElementById('asg-date-input');
+  const btn = document.getElementById('asg-date-save-btn');
+  const status = document.getElementById('asg-date-status');
+  const preview = document.getElementById('schedule-dates-preview');
+  if (!input || !btn) return;
+
+  // Pre-fill if already saved
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (sd && sd.asg_date) {
+    input.value = sd.asg_date;
+  }
+  renderScheduleDatesPreview();
+
+  btn.onclick = () => {
+    if (!input.value) {
+      status.innerHTML = '<span style="color:#ef4444;">Please select a date.</span>';
+      return;
+    }
+    const dates = computeScheduleDates(input.value);
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    sd.asg_date = input.value;
+    sd.schedule_dates = dates;
+    saveSeason(SELECTED_SEASON, sd);
+
+    status.innerHTML = '<span style="color:#10b981;">Schedule dates saved!</span>';
+    renderScheduleDatesPreview();
+    // Refresh dependent views
+    renderWeeklyUploadSections();
+  };
+}
+
+function renderScheduleDatesPreview() {
+  const preview = document.getElementById('schedule-dates-preview');
+  if (!preview) return;
+  const dates = getScheduleDates();
+  if (!dates || dates.length === 0) {
+    preview.innerHTML = '<p style="color:#888;">No schedule dates set yet.</p>';
+    return;
+  }
+  let html = '<table class="compact-table" style="width:100%;"><thead><tr><th>#</th><th>Round</th><th>Dates</th></tr></thead><tbody>';
+  SEASON_SCHEDULE.forEach((s, i) => {
+    const d = dates[i];
+    if (!d) return;
+    html += `<tr><td>${i + 1}</td><td>${s.label}</td><td>${fmtDateRangeShort(d.start, d.end)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  preview.innerHTML = html;
 }
 
 // ---- Manager Management ----
@@ -3626,17 +3791,19 @@ function renderWeeklyUploadSections() {
   batting.forEach(b => uploadedBatting.add(`${b.round}|${b.week}`));
   pitching.forEach(p => uploadedPitching.add(`${p.round}|${p.week}`));
 
+  const dates = getScheduleDates();
   let html = '';
   SEASON_SCHEDULE.forEach((s, i) => {
     const weekKey = `${s.round}|${s.week}`;
     const hasBatting = uploadedBatting.has(weekKey);
     const hasPitching = uploadedPitching.has(weekKey);
     const isComplete = hasBatting && hasPitching;
+    const dateStr = dates && dates[i] ? fmtDateRangeShort(dates[i].start, dates[i].end) : '';
 
     html += `
       <div class="weekly-upload-block ${isComplete ? 'upload-complete' : ''}">
         <div class="weekly-upload-header">
-          <h3>${s.label}</h3>
+          <h3>${s.label}${dateStr ? ` <span class="week-dates-inline">(${dateStr})</span>` : ''}</h3>
           <span class="badge ${isComplete ? 'badge-winner' : 'badge-wildcard'}">${isComplete ? 'Complete' : 'Pending'}</span>
         </div>
         <div class="two-col" style="margin-top:0.5rem;">
@@ -3935,7 +4102,7 @@ function getPool(manager) {
   return '';
 }
 
-function resetSelect(id, options) {
+function resetSelect(id, options, labelMap) {
   const select = document.getElementById(id);
   const current = select.value;
   select.innerHTML = `<option value="all">${select.querySelector('option').textContent}</option>`;
@@ -3943,7 +4110,7 @@ function resetSelect(id, options) {
     if (opt) {
       const el = document.createElement('option');
       el.value = opt;
-      el.textContent = opt;
+      el.textContent = (labelMap && labelMap[opt]) ? labelMap[opt] : opt;
       select.appendChild(el);
     }
   });
