@@ -3381,46 +3381,31 @@ function calculateManualScore(type) {
 // Commissioner Page
 // ============================================================
 function renderCommissioner() {
-  // Auto-auth from app-level login or localStorage
-  const autoEmail = LOGGED_IN_EMAIL || localStorage.getItem('wmmc_commissioner_logged_in');
-  if (autoEmail) {
-    const managers = getManagers();
-    const mgr = managers.find(m => m.email.toLowerCase() === autoEmail.toLowerCase() && m.commissioner);
-    if (mgr) {
-      COMMISSIONER_EMAIL = autoEmail;
-      showCommissionerPanel();
-    }
+  const loginDiv = document.getElementById('commissioner-login');
+  const panelDiv = document.getElementById('commissioner-panel');
+
+  // Use the already-logged-in user — no separate login needed
+  if (!LOGGED_IN_EMAIL) {
+    loginDiv.style.display = 'block';
+    loginDiv.innerHTML = '<h2>Commissioner</h2><p>Please log in to the app first.</p>';
+    panelDiv.style.display = 'none';
+    return;
   }
 
-  document.getElementById('commissioner-login-btn').onclick = () => {
-    const email = document.getElementById('commissioner-email').value.trim().toLowerCase();
-    if (!email) return;
+  const managers = getManagers();
+  const mgr = managers.find(m => m.email && m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase() && m.commissioner);
 
-    const managers = getManagers();
-    const mgr = managers.find(m => m.email.toLowerCase() === email && m.commissioner);
+  if (!mgr) {
+    loginDiv.style.display = 'block';
+    loginDiv.innerHTML = '<h2>Commissioner</h2><p>Your account does not have commissioner access.</p>';
+    panelDiv.style.display = 'none';
+    return;
+  }
 
-    if (mgr) {
-      COMMISSIONER_EMAIL = email;
-      localStorage.setItem('wmmc_commissioner_logged_in', email);
-      document.getElementById('login-error').style.display = 'none';
-      showCommissionerPanel();
-    } else {
-      const err = document.getElementById('login-error');
-      err.textContent = 'Access denied. Only commissioners can log in.';
-      err.style.display = 'block';
-    }
-  };
-
-  document.getElementById('commissioner-email').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('commissioner-login-btn').click();
-  });
-
-  document.getElementById('commissioner-logout-btn').onclick = () => {
-    COMMISSIONER_EMAIL = null;
-    localStorage.removeItem('wmmc_commissioner_logged_in');
-    document.getElementById('commissioner-login').style.display = 'block';
-    document.getElementById('commissioner-panel').style.display = 'none';
-  };
+  COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
+  localStorage.setItem('wmmc_commissioner_logged_in', LOGGED_IN_EMAIL);
+  loginDiv.style.display = 'none';
+  showCommissionerPanel();
 }
 
 function showCommissionerPanel() {
