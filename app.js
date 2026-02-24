@@ -1336,7 +1336,6 @@ function showActiveSeason(seasonData) {
 }
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
-  const p2m = buildPlayerToManagerMap(seasonData);
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
@@ -1357,13 +1356,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       if (m.pool) mgrMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
     });
     batting.filter(b => roundFilter.includes(b.round)).forEach(b => {
-      const mgr = p2m[b.batter];
+      const mgr = b.manager; // use stored manager — banked points
       if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].batting += (b.weekly_score || 0);
     });
     pitching.filter(p => roundFilter.includes(p.round)).forEach(p => {
-      const mgr = p2m[p.pitcher];
+      const mgr = p.manager;
       if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].pitching += (p.weekly_score || 0);
@@ -1598,10 +1597,9 @@ function renderActivePlayers(seasonData) {
     return;
   }
 
-  // Resolve manager names from rosters ONLY — never fall back to stored field (which may be an MLB team)
-  const p2m = buildPlayerToManagerMap(seasonData);
-  const fixedBatting = batting.map(b => ({ ...b, manager: p2m[b.batter] || '(Unassigned)' }));
-  const fixedPitching = pitching.map(p => ({ ...p, manager: p2m[p.pitcher] || '(Unassigned)' }));
+  // Use stored manager field (banked at upload/assign time); show (Unassigned) for null
+  const fixedBatting = batting.map(b => ({ ...b, manager: b.manager || '(Unassigned)' }));
+  const fixedPitching = pitching.map(p => ({ ...p, manager: p.manager || '(Unassigned)' }));
 
   const origData = DATA;
   DATA = { batting_weekly: fixedBatting, pitching_weekly: fixedPitching };
@@ -1646,12 +1644,11 @@ function renderTrends() {
     }));
   } else {
     teamWeekly = buildTeamWeekly(seasonData);
-    const p2m = buildPlayerToManagerMap(seasonData);
-    battingData = (seasonData.weekly_batting || []).filter(b => p2m[b.batter]).map(b => ({
-      player: b.batter, manager: p2m[b.batter], round: b.round, week: b.week, weekly_score: b.weekly_score || 0
+    battingData = (seasonData.weekly_batting || []).filter(b => b.manager).map(b => ({
+      player: b.batter, manager: b.manager, round: b.round, week: b.week, weekly_score: b.weekly_score || 0
     }));
-    pitchingData = (seasonData.weekly_pitching || []).filter(p => p2m[p.pitcher]).map(p => ({
-      player: p.pitcher, manager: p2m[p.pitcher], round: p.round, week: p.week, weekly_score: p.weekly_score || 0
+    pitchingData = (seasonData.weekly_pitching || []).filter(p => p.manager).map(p => ({
+      player: p.pitcher, manager: p.manager, round: p.round, week: p.week, weekly_score: p.weekly_score || 0
     }));
   }
 
@@ -2021,8 +2018,6 @@ function calculatePitchingScore(stats) {
 function repairManagerAssignments(seasonData) {
   if (!seasonData || seasonData.status === 'completed') return false;
 
-  const managers = getManagers();
-  const managerNames = new Set(managers.map(m => m.name));
   const rosters = seasonData.rosters || {};
   let repaired = false;
 
@@ -2033,10 +2028,10 @@ function repairManagerAssignments(seasonData) {
     (roster.pitchers || []).forEach(p => { playerToManager[p] = managerName; });
   }
 
-  // Repair batting entries
+  // Only repair entries with null/empty manager (unassigned stats).
+  // Never overwrite a valid stored manager — that would break banked points.
   (seasonData.weekly_batting || []).forEach(entry => {
-    if (!managerNames.has(entry.manager)) {
-      // Manager field doesn't match any registered manager - try roster lookup
+    if (!entry.manager) {
       const correctManager = playerToManager[entry.batter];
       if (correctManager) {
         entry.manager = correctManager;
@@ -2045,9 +2040,8 @@ function repairManagerAssignments(seasonData) {
     }
   });
 
-  // Repair pitching entries
   (seasonData.weekly_pitching || []).forEach(entry => {
-    if (!managerNames.has(entry.manager)) {
+    if (!entry.manager) {
       const correctManager = playerToManager[entry.pitcher];
       if (correctManager) {
         entry.manager = correctManager;
@@ -2074,17 +2068,16 @@ function buildPlayerToManagerMap(seasonData) {
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
-  const p2m = buildPlayerToManagerMap(seasonData);
 
   const managerMap = {};
   batting.forEach(b => {
-    const mgr = p2m[b.batter]; // roster-only lookup — no fallback to stored field
-    if (!mgr) return;           // skip players not assigned to any manager roster
+    const mgr = b.manager; // use stored manager — points are banked at upload time
+    if (!mgr) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].batting += (b.weekly_score || 0);
   });
   pitching.forEach(p => {
-    const mgr = p2m[p.pitcher]; // roster-only lookup
+    const mgr = p.manager;
     if (!mgr) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].pitching += (p.weekly_score || 0);
@@ -2102,7 +2095,6 @@ function buildTeamWeekly(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
   const managers = getManagers();
-  const p2m = buildPlayerToManagerMap(seasonData);
 
   // Build manager-to-pool lookup
   const managerPool = {};
@@ -2112,15 +2104,15 @@ function buildTeamWeekly(seasonData) {
   const map = {};
 
   batting.forEach(b => {
-    const mgr = p2m[b.batter]; // roster-only lookup — no fallback
-    if (!mgr) return;           // skip unassigned players
+    const mgr = b.manager; // use stored manager — points are banked at upload/assign time
+    if (!mgr) return;       // skip unassigned players
     const k = key(b.round, b.week, mgr);
     if (!map[k]) map[k] = { round: b.round, week: b.week, manager: mgr, pool: managerPool[mgr] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
     map[k].weekly_batting += (b.weekly_score || 0);
   });
 
   pitching.forEach(p => {
-    const mgr = p2m[p.pitcher]; // roster-only lookup
+    const mgr = p.manager;
     if (!mgr) return;
     const k = key(p.round, p.week, mgr);
     if (!map[k]) map[k] = { round: p.round, week: p.week, manager: mgr, pool: managerPool[mgr] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
@@ -2431,6 +2423,18 @@ function renderRosterData(managerName, isCommissioner) {
   }
   html += '</div>';
 
+  // ---- Commissioner: Recalculate Stats button ----
+  if (isCommissioner && isActive) {
+    html += `<div class="roster-recalc-row">
+      <button class="btn btn-sm btn-secondary" id="recalc-stats-btn" onclick="recalculateRosterStats('${managerName.replace(/'/g, "\\'")}')">Recalculate Stats</button>
+      <span class="text-muted" style="font-size:0.8rem;">Force lookup of weekly stats for all rostered players</span>
+      <span id="recalc-status"></span>
+    </div>`;
+  }
+
+  // ---- Weekly Roster Scoring (all weeks, including historical players) ----
+  html += buildWeeklyRosterScoring(managerName, seasonData);
+
   // ---- Team Stats Breakdown ----
   html += buildTeamStatsBreakdown(managerName, seasonData, p2m);
 
@@ -2469,12 +2473,12 @@ function computeRosterPeriodScores(managerName, seasonData, p2m) {
   pitching = seasonData.weekly_pitching || [];
 
   batting.forEach(b => {
-    if (p2m[b.batter] !== managerName) return;
+    if (b.manager !== managerName) return; // use stored manager — banked points
     if (!result[b.round]) result[b.round] = { batting: 0, pitching: 0, total: 0 };
     result[b.round].batting += (b.weekly_score || 0);
   });
   pitching.forEach(p => {
-    if (p2m[p.pitcher] !== managerName) return;
+    if (p.manager !== managerName) return;
     if (!result[p.round]) result[p.round] = { batting: 0, pitching: 0, total: 0 };
     result[p.round].pitching += (p.weekly_score || 0);
   });
@@ -2503,7 +2507,7 @@ function computePlayerTotals(managerName, type, seasonData, p2m) {
     const weekly = type === 'batting' ? (seasonData.weekly_batting || []) : (seasonData.weekly_pitching || []);
     const nameKey = type === 'batting' ? 'batter' : 'pitcher';
     weekly.forEach(e => {
-      if (p2m[e[nameKey]] !== managerName) return;
+      if (e.manager !== managerName) return; // use stored manager — banked points
       scores[e[nameKey]] = (scores[e[nameKey]] || 0) + (e.weekly_score || 0);
     });
   }
@@ -2529,7 +2533,7 @@ function computePlayerStatTotals(managerName, type, seasonData, p2m) {
     filterFn = e => e.manager === managerName;
   } else if (seasonData && seasonData.status === 'active') {
     weekly = type === 'batting' ? (seasonData.weekly_batting || []) : (seasonData.weekly_pitching || []);
-    filterFn = e => p2m[e[nameKey]] === managerName;
+    filterFn = e => e.manager === managerName; // use stored manager — banked points
   } else {
     return totals;
   }
@@ -2578,6 +2582,178 @@ function computePlayerRankings(type, seasonData, p2m) {
   return rankings;
 }
 
+// ---- Weekly Roster Scoring ----
+// Shows every week's individual player stats for a manager, including historical/dropped players.
+// Current week is expanded at top; previous weeks are collapsed below.
+function buildWeeklyRosterScoring(managerName, seasonData) {
+  const isHistorical = !!(DATA && DATA.batting_weekly);
+  const isActive = !!(seasonData && seasonData.status === 'active');
+  if (!isHistorical && !isActive) return '';
+
+  const batting = isHistorical ? (DATA.batting_weekly || []) : (seasonData.weekly_batting || []);
+  const pitching = isHistorical ? (DATA.pitching_weekly || []) : (seasonData.weekly_pitching || []);
+
+  // Build set of currently rostered players for active seasons
+  const currentBatters = new Set();
+  const currentPitchers = new Set();
+  if (isActive && seasonData.rosters && seasonData.rosters[managerName]) {
+    (seasonData.rosters[managerName].batters || []).forEach(b => currentBatters.add(b));
+    (seasonData.rosters[managerName].pitchers || []).forEach(p => currentPitchers.add(p));
+  }
+
+  // Collect per-week data for this manager across all schedule weeks
+  // Key: "round|week" → { batters: [{player, stats, score}], pitchers: [...], batTotal, pitTotal }
+  const weekData = {};
+
+  batting.filter(b => b.manager === managerName).forEach(b => {
+    const wk = `${b.round}|${b.week}`;
+    if (!weekData[wk]) weekData[wk] = { round: b.round, week: b.week, batters: [], pitchers: [], batTotal: 0, pitTotal: 0 };
+    weekData[wk].batters.push({
+      name: b.batter,
+      stats: {
+        abs: b.abs || 0, '1b': b['1b'] || 0, '2b': b['2b'] || 0, '3b': b['3b'] || 0,
+        hr: b.hr || 0, r: b.r || 0, rbi: b.rbi || 0, sb: b.sb || 0, bb: b.bb || 0
+      },
+      score: b.weekly_score || 0,
+      onRoster: currentBatters.has(b.batter)
+    });
+    weekData[wk].batTotal += (b.weekly_score || 0);
+  });
+
+  pitching.filter(p => p.manager === managerName).forEach(p => {
+    const wk = `${p.round}|${p.week}`;
+    if (!weekData[wk]) weekData[wk] = { round: p.round, week: p.week, batters: [], pitchers: [], batTotal: 0, pitTotal: 0 };
+    weekData[wk].pitchers.push({
+      name: p.pitcher,
+      stats: {
+        gs: p.gs || 0, w: p.w || 0, qs: p.qs || 0, cg: p.cg || 0, cgso: p.cgso || 0,
+        nh: p.nh || 0, ip: p.ip || 0, h: p.h || 0, er: p.er || 0, bb: p.bb || 0, k: p.k || 0
+      },
+      score: p.weekly_score || 0,
+      onRoster: currentPitchers.has(p.pitcher)
+    });
+    weekData[wk].pitTotal += (p.weekly_score || 0);
+  });
+
+  if (Object.keys(weekData).length === 0) return '';
+
+  // Order weeks by SEASON_SCHEDULE index (most recent first)
+  const scheduleOrder = {};
+  SEASON_SCHEDULE.forEach((s, i) => { scheduleOrder[`${s.round}|${s.week}`] = i; });
+  const sortedKeys = Object.keys(weekData).sort((a, b) => {
+    const ia = scheduleOrder[a] !== undefined ? scheduleOrder[a] : 999;
+    const ib = scheduleOrder[b] !== undefined ? scheduleOrder[b] : 999;
+    return ib - ia; // most recent first
+  });
+
+  // Find label for a week key
+  function weekLabel(round, week) {
+    const entry = SEASON_SCHEDULE.find(s => s.round === round && s.week === week);
+    return entry ? entry.label : `${round} - ${week}`;
+  }
+
+  // Latest (current) week key
+  const latestKey = sortedKeys[0];
+
+  let html = `<div class="card weekly-roster-scoring">
+    <h2>Weekly Scoring</h2>
+    <p class="text-muted" style="margin-bottom:1rem;">Points earned per week, including all players who contributed</p>`;
+
+  sortedKeys.forEach(wk => {
+    const d = weekData[wk];
+    const isCurrent = wk === latestKey;
+    const weekTotal = Math.round((d.batTotal + d.pitTotal) * 100) / 100;
+    const safeId = wk.replace(/[^a-zA-Z0-9]/g, '_');
+
+    // Sort players by score descending within each week
+    d.batters.sort((a, b) => b.score - a.score);
+    d.pitchers.sort((a, b) => b.score - a.score);
+
+    const headerClass = isCurrent ? 'wrs-header wrs-current' : 'wrs-header';
+    const bodyDisplay = isCurrent ? 'block' : 'none';
+    const openClass = isCurrent ? ' wrs-open' : '';
+
+    html += `<div class="wrs-section">
+      <div class="${headerClass}${openClass}" onclick="toggleWeeklyScoring('${safeId}')">
+        <span class="wrs-header-label">${isCurrent ? '(Latest) ' : ''}${weekLabel(d.round, d.week)}</span>
+        <span class="wrs-header-pts">${fmt(weekTotal)} PTS</span>
+      </div>
+      <div class="wrs-body" id="wrs-body-${safeId}" style="display:${bodyDisplay};">`;
+
+    // Batters table
+    if (d.batters.length > 0) {
+      html += `<div class="wrs-group-label">BATTERS <span class="wrs-group-pts">${fmt(Math.round(d.batTotal * 100) / 100)} pts</span></div>`;
+      html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
+      html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th>';
+      html += '</tr></thead><tbody>';
+      d.batters.forEach(b => {
+        const rosterTag = (!isActive || b.onRoster) ? '' : ' <span class="wrs-hist-tag">dropped</span>';
+        html += `<tr${!isActive || b.onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        html += `<td>${b.name}${rosterTag}</td>`;
+        html += `<td class="num">${b.stats.abs}</td>`;
+        html += `<td class="num">${b.stats['1b']}</td>`;
+        html += `<td class="num">${b.stats['2b']}</td>`;
+        html += `<td class="num">${b.stats['3b']}</td>`;
+        html += `<td class="num">${b.stats.hr}</td>`;
+        html += `<td class="num">${b.stats.r}</td>`;
+        html += `<td class="num">${b.stats.rbi}</td>`;
+        html += `<td class="num">${b.stats.sb}</td>`;
+        html += `<td class="num">${b.stats.bb}</td>`;
+        html += `<td class="num"><strong>${fmt(b.score)}</strong></td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+
+    // Pitchers table
+    if (d.pitchers.length > 0) {
+      html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS <span class="wrs-group-pts">${fmt(Math.round(d.pitTotal * 100) / 100)} pts</span></div>`;
+      html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
+      html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th>';
+      html += '</tr></thead><tbody>';
+      d.pitchers.forEach(p => {
+        const rosterTag = (!isActive || p.onRoster) ? '' : ' <span class="wrs-hist-tag">dropped</span>';
+        html += `<tr${!isActive || p.onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        html += `<td>${p.name}${rosterTag}</td>`;
+        html += `<td class="num">${p.stats.gs}</td>`;
+        html += `<td class="num">${p.stats.w}</td>`;
+        html += `<td class="num">${fmtDec(p.stats.qs)}</td>`;
+        html += `<td class="num">${p.stats.cg}</td>`;
+        html += `<td class="num">${p.stats.cgso}</td>`;
+        html += `<td class="num">${p.stats.nh}</td>`;
+        html += `<td class="num">${fmtDec(p.stats.ip)}</td>`;
+        html += `<td class="num">${p.stats.h}</td>`;
+        html += `<td class="num">${p.stats.er}</td>`;
+        html += `<td class="num">${p.stats.bb}</td>`;
+        html += `<td class="num">${p.stats.k}</td>`;
+        html += `<td class="num"><strong>${fmt(p.score)}</strong></td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+
+    // Week total footer
+    html += `<div class="wrs-week-total">
+      <span>Week Total</span>
+      <span><strong>${fmt(weekTotal)}</strong> <span class="wrs-total-detail">(Bat: ${fmt(Math.round(d.batTotal * 100) / 100)} | Pit: ${fmt(Math.round(d.pitTotal * 100) / 100)})</span></span>
+    </div>`;
+
+    html += '</div></div>'; // .wrs-body, .wrs-section
+  });
+
+  html += '</div>'; // .weekly-roster-scoring
+  return html;
+}
+
+window.toggleWeeklyScoring = function(safeId) {
+  const body = document.getElementById(`wrs-body-${safeId}`);
+  if (!body) return;
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  const header = body.previousElementSibling;
+  if (header) header.classList.toggle('wrs-open', !isOpen);
+};
+
 // ---- Team Stats Breakdown (accordion by scoring period) ----
 const BREAKDOWN_PERIODS = [
   { key: 'PP1',    label: 'Pool Play 1',    weekRange: 'Weeks 1–5',   colorClass: 'period-pp1' },
@@ -2620,14 +2796,14 @@ function buildTeamStatsBreakdown(managerName, seasonData, p2m) {
         });
     } else if (isActive) {
       (seasonData.weekly_batting || [])
-        .filter(e => e.round === period.key && p2m[e.batter] === managerName)
+        .filter(e => e.round === period.key && e.manager === managerName)
         .forEach(e => {
           if (!weekTotals[e.week]) weekTotals[e.week] = { batting: 0, pitching: 0 };
           weekTotals[e.week].batting += (e.weekly_score || 0);
           batterPeriodTotals[e.batter] = (batterPeriodTotals[e.batter] || 0) + (e.weekly_score || 0);
         });
       (seasonData.weekly_pitching || [])
-        .filter(e => e.round === period.key && p2m[e.pitcher] === managerName)
+        .filter(e => e.round === period.key && e.manager === managerName)
         .forEach(e => {
           if (!weekTotals[e.week]) weekTotals[e.week] = { batting: 0, pitching: 0 };
           weekTotals[e.week].pitching += (e.weekly_score || 0);
@@ -3006,9 +3182,12 @@ window.approveSwap = function(swapId) {
     if (isBatter) {
       roster.batters = roster.batters.filter(b => b !== swap.player_out);
       if (!roster.batters.includes(swap.player_in)) roster.batters.push(swap.player_in);
+      // Auto-assign any unattributed stats for the incoming player
+      assignUnclaimedStats(sd, swap.player_in, swap.manager, 'batters');
     } else if (isPitcher) {
       roster.pitchers = roster.pitchers.filter(p => p !== swap.player_out);
       if (!roster.pitchers.includes(swap.player_in)) roster.pitchers.push(swap.player_in);
+      assignUnclaimedStats(sd, swap.player_in, swap.manager, 'pitchers');
     }
   }
 
@@ -3381,46 +3560,31 @@ function calculateManualScore(type) {
 // Commissioner Page
 // ============================================================
 function renderCommissioner() {
-  // Auto-auth from app-level login or localStorage
-  const autoEmail = LOGGED_IN_EMAIL || localStorage.getItem('wmmc_commissioner_logged_in');
-  if (autoEmail) {
-    const managers = getManagers();
-    const mgr = managers.find(m => m.email.toLowerCase() === autoEmail.toLowerCase() && m.commissioner);
-    if (mgr) {
-      COMMISSIONER_EMAIL = autoEmail;
-      showCommissionerPanel();
-    }
+  const loginDiv = document.getElementById('commissioner-login');
+  const panelDiv = document.getElementById('commissioner-panel');
+
+  // Use the already-logged-in user — no separate login needed
+  if (!LOGGED_IN_EMAIL) {
+    loginDiv.style.display = 'block';
+    loginDiv.innerHTML = '<h2>Commissioner</h2><p>Please log in to the app first.</p>';
+    panelDiv.style.display = 'none';
+    return;
   }
 
-  document.getElementById('commissioner-login-btn').onclick = () => {
-    const email = document.getElementById('commissioner-email').value.trim().toLowerCase();
-    if (!email) return;
+  const managers = getManagers();
+  const mgr = managers.find(m => m.email && m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase() && m.commissioner);
 
-    const managers = getManagers();
-    const mgr = managers.find(m => m.email.toLowerCase() === email && m.commissioner);
+  if (!mgr) {
+    loginDiv.style.display = 'block';
+    loginDiv.innerHTML = '<h2>Commissioner</h2><p>Your account does not have commissioner access.</p>';
+    panelDiv.style.display = 'none';
+    return;
+  }
 
-    if (mgr) {
-      COMMISSIONER_EMAIL = email;
-      localStorage.setItem('wmmc_commissioner_logged_in', email);
-      document.getElementById('login-error').style.display = 'none';
-      showCommissionerPanel();
-    } else {
-      const err = document.getElementById('login-error');
-      err.textContent = 'Access denied. Only commissioners can log in.';
-      err.style.display = 'block';
-    }
-  };
-
-  document.getElementById('commissioner-email').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('commissioner-login-btn').click();
-  });
-
-  document.getElementById('commissioner-logout-btn').onclick = () => {
-    COMMISSIONER_EMAIL = null;
-    localStorage.removeItem('wmmc_commissioner_logged_in');
-    document.getElementById('commissioner-login').style.display = 'block';
-    document.getElementById('commissioner-panel').style.display = 'none';
-  };
+  COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
+  localStorage.setItem('wmmc_commissioner_logged_in', LOGGED_IN_EMAIL);
+  loginDiv.style.display = 'none';
+  showCommissionerPanel();
 }
 
 function showCommissionerPanel() {
@@ -3615,6 +3779,9 @@ window.addToRoster = function(manager, type, selectId, dateSelectId) {
   if (!sd.rosters[manager][type].includes(player)) {
     sd.rosters[manager][type].push(player);
 
+    // Auto-assign any unattributed stats for this player to this manager
+    assignUnclaimedStats(sd, player, manager, type);
+
     // Create swap log entry for the add
     if (!sd.swaps) sd.swaps = [];
     sd.swaps.push({
@@ -3633,6 +3800,54 @@ window.addToRoster = function(manager, type, selectId, dateSelectId) {
   }
 
   renderRosterData(manager, true);
+};
+
+// Commissioner: force recalculate stats for all rostered players of a manager.
+// Scans weekly_batting/weekly_pitching for any records matching rostered players
+// that have a null manager, and assigns them to this manager.
+window.recalculateRosterStats = function(managerName) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || sd.status !== 'active') return;
+
+  const roster = (sd.rosters && sd.rosters[managerName]) || {};
+  const batters = roster.batters || [];
+  const pitchers = roster.pitchers || [];
+  let assigned = 0;
+
+  // Assign unclaimed batting records for rostered batters
+  batters.forEach(playerName => {
+    (sd.weekly_batting || []).forEach(b => {
+      if (b.batter === playerName && !b.manager) {
+        b.manager = managerName;
+        assigned++;
+      }
+    });
+  });
+
+  // Assign unclaimed pitching records for rostered pitchers
+  pitchers.forEach(playerName => {
+    (sd.weekly_pitching || []).forEach(p => {
+      if (p.pitcher === playerName && !p.manager) {
+        p.manager = managerName;
+        assigned++;
+      }
+    });
+  });
+
+  saveSeason(SELECTED_SEASON, sd);
+
+  const statusEl = document.getElementById('recalc-status');
+  if (statusEl) {
+    if (assigned > 0) {
+      statusEl.innerHTML = `<span class="success-text" style="font-size:0.8rem;">Assigned ${assigned} stat record${assigned > 1 ? 's' : ''}.</span>`;
+    } else {
+      statusEl.innerHTML = `<span class="text-muted" style="font-size:0.8rem;">All stats already assigned.</span>`;
+    }
+  }
+
+  // Re-render the roster view with updated data
+  renderRosterData(managerName, true);
 };
 
 window.showDropForm = function(manager, type, player, btnElement) {
@@ -3761,6 +3976,33 @@ function renderPlayerPoolDisplay() {
 
 // ---- Weekly Stat Uploads ----
 
+// Assign any unattributed (manager === null) weekly stats for a player to a manager.
+// Called when a player is added to a roster so previously-uploaded stats are credited.
+function assignUnclaimedStats(sd, playerName, managerName, rosterType) {
+  const isBatter = rosterType === 'batters' || rosterType === 'batting';
+  let changed = false;
+
+  if (isBatter && sd.weekly_batting) {
+    sd.weekly_batting.forEach(b => {
+      if (b.batter === playerName && !b.manager) {
+        b.manager = managerName;
+        changed = true;
+      }
+    });
+  }
+
+  if (!isBatter && sd.weekly_pitching) {
+    sd.weekly_pitching.forEach(p => {
+      if (p.pitcher === playerName && !p.manager) {
+        p.manager = managerName;
+        changed = true;
+      }
+    });
+  }
+
+  return changed;
+}
+
 // Helper: find which manager owns a player via roster assignments
 function findManagerForPlayer(seasonData, playerName, type) {
   const rosters = seasonData.rosters || {};
@@ -3857,11 +4099,13 @@ window.uploadWeeklyBatting = function(weekIndex) {
       if (!batter) return;
 
       // Resolve manager: first try roster lookup, then CSV column fallback
+      // Store record even if unrostered (manager = null) so stats can be
+      // assigned later when the player is added to a roster.
       let manager = findManagerForPlayer(sd, batter, 'batting');
       if (!manager) {
         manager = findColumn(row, ['manager', 'owner']);
       }
-      if (!manager) { skipped++; return; }
+      const isUnassigned = !manager;
 
       const stats = {
         '1b': parseNum(row['1b'] || row['1B'] || row['singles'] || 0),
@@ -3881,19 +4125,20 @@ window.uploadWeeklyBatting = function(weekIndex) {
       sd.weekly_batting.push({
         round: scheduleWeek.round,
         week: scheduleWeek.week,
-        manager: manager,
+        manager: manager || null,
         batter: batter,
         status: row['status'] || row['Status'] || null,
         ...stats,
         weekly_score: weeklyScore,
         total_score: Math.round((previousTotal + weeklyScore) * 100) / 100
       });
-      imported++;
+      if (isUnassigned) skipped++;
+      else imported++;
     });
 
     saveSeason(SELECTED_SEASON, sd);
     let statusMsg = `Uploaded ${imported} batter records. Scores calculated.`;
-    if (skipped > 0) statusMsg += ` ${skipped} rows skipped (player not found in any roster).`;
+    if (skipped > 0) statusMsg += ` ${skipped} players unrostered (stats stored, will be assigned when added to a roster).`;
     document.getElementById(`upload-status-${weekIndex}`).innerHTML =
       `<p class="success-text">${statusMsg}</p>`;
     renderWeeklyUploadSections();
@@ -3923,11 +4168,13 @@ window.uploadWeeklyPitching = function(weekIndex) {
       if (!pitcher) return;
 
       // Resolve manager: first try roster lookup, then CSV column fallback
+      // Store record even if unrostered (manager = null) so stats can be
+      // assigned later when the player is added to a roster.
       let manager = findManagerForPlayer(sd, pitcher, 'pitching');
       if (!manager) {
         manager = findColumn(row, ['manager', 'owner']);
       }
-      if (!manager) { skipped++; return; }
+      const isUnassigned = !manager;
 
       const stats = {
         gs: parseNum(row['gs'] || row['GS'] || 0),
@@ -3948,18 +4195,19 @@ window.uploadWeeklyPitching = function(weekIndex) {
       sd.weekly_pitching.push({
         round: scheduleWeek.round,
         week: scheduleWeek.week,
-        manager: manager,
+        manager: manager || null,
         pitcher: pitcher,
         status: row['status'] || row['Status'] || null,
         ...stats,
         weekly_score: weeklyScore
       });
-      imported++;
+      if (isUnassigned) skipped++;
+      else imported++;
     });
 
     saveSeason(SELECTED_SEASON, sd);
     let statusMsg = `Uploaded ${imported} pitcher records. Scores calculated.`;
-    if (skipped > 0) statusMsg += ` ${skipped} rows skipped (player not found in any roster).`;
+    if (skipped > 0) statusMsg += ` ${skipped} players unrostered (stats stored, will be assigned when added to a roster).`;
     document.getElementById(`upload-status-${weekIndex}`).innerHTML =
       `<p class="success-text">${statusMsg}</p>`;
     renderWeeklyUploadSections();

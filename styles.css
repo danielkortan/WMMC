@@ -362,7 +362,7 @@ main {
   background: var(--primary);
   color: white;
   padding: 0.75rem 0.75rem;
-  text-align: left;
+  text-align: center;
   font-weight: 600;
   font-size: 0.8rem;
   text-transform: uppercase;
@@ -389,6 +389,7 @@ main {
   padding: 0.625rem 0.75rem;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+  text-align: center;
 }
 
 .data-table tbody tr:hover {
@@ -404,7 +405,7 @@ main {
 }
 
 .data-table .num {
-  text-align: right;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1327,6 +1328,7 @@ footer {
 .compact-table th,
 .compact-table td {
   padding: 0.3rem 0.5rem;
+  text-align: center;
 }
 
 #weekly-table.compact-table th,
@@ -1947,6 +1949,145 @@ footer {
   color: var(--text);
   white-space: nowrap;
   text-align: right;
+}
+
+/* ============================================================ */
+/* Recalculate Stats Row */
+/* ============================================================ */
+
+.roster-recalc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+/* ============================================================ */
+/* Weekly Roster Scoring Section */
+/* ============================================================ */
+
+.weekly-roster-scoring {
+  /* inherits .card styles */
+}
+
+.wrs-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+
+.wrs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.7rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  background: var(--bg);
+  transition: background 0.15s;
+}
+
+.wrs-header:hover {
+  background: rgba(0,45,98,0.05);
+}
+
+.wrs-header.wrs-current {
+  background: var(--primary);
+  color: #fff;
+}
+
+.wrs-header.wrs-current:hover {
+  background: var(--primary-light);
+}
+
+.wrs-header-label {
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+}
+
+.wrs-header-label::before {
+  content: '›';
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-size: 1.1rem;
+  transition: transform 0.2s;
+}
+
+.wrs-header.wrs-open .wrs-header-label::before {
+  transform: rotate(90deg);
+}
+
+.wrs-header-pts {
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.wrs-body {
+  padding: 0.75rem 1rem 1rem;
+  background: var(--card-bg);
+}
+
+.wrs-group-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--primary);
+  margin-bottom: 0.4rem;
+}
+
+.wrs-group-pts {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: 0.4rem;
+}
+
+.wrs-table {
+  margin-bottom: 0;
+}
+
+.wrs-hist-row td {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.wrs-hist-tag {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  margin-left: 0.3rem;
+  vertical-align: middle;
+}
+
+.wrs-week-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 2px solid var(--border);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.wrs-total-detail {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-left: 0.4rem;
 }
 
 /* ============================================================ */
