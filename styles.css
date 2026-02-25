@@ -2557,6 +2557,64 @@ body::before {
   border-color: var(--primary-light);
 }
 
+/* ============================================================ */
+/* Upload Log */
+/* ============================================================ */
+
+.upload-log {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.upload-log-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.upload-log-entry {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  font-size: 0.78rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.upload-log-entry:last-child {
+  border-bottom: none;
+}
+
+.upload-log-time {
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-size: 0.72rem;
+}
+
+.upload-log-type {
+  font-weight: 600;
+  color: var(--primary);
+  white-space: nowrap;
+}
+
+.upload-log-detail {
+  color: var(--text);
+}
+
+/* ============================================================ */
+/* Advance Players Button */
+/* ============================================================ */
+
+.advance-players-row {
+  margin-bottom: 0.5rem;
+}
+
 .chart-wrapper {
   position: relative;
   height: 420px;
