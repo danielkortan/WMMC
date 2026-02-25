@@ -978,6 +978,216 @@ input[type="file"] {
   color: var(--text-light);
 }
 
+/* ============================================================ */
+/* Pool Play Collapsible Section */
+/* ============================================================ */
+
+.sb-poolplay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+
+.sb-poolplay-header:hover {
+  opacity: 0.85;
+}
+
+.sb-poolplay-body {
+  margin-top: 0.75rem;
+}
+
+/* ============================================================ */
+/* Timeline Schedule (League Info) */
+/* ============================================================ */
+
+.schedule-timeline {
+  position: relative;
+  padding-left: 1.5rem;
+}
+
+.tl-round-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+  margin: 1rem 0 0.35rem -0.5rem;
+}
+
+.tl-round-label:first-child {
+  margin-top: 0;
+}
+
+.tl-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0;
+  position: relative;
+}
+
+.tl-item::before {
+  content: '';
+  position: absolute;
+  left: -1.18rem;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+.tl-item:last-child::before {
+  display: none;
+}
+
+.tl-marker {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+  margin-left: -1.52rem;
+  z-index: 1;
+}
+
+.tl-done .tl-marker {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+.tl-pending .tl-marker {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tl-content {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.tl-week {
+  font-weight: 600;
+  min-width: 52px;
+}
+
+.tl-dates {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.tl-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.tl-done .tl-status {
+  color: var(--success);
+}
+
+.tl-pending .tl-status {
+  color: var(--accent);
+}
+
+/* ============================================================ */
+/* League Info Section Headers */
+/* ============================================================ */
+
+.league-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.league-section-header h2 {
+  margin: 0;
+  border: none;
+  padding: 0;
+}
+
+.league-rules-textarea {
+  width: 100%;
+  min-height: 400px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+#league-rules-display {
+  line-height: 1.8;
+}
+
+#league-rules-display p {
+  margin-bottom: 0.75rem;
+}
+
+#league-rules-display .rule-heading {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--primary);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+/* ============================================================ */
+/* Google Sheets Sync (Commissioner) */
+/* ============================================================ */
+
+.gsheets-sync-status {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-bottom: 0.35rem;
+}
+
+.gsheets-sync-ok {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+}
+
+.gsheets-sync-err {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+}
+
+.gsheets-sync-info {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+}
+
+.gsheets-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.gsheets-log-item {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.gsheets-log-time {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 130px;
+}
+
 /* Week date labels in tables and headers */
 .week-dates {
   font-size: 0.8rem;
@@ -2091,6 +2301,102 @@ footer {
 }
 
 /* ============================================================ */
+/* Manually Edited Stat Highlight */
+/* ============================================================ */
+
+.stat-manual {
+  background: rgba(239, 68, 68, 0.12) !important;
+}
+
+/* ============================================================ */
+/* Commissioner Stat Edit Dialog */
+/* ============================================================ */
+
+.stat-edit-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.stat-edit-card {
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  max-width: 460px;
+  width: 92%;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+
+.stat-edit-header h3 {
+  margin: 0 0 0.15rem;
+  font-size: 1rem;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.stat-edit-fields {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.stat-edit-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+}
+
+.stat-edit-field label.stat-edit-manual-label {
+  color: #dc2626;
+}
+
+.stat-edit-field input {
+  width: 100%;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.stat-edit-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.wrs-actions {
+  white-space: nowrap;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.btn-outline:hover {
+  background: var(--bg);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ============================================================ */
 /* Player Swaps Section */
 /* ============================================================ */
 
@@ -2317,42 +2623,19 @@ footer {
   padding-bottom: 0;
 }
 
-.swap-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
+.swap-table {
+  font-size: 0.82rem;
 }
 
-.swap-list-item {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.6rem 0.75rem;
-  background: var(--bg);
+.swap-table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
-.swap-list-main {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.2rem;
-}
-
-.swap-list-players {
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.swap-list-meta {
-  display: flex;
-  gap: 0.75rem;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.swap-list-reason {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--primary);
+.swap-table td {
+  padding: 0.3rem 0.5rem;
+  white-space: nowrap;
 }
 
 /* ============================================================ */
