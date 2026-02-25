@@ -2414,8 +2414,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   const safeMgr = managerName.replace(/'/g, "\\'");
   let html = '';
 
-  // Reverse so most recent is at top
-  [...weeksToShow].reverse().forEach(weekKey => {
+  // Show weeks in chronological order, latest week with data expanded
+  weeksToShow.forEach(weekKey => {
     const [round, week] = weekKey.split('|');
     const schedEntry = SEASON_SCHEDULE.find(s => s.round === round && s.week === week);
     const label = schedEntry ? schedEntry.label : `${round} - ${week}`;
@@ -2445,6 +2445,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       </div>
       <div class="wrs-body" id="wrs-body-${safeId}" style="display:${bodyDisplay};">`;
 
+    // Helper: render a stat cell, highlighting manually edited fields
+    function batStatCell(s, field, displayVal) {
+      const manual = (s.manual_fields || []).includes(field);
+      return `<td class="num${manual ? ' stat-manual' : ''}">${displayVal}</td>`;
+    }
+
     // ---- Batters for this week ----
     html += `<div class="wrs-group-label">BATTERS (${weekRoster.batters.length}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
@@ -2462,22 +2468,24 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       [...allBattersThisWeek].sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0)).forEach(batter => {
         const s = batStatMap[batter] || {};
         const onRoster = weekRoster.batters.includes(batter);
+        const safeBatter = batter.replace(/'/g, "\\'");
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
         html += `<td>${batter}${onRoster ? '' : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
-        html += `<td class="num">${s.abs || 0}</td>`;
-        html += `<td class="num">${s['1b'] || 0}</td>`;
-        html += `<td class="num">${s['2b'] || 0}</td>`;
-        html += `<td class="num">${s['3b'] || 0}</td>`;
-        html += `<td class="num">${s.hr || 0}</td>`;
-        html += `<td class="num">${s.r || 0}</td>`;
-        html += `<td class="num">${s.rbi || 0}</td>`;
-        html += `<td class="num">${s.sb || 0}</td>`;
-        html += `<td class="num">${s.bb || 0}</td>`;
+        html += batStatCell(s, 'abs', s.abs || 0);
+        html += batStatCell(s, '1b', s['1b'] || 0);
+        html += batStatCell(s, '2b', s['2b'] || 0);
+        html += batStatCell(s, '3b', s['3b'] || 0);
+        html += batStatCell(s, 'hr', s.hr || 0);
+        html += batStatCell(s, 'r', s.r || 0);
+        html += batStatCell(s, 'rbi', s.rbi || 0);
+        html += batStatCell(s, 'sb', s.sb || 0);
+        html += batStatCell(s, 'bb', s.bb || 0);
         html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
         if (isCommissioner && isActive) {
-          html += `<td class="num">`;
+          html += `<td class="num wrs-actions">`;
+          html += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeBatter}','${weekKey}')" title="Edit stats">Edit</button>`;
           if (onRoster) {
-            html += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${batter.replace(/'/g, "\\'")}','${weekKey}')">Drop</button>`;
+            html += ` <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeBatter}','${weekKey}')">Drop</button>`;
           }
           html += `</td>`;
         }
@@ -2497,6 +2505,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       </div>`;
     }
 
+    // Helper: render a pitching stat cell with manual highlight
+    function pitStatCell(s, field, displayVal) {
+      const manual = (s.manual_fields || []).includes(field);
+      return `<td class="num${manual ? ' stat-manual' : ''}">${displayVal}</td>`;
+    }
+
     // ---- Pitchers for this week ----
     html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${weekRoster.pitchers.length}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
@@ -2512,24 +2526,26 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       [...allPitchersThisWeek].sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0)).forEach(pitcher => {
         const s = pitStatMap[pitcher] || {};
         const onRoster = weekRoster.pitchers.includes(pitcher);
+        const safePitcher = pitcher.replace(/'/g, "\\'");
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
         html += `<td>${pitcher}${onRoster ? '' : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
-        html += `<td class="num">${s.gs || 0}</td>`;
-        html += `<td class="num">${s.w || 0}</td>`;
-        html += `<td class="num">${fmtDec(s.qs || 0)}</td>`;
-        html += `<td class="num">${s.cg || 0}</td>`;
-        html += `<td class="num">${s.cgso || 0}</td>`;
-        html += `<td class="num">${s.nh || 0}</td>`;
-        html += `<td class="num">${fmtDec(s.ip || 0)}</td>`;
-        html += `<td class="num">${s.h || 0}</td>`;
-        html += `<td class="num">${s.er || 0}</td>`;
-        html += `<td class="num">${s.bb || 0}</td>`;
-        html += `<td class="num">${s.k || 0}</td>`;
+        html += pitStatCell(s, 'gs', s.gs || 0);
+        html += pitStatCell(s, 'w', s.w || 0);
+        html += pitStatCell(s, 'qs', fmtDec(s.qs || 0));
+        html += pitStatCell(s, 'cg', s.cg || 0);
+        html += pitStatCell(s, 'cgso', s.cgso || 0);
+        html += pitStatCell(s, 'nh', s.nh || 0);
+        html += pitStatCell(s, 'ip', fmtDec(s.ip || 0));
+        html += pitStatCell(s, 'h', s.h || 0);
+        html += pitStatCell(s, 'er', s.er || 0);
+        html += pitStatCell(s, 'bb', s.bb || 0);
+        html += pitStatCell(s, 'k', s.k || 0);
         html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
         if (isCommissioner && isActive) {
-          html += `<td class="num">`;
+          html += `<td class="num wrs-actions">`;
+          html += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safePitcher}','${weekKey}')" title="Edit stats">Edit</button>`;
           if (onRoster) {
-            html += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${pitcher.replace(/'/g, "\\'")}','${weekKey}')">Drop</button>`;
+            html += ` <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safePitcher}','${weekKey}')">Drop</button>`;
           }
           html += `</td>`;
         }
@@ -3821,6 +3837,205 @@ window.deleteManager = function(index) {
   renderManagersTable();
 };
 
+// Commissioner: open inline stat editor for a player
+window.editPlayerStats = function(manager, statType, playerName, weekKey) {
+  const [round, week] = weekKey.split('|');
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const isBatting = statType === 'batting';
+  const weeklyArr = isBatting ? (sd.weekly_batting || []) : (sd.weekly_pitching || []);
+  const nameField = isBatting ? 'batter' : 'pitcher';
+  const existing = weeklyArr.find(r => r[nameField] === playerName && r.manager === manager && r.round === round && r.week === week);
+
+  // Build the edit dialog
+  const dialogId = `stat-edit-dialog`;
+  let dialog = document.getElementById(dialogId);
+  if (dialog) dialog.remove();
+
+  dialog = document.createElement('div');
+  dialog.id = dialogId;
+  dialog.className = 'stat-edit-overlay';
+
+  const schedEntry = SEASON_SCHEDULE.find(s => s.round === round && s.week === week);
+  const weekLabel = schedEntry ? schedEntry.label : `${round} - ${week}`;
+
+  let fieldsHtml = '';
+  if (isBatting) {
+    const fields = [
+      { key: 'abs', label: 'AB' }, { key: '1b', label: '1B' }, { key: '2b', label: '2B' },
+      { key: '3b', label: '3B' }, { key: 'hr', label: 'HR' }, { key: 'r', label: 'R' },
+      { key: 'rbi', label: 'RBI' }, { key: 'sb', label: 'SB' }, { key: 'bb', label: 'BB' }
+    ];
+    fields.forEach(f => {
+      const val = existing ? (existing[f.key] || 0) : 0;
+      const isManual = existing && (existing.manual_fields || []).includes(f.key);
+      fieldsHtml += `<div class="stat-edit-field">
+        <label${isManual ? ' class="stat-edit-manual-label"' : ''}>${f.label}${isManual ? ' *' : ''}</label>
+        <input type="number" id="se-${f.key}" value="${val}" step="any" min="0">
+      </div>`;
+    });
+  } else {
+    const fields = [
+      { key: 'gs', label: 'GS' }, { key: 'w', label: 'W' }, { key: 'qs', label: 'QS' },
+      { key: 'cg', label: 'CG' }, { key: 'cgso', label: 'CGSO' }, { key: 'nh', label: 'NH' },
+      { key: 'ip', label: 'IP' }, { key: 'h', label: 'H' }, { key: 'er', label: 'ER' },
+      { key: 'bb', label: 'BB' }, { key: 'k', label: 'K' }
+    ];
+    fields.forEach(f => {
+      const val = existing ? (existing[f.key] || 0) : 0;
+      const isManual = existing && (existing.manual_fields || []).includes(f.key);
+      fieldsHtml += `<div class="stat-edit-field">
+        <label${isManual ? ' class="stat-edit-manual-label"' : ''}>${f.label}${isManual ? ' *' : ''}</label>
+        <input type="number" id="se-${f.key}" value="${val}" step="any">
+      </div>`;
+    });
+  }
+
+  dialog.innerHTML = `<div class="stat-edit-card">
+    <div class="stat-edit-header">
+      <h3>Edit Stats: ${playerName}</h3>
+      <span class="text-muted" style="font-size:0.8rem;">${manager} &middot; ${weekLabel}</span>
+    </div>
+    <div class="stat-edit-fields">${fieldsHtml}</div>
+    <p class="text-muted" style="font-size:0.72rem;margin-top:0.5rem;">* = previously edited by commissioner. Changed fields will be protected from future stat uploads.</p>
+    <div class="stat-edit-actions">
+      <button class="btn btn-primary" onclick="savePlayerStats('${manager.replace(/'/g, "\\'")}','${statType}','${playerName.replace(/'/g, "\\'")}','${weekKey}')">Save</button>
+      <button class="btn btn-secondary" onclick="document.getElementById('${dialogId}').remove()">Cancel</button>
+    </div>
+  </div>`;
+
+  document.body.appendChild(dialog);
+};
+
+// Commissioner: save edited stats for a player
+window.savePlayerStats = function(manager, statType, playerName, weekKey) {
+  const [round, week] = weekKey.split('|');
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const isBatting = statType === 'batting';
+  const nameField = isBatting ? 'batter' : 'pitcher';
+
+  if (isBatting) {
+    if (!sd.weekly_batting) sd.weekly_batting = [];
+    const idx = sd.weekly_batting.findIndex(r => r[nameField] === playerName && r.manager === manager && r.round === round && r.week === week);
+    const existing = idx >= 0 ? sd.weekly_batting[idx] : null;
+    const prevManualFields = existing ? (existing.manual_fields || []) : [];
+
+    const newStats = {
+      abs: parseNum(document.getElementById('se-abs').value),
+      '1b': parseNum(document.getElementById('se-1b').value),
+      '2b': parseNum(document.getElementById('se-2b').value),
+      '3b': parseNum(document.getElementById('se-3b').value),
+      hr: parseNum(document.getElementById('se-hr').value),
+      r: parseNum(document.getElementById('se-r').value),
+      rbi: parseNum(document.getElementById('se-rbi').value),
+      sb: parseNum(document.getElementById('se-sb').value),
+      bb: parseNum(document.getElementById('se-bb').value),
+    };
+
+    // Determine which fields changed from existing values
+    const changedFields = new Set(prevManualFields);
+    const statKeys = ['abs', '1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb'];
+    statKeys.forEach(k => {
+      const oldVal = existing ? (existing[k] || 0) : 0;
+      if (newStats[k] !== oldVal) changedFields.add(k);
+    });
+
+    const weeklyScore = calculateBattingScore(newStats);
+
+    const record = {
+      round, week,
+      manager: manager,
+      batter: playerName,
+      status: 'Manual',
+      ...newStats,
+      weekly_score: weeklyScore,
+      total_score: 0,
+      manual_fields: [...changedFields],
+    };
+
+    if (idx >= 0) {
+      sd.weekly_batting[idx] = record;
+    } else {
+      sd.weekly_batting.push(record);
+    }
+
+    // Recompute total_score for this batter
+    let total = 0;
+    sd.weekly_batting.forEach(b => { if (b.batter === playerName) total += (b.weekly_score || 0); });
+    sd.weekly_batting.filter(b => b.batter === playerName).forEach(b => { b.total_score = Math.round(total * 100) / 100; });
+
+  } else {
+    if (!sd.weekly_pitching) sd.weekly_pitching = [];
+    const idx = sd.weekly_pitching.findIndex(r => r[nameField] === playerName && r.manager === manager && r.round === round && r.week === week);
+    const existing = idx >= 0 ? sd.weekly_pitching[idx] : null;
+    const prevManualFields = existing ? (existing.manual_fields || []) : [];
+
+    const newStats = {
+      gs: parseNum(document.getElementById('se-gs').value),
+      w: parseNum(document.getElementById('se-w').value),
+      qs: parseNum(document.getElementById('se-qs').value),
+      cg: parseNum(document.getElementById('se-cg').value),
+      cgso: parseNum(document.getElementById('se-cgso').value),
+      nh: parseNum(document.getElementById('se-nh').value),
+      ip: parseNum(document.getElementById('se-ip').value),
+      h: parseNum(document.getElementById('se-h').value),
+      er: parseNum(document.getElementById('se-er').value),
+      bb: parseNum(document.getElementById('se-bb').value),
+      k: parseNum(document.getElementById('se-k').value),
+    };
+
+    // Determine which fields changed from existing values
+    const changedFields = new Set(prevManualFields);
+    const statKeys = ['gs', 'w', 'qs', 'cg', 'cgso', 'nh', 'ip', 'h', 'er', 'bb', 'k'];
+    statKeys.forEach(k => {
+      const oldVal = existing ? (existing[k] || 0) : 0;
+      if (newStats[k] !== oldVal) changedFields.add(k);
+    });
+
+    const weeklyScore = calculatePitchingScore(newStats);
+
+    const record = {
+      round, week,
+      manager: manager,
+      pitcher: playerName,
+      status: 'Manual',
+      ...newStats,
+      weekly_score: weeklyScore,
+      manual_fields: [...changedFields],
+    };
+
+    if (idx >= 0) {
+      sd.weekly_pitching[idx] = record;
+    } else {
+      sd.weekly_pitching.push(record);
+    }
+  }
+
+  // Auto-add to roster for this week if not already
+  if (!sd.rosters) sd.rosters = {};
+  if (!sd.rosters[manager]) sd.rosters[manager] = {};
+  if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+  const rosterKey = isBatting ? 'batters' : 'pitchers';
+  if (!sd.rosters[manager][weekKey][rosterKey].includes(playerName)) {
+    sd.rosters[manager][weekKey][rosterKey].push(playerName);
+  }
+
+  saveSeason(SELECTED_SEASON, sd);
+
+  // Close dialog
+  const dialog = document.getElementById('stat-edit-dialog');
+  if (dialog) dialog.remove();
+
+  // Re-render the roster view
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
 // Add a player to a specific week's roster for a manager
 window.addToRoster = function(manager, type, selectId, weekKey) {
   const select = document.getElementById(selectId);
@@ -4150,8 +4365,15 @@ window.uploadWeeklyBatting = function(weekIndex) {
     const sd = seasons[SELECTED_SEASON];
     if (!sd.weekly_batting) sd.weekly_batting = [];
 
+    // Preserve records that have manually edited fields
+    const manualBatRecords = sd.weekly_batting.filter(b =>
+      b.round === scheduleWeek.round && b.week === scheduleWeek.week && b.manual_fields && b.manual_fields.length > 0
+    );
+    const manualBatKeys = new Set(manualBatRecords.map(b => `${b.manager}|${b.batter}`));
+
     sd.weekly_batting = sd.weekly_batting.filter(b =>
-      !(b.round === scheduleWeek.round && b.week === scheduleWeek.week)
+      !(b.round === scheduleWeek.round && b.week === scheduleWeek.week) ||
+      (b.manual_fields && b.manual_fields.length > 0)
     );
 
     const batterTotals = {};
@@ -4183,6 +4405,25 @@ window.uploadWeeklyBatting = function(weekIndex) {
         bb: parseNum(row['bb'] || row['BB'] || row['walks'] || 0),
         abs: parseNum(row['ab'] || row['AB'] || row['abs'] || row['atBats'] || 0),
       };
+
+      // Check if this player has a manually-edited record for this week
+      const manualKey = `${manager || null}|${batter}`;
+      const manualRecord = manualBatRecords.find(m => m.batter === batter && m.manager === (manager || null));
+      if (manualRecord) {
+        // Merge: keep manual fields from existing record, use upload for non-manual fields
+        const manualFields = manualRecord.manual_fields || [];
+        const statKeys = ['abs', '1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb'];
+        statKeys.forEach(k => {
+          if (!manualFields.includes(k)) {
+            manualRecord[k] = stats[k]; // update non-manual fields from upload
+          }
+        });
+        // Recalculate score after merging
+        manualRecord.weekly_score = calculateBattingScore(manualRecord);
+        manualRecord.status = manualRecord.status || row['status'] || row['Status'] || null;
+        imported++;
+        return;
+      }
 
       const weeklyScore = calculateBattingScore(stats);
       const previousTotal = batterTotals[batter] || 0;
@@ -4234,8 +4475,14 @@ window.uploadWeeklyPitching = function(weekIndex) {
     const sd = seasons[SELECTED_SEASON];
     if (!sd.weekly_pitching) sd.weekly_pitching = [];
 
+    // Preserve records that have manually edited fields
+    const manualPitRecords = sd.weekly_pitching.filter(p =>
+      p.round === scheduleWeek.round && p.week === scheduleWeek.week && p.manual_fields && p.manual_fields.length > 0
+    );
+
     sd.weekly_pitching = sd.weekly_pitching.filter(p =>
-      !(p.round === scheduleWeek.round && p.week === scheduleWeek.week)
+      !(p.round === scheduleWeek.round && p.week === scheduleWeek.week) ||
+      (p.manual_fields && p.manual_fields.length > 0)
     );
 
     let imported = 0;
@@ -4263,6 +4510,24 @@ window.uploadWeeklyPitching = function(weekIndex) {
         bb: parseNum(row['bb'] || row['BB'] || row['walks'] || 0),
         k: parseNum(row['k'] || row['K'] || row['so'] || row['SO'] || row['strikeouts'] || 0),
       };
+
+      // Check if this player has a manually-edited record for this week
+      const manualRecord = manualPitRecords.find(m => m.pitcher === pitcher && m.manager === (manager || null));
+      if (manualRecord) {
+        // Merge: keep manual fields from existing record, use upload for non-manual fields
+        const manualFields = manualRecord.manual_fields || [];
+        const statKeys = ['gs', 'w', 'qs', 'cg', 'cgso', 'nh', 'ip', 'h', 'er', 'bb', 'k'];
+        statKeys.forEach(k => {
+          if (!manualFields.includes(k)) {
+            manualRecord[k] = stats[k]; // update non-manual fields from upload
+          }
+        });
+        // Recalculate score after merging
+        manualRecord.weekly_score = calculatePitchingScore(manualRecord);
+        manualRecord.status = manualRecord.status || row['status'] || row['Status'] || null;
+        imported++;
+        return;
+      }
 
       const weeklyScore = calculatePitchingScore(stats);
 

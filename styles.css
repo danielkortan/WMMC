@@ -2091,6 +2091,102 @@ footer {
 }
 
 /* ============================================================ */
+/* Manually Edited Stat Highlight */
+/* ============================================================ */
+
+.stat-manual {
+  background: rgba(239, 68, 68, 0.12) !important;
+}
+
+/* ============================================================ */
+/* Commissioner Stat Edit Dialog */
+/* ============================================================ */
+
+.stat-edit-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.stat-edit-card {
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  max-width: 460px;
+  width: 92%;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+
+.stat-edit-header h3 {
+  margin: 0 0 0.15rem;
+  font-size: 1rem;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.stat-edit-fields {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.stat-edit-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+}
+
+.stat-edit-field label.stat-edit-manual-label {
+  color: #dc2626;
+}
+
+.stat-edit-field input {
+  width: 100%;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.stat-edit-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.wrs-actions {
+  white-space: nowrap;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.btn-outline:hover {
+  background: var(--bg);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ============================================================ */
 /* Player Swaps Section */
 /* ============================================================ */
 
