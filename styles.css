@@ -1139,6 +1139,55 @@ input[type="file"] {
   margin-bottom: 0.5rem;
 }
 
+/* ============================================================ */
+/* Google Sheets Sync (Commissioner) */
+/* ============================================================ */
+
+.gsheets-sync-status {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-bottom: 0.35rem;
+}
+
+.gsheets-sync-ok {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+}
+
+.gsheets-sync-err {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+}
+
+.gsheets-sync-info {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+}
+
+.gsheets-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.gsheets-log-item {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.gsheets-log-time {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 130px;
+}
+
 /* Week date labels in tables and headers */
 .week-dates {
   font-size: 0.8rem;

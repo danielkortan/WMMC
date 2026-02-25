@@ -3852,6 +3852,7 @@ function showCommissionerPanel() {
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
   setupASGDateInput();
+  renderGSheetsConfig();
 }
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
@@ -3976,6 +3977,162 @@ function renderScheduleDatesPreview() {
   html += '</tbody></table>';
   preview.innerHTML = html;
 }
+
+// ---- Google Sheets Auto-Sync (Commissioner) ----
+
+async function renderGSheetsConfig() {
+  const statusDiv = document.getElementById('gsheets-status');
+  const logDiv = document.getElementById('gsheets-sync-log');
+  const urlInput = document.getElementById('gsheets-url');
+  const apiKeyInput = document.getElementById('gsheets-api-key');
+  const enabledCheckbox = document.getElementById('gsheets-enabled');
+  if (!statusDiv || !urlInput) return;
+
+  try {
+    const [configResp, statusResp] = await Promise.all([
+      fetch('/api/google-sheets/config'),
+      fetch('/api/google-sheets/sync-status')
+    ]);
+    const config = await configResp.json();
+    const syncStatus = await statusResp.json();
+
+    // Populate form fields
+    if (config.spreadsheet_id && !urlInput.value) {
+      urlInput.value = config.spreadsheet_id;
+    }
+    if (config.api_key_masked && !apiKeyInput.value) {
+      apiKeyInput.placeholder = config.api_key_masked;
+    }
+    enabledCheckbox.checked = config.enabled || false;
+
+    // Show sync status
+    let statusHtml = '';
+    if (syncStatus.last_sync) {
+      const syncDate = new Date(syncStatus.last_sync);
+      const timeAgo = getTimeAgo(syncDate);
+      const result = syncStatus.last_sync_result;
+
+      if (result && result.success) {
+        statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
+          <strong>Last sync:</strong> ${timeAgo} &mdash;
+          ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
+          (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} errors` : ''})
+        </div>`;
+      } else if (result) {
+        statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
+          <strong>Last sync failed:</strong> ${timeAgo} &mdash; ${result.error || 'Unknown error'}
+        </div>`;
+      }
+    }
+
+    if (syncStatus.enabled && syncStatus.next_sync) {
+      const nextDate = new Date(syncStatus.next_sync);
+      statusHtml += `<div class="gsheets-sync-status gsheets-sync-info">
+        <strong>Next auto-sync:</strong> ${nextDate.toLocaleString()}
+      </div>`;
+    }
+
+    statusDiv.innerHTML = statusHtml;
+
+    // Show sync log from season's upload_log
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (sd && sd.upload_log) {
+      const gsheetsLogs = sd.upload_log
+        .filter(l => l.type === 'gsheets_sync')
+        .slice(-5)
+        .reverse();
+      if (gsheetsLogs.length > 0) {
+        let logHtml = '<h3 style="margin-bottom:0.5rem;">Recent Syncs</h3><div class="gsheets-log-list">';
+        gsheetsLogs.forEach(l => {
+          logHtml += `<div class="gsheets-log-item">
+            <span class="gsheets-log-time">${l.timestamp}</span>
+            <span>${l.batting_imported} bat, ${l.pitching_imported} pit records</span>
+          </div>`;
+        });
+        logHtml += '</div>';
+        logDiv.innerHTML = logHtml;
+      }
+    }
+  } catch (e) {
+    statusDiv.innerHTML = `<p class="text-muted">Could not load sync configuration.</p>`;
+  }
+}
+
+function getTimeAgo(date) {
+  const diffMs = Date.now() - date.getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+window.saveGSheetsConfig = async function() {
+  const statusDiv = document.getElementById('gsheets-status');
+  const urlInput = document.getElementById('gsheets-url');
+  const apiKeyInput = document.getElementById('gsheets-api-key');
+  const enabledCheckbox = document.getElementById('gsheets-enabled');
+
+  const body = {
+    spreadsheet_url: urlInput.value.trim(),
+    enabled: enabledCheckbox.checked,
+    season: SELECTED_SEASON
+  };
+  // Only send API key if the user typed a new one
+  if (apiKeyInput.value.trim()) body.api_key = apiKeyInput.value.trim();
+
+  try {
+    statusDiv.innerHTML = '<p>Saving configuration...</p>';
+    const resp = await fetch('/api/google-sheets/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">${data.error}</div>`;
+      return;
+    }
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${data.spreadsheet_id}</div>`;
+    apiKeyInput.value = '';
+    renderGSheetsConfig();
+  } catch (e) {
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Failed to save: ${e.message}</div>`;
+  }
+};
+
+window.triggerGSheetsSync = async function() {
+  const statusDiv = document.getElementById('gsheets-status');
+  statusDiv.innerHTML = '<p>Syncing from Google Sheets... this may take a moment.</p>';
+
+  try {
+    const resp = await fetch('/api/google-sheets/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ season: SELECTED_SEASON })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync failed: ${data.error}</div>`;
+      return;
+    }
+
+    const r = data.result;
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
+      Sync complete! ${r.batting_imported} batting, ${r.pitching_imported} pitching records.
+      ${r.weeks_with_data} weeks with data${r.errors > 0 ? `, ${r.errors} errors` : ''}.
+    </div>`;
+
+    // Reload season data from server to pick up the synced stats
+    await loadData();
+    init();
+  } catch (e) {
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error: ${e.message}</div>`;
+  }
+};
 
 // ---- Manager Management ----
 let editingManagerIndex = -1;

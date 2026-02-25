@@ -211,6 +211,34 @@
           <div id="weekly-upload-sections"></div>
         </div>
 
+        <!-- Google Sheets Auto-Sync -->
+        <div class="card">
+          <h2>Google Sheets Auto-Sync</h2>
+          <p class="upload-hint">Link a Google Sheet to automatically pull weekly stats daily at 5:00 AM. The sheet must have tabs named like "Week 1 Batting", "Week 1 Pitching", etc. Manual uploads above will still work and take priority over synced data.</p>
+          <div id="gsheets-config-form">
+            <div class="form-row" style="margin-top:0.75rem;">
+              <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
+              <input type="text" id="gsheets-url" class="form-input" placeholder="https://docs.google.com/spreadsheets/d/...">
+            </div>
+            <div class="form-row">
+              <label class="upload-label">Google API Key</label>
+              <input type="text" id="gsheets-api-key" class="form-input" placeholder="AIza...">
+              <p class="upload-hint" style="margin-top:0.25rem;">Required. Create at <em>console.cloud.google.com</em> &rarr; APIs &amp; Services &rarr; Credentials. Enable the Google Sheets API.</p>
+            </div>
+            <div class="form-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="gsheets-enabled"> Enable daily auto-sync (5:00 AM)
+              </label>
+            </div>
+            <div class="gsheets-actions" style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
+              <button class="btn btn-primary" onclick="saveGSheetsConfig()">Save Configuration</button>
+              <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
+            </div>
+            <div id="gsheets-status" style="margin-top:0.75rem;"></div>
+          </div>
+          <div id="gsheets-sync-log" style="margin-top:1rem;"></div>
+        </div>
+
         <!-- Manager Management -->
         <div class="card">
           <h2>Manage Managers</h2>
