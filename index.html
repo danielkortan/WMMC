@@ -52,9 +52,7 @@
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
     <button class="nav-btn" data-tab="players">Player Stats</button>
     <button class="nav-btn" data-tab="trends">Trends</button>
-    <button class="nav-btn" data-tab="bracket">Bracket</button>
-    <button class="nav-btn" data-tab="rules">Rules</button>
-    <button class="nav-btn" data-tab="schedule">Schedule</button>
+    <button class="nav-btn" data-tab="league-info">League Info</button>
     <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
   </nav>
 
@@ -64,6 +62,7 @@
       <div class="champion-banner" id="champion-banner"></div>
       <div class="stats-grid" id="stats-grid"></div>
       <div id="scoreboard-content"></div>
+      <div id="scoreboard-bracket"></div>
     </section>
 
     <!-- Weekly Scores -->
@@ -112,35 +111,11 @@
       <div id="trends-content"></div>
     </section>
 
-    <!-- Bracket -->
-    <section id="bracket" class="tab-content">
-      <div class="card">
-        <h2>Elimination Bracket</h2>
-        <div class="bracket-container" id="bracket-container"></div>
-      </div>
-    </section>
-
-    <!-- Rules -->
-    <section id="rules" class="tab-content">
-      <div class="card">
-        <h2>Constitution & Rules</h2>
-        <div id="rules-content"></div>
-      </div>
-      <div class="two-col">
-        <div class="card">
-          <h2>Batting Scoring</h2>
-          <table id="batting-scoring-table" class="data-table scoring-table"></table>
-        </div>
-        <div class="card">
-          <h2>Pitching Scoring</h2>
-          <table id="pitching-scoring-table" class="data-table scoring-table"></table>
-        </div>
-      </div>
-    </section>
-
-    <!-- Season Schedule -->
-    <section id="schedule" class="tab-content">
-      <div id="schedule-content"></div>
+    <!-- League Info (Schedule + Scoring + Constitution) -->
+    <section id="league-info" class="tab-content">
+      <div id="league-schedule-content"></div>
+      <div id="league-scoring-content"></div>
+      <div id="league-rules-content"></div>
     </section>
 
     <!-- Rosters -->

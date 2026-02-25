@@ -428,9 +428,8 @@ function init() {
 
   setupNav();
   setupMyRoster();
-  renderSchedule();
+  renderLeagueInfo();
   renderCommissioner();
-  renderRulesFromScoring();
 }
 
 // ============================================================
@@ -524,25 +523,33 @@ function renderScoreboardContent() {
 
   const leaders = getPoolPlayLeaders();
   const seeding = computePlayoffSeeding(leaders);
+  const hasBracket = !!(DATA && DATA.bracket);
 
   let html = '';
 
-  // Scoring period tabs
-  html += `<div class="card scoreboard-card">
-    <div class="scoreboard-tabs" id="scoreboard-tabs">
-      <button class="sb-tab active" data-period="pp-overall">Pool Play Overall</button>
-      <button class="sb-tab" data-period="pp1">Pool Play 1</button>
-      <button class="sb-tab" data-period="pp2">Pool Play 2</button>
-      <button class="sb-tab" data-period="qf">Quarterfinals</button>
-      <button class="sb-tab" data-period="sf">Semifinals</button>
-      <button class="sb-tab" data-period="finals">Finals</button>
+  // Pool Play section — collapsible when bracket data exists
+  const ppCollapsed = hasBracket;
+  html += `<div class="card scoreboard-card sb-poolplay-section">
+    <div class="sb-poolplay-header" onclick="togglePoolPlay()">
+      <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
+      <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
     </div>
-    <div class="sb-period" id="sb-pp-overall">${renderPPOverallContent(leaders, seeding)}</div>
-    <div class="sb-period" id="sb-pp1" style="display:none">${renderPoolPeriodContent('pp1')}</div>
-    <div class="sb-period" id="sb-pp2" style="display:none">${renderPoolPeriodContent('pp2')}</div>
-    <div class="sb-period" id="sb-qf" style="display:none">${renderQFContent()}</div>
-    <div class="sb-period" id="sb-sf" style="display:none">${renderSFContent()}</div>
-    <div class="sb-period" id="sb-finals" style="display:none">${renderFinalsContent()}</div>
+    <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">
+      <div class="scoreboard-tabs" id="scoreboard-tabs">
+        <button class="sb-tab active" data-period="pp-overall">Pool Play Overall</button>
+        <button class="sb-tab" data-period="pp1">Pool Play 1</button>
+        <button class="sb-tab" data-period="pp2">Pool Play 2</button>
+        <button class="sb-tab" data-period="qf">Quarterfinals</button>
+        <button class="sb-tab" data-period="sf">Semifinals</button>
+        <button class="sb-tab" data-period="finals">Finals</button>
+      </div>
+      <div class="sb-period" id="sb-pp-overall">${renderPPOverallContent(leaders, seeding)}</div>
+      <div class="sb-period" id="sb-pp1" style="display:none">${renderPoolPeriodContent('pp1')}</div>
+      <div class="sb-period" id="sb-pp2" style="display:none">${renderPoolPeriodContent('pp2')}</div>
+      <div class="sb-period" id="sb-qf" style="display:none">${renderQFContent()}</div>
+      <div class="sb-period" id="sb-sf" style="display:none">${renderSFContent()}</div>
+      <div class="sb-period" id="sb-finals" style="display:none">${renderFinalsContent()}</div>
+    </div>
   </div>`;
 
   // Awards
@@ -551,6 +558,15 @@ function renderScoreboardContent() {
   container.innerHTML = html;
   setupScoreboardTabs();
 }
+
+window.togglePoolPlay = function() {
+  const body = document.getElementById('sb-poolplay-body');
+  const btn = document.getElementById('sb-poolplay-toggle-btn');
+  if (!body || !btn) return;
+  const hidden = body.style.display === 'none';
+  body.style.display = hidden ? 'block' : 'none';
+  btn.textContent = hidden ? 'Hide' : 'Show';
+};
 
 function setupScoreboardTabs() {
   const tabs = document.querySelectorAll('.sb-tab');
@@ -1148,9 +1164,10 @@ function renderPlayers() {
 
 // ---- Bracket ----
 function renderBracket() {
-  const container = document.getElementById('bracket-container');
+  const container = document.getElementById('scoreboard-bracket');
+  if (!container) return;
   if (!DATA || !DATA.bracket) {
-    container.innerHTML = '<p>No bracket data available for this season.</p>';
+    container.innerHTML = '';
     return;
   }
 
@@ -1177,69 +1194,308 @@ function renderBracket() {
     `;
   }
 
-  container.innerHTML = `
-    <div class="bracket-grid">
-      <div class="bracket-round">
-        <h3>Quarterfinals</h3>
-        ${(b.qf_matchups || []).map(m => matchupHTML(m, true)).join('')}
-      </div>
-      <div class="bracket-round" style="margin-top: 3rem;">
-        <h3>Semifinals</h3>
-        ${(b.sf_matchups || []).map(m => matchupHTML(m, true)).join('')}
-      </div>
-      <div class="bracket-round" style="margin-top: 6rem;">
-        <h3>Finals</h3>
-        ${matchupHTML(b.finals, false)}
-      </div>
-      <div class="bracket-round" style="margin-top: 6rem;">
-        <h3>3rd Place</h3>
-        ${matchupHTML(b.consolation, false)}
+  container.innerHTML = `<div class="card">
+    <h2>Playoff Bracket</h2>
+    <div class="bracket-container">
+      <div class="bracket-grid">
+        <div class="bracket-round">
+          <h3>Quarterfinals</h3>
+          ${(b.qf_matchups || []).map(m => matchupHTML(m, true)).join('')}
+        </div>
+        <div class="bracket-round" style="margin-top: 3rem;">
+          <h3>Semifinals</h3>
+          ${(b.sf_matchups || []).map(m => matchupHTML(m, true)).join('')}
+        </div>
+        <div class="bracket-round" style="margin-top: 6rem;">
+          <h3>Finals</h3>
+          ${matchupHTML(b.finals, false)}
+        </div>
+        <div class="bracket-round" style="margin-top: 6rem;">
+          <h3>3rd Place</h3>
+          ${matchupHTML(b.consolation, false)}
+        </div>
       </div>
     </div>
-  `;
+  </div>`;
 }
 
-// ---- Swaps ----
-// ---- Rules ----
-function renderRulesFromScoring() {
-  const batTable = document.getElementById('batting-scoring-table');
-  const pitchTable = document.getElementById('pitching-scoring-table');
+// ---- League Info (Schedule + Scoring + Constitution) ----
 
-  batTable.innerHTML = `
-    <thead><tr><th>Category</th><th>Points</th></tr></thead>
-    <tbody>
-      ${Object.entries(SCORING.batting).map(([k, v]) =>
-        `<tr><td>${k}</td><td class="${v >= 0 ? 'positive' : 'negative'}">${v}</td></tr>`
-      ).join('')}
-    </tbody>
-  `;
+// Default constitution/rules text from the WMMC document
+const WMMC_DEFAULT_RULES = [
+  { heading: true, text: 'Purpose' },
+  { text: 'The Whit Merrifield Memorial Cup is a fantasy baseball game that uses limited rosters and daily fantasy scoring to be played in conjunction with the season-long rotisserie League. The game will consist of a subset of a Franchise\'s rotisserie League players competing in a Cup format of round robin play followed by an elimination tournament.' },
+  { heading: true, text: 'Format' },
+  { text: 'The WMMC will start 10 weeks prior to the All-Star Break. Franchises will be organized into pools based on prior year\'s finishing position.' },
+  { text: 'Franchises will be first categorized into Pots based on prior year\'s finishing position: Pot 1 (1st\u20133rd place), Pot 2 (4th\u20136th), Pot 3 (7th\u20139th), Pot 4 (10th\u201312th). The three players in Pot 1 draft their pools in snake order.' },
+  { heading: true, text: 'Player Selection' },
+  { text: 'Owners will select 4 batters and 3 starting pitchers that will accumulate points for the current round.' },
+  { text: 'At the conclusion of each round, players can be swapped in or out.' },
+  { text: 'If a player is traded or dropped from an owner\'s team, they must be replaced in WMMC.' },
+  { text: 'Injured players can be replaced if they receive an official IL designation, but cannot be subbed back in until the next round unless they are used to replace another dropped/traded/injured player.' },
+  { text: 'Each owner is allowed one free player swap per round, in addition to normal status change swaps.' },
+  { text: 'For playoff rounds, owners are restricted to one drop swap per round.' },
+  { text: 'There are no limits on the number of times a player can be selected.' },
+  { text: 'All replacement player requests must be filed to the Commissioner\'s office and confirmed by the Commissioner.' },
+  { heading: true, text: 'Schedule' },
+  { text: '10 Weeks from All-Star Break \u2013 Pool Play 1 starts (5 weeks)' },
+  { text: '5 Weeks from All-Star Break \u2013 Pool Play 2 starts (5 weeks)' },
+  { text: 'Sunday Before All-Star Break \u2013 Pool Play ends (1 week break)' },
+  { text: 'Week after All-Star Break \u2013 Quarterfinals (2 weeks)' },
+  { text: 'Week after Quarterfinals \u2013 Semifinals (2 weeks)' },
+  { text: 'Week after Semifinals \u2013 Finals and 3rd-Place Game (2 weeks each, concurrently)' },
+  { heading: true, text: 'Pool Play' },
+  { text: 'Each Owner will score points using Daily Fantasy Scoring for two 5 week periods.' },
+  { text: 'Owners can select or change players for the second five week period, but the pools will remain the same.' },
+  { text: 'Pool Play Advancement Rules: The winners of PP1 and PP2 per pool automatically advance to the Quarterfinals (up to 6 teams). Top 2 high-scoring non-PP winners are automatically selected as Wildcards. If a pool\'s PP1 champion is also PP2 champion, the next highest overall scoring team from any pool is selected.' },
+  { heading: true, text: 'Elimination Play' },
+  { text: 'After pool play finishes, Owners will be seeded: Pool Play Winners by overall score, then Wildcards by overall score.' },
+  { text: 'There will be three rounds of two-week single-elimination games: Quarterfinals, Semifinals, and Finals.' },
+  { text: 'Bracket: 1st vs 8th (QF1), 4th vs 5th (QF2), 3rd vs 6th (QF3), 2nd vs 7th (QF4). QF1 winner vs QF2 winner (SF1), QF3 winner vs QF4 winner (SF2). SF1 winner vs SF2 winner (Final), SF1 loser vs SF2 loser (3rd place).' },
+  { text: 'The bracket will not reseed after each round. Owners use the same lineup/replacement rules during playoffs.' },
+];
 
-  pitchTable.innerHTML = `
-    <thead><tr><th>Category</th><th>Points</th></tr></thead>
-    <tbody>
-      ${Object.entries(SCORING.pitching).map(([k, v]) =>
-        `<tr><td>${k}</td><td class="${v >= 0 ? 'positive' : 'negative'}">${v}</td></tr>`
-      ).join('')}
-    </tbody>
-  `;
+function renderLeagueInfo() {
+  renderLeagueSchedule();
+  renderLeagueScoring();
+  renderLeagueRules();
+}
 
-  const container = document.getElementById('rules-content');
-  if (DATA && DATA.rules_text) {
-    const headings = ['Purpose', 'Format', 'Player Selection', 'Schedule', 'Pool Play', 'Elimination Play', 'Scoring'];
-    let html = '';
-    for (const line of DATA.rules_text) {
-      if (line === 'The Whit Merrifield Memorial Cup') continue;
-      if (headings.includes(line)) {
-        html += `<p class="rule-heading">${line}</p>`;
-      } else {
-        html += `<p>${line}</p>`;
-      }
-    }
-    container.innerHTML = html;
-  } else {
-    container.innerHTML = '<p>Rules are defined in the Constitution. See scoring tables below.</p>';
+function renderLeagueSchedule() {
+  const container = document.getElementById('league-schedule-content');
+  if (!container) return;
+  const seasons = getSeasons();
+  const seasonData = seasons[SELECTED_SEASON];
+  if (!seasonData) { container.innerHTML = ''; return; }
+
+  const isActive = seasonData.status === 'active';
+  const dates = isActive ? getScheduleDates() : (seasonData.schedule_dates || null);
+  const uploadedWeeks = new Set();
+  if (isActive) {
+    (seasonData.weekly_batting || []).forEach(b => uploadedWeeks.add(`${b.round}|${b.week}`));
+  } else if (seasonData.data && seasonData.data.team_weekly) {
+    seasonData.data.team_weekly.forEach(t => uploadedWeeks.add(`${t.round}|${t.week}`));
   }
+
+  let html = `<div class="card"><h2>${SELECTED_SEASON} Season Schedule</h2>`;
+  html += '<div class="schedule-timeline">';
+  let prevRound = '';
+  SEASON_SCHEDULE.forEach((s, i) => {
+    const weekKey = `${s.round}|${s.week}`;
+    const hasData = uploadedWeeks.has(weekKey);
+    const dateStr = dates && dates[i] ? fmtDateRangeShort(dates[i].start, dates[i].end) : '';
+    const statusClass = hasData ? 'tl-done' : (isActive ? 'tl-pending' : 'tl-empty');
+
+    // Round separator
+    if (s.round !== prevRound) {
+      const roundLabels = { PP1: 'Pool Play 1', PP2: 'Pool Play 2', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+      html += `<div class="tl-round-label">${roundLabels[s.round] || s.round}</div>`;
+      prevRound = s.round;
+    }
+
+    html += `<div class="tl-item ${statusClass}">
+      <div class="tl-marker"></div>
+      <div class="tl-content">
+        <span class="tl-week">${s.week}</span>
+        ${dateStr ? `<span class="tl-dates">${dateStr}</span>` : ''}
+        <span class="tl-status">${hasData ? 'Complete' : (isActive ? 'Pending' : '')}</span>
+      </div>
+    </div>`;
+  });
+  html += '</div></div>';
+  container.innerHTML = html;
 }
+
+function renderLeagueScoring() {
+  const container = document.getElementById('league-scoring-content');
+  if (!container) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const isCommissioner = !!(COMMISSIONER_EMAIL || (LOGGED_IN_EMAIL && getManagers().some(m => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase() && m.commissioner)));
+
+  // Use season-level overrides if they exist, otherwise use defaults
+  const batScoring = (sd && sd.custom_batting_scoring) || SCORING.batting;
+  const pitScoring = (sd && sd.custom_pitching_scoring) || SCORING.pitching;
+
+  let html = `<div class="card">
+    <div class="league-section-header">
+      <h2>Scoring</h2>
+      ${isCommissioner ? '<button class="btn btn-sm btn-outline" onclick="editLeagueScoring()">Edit</button>' : ''}
+    </div>
+    <div id="league-scoring-display">
+      <div class="two-col">
+        <div>
+          <h3>Batting</h3>
+          <table class="data-table scoring-table">
+            <thead><tr><th>Category</th><th>Points</th></tr></thead>
+            <tbody>
+              ${Object.entries(batScoring).map(([k, v]) =>
+                `<tr><td>${k}</td><td class="${v >= 0 ? 'positive' : 'negative'}">${v}</td></tr>`
+              ).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <h3>Pitching</h3>
+          <table class="data-table scoring-table">
+            <thead><tr><th>Category</th><th>Points</th></tr></thead>
+            <tbody>
+              ${Object.entries(pitScoring).map(([k, v]) =>
+                `<tr><td>${k}</td><td class="${v >= 0 ? 'positive' : 'negative'}">${v}</td></tr>`
+              ).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>`;
+
+  container.innerHTML = html;
+}
+
+function renderLeagueRules() {
+  const container = document.getElementById('league-rules-content');
+  if (!container) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const isCommissioner = !!(COMMISSIONER_EMAIL || (LOGGED_IN_EMAIL && getManagers().some(m => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase() && m.commissioner)));
+
+  // Use season-level custom rules if they exist, or historical rules_text, or defaults
+  let rules;
+  if (sd && sd.custom_rules) {
+    rules = sd.custom_rules;
+  } else if (DATA && DATA.rules_text) {
+    // Convert old format to new format
+    const headings = ['Purpose', 'Format', 'Player Selection', 'Schedule', 'Pool Play', 'Elimination Play', 'Scoring'];
+    rules = DATA.rules_text
+      .filter(line => line !== 'The Whit Merrifield Memorial Cup')
+      .map(line => headings.includes(line) ? { heading: true, text: line } : { text: line });
+  } else {
+    rules = WMMC_DEFAULT_RULES;
+  }
+
+  let rulesHtml = '';
+  rules.forEach(r => {
+    if (r.heading) {
+      rulesHtml += `<p class="rule-heading">${r.text}</p>`;
+    } else {
+      rulesHtml += `<p>${r.text}</p>`;
+    }
+  });
+
+  let html = `<div class="card">
+    <div class="league-section-header">
+      <h2>Constitution & Rules</h2>
+      ${isCommissioner ? '<button class="btn btn-sm btn-outline" onclick="editLeagueRules()">Edit</button>' : ''}
+    </div>
+    <div id="league-rules-display">${rulesHtml}</div>
+  </div>`;
+
+  container.innerHTML = html;
+}
+
+// Commissioner: edit scoring values
+window.editLeagueScoring = function() {
+  const container = document.getElementById('league-scoring-display');
+  if (!container) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const batScoring = (sd && sd.custom_batting_scoring) || { ...SCORING.batting };
+  const pitScoring = (sd && sd.custom_pitching_scoring) || { ...SCORING.pitching };
+
+  let html = '<div class="two-col">';
+  html += '<div><h3>Batting</h3><div class="stat-edit-fields">';
+  Object.entries(batScoring).forEach(([k, v]) => {
+    html += `<div class="stat-edit-field"><label>${k}</label><input type="number" id="se-bat-${k}" value="${v}" step="0.1"></div>`;
+  });
+  html += '</div></div>';
+
+  html += '<div><h3>Pitching</h3><div class="stat-edit-fields">';
+  Object.entries(pitScoring).forEach(([k, v]) => {
+    html += `<div class="stat-edit-field"><label>${k}</label><input type="number" id="se-pit-${k}" value="${v}" step="0.1"></div>`;
+  });
+  html += '</div></div></div>';
+
+  html += `<div class="stat-edit-actions" style="margin-top:0.75rem;">
+    <button class="btn btn-primary" onclick="saveLeagueScoring()">Save Scoring</button>
+    <button class="btn btn-secondary" onclick="renderLeagueScoring()">Cancel</button>
+  </div>`;
+
+  container.innerHTML = html;
+};
+
+window.saveLeagueScoring = function() {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const batScoring = {};
+  Object.keys(SCORING.batting).forEach(k => {
+    batScoring[k] = parseFloat(document.getElementById(`se-bat-${k}`).value) || 0;
+  });
+  const pitScoring = {};
+  Object.keys(SCORING.pitching).forEach(k => {
+    pitScoring[k] = parseFloat(document.getElementById(`se-pit-${k}`).value) || 0;
+  });
+
+  sd.custom_batting_scoring = batScoring;
+  sd.custom_pitching_scoring = pitScoring;
+  saveSeason(SELECTED_SEASON, sd);
+  renderLeagueScoring();
+};
+
+// Commissioner: edit constitution/rules
+window.editLeagueRules = function() {
+  const container = document.getElementById('league-rules-display');
+  if (!container) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+
+  // Get current rules as plain text
+  let rules;
+  if (sd && sd.custom_rules) {
+    rules = sd.custom_rules;
+  } else if (DATA && DATA.rules_text) {
+    const headings = ['Purpose', 'Format', 'Player Selection', 'Schedule', 'Pool Play', 'Elimination Play', 'Scoring'];
+    rules = DATA.rules_text
+      .filter(line => line !== 'The Whit Merrifield Memorial Cup')
+      .map(line => headings.includes(line) ? { heading: true, text: line } : { text: line });
+  } else {
+    rules = WMMC_DEFAULT_RULES;
+  }
+
+  // Convert to editable text: headings prefixed with ##
+  const textLines = rules.map(r => r.heading ? `## ${r.text}` : r.text).join('\n');
+
+  container.innerHTML = `<div>
+    <p class="text-muted" style="font-size:0.78rem;margin-bottom:0.5rem;">Lines starting with <strong>##</strong> will be rendered as section headings. All other lines are paragraphs.</p>
+    <textarea id="league-rules-editor" class="league-rules-textarea">${textLines}</textarea>
+    <div class="stat-edit-actions" style="margin-top:0.5rem;">
+      <button class="btn btn-primary" onclick="saveLeagueRules()">Save Rules</button>
+      <button class="btn btn-secondary" onclick="renderLeagueRules()">Cancel</button>
+    </div>
+  </div>`;
+};
+
+window.saveLeagueRules = function() {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const text = document.getElementById('league-rules-editor').value;
+  const lines = text.split('\n').filter(l => l.trim());
+  sd.custom_rules = lines.map(l => {
+    if (l.startsWith('## ')) return { heading: true, text: l.slice(3).trim() };
+    return { text: l.trim() };
+  });
+
+  saveSeason(SELECTED_SEASON, sd);
+  renderLeagueRules();
+};
 
 // ============================================================
 // Active Season Display
@@ -1331,8 +1587,27 @@ function showActiveSeason(seasonData) {
   renderActiveWeekly(seasonData);
   renderActivePlayers(seasonData);
 
-  // Clear historical-only sections
-  document.getElementById('bracket-container').innerHTML = '<p>Bracket will be available during playoff rounds.</p>';
+  // Check if playoffs have started (QF/SF/Finals data exists)
+  const rounds = new Set([
+    ...(seasonData.weekly_batting || []).map(b => b.round),
+    ...(seasonData.weekly_pitching || []).map(p => p.round)
+  ]);
+  const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
+
+  // Bracket section on scoreboard
+  const bracketContainer = document.getElementById('scoreboard-bracket');
+  if (bracketContainer) {
+    if (hasPlayoffData) {
+      // Collapse pool play when playoffs have started
+      const ppBody = document.getElementById('sb-poolplay-body');
+      const ppBtn = document.getElementById('sb-poolplay-toggle-btn');
+      if (ppBody) ppBody.style.display = 'none';
+      if (ppBtn) ppBtn.textContent = 'Show';
+      bracketContainer.innerHTML = '<div class="card"><h2>Playoff Bracket</h2><p class="text-muted">Bracket will be available for completed seasons.</p></div>';
+    } else {
+      bracketContainer.innerHTML = '';
+    }
+  }
 }
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
@@ -1491,30 +1766,42 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // ---- Build full HTML ----
+  // Check if playoff data exists — if so, pool play starts collapsed
+  const rounds = new Set([...batting.map(b => b.round), ...pitching.map(p => p.round)]);
+  const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
+  const ppCollapsed = hasPlayoffData;
+
   let html = '';
 
+  html += `<div class="card scoreboard-card sb-poolplay-section">
+    <div class="sb-poolplay-header" onclick="togglePoolPlay()">
+      <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
+      <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
+    </div>
+    <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">`;
+
   // Pool Play Overall (combined PP1 + PP2, single list sorted by total)
-  html += `<div class="card scoreboard-section">
-    <h2>Pool Play Overall</h2>
+  html += `<div class="scoreboard-section">
+    <h3>Pool Play Overall</h3>
     ${renderOverallTable(overallScores)}
   </div>`;
 
   // Pool Play 1
-  html += `<div class="card scoreboard-section">
-    <h2>Pool Play 1</h2>
+  html += `<div class="scoreboard-section">
+    <h3>Pool Play 1</h3>
     ${renderPoolSection(pp1Scores, 'Pool Play 1', 'pp1')}
   </div>`;
 
   // Pool Play 2
-  html += `<div class="card scoreboard-section">
-    <h2>Pool Play 2</h2>
+  html += `<div class="scoreboard-section">
+    <h3>Pool Play 2</h3>
     ${renderPoolSection(pp2Scores, 'Pool Play 2', 'pp2')}
   </div>`;
 
   // Playoff Advancement summary
   if (allPPWinners.size > 0 || wildcardSet.size > 0) {
-    html += `<div class="card scoreboard-section">
-      <h2>Playoff Advancement</h2>
+    html += `<div class="scoreboard-section">
+      <h3>Playoff Advancement</h3>
       <div class="advancement-summary">
         <p><strong>Pool Play Winners (${allPPWinners.size}):</strong> ${[...allPPWinners].sort().join(', ') || 'TBD'}</p>
         <p><strong>Wild Cards (${numWildcards} spot${numWildcards !== 1 ? 's' : ''}):</strong> ${[...wildcardSet].sort().join(', ') || 'TBD'}</p>
@@ -1528,9 +1815,9 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       </div>
     </div>`;
   }
+  html += `</div></div>`; // close sb-poolplay-body and sb-poolplay-section
 
   // Playoff period tabs (QF / SF / Finals) — only if data exists
-  const rounds = new Set([...batting.map(b => b.round), ...pitching.map(p => p.round)]);
   const hasQF = rounds.has('QF');
   const hasSF = rounds.has('SF');
   const hasFinals = rounds.has('Finals');
@@ -2208,62 +2495,6 @@ function countUploadedWeeks(seasonData) {
 // ============================================================
 // Season Schedule View
 // ============================================================
-function renderSchedule() {
-  const container = document.getElementById('schedule-content');
-  const seasons = getSeasons();
-  const seasonData = seasons[SELECTED_SEASON];
-
-  if (!seasonData) { container.innerHTML = ''; return; }
-
-  const isActive = seasonData.status === 'active';
-
-  let html = `<div class="card"><h2>${SELECTED_SEASON} Season Schedule</h2>`;
-
-  if (!isActive && seasonData.data && seasonData.data.team_weekly) {
-    const weekSet = new Set(seasonData.data.team_weekly.map(t => `${t.round}|${t.week}`));
-    const dates = (seasonData.schedule_dates) || null;
-    html += '<div class="schedule-grid">';
-    SEASON_SCHEDULE.forEach((s, i) => {
-      const hasData = weekSet.has(`${s.round}|${s.week}`);
-      const dateStr = dates && dates[i] ? fmtDateRangeShort(dates[i].start, dates[i].end) : '';
-      html += `
-        <div class="schedule-week ${hasData ? 'schedule-completed' : 'schedule-empty'}">
-          <div class="schedule-week-num">Week ${i + 1}</div>
-          <div class="schedule-week-label">${s.label}</div>
-          ${dateStr ? `<div class="schedule-week-dates">${dateStr}</div>` : ''}
-          <div class="schedule-week-status">${hasData ? 'Completed' : 'No Data'}</div>
-        </div>
-      `;
-    });
-    html += '</div>';
-  } else if (isActive) {
-    const batting = seasonData.weekly_batting || [];
-    const uploadedWeeks = new Set();
-    batting.forEach(b => uploadedWeeks.add(`${b.round}|${b.week}`));
-    const dates = getScheduleDates();
-
-    html += '<div class="schedule-grid">';
-    SEASON_SCHEDULE.forEach((s, i) => {
-      const hasData = uploadedWeeks.has(`${s.round}|${s.week}`);
-      const dateStr = dates && dates[i] ? fmtDateRangeShort(dates[i].start, dates[i].end) : '';
-      html += `
-        <div class="schedule-week ${hasData ? 'schedule-completed' : 'schedule-pending'}">
-          <div class="schedule-week-num">Week ${i + 1}</div>
-          <div class="schedule-week-label">${s.label}</div>
-          ${dateStr ? `<div class="schedule-week-dates">${dateStr}</div>` : ''}
-          <div class="schedule-week-status">${hasData ? 'Stats Uploaded' : 'Pending'}</div>
-        </div>
-      `;
-    });
-    html += '</div>';
-  } else {
-    html += '<p>No schedule data available.</p>';
-  }
-
-  html += '</div>';
-  container.innerHTML = html;
-}
-
 // ============================================================
 // Rosters Page
 // ============================================================

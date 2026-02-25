@@ -978,6 +978,167 @@ input[type="file"] {
   color: var(--text-light);
 }
 
+/* ============================================================ */
+/* Pool Play Collapsible Section */
+/* ============================================================ */
+
+.sb-poolplay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+
+.sb-poolplay-header:hover {
+  opacity: 0.85;
+}
+
+.sb-poolplay-body {
+  margin-top: 0.75rem;
+}
+
+/* ============================================================ */
+/* Timeline Schedule (League Info) */
+/* ============================================================ */
+
+.schedule-timeline {
+  position: relative;
+  padding-left: 1.5rem;
+}
+
+.tl-round-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+  margin: 1rem 0 0.35rem -0.5rem;
+}
+
+.tl-round-label:first-child {
+  margin-top: 0;
+}
+
+.tl-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0;
+  position: relative;
+}
+
+.tl-item::before {
+  content: '';
+  position: absolute;
+  left: -1.18rem;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+.tl-item:last-child::before {
+  display: none;
+}
+
+.tl-marker {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+  margin-left: -1.52rem;
+  z-index: 1;
+}
+
+.tl-done .tl-marker {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+.tl-pending .tl-marker {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tl-content {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.tl-week {
+  font-weight: 600;
+  min-width: 52px;
+}
+
+.tl-dates {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.tl-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.tl-done .tl-status {
+  color: var(--success);
+}
+
+.tl-pending .tl-status {
+  color: var(--accent);
+}
+
+/* ============================================================ */
+/* League Info Section Headers */
+/* ============================================================ */
+
+.league-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.league-section-header h2 {
+  margin: 0;
+  border: none;
+  padding: 0;
+}
+
+.league-rules-textarea {
+  width: 100%;
+  min-height: 400px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+#league-rules-display {
+  line-height: 1.8;
+}
+
+#league-rules-display p {
+  margin-bottom: 0.75rem;
+}
+
+#league-rules-display .rule-heading {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--primary);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
 /* Week date labels in tables and headers */
 .week-dates {
   font-size: 0.8rem;
