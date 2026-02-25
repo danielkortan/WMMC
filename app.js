@@ -3010,31 +3010,30 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     }
   }
 
-  // All Swaps list
+  // All Swaps table (compact)
   html += `<div class="swap-list-section">
     <h3>All Swaps</h3>`;
   if (mySwaps.length > 0) {
     const sorted = [...mySwaps].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-    html += '<div class="swap-list">';
+    html += '<div class="table-wrapper"><table class="data-table compact-table swap-table"><thead><tr>';
+    html += '<th>Player In</th><th>Player Out</th><th>Reason</th><th>Date</th><th>Status</th>';
+    html += '</tr></thead><tbody>';
     sorted.forEach(s => {
-      const status = s.status || 'approved'; // historical swaps have no status field
+      const status = s.status || 'approved';
       const badgeClass = status === 'approved' ? 'swap-badge-approved'
         : status === 'pending' ? 'swap-badge-pending'
         : 'swap-badge-denied';
       const badgeLabel = status.charAt(0).toUpperCase() + status.slice(1);
       const date = s.swap_date || (s.timestamp ? s.timestamp.split(' ')[0] : '');
-      html += `<div class="swap-list-item">
-        <div class="swap-list-main">
-          <span class="swap-list-players">${s.player_out || '?'} &rarr; ${s.player_in || '?'}</span>
-          <span class="swap-badge ${badgeClass}">${badgeLabel}</span>
-        </div>
-        <div class="swap-list-meta">
-          <span class="swap-list-reason">${s.reason || ''}</span>
-          <span class="swap-list-date">${date}</span>
-        </div>
-      </div>`;
+      html += `<tr>`;
+      html += `<td>${s.player_in || '—'}</td>`;
+      html += `<td>${s.player_out || '—'}</td>`;
+      html += `<td>${s.reason || ''}</td>`;
+      html += `<td>${date}</td>`;
+      html += `<td><span class="swap-badge ${badgeClass}">${badgeLabel}</span></td>`;
+      html += `</tr>`;
     });
-    html += '</div>';
+    html += '</tbody></table></div>';
   } else {
     html += '<p class="text-muted">No swaps recorded.</p>';
   }
@@ -3423,12 +3422,29 @@ function setupManualUpdate() {
         total_score: Math.round((previousTotal + weeklyScore) * 100) / 100
       });
 
-      // Auto-add player to roster if not already rostered
+      // Auto-add player to roster for this week if not already rostered
+      const weekKey = `${scheduleWeek.round}|${scheduleWeek.week}`;
       if (!sd.rosters) sd.rosters = {};
-      if (!sd.rosters[manager]) sd.rosters[manager] = { batters: [], pitchers: [] };
-      if (!sd.rosters[manager].batters.includes(playerName)) {
-        sd.rosters[manager].batters.push(playerName);
+      if (!sd.rosters[manager]) sd.rosters[manager] = {};
+      if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+      if (!sd.rosters[manager][weekKey].batters.includes(playerName)) {
+        sd.rosters[manager][weekKey].batters.push(playerName);
       }
+
+      // Log as a swap entry so it appears in All Swaps
+      if (!sd.swaps) sd.swaps = [];
+      sd.swaps.push({
+        id: Date.now().toString(),
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        email: COMMISSIONER_EMAIL || ROSTER_EMAIL || '',
+        manager: manager,
+        player_out: null,
+        player_in: playerName,
+        reason: 'Manual Update',
+        swap_date: new Date().toISOString().split('T')[0],
+        week_key: weekKey,
+        status: 'approved',
+      });
 
       saveSeason(SELECTED_SEASON, sd);
       document.getElementById('manual-update-status').innerHTML =
@@ -3468,12 +3484,29 @@ function setupManualUpdate() {
         weekly_score: weeklyScore
       });
 
-      // Auto-add player to roster if not already rostered
+      // Auto-add player to roster for this week if not already rostered
+      const weekKeyP = `${scheduleWeek.round}|${scheduleWeek.week}`;
       if (!sd.rosters) sd.rosters = {};
-      if (!sd.rosters[manager]) sd.rosters[manager] = { batters: [], pitchers: [] };
-      if (!sd.rosters[manager].pitchers.includes(playerName)) {
-        sd.rosters[manager].pitchers.push(playerName);
+      if (!sd.rosters[manager]) sd.rosters[manager] = {};
+      if (!sd.rosters[manager][weekKeyP]) sd.rosters[manager][weekKeyP] = { batters: [], pitchers: [] };
+      if (!sd.rosters[manager][weekKeyP].pitchers.includes(playerName)) {
+        sd.rosters[manager][weekKeyP].pitchers.push(playerName);
       }
+
+      // Log as a swap entry so it appears in All Swaps
+      if (!sd.swaps) sd.swaps = [];
+      sd.swaps.push({
+        id: Date.now().toString(),
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        email: COMMISSIONER_EMAIL || ROSTER_EMAIL || '',
+        manager: manager,
+        player_out: null,
+        player_in: playerName,
+        reason: 'Manual Update',
+        swap_date: new Date().toISOString().split('T')[0],
+        week_key: weekKeyP,
+        status: 'approved',
+      });
 
       saveSeason(SELECTED_SEASON, sd);
       document.getElementById('manual-update-status').innerHTML =
