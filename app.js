@@ -1991,6 +1991,22 @@ function renderTrends() {
   const allBatters = [...new Set(battingData.map(b => b.player))].sort();
   const allPitchers = [...new Set(pitchingData.map(p => p.player))].sort();
 
+  // ---- Pool groups ----
+  const managers = getManagers();
+  const poolGroups = {};
+  managers.forEach(m => {
+    if (m.pool) {
+      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
+      poolGroups[m.pool].push(m.name);
+    }
+  });
+  const poolNums = Object.keys(poolGroups).sort();
+  const hasPools = poolNums.length > 0;
+
+  // Build manager→pool lookup
+  const mgrPoolMap = {};
+  managers.forEach(m => { if (m.pool) mgrPoolMap[m.name] = m.pool; });
+
   // ---- State ----
   let selectedManagers = new Set(allManagers);
   let managerMode = 'weekly';
@@ -1998,6 +2014,16 @@ function renderTrends() {
   let mgrsForPitchers = new Set(allManagers);
   let selectedBatters = new Set();
   let selectedPitchers = new Set();
+
+  // ---- Pool filter buttons HTML ----
+  const poolBtnsHtml = hasPools ? `<div class="trends-control-row">
+            <span class="trends-label">By Pool</span>
+            ${poolNums.map(p => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}">Pool ${p}</button>`).join('')}
+          </div>` : '';
+  const mgrPoolBtnsHtml = (prefix) => hasPools ? `<div class="trends-control-row">
+            <span class="trends-label">By Pool</span>
+            ${poolNums.map(p => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}" data-prefix="${prefix}">Pool ${p}</button>`).join('')}
+          </div>` : '';
 
   // ---- Build HTML ----
   container.innerHTML = `
@@ -2018,6 +2044,7 @@ function renderTrends() {
               <button class="type-btn" id="mode-cumulative">Cumulative</button>
             </div>
           </div>
+          ${poolBtnsHtml}
           <div class="trends-control-row">
             <span class="trends-label">Managers</span>
             <button class="btn btn-sm btn-secondary" id="mgr-all-btn">All</button>
@@ -2031,6 +2058,7 @@ function renderTrends() {
       <!-- Batters -->
       <div id="trends-batters-panel" class="trends-panel" style="display:none;">
         <div class="trends-controls">
+          ${mgrPoolBtnsHtml('bat')}
           <div class="trends-control-row">
             <span class="trends-label">By Manager</span>
             <button class="btn btn-sm btn-secondary" id="bat-mgr-all-btn">All</button>
@@ -2050,6 +2078,7 @@ function renderTrends() {
       <!-- Pitchers -->
       <div id="trends-pitchers-panel" class="trends-panel" style="display:none;">
         <div class="trends-controls">
+          ${mgrPoolBtnsHtml('pit')}
           <div class="trends-control-row">
             <span class="trends-label">By Manager</span>
             <button class="btn btn-sm btn-secondary" id="pit-mgr-all-btn">All</button>
@@ -2276,6 +2305,45 @@ function renderTrends() {
   document.getElementById('pit-none-btn').onclick = () => {
     selectedPitchers.clear(); refreshPitcherPlayerChips(); drawPitcherChart();
   };
+
+  // ---- Pool filter buttons ----
+  if (hasPools) {
+    // Manager Trends pool buttons
+    document.querySelectorAll('#trends-managers-panel .pool-filter-btn').forEach(btn => {
+      btn.onclick = () => {
+        const pool = btn.dataset.pool;
+        const poolMembers = poolGroups[pool] || [];
+        selectedManagers.clear();
+        poolMembers.forEach(m => { if (allManagers.includes(m)) selectedManagers.add(m); });
+        renderChips('manager-chips', allManagers, selectedManagers, drawManagerChart);
+        drawManagerChart();
+      };
+    });
+
+    // Batters pool buttons
+    document.querySelectorAll('#trends-batters-panel .pool-filter-btn').forEach(btn => {
+      btn.onclick = () => {
+        const pool = btn.dataset.pool;
+        const poolMembers = poolGroups[pool] || [];
+        mgrsForBatters.clear();
+        poolMembers.forEach(m => { if (allManagers.includes(m)) mgrsForBatters.add(m); });
+        renderChips('batter-mgr-chips', allManagers, mgrsForBatters, () => { refreshBatterPlayerChips(); drawBatterChart(); });
+        selectedBatters.clear(); refreshBatterPlayerChips(); drawBatterChart();
+      };
+    });
+
+    // Pitchers pool buttons
+    document.querySelectorAll('#trends-pitchers-panel .pool-filter-btn').forEach(btn => {
+      btn.onclick = () => {
+        const pool = btn.dataset.pool;
+        const poolMembers = poolGroups[pool] || [];
+        mgrsForPitchers.clear();
+        poolMembers.forEach(m => { if (allManagers.includes(m)) mgrsForPitchers.add(m); });
+        renderChips('pitcher-mgr-chips', allManagers, mgrsForPitchers, () => { refreshPitcherPlayerChips(); drawPitcherChart(); });
+        selectedPitchers.clear(); refreshPitcherPlayerChips(); drawPitcherChart();
+      };
+    });
+  }
 }
 
 // ============================================================
@@ -3931,6 +3999,42 @@ function setupSeasonSetupToggle() {
     body.style.display = isHidden ? 'block' : 'none';
     btn.textContent = isHidden ? 'Hide' : 'Show';
   };
+
+  // Reset Season button
+  const resetBtn = document.getElementById('reset-season-btn');
+  const resetStatus = document.getElementById('reset-season-status');
+  if (resetBtn) {
+    resetBtn.onclick = () => {
+      const confirmed = confirm(
+        `Are you sure you want to reset all season data for ${SELECTED_SEASON}?\n\n` +
+        'This will clear:\n' +
+        '  - All player pools (batters & pitchers)\n' +
+        '  - All rosters\n' +
+        '  - All uploaded weekly stats\n' +
+        '  - All swap history\n\n' +
+        'Manager names, emails, pool assignments, and credentials will NOT be affected.\n\n' +
+        'This action cannot be undone.'
+      );
+      if (!confirmed) return;
+
+      const seasons = getSeasons();
+      const sd = seasons[SELECTED_SEASON];
+      if (!sd) return;
+
+      sd.batters_pool = [];
+      sd.pitchers_pool = [];
+      sd.weekly_batting = [];
+      sd.weekly_pitching = [];
+      sd.rosters = {};
+      sd.team_weekly = [];
+      sd.swaps = [];
+      sd.upload_log = [];
+
+      saveSeason(SELECTED_SEASON, sd);
+      if (resetStatus) resetStatus.innerHTML = '<p style="color:var(--success);font-weight:600;">Season data has been reset.</p>';
+      init();
+    };
+  }
 }
 
 // ---- ASG Date Input ----
