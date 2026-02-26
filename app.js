@@ -280,6 +280,7 @@ function enterApp(mgr) {
   document.getElementById('footer-year').textContent = CURRENT_YEAR;
   buildSeasonSelector();
   setupNav();
+  updateOnlineStatus();
   init();
 }
 
@@ -389,6 +390,69 @@ function initGoogleSignIn() {
     { theme: 'outline', size: 'large', width: '100%', text: 'signin_with' }
   );
 }
+
+// ---- Online Users Tracking ----
+function getInitials(name) {
+  if (!name) return '?';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  return name.substring(0, 2).toUpperCase();
+}
+
+function updateOnlineStatus() {
+  if (!LOGGED_IN_EMAIL) return;
+  const mgr = findManagerByEmail(LOGGED_IN_EMAIL);
+  if (!mgr) return;
+  try {
+    const onlineData = JSON.parse(localStorage.getItem('wmmc_online_users') || '{}');
+    onlineData[LOGGED_IN_EMAIL] = { name: mgr.name, timestamp: Date.now() };
+    localStorage.setItem('wmmc_online_users', JSON.stringify(onlineData));
+    // Also try server-side heartbeat
+    fetch('/api/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: LOGGED_IN_EMAIL, name: mgr.name })
+    }).catch(() => {});
+  } catch (e) {}
+  renderOnlineUsers();
+}
+
+function renderOnlineUsers() {
+  const bar = document.getElementById('online-users-bar');
+  if (!bar) return;
+  let onlineData = {};
+  try { onlineData = JSON.parse(localStorage.getItem('wmmc_online_users') || '{}'); } catch(e) {}
+
+  // Also try to get from server
+  fetch('/api/online-users').then(r => r.json()).then(serverData => {
+    if (serverData && typeof serverData === 'object') {
+      Object.assign(onlineData, serverData);
+      localStorage.setItem('wmmc_online_users', JSON.stringify(onlineData));
+    }
+    displayOnlineUsers(bar, onlineData);
+  }).catch(() => {
+    displayOnlineUsers(bar, onlineData);
+  });
+}
+
+function displayOnlineUsers(bar, onlineData) {
+  const now = Date.now();
+  const FIVE_MIN = 5 * 60 * 1000;
+  const active = Object.entries(onlineData)
+    .filter(([email, data]) => now - data.timestamp < FIVE_MIN)
+    .map(([email, data]) => data);
+
+  if (active.length === 0) { bar.innerHTML = ''; return; }
+
+  bar.innerHTML = active.map(u => {
+    const initials = getInitials(u.name);
+    const isMe = u.name === (findManagerByEmail(LOGGED_IN_EMAIL) || {}).name;
+    return `<span class="online-user-chip${isMe ? ' online-user-me' : ''}" title="${u.name}">${initials}</span>`;
+  }).join('');
+}
+
+// Heartbeat every 60 seconds
+setInterval(updateOnlineStatus, 60000);
 
 function buildSeasonSelector() {
   const seasons = getSeasons();
@@ -1595,27 +1659,221 @@ function showActiveSeason(seasonData) {
   renderActiveWeekly(seasonData);
   renderActivePlayers(seasonData);
 
-  // Check if playoffs have started (QF/SF/Finals data exists)
-  const rounds = new Set([
-    ...(seasonData.weekly_batting || []).map(b => b.round),
-    ...(seasonData.weekly_pitching || []).map(p => p.round)
-  ]);
-  const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
+  // Always show playoff bracket on scoreboard
+  const finalized = seasonData.finalized_rounds || [];
+  const ppFinalized = finalized.includes('PP');
 
-  // Bracket section on scoreboard
   const bracketContainer = document.getElementById('scoreboard-bracket');
   if (bracketContainer) {
-    if (hasPlayoffData) {
-      // Collapse pool play when playoffs have started
+    bracketContainer.innerHTML = buildActivePlayoffBracket(seasonData, ppFinalized);
+
+    // If pool play is finalized, minimize pool play section and feature bracket
+    if (ppFinalized) {
       const ppBody = document.getElementById('sb-poolplay-body');
       const ppBtn = document.getElementById('sb-poolplay-toggle-btn');
       if (ppBody) ppBody.style.display = 'none';
       if (ppBtn) ppBtn.textContent = 'Show';
-      bracketContainer.innerHTML = '<div class="card"><h2>Playoff Bracket</h2><p class="text-muted">Bracket will be available for completed seasons.</p></div>';
-    } else {
-      bracketContainer.innerHTML = '';
     }
   }
+}
+
+// Build an active season playoff bracket (tentative or finalized)
+function buildActivePlayoffBracket(seasonData, ppFinalized) {
+  const managerScores = computeManagerScores(seasonData);
+  if (managerScores.length === 0) return '';
+
+  // Compute seeding from pool play scores
+  const managers = getManagers();
+  const poolGroups = {};
+  managers.forEach(m => {
+    if (m.pool) {
+      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
+      poolGroups[m.pool].push(m.name);
+    }
+  });
+
+  // Compute PP1 and PP2 scores per manager
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+  const mgrPPScores = {};
+
+  managerScores.forEach(ms => {
+    mgrPPScores[ms.manager] = { pp1: 0, pp2: 0, total: ms.total, pool: null };
+  });
+
+  batting.forEach(b => {
+    if (!b.manager || !mgrPPScores[b.manager]) return;
+    if (b.round === 'PP1') mgrPPScores[b.manager].pp1 += (b.weekly_score || 0);
+    if (b.round === 'PP2') mgrPPScores[b.manager].pp2 += (b.weekly_score || 0);
+  });
+  pitching.forEach(p => {
+    if (!p.manager || !mgrPPScores[p.manager]) return;
+    if (p.round === 'PP1') mgrPPScores[p.manager].pp1 += (p.weekly_score || 0);
+    if (p.round === 'PP2') mgrPPScores[p.manager].pp2 += (p.weekly_score || 0);
+  });
+
+  managers.forEach(m => {
+    if (mgrPPScores[m.name]) mgrPPScores[m.name].pool = m.pool;
+  });
+
+  // Find pool leaders (PP1 and PP2)
+  const pp1Leaders = new Set();
+  const pp2Leaders = new Set();
+  for (const [poolName, members] of Object.entries(poolGroups)) {
+    let bestPP1 = null, bestPP1Score = -Infinity;
+    let bestPP2 = null, bestPP2Score = -Infinity;
+    members.forEach(name => {
+      const s = mgrPPScores[name];
+      if (s && s.pp1 > bestPP1Score) { bestPP1 = name; bestPP1Score = s.pp1; }
+      if (s && s.pp2 > bestPP2Score) { bestPP2 = name; bestPP2Score = s.pp2; }
+    });
+    if (bestPP1) pp1Leaders.add(bestPP1);
+    if (bestPP2) pp2Leaders.add(bestPP2);
+  }
+
+  const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
+  const wildcardsNeeded = Math.max(0, 8 - allLeaders.size);
+
+  // Get PP totals for seeding
+  const ppTotals = {};
+  Object.entries(mgrPPScores).forEach(([name, s]) => {
+    ppTotals[name] = s.pp1 + s.pp2;
+  });
+
+  const nonLeaders = Object.keys(ppTotals)
+    .filter(n => !allLeaders.has(n))
+    .sort((a, b) => ppTotals[b] - ppTotals[a]);
+  const wildcards = nonLeaders.slice(0, wildcardsNeeded);
+
+  const qualifiers = [...[...allLeaders].sort((a, b) => ppTotals[b] - ppTotals[a]), ...wildcards];
+  if (qualifiers.length < 8) {
+    // Not enough managers to form a bracket
+    return `<div class="card"><h2>Playoff Bracket ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
+      <p class="text-muted">Need at least 8 qualifying managers to display the bracket. Currently ${qualifiers.length}.</p></div>`;
+  }
+
+  const seeded = qualifiers.slice(0, 8);
+
+  // Build bracket matchups (1v8, 2v7, 3v6, 4v5)
+  const qfMatchups = [
+    { label: 'QF1', s1: { seed: 1, name: seeded[0] }, s2: { seed: 8, name: seeded[7] } },
+    { label: 'QF2', s1: { seed: 2, name: seeded[1] }, s2: { seed: 7, name: seeded[6] } },
+    { label: 'QF3', s1: { seed: 3, name: seeded[2] }, s2: { seed: 6, name: seeded[5] } },
+    { label: 'QF4', s1: { seed: 4, name: seeded[3] }, s2: { seed: 5, name: seeded[4] } },
+  ];
+
+  // Compute round scores for matchups
+  function getRoundScore(manager, round) {
+    let total = 0;
+    batting.filter(b => b.manager === manager && b.round === round).forEach(b => total += (b.weekly_score || 0));
+    pitching.filter(p => p.manager === manager && p.round === round).forEach(p => total += (p.weekly_score || 0));
+    return Math.round(total * 100) / 100;
+  }
+
+  const finalized = seasonData.finalized_rounds || [];
+  const tentativeLabel = !ppFinalized ? ' <span class="badge badge-wildcard">Tentative</span>' : '';
+
+  let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
+    <h2>Playoff Bracket${tentativeLabel}</h2>
+    <div class="active-bracket">`;
+
+  // QF column
+  html += '<div class="bracket-round"><div class="bracket-round-label">Quarterfinals</div>';
+  const qfWinners = [];
+  qfMatchups.forEach(m => {
+    const s1Score = getRoundScore(m.s1.name, 'QF');
+    const s2Score = getRoundScore(m.s2.name, 'QF');
+    const qfDone = finalized.includes('QF');
+    const winner = qfDone ? (s1Score >= s2Score ? m.s1.name : m.s2.name) : null;
+    qfWinners.push(winner);
+    html += `<div class="bracket-matchup">
+      <div class="bracket-matchup-label">${m.label}</div>
+      <div class="bracket-team ${winner === m.s1.name ? 'bracket-winner' : ''}">
+        <span class="bracket-seed">${m.s1.seed}</span>
+        <span class="bracket-name">${m.s1.name}</span>
+        <span class="bracket-score">${s1Score > 0 ? fmt(s1Score) : '-'}</span>
+      </div>
+      <div class="bracket-team ${winner === m.s2.name ? 'bracket-winner' : ''}">
+        <span class="bracket-seed">${m.s2.seed}</span>
+        <span class="bracket-name">${m.s2.name}</span>
+        <span class="bracket-score">${s2Score > 0 ? fmt(s2Score) : '-'}</span>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+
+  // SF column
+  html += '<div class="bracket-round"><div class="bracket-round-label">Semifinals</div>';
+  const sfMatchups = [
+    { label: 'SF1', t1: qfWinners[0] || 'TBD', t2: qfWinners[1] || 'TBD' },
+    { label: 'SF2', t1: qfWinners[2] || 'TBD', t2: qfWinners[3] || 'TBD' },
+  ];
+  const sfWinners = [];
+  const sfLosers = [];
+  sfMatchups.forEach(m => {
+    const s1Score = m.t1 !== 'TBD' ? getRoundScore(m.t1, 'SF') : 0;
+    const s2Score = m.t2 !== 'TBD' ? getRoundScore(m.t2, 'SF') : 0;
+    const sfDone = finalized.includes('SF');
+    const winner = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Score >= s2Score ? m.t1 : m.t2) : null;
+    const loser = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Score >= s2Score ? m.t2 : m.t1) : null;
+    sfWinners.push(winner);
+    sfLosers.push(loser);
+    html += `<div class="bracket-matchup">
+      <div class="bracket-matchup-label">${m.label}</div>
+      <div class="bracket-team ${winner === m.t1 ? 'bracket-winner' : ''}">
+        <span class="bracket-name">${m.t1}</span>
+        <span class="bracket-score">${s1Score > 0 ? fmt(s1Score) : '-'}</span>
+      </div>
+      <div class="bracket-team ${winner === m.t2 ? 'bracket-winner' : ''}">
+        <span class="bracket-name">${m.t2}</span>
+        <span class="bracket-score">${s2Score > 0 ? fmt(s2Score) : '-'}</span>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+
+  // Finals column
+  html += '<div class="bracket-round"><div class="bracket-round-label">Finals</div>';
+  const f1 = sfWinners[0] || 'TBD';
+  const f2 = sfWinners[1] || 'TBD';
+  const f1Score = f1 !== 'TBD' ? getRoundScore(f1, 'Finals') : 0;
+  const f2Score = f2 !== 'TBD' ? getRoundScore(f2, 'Finals') : 0;
+  const finalsDone = finalized.includes('Finals');
+  const champion = finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? (f1Score >= f2Score ? f1 : f2) : null;
+
+  html += `<div class="bracket-matchup">
+    <div class="bracket-matchup-label">Championship</div>
+    <div class="bracket-team ${champion === f1 ? 'bracket-winner bracket-champion' : ''}">
+      <span class="bracket-name">${f1}</span>
+      <span class="bracket-score">${f1Score > 0 ? fmt(f1Score) : '-'}</span>
+    </div>
+    <div class="bracket-team ${champion === f2 ? 'bracket-winner bracket-champion' : ''}">
+      <span class="bracket-name">${f2}</span>
+      <span class="bracket-score">${f2Score > 0 ? fmt(f2Score) : '-'}</span>
+    </div>
+  </div>`;
+
+  // 3rd Place
+  const t1 = sfLosers[0] || 'TBD';
+  const t2 = sfLosers[1] || 'TBD';
+  const t1Score = t1 !== 'TBD' ? getRoundScore(t1, 'Finals') : 0;
+  const t2Score = t2 !== 'TBD' ? getRoundScore(t2, 'Finals') : 0;
+  const thirdPlace = finalsDone && t1 !== 'TBD' && t2 !== 'TBD' ? (t1Score >= t2Score ? t1 : t2) : null;
+
+  html += `<div class="bracket-matchup" style="margin-top:1rem;">
+    <div class="bracket-matchup-label">3rd Place</div>
+    <div class="bracket-team ${thirdPlace === t1 ? 'bracket-winner' : ''}">
+      <span class="bracket-name">${t1}</span>
+      <span class="bracket-score">${t1Score > 0 ? fmt(t1Score) : '-'}</span>
+    </div>
+    <div class="bracket-team ${thirdPlace === t2 ? 'bracket-winner' : ''}">
+      <span class="bracket-name">${t2}</span>
+      <span class="bracket-score">${t2Score > 0 ? fmt(t2Score) : '-'}</span>
+    </div>
+  </div>`;
+
+  html += '</div></div></div>';
+  return html;
 }
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
@@ -2351,6 +2609,18 @@ function renderTrends() {
 // ============================================================
 // Scoring Engine
 // ============================================================
+// Convert IP from baseball notation to decimal: .1 -> .33, .2 -> .66
+function convertIP(rawIP) {
+  const str = String(rawIP);
+  const dotIndex = str.indexOf('.');
+  if (dotIndex === -1) return rawIP; // whole number, no conversion needed
+  const whole = parseInt(str.substring(0, dotIndex)) || 0;
+  const frac = str.substring(dotIndex + 1);
+  if (frac === '1') return Math.round((whole + 0.33) * 100) / 100;
+  if (frac === '2') return Math.round((whole + 0.66) * 100) / 100;
+  return rawIP; // already in decimal or unexpected format
+}
+
 function calculateBattingScore(stats) {
   let score = 0;
   score += (stats['1b'] || 0) * SCORING.batting['1B'];
@@ -2663,16 +2933,103 @@ function renderRosterData(managerName, isCommissioner) {
   </div>`;
   html += '</div>';
 
+  // ---- Roster Tabs ----
+  html += `<div class="roster-tabs">
+    <button class="roster-tab active" data-rtab="per-week" onclick="switchRosterTab(this, 'per-week')">Per-Week Roster</button>
+    <button class="roster-tab" data-rtab="dates-rostered" onclick="switchRosterTab(this, 'dates-rostered')">Dates Rostered</button>
+    <button class="roster-tab" data-rtab="team-stats" onclick="switchRosterTab(this, 'team-stats')">Team Stats</button>
+    <button class="roster-tab" data-rtab="swaps" onclick="switchRosterTab(this, 'swaps')">Swaps</button>
+  </div>`;
+
   // ---- Per-Week Roster Sections ----
+  html += `<div class="roster-tab-content" id="rtab-per-week" style="display:block;">`;
   html += buildPerWeekRoster(managerName, isCommissioner, seasonData);
+  html += `</div>`;
+
+  // ---- Dates Rostered ----
+  html += `<div class="roster-tab-content" id="rtab-dates-rostered" style="display:none;">`;
+  html += buildDatesRosteredSection(managerName, seasonData);
+  html += `</div>`;
 
   // ---- Team Stats Breakdown ----
+  html += `<div class="roster-tab-content" id="rtab-team-stats" style="display:none;">`;
   html += buildTeamStatsBreakdown(managerName, seasonData, p2m);
+  html += `</div>`;
 
   // ---- Player Swaps ----
+  html += `<div class="roster-tab-content" id="rtab-swaps" style="display:none;">`;
   html += buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m);
+  html += `</div>`;
 
   container.innerHTML = html;
+  // Initialize type-to-search inputs after DOM is rendered
+  setupPlayerSearchInputs();
+}
+
+// Compute cumulative scores for all players across all weeks
+function computeAllPlayerCumulativeScores(seasonData) {
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+
+  const batCumulative = {}; // playerName -> total score
+  batting.forEach(b => {
+    if (!b.batter) return;
+    batCumulative[b.batter] = (batCumulative[b.batter] || 0) + (b.weekly_score || 0);
+  });
+
+  const pitCumulative = {};
+  pitching.forEach(p => {
+    if (!p.pitcher) return;
+    pitCumulative[p.pitcher] = (pitCumulative[p.pitcher] || 0) + (p.weekly_score || 0);
+  });
+
+  // Round
+  for (const k of Object.keys(batCumulative)) batCumulative[k] = Math.round(batCumulative[k] * 100) / 100;
+  for (const k of Object.keys(pitCumulative)) pitCumulative[k] = Math.round(pitCumulative[k] * 100) / 100;
+
+  return { batCumulative, pitCumulative };
+}
+
+// Compute weekly rankings for all players in a given week
+function computeWeeklyRankings(seasonData, round, week) {
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+
+  const weekBatScores = {};
+  batting.filter(b => b.round === round && b.week === week).forEach(b => {
+    if (!b.batter) return;
+    weekBatScores[b.batter] = Math.max(weekBatScores[b.batter] || 0, b.weekly_score || 0);
+  });
+
+  const weekPitScores = {};
+  pitching.filter(p => p.round === round && p.week === week).forEach(p => {
+    if (!p.pitcher) return;
+    weekPitScores[p.pitcher] = Math.max(weekPitScores[p.pitcher] || 0, p.weekly_score || 0);
+  });
+
+  // Sort and rank
+  const batSorted = Object.entries(weekBatScores).sort((a, b) => b[1] - a[1]);
+  const batRanks = {};
+  batSorted.forEach(([name], i) => { batRanks[name] = { rank: i + 1, total: batSorted.length }; });
+
+  const pitSorted = Object.entries(weekPitScores).sort((a, b) => b[1] - a[1]);
+  const pitRanks = {};
+  pitSorted.forEach(([name], i) => { pitRanks[name] = { rank: i + 1, total: pitSorted.length }; });
+
+  return { batRanks, pitRanks };
+}
+
+// Compute cumulative rankings for all players across all weeks
+function computeCumulativeRankings(batCumulative, pitCumulative) {
+  const batSorted = Object.entries(batCumulative).sort((a, b) => b[1] - a[1]);
+  const batRanks = {};
+  batSorted.forEach(([name], i) => { batRanks[name] = { rank: i + 1, total: batSorted.length }; });
+
+  const pitSorted = Object.entries(pitCumulative).sort((a, b) => b[1] - a[1]);
+  const pitRanks = {};
+  pitSorted.forEach(([name], i) => { pitRanks[name] = { rank: i + 1, total: pitSorted.length }; });
+
+  return { batRanks, pitRanks };
 }
 
 // Build per-week roster sections showing batters and pitchers for each week
@@ -2682,6 +3039,10 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
 
   const batting = isHistorical ? (DATA.batting_weekly || []) : (seasonData.weekly_batting || []);
   const pitching = isHistorical ? (DATA.pitching_weekly || []) : (seasonData.weekly_pitching || []);
+
+  // Compute cumulative scores and rankings
+  const cumScores = computeAllPlayerCumulativeScores(isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching });
+  const cumRankings = computeCumulativeRankings(cumScores.batCumulative, cumScores.pitCumulative);
 
   // Available players for commissioner add
   let availBatters = [];
@@ -2737,6 +3098,9 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const weekBatting = batting.filter(b => b.manager === managerName && b.round === round && b.week === week);
     const weekPitching = pitching.filter(p => p.manager === managerName && p.round === round && p.week === week);
 
+    // Compute weekly rankings for this week
+    const weekRanks = computeWeeklyRankings(isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching }, round, week);
+
     // Compute week totals
     const batTotal = weekBatting.reduce((s, b) => s + (b.weekly_score || 0), 0);
     const pitTotal = weekPitching.reduce((s, p) => s + (p.weekly_score || 0), 0);
@@ -2771,13 +3135,16 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const allBattersThisWeek = new Set([...weekRoster.batters, ...weekBatting.map(b => b.batter)]);
     if (allBattersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
-      html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th>';
+      html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
       if (isCommissioner && isActive) html += '<th></th>';
       html += '</tr></thead><tbody>';
       [...allBattersThisWeek].sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0)).forEach(batter => {
         const s = batStatMap[batter] || {};
         const onRoster = weekRoster.batters.includes(batter);
         const safeBatter = batter.replace(/'/g, "\\'");
+        const wkRank = weekRanks.batRanks[batter];
+        const cumScore = cumScores.batCumulative[batter] || 0;
+        const cumRank = cumRankings.batRanks[batter];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
         html += `<td>${batter}${onRoster ? '' : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
         html += batStatCell(s, 'abs', s.abs || 0);
@@ -2790,6 +3157,9 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         html += batStatCell(s, 'sb', s.sb || 0);
         html += batStatCell(s, 'bb', s.bb || 0);
         html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
+        html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
+        html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
+        html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
         if (isCommissioner && isActive) {
           html += `<td class="num wrs-actions">`;
           html += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeBatter}','${weekKey}')" title="Edit stats">Edit</button>`;
@@ -2804,13 +3174,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No batters rostered this week.</p>';
     }
-    // Commissioner: add batter for this week
+    // Commissioner: add batter for this week (type-to-search)
     if (isCommissioner && isActive) {
-      html += `<div class="roster-add-row">
-        <select id="add-bat-${safeId}" class="form-select" style="max-width:200px;"><option value="">Add batter...</option>
-          ${availBatters.filter(b => !weekRoster.batters.includes(b)).map(b => `<option value="${b}">${b}</option>`).join('')}
-        </select>
-        <button class="btn btn-sm btn-primary" onclick="addToRoster('${safeMgr}','batters','add-bat-${safeId}','${weekKey}')">Add</button>
+      html += `<div class="roster-add-row player-search-container">
+        <input type="text" id="add-bat-${safeId}" class="form-input player-search-input" placeholder="Type to search batters..." autocomplete="off" data-pool-type="batters" data-week-key="${weekKey}" data-manager="${safeMgr}">
+        <div class="player-search-results" id="results-bat-${safeId}"></div>
+        <button class="btn btn-sm btn-primary" onclick="addToRosterFromSearch('${safeMgr}','batters','add-bat-${safeId}','${weekKey}')">Add</button>
       </div>`;
     }
 
@@ -2829,18 +3198,27 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const allPitchersThisWeek = new Set([...weekRoster.pitchers, ...weekPitching.map(p => p.pitcher)]);
     if (allPitchersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
-      html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th>';
+      html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
       if (isCommissioner && isActive) html += '<th></th>';
       html += '</tr></thead><tbody>';
       [...allPitchersThisWeek].sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0)).forEach(pitcher => {
         const s = pitStatMap[pitcher] || {};
         const onRoster = weekRoster.pitchers.includes(pitcher);
         const safePitcher = pitcher.replace(/'/g, "\\'");
+        const wkRank = weekRanks.pitRanks[pitcher];
+        const cumScore = cumScores.pitCumulative[pitcher] || 0;
+        const cumRank = cumRankings.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
         html += `<td>${pitcher}${onRoster ? '' : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
         html += pitStatCell(s, 'gs', s.gs || 0);
         html += pitStatCell(s, 'w', s.w || 0);
-        html += pitStatCell(s, 'qs', fmtDec(s.qs || 0));
+        // QS: highlight yellow if pitcher had 2+ GS (qs_highlight flag)
+        if (s.qs_highlight) {
+          const manual = (s.manual_fields || []).includes('qs');
+          html += `<td class="num qs-highlight${manual ? ' stat-manual' : ''}" title="Multiple GS this week - QS not calculated">&mdash;</td>`;
+        } else {
+          html += pitStatCell(s, 'qs', s.qs != null ? fmtDec(s.qs) : 0);
+        }
         html += pitStatCell(s, 'cg', s.cg || 0);
         html += pitStatCell(s, 'cgso', s.cgso || 0);
         html += pitStatCell(s, 'nh', s.nh || 0);
@@ -2850,6 +3228,9 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         html += pitStatCell(s, 'bb', s.bb || 0);
         html += pitStatCell(s, 'k', s.k || 0);
         html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
+        html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
+        html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
+        html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
         if (isCommissioner && isActive) {
           html += `<td class="num wrs-actions">`;
           html += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safePitcher}','${weekKey}')" title="Edit stats">Edit</button>`;
@@ -2864,13 +3245,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No pitchers rostered this week.</p>';
     }
-    // Commissioner: add pitcher for this week
+    // Commissioner: add pitcher for this week (type-to-search)
     if (isCommissioner && isActive) {
-      html += `<div class="roster-add-row">
-        <select id="add-pit-${safeId}" class="form-select" style="max-width:200px;"><option value="">Add pitcher...</option>
-          ${availPitchers.filter(p => !weekRoster.pitchers.includes(p)).map(p => `<option value="${p}">${p}</option>`).join('')}
-        </select>
-        <button class="btn btn-sm btn-primary" onclick="addToRoster('${safeMgr}','pitchers','add-pit-${safeId}','${weekKey}')">Add</button>
+      html += `<div class="roster-add-row player-search-container">
+        <input type="text" id="add-pit-${safeId}" class="form-input player-search-input" placeholder="Type to search pitchers..." autocomplete="off" data-pool-type="pitchers" data-week-key="${weekKey}" data-manager="${safeMgr}">
+        <div class="player-search-results" id="results-pit-${safeId}"></div>
+        <button class="btn btn-sm btn-primary" onclick="addToRosterFromSearch('${safeMgr}','pitchers','add-pit-${safeId}','${weekKey}')">Add</button>
       </div>`;
     }
 
@@ -3022,6 +3402,108 @@ function computePlayerRankings(type, seasonData, p2m) {
     rankings[name] = { overallRank: i + 1, totalPlayers: sorted.length };
   });
   return rankings;
+}
+
+window.switchRosterTab = function(btn, tabKey) {
+  document.querySelectorAll('.roster-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.roster-tab-content').forEach(c => c.style.display = 'none');
+  btn.classList.add('active');
+  const target = document.getElementById('rtab-' + tabKey);
+  if (target) target.style.display = 'block';
+};
+
+// Build "Dates Rostered" section showing start/end date for each player
+function buildDatesRosteredSection(managerName, seasonData) {
+  if (!seasonData || seasonData.status !== 'active') return '<p class="text-muted">Dates rostered is only available for active seasons.</p>';
+
+  const dates = getScheduleDates();
+  if (!dates || dates.length === 0) return '<p class="text-muted">Schedule dates not set. Set All-Star Game date in Commissioner page first.</p>';
+
+  const swaps = (seasonData.swaps || []).filter(s => s.manager === managerName && s.status === 'approved');
+
+  // Track rostered periods for each player
+  function computePlayerDates(type) {
+    const poolKey = type === 'batters' ? 'batters' : 'pitchers';
+    const playerDates = {};
+
+    SEASON_SCHEDULE.forEach((sched, weekIdx) => {
+      const weekKey = `${sched.round}|${sched.week}`;
+      const roster = seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey];
+      if (!roster) return;
+      const players = roster[poolKey] || [];
+      const weekDates = dates[weekIdx];
+      if (!weekDates) return;
+
+      players.forEach(player => {
+        if (!playerDates[player]) playerDates[player] = [];
+
+        // Find if player was added mid-week (swap log)
+        const addSwap = swaps.find(s => s.player_in === player && s.week_key === weekKey);
+        const startDate = addSwap ? addSwap.swap_date : weekDates.start;
+
+        // Find if player was dropped during this week
+        const dropSwap = swaps.find(s => s.player_out === player && s.week_key === weekKey);
+        const endDate = dropSwap ? dropSwap.swap_date : weekDates.end;
+
+        playerDates[player].push({ weekKey, weekIdx, startDate, endDate, label: sched.label });
+      });
+    });
+    return playerDates;
+  }
+
+  let html = '';
+
+  ['batters', 'pitchers'].forEach(type => {
+    const label = type === 'batters' ? 'Batters' : 'Pitchers';
+    const playerDates = computePlayerDates(type);
+    const playerNames = Object.keys(playerDates).sort();
+
+    html += `<div class="card" style="margin-bottom:1rem;">
+      <h3>${label} - Dates Rostered</h3>`;
+
+    if (playerNames.length === 0) {
+      html += '<p class="text-muted">No players rostered.</p>';
+    } else {
+      html += '<div class="table-wrapper"><table class="data-table compact-table"><thead><tr>';
+      html += '<th>Player</th><th>Start Date</th><th>End Date</th><th>Weeks</th>';
+      html += '</tr></thead><tbody>';
+
+      playerNames.forEach(player => {
+        const periods = playerDates[player];
+        // Merge contiguous periods
+        const merged = [];
+        periods.sort((a, b) => a.weekIdx - b.weekIdx);
+        periods.forEach(p => {
+          if (merged.length > 0) {
+            const last = merged[merged.length - 1];
+            if (last.weekIdx + 1 === p.weekIdx && last.endDate >= last.origEnd) {
+              // Contiguous week - extend
+              last.endDate = p.endDate;
+              last.origEnd = p.endDate;
+              last.weekCount++;
+              last.endLabel = p.label;
+              return;
+            }
+          }
+          merged.push({ ...p, weekCount: 1, origEnd: p.endDate, startLabel: p.label, endLabel: p.label });
+        });
+
+        merged.forEach(m => {
+          html += `<tr>
+            <td>${player}</td>
+            <td>${m.startDate}</td>
+            <td>${m.endDate}</td>
+            <td class="num">${m.weekCount} (${m.startLabel}${m.startLabel !== m.endLabel ? ' - ' + m.endLabel : ''})</td>
+          </tr>`;
+        });
+      });
+
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+  });
+
+  return html;
 }
 
 window.toggleWeeklyScoring = function(safeId) {
@@ -4092,89 +4574,23 @@ function renderScheduleDatesPreview() {
   preview.innerHTML = html;
 }
 
-// ---- Google Sheets Auto-Sync (Commissioner) ----
+// ---- Google Sheets Sync (Commissioner) ----
+// Fully client-side: config stored in localStorage, sync calls Google Sheets API directly from browser.
 
-async function renderGSheetsConfig() {
-  const statusDiv = document.getElementById('gsheets-status');
-  const logDiv = document.getElementById('gsheets-sync-log');
-  const urlInput = document.getElementById('gsheets-url');
-  const apiKeyInput = document.getElementById('gsheets-api-key');
-  const enabledCheckbox = document.getElementById('gsheets-enabled');
-  if (!statusDiv || !urlInput) return;
+function getGSheetsConfig() {
+  try { return JSON.parse(localStorage.getItem('wmmc_gsheets_config') || '{}'); } catch { return {}; }
+}
 
-  try {
-    const [configResp, statusResp] = await Promise.all([
-      fetch('/api/google-sheets/config'),
-      fetch('/api/google-sheets/sync-status')
-    ]);
-    if (!configResp.ok || !statusResp.ok) {
-      statusDiv.innerHTML = '<p class="text-muted">Could not load sync configuration (server unavailable).</p>';
-      return;
-    }
-    const config = await configResp.json();
-    const syncStatus = await statusResp.json();
+function saveGSheetsConfigLocal(config) {
+  localStorage.setItem('wmmc_gsheets_config', JSON.stringify(config));
+}
 
-    // Populate form fields
-    if (config.spreadsheet_id && !urlInput.value) {
-      urlInput.value = config.spreadsheet_id;
-    }
-    if (config.api_key_masked && !apiKeyInput.value) {
-      apiKeyInput.placeholder = config.api_key_masked;
-    }
-    enabledCheckbox.checked = config.enabled || false;
-
-    // Show sync status
-    let statusHtml = '';
-    if (syncStatus.last_sync) {
-      const syncDate = new Date(syncStatus.last_sync);
-      const timeAgo = getTimeAgo(syncDate);
-      const result = syncStatus.last_sync_result;
-
-      if (result && result.success) {
-        statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
-          <strong>Last sync:</strong> ${timeAgo} &mdash;
-          ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
-          (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} errors` : ''})
-        </div>`;
-      } else if (result) {
-        statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
-          <strong>Last sync failed:</strong> ${timeAgo} &mdash; ${result.error || 'Unknown error'}
-        </div>`;
-      }
-    }
-
-    if (syncStatus.enabled && syncStatus.next_sync) {
-      const nextDate = new Date(syncStatus.next_sync);
-      statusHtml += `<div class="gsheets-sync-status gsheets-sync-info">
-        <strong>Next auto-sync:</strong> ${nextDate.toLocaleString()}
-      </div>`;
-    }
-
-    statusDiv.innerHTML = statusHtml;
-
-    // Show sync log from season's upload_log
-    const seasons = getSeasons();
-    const sd = seasons[SELECTED_SEASON];
-    if (sd && sd.upload_log) {
-      const gsheetsLogs = sd.upload_log
-        .filter(l => l.type === 'gsheets_sync')
-        .slice(-5)
-        .reverse();
-      if (gsheetsLogs.length > 0) {
-        let logHtml = '<h3 style="margin-bottom:0.5rem;">Recent Syncs</h3><div class="gsheets-log-list">';
-        gsheetsLogs.forEach(l => {
-          logHtml += `<div class="gsheets-log-item">
-            <span class="gsheets-log-time">${l.timestamp}</span>
-            <span>${l.batting_imported} bat, ${l.pitching_imported} pit records</span>
-          </div>`;
-        });
-        logHtml += '</div>';
-        logDiv.innerHTML = logHtml;
-      }
-    }
-  } catch (e) {
-    statusDiv.innerHTML = `<p class="text-muted">Could not load sync configuration.</p>`;
-  }
+function extractSpreadsheetId(input) {
+  if (!input) return null;
+  const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
+  if (/^[a-zA-Z0-9_-]{20,}$/.test(input.trim())) return input.trim();
+  return null;
 }
 
 function getTimeAgo(date) {
@@ -4188,71 +4604,347 @@ function getTimeAgo(date) {
   return `${days}d ago`;
 }
 
-window.saveGSheetsConfig = async function() {
+function renderGSheetsConfig() {
+  const statusDiv = document.getElementById('gsheets-status');
+  const logDiv = document.getElementById('gsheets-sync-log');
+  const urlInput = document.getElementById('gsheets-url');
+  const apiKeyInput = document.getElementById('gsheets-api-key');
+  const enabledCheckbox = document.getElementById('gsheets-enabled');
+  if (!statusDiv || !urlInput) return;
+
+  const config = getGSheetsConfig();
+
+  if (config.spreadsheet_id && !urlInput.value) {
+    urlInput.value = config.spreadsheet_id;
+  }
+  if (config.api_key && !apiKeyInput.value) {
+    apiKeyInput.placeholder = config.api_key.slice(0, 8) + '...' + config.api_key.slice(-4);
+  }
+  enabledCheckbox.checked = config.enabled || false;
+
+  let statusHtml = '';
+  if (config.last_sync) {
+    const timeAgo = getTimeAgo(new Date(config.last_sync));
+    const result = config.last_sync_result;
+    if (result && result.success) {
+      statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
+        <strong>Last sync:</strong> ${timeAgo} &mdash;
+        ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
+        (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} errors` : ''})
+      </div>`;
+    } else if (result) {
+      statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
+        <strong>Last sync failed:</strong> ${timeAgo} &mdash; ${result.error || 'Unknown error'}
+      </div>`;
+    }
+  }
+  statusDiv.innerHTML = statusHtml;
+
+  // Show sync log from season's upload_log
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (sd && sd.upload_log) {
+    const gsheetsLogs = sd.upload_log
+      .filter(l => l.type === 'gsheets_sync')
+      .slice(-5)
+      .reverse();
+    if (gsheetsLogs.length > 0) {
+      let logHtml = '<h3 style="margin-bottom:0.5rem;">Recent Syncs</h3><div class="gsheets-log-list">';
+      gsheetsLogs.forEach(l => {
+        logHtml += `<div class="gsheets-log-item">
+          <span class="gsheets-log-time">${l.timestamp}</span>
+          <span>${l.batting_imported} bat, ${l.pitching_imported} pit records</span>
+        </div>`;
+      });
+      logHtml += '</div>';
+      logDiv.innerHTML = logHtml;
+    }
+  }
+}
+
+window.saveGSheetsConfig = function() {
   const statusDiv = document.getElementById('gsheets-status');
   const urlInput = document.getElementById('gsheets-url');
   const apiKeyInput = document.getElementById('gsheets-api-key');
   const enabledCheckbox = document.getElementById('gsheets-enabled');
 
-  const body = {
-    spreadsheet_url: urlInput.value.trim(),
-    enabled: enabledCheckbox.checked,
-    season: SELECTED_SEASON
-  };
-  // Only send API key if the user typed a new one
-  if (apiKeyInput.value.trim()) body.api_key = apiKeyInput.value.trim();
-
-  try {
-    statusDiv.innerHTML = '<p>Saving configuration...</p>';
-    const resp = await fetch('/api/google-sheets/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!resp.ok) {
-      let errMsg = `Server error (${resp.status})`;
-      try { const err = await resp.json(); errMsg = err.error || errMsg; } catch {}
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">${errMsg}</div>`;
-      return;
-    }
-    const data = await resp.json();
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${data.spreadsheet_id}</div>`;
-    apiKeyInput.value = '';
-    renderGSheetsConfig();
-  } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Failed to save. Make sure the server is running.</div>`;
+  const urlVal = urlInput.value.trim();
+  const spreadsheetId = extractSpreadsheetId(urlVal);
+  if (urlVal && !spreadsheetId) {
+    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">Could not extract spreadsheet ID from the provided URL.</div>';
+    return;
   }
+
+  const config = getGSheetsConfig();
+  if (spreadsheetId) config.spreadsheet_id = spreadsheetId;
+  if (apiKeyInput.value.trim()) config.api_key = apiKeyInput.value.trim();
+  config.enabled = enabledCheckbox.checked;
+  config.season = SELECTED_SEASON;
+
+  saveGSheetsConfigLocal(config);
+  statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${config.spreadsheet_id || '(none)'}</div>`;
+  apiKeyInput.value = '';
+  renderGSheetsConfig();
 };
+
+// ---- Client-side Google Sheets Sync ----
+
+async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName)}?key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    if (resp.status === 404 || resp.status === 400) return null;
+    const text = await resp.text();
+    throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return data.values || [];
+}
+
+function parseSheetRows(values) {
+  if (!values || values.length < 2) return [];
+  const headers = values[0].map(h => (h || '').trim());
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = {};
+    headers.forEach((h, j) => { row[h] = (values[i][j] || '').trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function gsFindCol(row, names) {
+  for (const name of names) {
+    for (const key of Object.keys(row)) {
+      if (key.toLowerCase() === name.toLowerCase()) return row[key];
+    }
+  }
+  return null;
+}
+
+function gsFindManagerForPlayer(sd, playerName, type) {
+  if (!sd.rosters || !playerName) return null;
+  const lcName = playerName.toLowerCase();
+  for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
+    for (const roster of Object.values(weekRosters)) {
+      const pool = type === 'batting' ? (roster.batters || []) : (roster.pitchers || []);
+      if (pool.some(p => p.toLowerCase() === lcName)) return manager;
+    }
+  }
+  return null;
+}
+
+function gsFindManagerForPlayerWeek(sd, playerName, type, round, week) {
+  if (!sd.rosters || !playerName) return null;
+  const lcName = playerName.toLowerCase();
+  const weekKey = `${round}|${week}`;
+  for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
+    const roster = weekRosters[weekKey];
+    if (!roster) continue;
+    const pool = type === 'batting' ? (roster.batters || []) : (roster.pitchers || []);
+    if (pool.some(p => p.toLowerCase() === lcName)) return manager;
+  }
+  return null;
+}
+
+function gsProcessBattingRows(rows, sd, scheduleWeek) {
+  let imported = 0, skipped = 0;
+  rows.forEach(row => {
+    const batter = gsFindCol(row, ['batter', 'player', 'name']);
+    if (!batter) return;
+    let manager = gsFindManagerForPlayerWeek(sd, batter, 'batting', scheduleWeek.round, scheduleWeek.week);
+    if (!manager) manager = gsFindManagerForPlayer(sd, batter, 'batting');
+    if (!manager) manager = gsFindCol(row, ['manager', 'owner']);
+    const isUnassigned = !manager;
+    const pn = v => parseFloat(v) || 0;
+    // Combine BB + IBB + HBP into BB
+    const gsBBVal = pn(gsFindCol(row, ['bb', 'BB', 'walks']));
+    const gsIBBVal = pn(gsFindCol(row, ['ibb', 'IBB']));
+    const gsHBPVal = pn(gsFindCol(row, ['hbp', 'HBP']));
+    const stats = {
+      '1b': pn(gsFindCol(row, ['1b', '1B', 'singles'])),
+      '2b': pn(gsFindCol(row, ['2b', '2B', 'doubles'])),
+      '3b': pn(gsFindCol(row, ['3b', '3B', 'triples'])),
+      hr: pn(gsFindCol(row, ['hr', 'HR', 'home_runs', 'homeRuns'])),
+      r: pn(gsFindCol(row, ['r', 'R', 'runs'])),
+      rbi: pn(gsFindCol(row, ['rbi', 'RBI'])),
+      sb: pn(gsFindCol(row, ['sb', 'SB', 'stolen_bases', 'stolenBases'])),
+      bb: gsBBVal + gsIBBVal + gsHBPVal,
+      abs: pn(gsFindCol(row, ['ab', 'AB', 'abs', 'atBats'])),
+    };
+    const weeklyScore = calculateBattingScore(stats);
+    const existingManual = sd.weekly_batting.find(b =>
+      b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
+      b.batter === batter && b.manual_fields && b.manual_fields.length > 0
+    );
+    if (existingManual) return;
+    sd.weekly_batting = sd.weekly_batting.filter(b =>
+      !(b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
+        b.batter === batter && b.source === 'gsheets')
+    );
+    sd.weekly_batting.push({
+      round: scheduleWeek.round, week: scheduleWeek.week,
+      manager: manager || null, batter,
+      status: gsFindCol(row, ['status', 'Status']) || null,
+      ...stats, weekly_score: weeklyScore, total_score: weeklyScore, source: 'gsheets'
+    });
+    if (isUnassigned) skipped++; else imported++;
+  });
+  return { imported, skipped };
+}
+
+function gsProcessPitchingRows(rows, sd, scheduleWeek) {
+  let imported = 0, skipped = 0;
+  rows.forEach(row => {
+    const pitcher = gsFindCol(row, ['pitcher', 'player', 'name']);
+    if (!pitcher) return;
+    let manager = gsFindManagerForPlayerWeek(sd, pitcher, 'pitching', scheduleWeek.round, scheduleWeek.week);
+    if (!manager) manager = gsFindManagerForPlayer(sd, pitcher, 'pitching');
+    if (!manager) manager = gsFindCol(row, ['manager', 'owner']);
+    const isUnassigned = !manager;
+    const pn = v => parseFloat(v) || 0;
+    // Convert IP and combine BB+IBB+HBP
+    const gsRawIP = pn(gsFindCol(row, ['ip', 'IP']));
+    const gsConvertedIP = convertIP(gsRawIP);
+    const gsPitBBVal = pn(gsFindCol(row, ['bb', 'BB', 'walks']));
+    const gsPitIBBVal = pn(gsFindCol(row, ['ibb', 'IBB']));
+    const gsPitHBPVal = pn(gsFindCol(row, ['hbp', 'HBP']));
+    const gsGSVal = pn(gsFindCol(row, ['gs', 'GS']));
+    const gsERVal = pn(gsFindCol(row, ['er', 'ER']));
+    // Calculate QS
+    let gsQSVal;
+    if (gsGSVal === 1 && gsConvertedIP >= 5 && gsERVal <= 2) {
+      gsQSVal = 1;
+    } else if (gsGSVal >= 2) {
+      gsQSVal = null;
+    } else {
+      gsQSVal = 0;
+    }
+    const stats = {
+      gs: gsGSVal,
+      w: pn(gsFindCol(row, ['w', 'W', 'wins'])),
+      qs: gsQSVal,
+      qs_highlight: gsGSVal >= 2,
+      cg: pn(gsFindCol(row, ['cg', 'CG'])),
+      cgso: pn(gsFindCol(row, ['cgso', 'CGSO'])),
+      nh: pn(gsFindCol(row, ['nh', 'NH'])),
+      ip: gsConvertedIP,
+      h: pn(gsFindCol(row, ['h', 'H', 'hits'])),
+      er: gsERVal,
+      bb: gsPitBBVal + gsPitIBBVal + gsPitHBPVal,
+      k: pn(gsFindCol(row, ['k', 'K', 'so', 'SO', 'strikeouts'])),
+    };
+    const weeklyScore = calculatePitchingScore(stats);
+    const existingManual = sd.weekly_pitching.find(p =>
+      p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
+      p.pitcher === pitcher && p.manual_fields && p.manual_fields.length > 0
+    );
+    if (existingManual) return;
+    sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+      !(p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
+        p.pitcher === pitcher && p.source === 'gsheets')
+    );
+    sd.weekly_pitching.push({
+      round: scheduleWeek.round, week: scheduleWeek.week,
+      manager: manager || null, pitcher,
+      status: gsFindCol(row, ['status', 'Status']) || null,
+      ...stats, weekly_score: weeklyScore, source: 'gsheets'
+    });
+    if (isUnassigned) skipped++; else imported++;
+  });
+  return { imported, skipped };
+}
 
 window.triggerGSheetsSync = async function() {
   const statusDiv = document.getElementById('gsheets-status');
+  const config = getGSheetsConfig();
+
+  if (!config.spreadsheet_id) {
+    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">No spreadsheet URL configured. Save configuration first.</div>';
+    return;
+  }
+  if (!config.api_key) {
+    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">No API key configured. Save configuration first.</div>';
+    return;
+  }
+
   statusDiv.innerHTML = '<p>Syncing from Google Sheets... this may take a moment.</p>';
 
   try {
-    const resp = await fetch('/api/google-sheets/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ season: SELECTED_SEASON })
-    });
-    if (!resp.ok) {
-      let errMsg = `Server error (${resp.status})`;
-      try { const err = await resp.json(); errMsg = err.error || errMsg; } catch {}
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync failed: ${errMsg}</div>`;
-      return;
-    }
-    const data = await resp.json();
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (!sd) throw new Error('Season not found');
+    if (!sd.weekly_batting) sd.weekly_batting = [];
+    if (!sd.weekly_pitching) sd.weekly_pitching = [];
 
-    const r = data.result;
+    const results = [];
+    let totalBat = 0, totalPit = 0;
+
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const sched = SEASON_SCHEDULE[i];
+      const weekNum = i + 1;
+
+      try {
+        const batValues = await fetchSheetTab(config.spreadsheet_id, `Week ${weekNum} Batting`, config.api_key);
+        if (batValues && batValues.length > 1) {
+          const r = gsProcessBattingRows(parseSheetRows(batValues), sd, sched);
+          totalBat += r.imported;
+          results.push({ week: weekNum, type: 'batting', imported: r.imported, skipped: r.skipped });
+        }
+      } catch (e) {
+        results.push({ week: weekNum, type: 'batting', error: e.message });
+      }
+
+      try {
+        const pitValues = await fetchSheetTab(config.spreadsheet_id, `Week ${weekNum} Pitching`, config.api_key);
+        if (pitValues && pitValues.length > 1) {
+          const r = gsProcessPitchingRows(parseSheetRows(pitValues), sd, sched);
+          totalPit += r.imported;
+          results.push({ week: weekNum, type: 'pitching', imported: r.imported, skipped: r.skipped });
+        }
+      } catch (e) {
+        results.push({ week: weekNum, type: 'pitching', error: e.message });
+      }
+    }
+
+    // Log the sync
+    if (!sd.upload_log) sd.upload_log = [];
+    sd.upload_log.push({
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      type: 'gsheets_sync',
+      batting_imported: totalBat,
+      pitching_imported: totalPit,
+      details: results
+    });
+
+    saveSeason(SELECTED_SEASON, sd);
+
+    // Update config with sync status
+    config.last_sync = new Date().toISOString();
+    config.last_sync_result = {
+      success: true,
+      batting_imported: totalBat,
+      pitching_imported: totalPit,
+      weeks_with_data: results.filter(r => !r.error && r.imported > 0).length,
+      errors: results.filter(r => r.error).length,
+    };
+    saveGSheetsConfigLocal(config);
+
+    const weeksWithData = config.last_sync_result.weeks_with_data;
+    const errors = config.last_sync_result.errors;
     statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
-      Sync complete! ${r.batting_imported} batting, ${r.pitching_imported} pitching records.
-      ${r.weeks_with_data} weeks with data${r.errors > 0 ? `, ${r.errors} errors` : ''}.
+      Sync complete! ${totalBat} batting, ${totalPit} pitching records imported.
+      ${weeksWithData} weeks with data${errors > 0 ? `, ${errors} errors` : ''}.
     </div>`;
 
-    // Reload season data from server to pick up the synced stats
-    await loadData();
     init();
+    renderGSheetsConfig();
   } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error. Make sure the server is running.</div>`;
+    const config2 = getGSheetsConfig();
+    config2.last_sync = new Date().toISOString();
+    config2.last_sync_result = { success: false, error: e.message };
+    saveGSheetsConfigLocal(config2);
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error: ${e.message}</div>`;
   }
 };
 
@@ -4547,6 +5239,77 @@ window.savePlayerStats = function(manager, statType, playerName, weekKey) {
 };
 
 // Add a player to a specific week's roster for a manager
+// Type-to-search player add
+window.addToRosterFromSearch = function(manager, type, inputId, weekKey) {
+  const input = document.getElementById(inputId);
+  const player = input.value.trim();
+  if (!player || !weekKey) return;
+
+  // Validate the player is in the pool
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const pool = type === 'batters' ? (sd.batters_pool || []) : (sd.pitchers_pool || []);
+  const match = pool.find(p => p.toLowerCase() === player.toLowerCase());
+  if (!match) { alert('Player not found in pool. Please select from suggestions.'); return; }
+
+  // Use the actual pool name (correct casing)
+  input.value = match;
+  window.addToRoster(manager, type, inputId, weekKey);
+};
+
+// Setup player search event listeners (called after roster HTML is rendered)
+function setupPlayerSearchInputs() {
+  document.querySelectorAll('.player-search-input').forEach(input => {
+    if (input._searchBound) return;
+    input._searchBound = true;
+    const resultsId = input.id.replace('add-', 'results-');
+    const resultsDiv = document.getElementById(resultsId);
+    if (!resultsDiv) return;
+
+    input.addEventListener('input', () => {
+      const query = input.value.trim().toLowerCase();
+      if (query.length < 1) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
+
+      const seasons = getSeasons();
+      const sd = seasons[SELECTED_SEASON];
+      const poolType = input.dataset.poolType;
+      const pool = poolType === 'batters' ? (sd.batters_pool || []) : (sd.pitchers_pool || []);
+      const weekKey = input.dataset.weekKey;
+      const manager = input.dataset.manager;
+
+      // Get already rostered players for this week
+      const roster = sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey];
+      const rostered = roster ? (roster[poolType] || []) : [];
+
+      const matches = pool.filter(p => {
+        if (rostered.includes(p)) return false;
+        const parts = p.toLowerCase().split(/\s+/);
+        return parts.some(part => part.startsWith(query)) || p.toLowerCase().includes(query);
+      }).slice(0, 8);
+
+      if (matches.length === 0) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
+      resultsDiv.style.display = 'block';
+      resultsDiv.innerHTML = matches.map(m =>
+        `<div class="player-search-item" onmousedown="selectPlayerSearchResult('${input.id}','${m.replace(/'/g, "\\'")}')">${m}</div>`
+      ).join('');
+    });
+
+    input.addEventListener('blur', () => {
+      setTimeout(() => { if (resultsDiv) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; } }, 200);
+    });
+  });
+}
+
+window.selectPlayerSearchResult = function(inputId, playerName) {
+  const input = document.getElementById(inputId);
+  if (input) {
+    input.value = playerName;
+    const resultsId = inputId.replace('add-', 'results-');
+    const resultsDiv = document.getElementById(resultsId);
+    if (resultsDiv) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; }
+  }
+};
+
 window.addToRoster = function(manager, type, selectId, weekKey) {
   const select = document.getElementById(selectId);
   const player = select.value;
@@ -4776,9 +5539,10 @@ function renderWeeklyUploadSections() {
 
     // Advance Players button (not for the first week)
     if (hasPriorWeek) {
+      const alreadyAdvanced = (sd.advanced_weeks || []).includes(i);
       html += `<div style="margin:0.5rem 0;">
-        <button class="btn btn-sm btn-secondary" onclick="advancePlayers(${i})">Advance Players</button>
-        <span class="text-muted" style="font-size:0.78rem;">Copy rosters from ${SEASON_SCHEDULE[i - 1].label}</span>
+        <button class="btn btn-sm btn-secondary" onclick="advancePlayers(${i})" ${alreadyAdvanced ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''}>Advance Players</button>
+        <span class="text-muted" style="font-size:0.78rem;">${alreadyAdvanced ? 'Players already advanced' : 'Copy rosters from ' + SEASON_SCHEDULE[i - 1].label}</span>
         <span id="advance-status-${i}"></span>
       </div>`;
     }
@@ -4801,6 +5565,46 @@ function renderWeeklyUploadSections() {
         </div>
         <div id="upload-status-${i}" class="upload-status"></div>`;
 
+    // End Pool Play / End Round buttons at key transition weeks
+    const finalized = sd.finalized_rounds || [];
+    if (i === 9) {
+      // Week 10 (PP2 Week 5) - End Pool Play
+      const ppFinalized = finalized.includes('PP');
+      html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm ${ppFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('PP', ${i})" ${ppFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+          ${ppFinalized ? 'Pool Play Ended' : 'End Pool Play'}
+        </button>
+        ${ppFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Pool Play finalized. Managers advanced to Quarterfinals.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize pool play and advance managers to playoffs.</span>'}
+      </div>`;
+    } else if (i === 11) {
+      // Week 12 (QF Week 2) - End Quarterfinals
+      const qfFinalized = finalized.includes('QF');
+      html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm ${qfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('QF', ${i})" ${qfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+          ${qfFinalized ? 'Quarterfinals Ended' : 'End Quarterfinals'}
+        </button>
+        ${qfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Quarterfinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize quarterfinals and advance winners to semifinals.</span>'}
+      </div>`;
+    } else if (i === 13) {
+      // Week 14 (SF Week 2) - End Semifinals
+      const sfFinalized = finalized.includes('SF');
+      html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF', ${i})" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+          ${sfFinalized ? 'Semifinals Ended' : 'End Semifinals'}
+        </button>
+        ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to finals.</span>'}
+      </div>`;
+    } else if (i === 15) {
+      // Week 16 (Finals Week 2) - End Finals
+      const finalsFinalized = finalized.includes('Finals');
+      html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals', ${i})" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+          ${finalsFinalized ? 'Season Complete' : 'End Finals'}
+        </button>
+        ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
+      </div>`;
+    }
+
     // Upload log for this week
     const weekLogs = uploadLog.filter(l => l.round === s.round && l.week === s.week);
     if (weekLogs.length > 0) {
@@ -4822,11 +5626,20 @@ function renderWeeklyUploadSections() {
   container.innerHTML = html;
 }
 
-// Advance Players: copy per-week rosters from prior week to current week for all managers
+// Advance Players: copy per-week rosters from prior week to current week for all managers.
+// Creates zero-stat records for all advanced players. Marks the week as advanced to prevent re-clicking.
 window.advancePlayers = function(weekIndex) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd || weekIndex < 1) return;
+
+  // Prevent double-click
+  if (!sd.advanced_weeks) sd.advanced_weeks = [];
+  if (sd.advanced_weeks.includes(weekIndex)) {
+    const statusEl = document.getElementById(`advance-status-${weekIndex}`);
+    if (statusEl) statusEl.innerHTML = `<span class="text-muted" style="font-size:0.78rem;"> Players already advanced for this week.</span>`;
+    return;
+  }
 
   migrateRostersToWeekly(sd);
 
@@ -4836,6 +5649,8 @@ window.advancePlayers = function(weekIndex) {
   const currentKey = `${currentSched.round}|${currentSched.week}`;
 
   if (!sd.rosters) sd.rosters = {};
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
   let advanced = 0;
 
   const managers = getManagers();
@@ -4843,17 +5658,51 @@ window.advancePlayers = function(weekIndex) {
     if (!sd.rosters[m.name]) sd.rosters[m.name] = {};
     const priorRoster = sd.rosters[m.name][priorKey];
     if (priorRoster) {
-      // Copy prior week's roster to current week (don't overwrite existing)
+      // Only advance currently rostered players (not dropped ones)
+      const batters = [...(priorRoster.batters || [])];
+      const pitchers = [...(priorRoster.pitchers || [])];
+
+      // Copy roster to current week (don't overwrite existing)
       if (!sd.rosters[m.name][currentKey]) {
-        sd.rosters[m.name][currentKey] = {
-          batters: [...(priorRoster.batters || [])],
-          pitchers: [...(priorRoster.pitchers || [])]
-        };
+        sd.rosters[m.name][currentKey] = { batters, pitchers };
+
+        // Create zero-stat batting records for advanced players
+        batters.forEach(batter => {
+          const exists = sd.weekly_batting.some(b =>
+            b.round === currentSched.round && b.week === currentSched.week && b.batter === batter && b.manager === m.name
+          );
+          if (!exists) {
+            sd.weekly_batting.push({
+              round: currentSched.round, week: currentSched.week,
+              manager: m.name, batter,
+              abs: 0, '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0,
+              weekly_score: 0, total_score: 0
+            });
+          }
+        });
+
+        // Create zero-stat pitching records for advanced players
+        pitchers.forEach(pitcher => {
+          const exists = sd.weekly_pitching.some(p =>
+            p.round === currentSched.round && p.week === currentSched.week && p.pitcher === pitcher && p.manager === m.name
+          );
+          if (!exists) {
+            sd.weekly_pitching.push({
+              round: currentSched.round, week: currentSched.week,
+              manager: m.name, pitcher,
+              gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0,
+              weekly_score: 0
+            });
+          }
+        });
+
         advanced++;
       }
     }
   });
 
+  // Mark this week as advanced
+  sd.advanced_weeks.push(weekIndex);
   saveSeason(SELECTED_SEASON, sd);
 
   const statusEl = document.getElementById(`advance-status-${weekIndex}`);
@@ -4863,6 +5712,34 @@ window.advancePlayers = function(weekIndex) {
       : `<span class="text-muted" style="font-size:0.78rem;"> All rosters already set for this week.</span>`;
   }
   renderWeeklyUploadSections();
+};
+
+// Finalize a round (End Pool Play, End QF, End SF, End Finals)
+window.finalizeRound = function(roundKey, weekIndex) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  if (!sd.finalized_rounds) sd.finalized_rounds = [];
+  if (sd.finalized_rounds.includes(roundKey)) return;
+
+  sd.finalized_rounds.push(roundKey);
+
+  // Auto-advance players to next round if applicable
+  if (roundKey === 'PP' && weekIndex < SEASON_SCHEDULE.length - 1) {
+    // Advance all managers to QF Week 1 (index 10)
+    window.advancePlayers(10);
+  } else if (roundKey === 'QF' && weekIndex < SEASON_SCHEDULE.length - 1) {
+    // Advance to SF Week 1 (index 12)
+    window.advancePlayers(12);
+  } else if (roundKey === 'SF' && weekIndex < SEASON_SCHEDULE.length - 1) {
+    // Advance to Finals Week 1 (index 14)
+    window.advancePlayers(14);
+  }
+
+  saveSeason(SELECTED_SEASON, sd);
+  renderWeeklyUploadSections();
+  init();
 };
 
 window.uploadWeeklyBatting = function(weekIndex) {
@@ -4904,6 +5781,11 @@ window.uploadWeeklyBatting = function(weekIndex) {
       if (!manager) manager = findColumn(row, ['manager', 'owner']);
       const isUnassigned = !manager;
 
+      // Combine BB + IBB + HBP into the BB scoring category
+      const bbVal = parseNum(row['bb'] || row['BB'] || row['walks'] || 0);
+      const ibbVal = parseNum(row['ibb'] || row['IBB'] || 0);
+      const hbpVal = parseNum(row['hbp'] || row['HBP'] || 0);
+
       const stats = {
         '1b': parseNum(row['1b'] || row['1B'] || row['singles'] || 0),
         '2b': parseNum(row['2b'] || row['2B'] || row['doubles'] || 0),
@@ -4912,7 +5794,7 @@ window.uploadWeeklyBatting = function(weekIndex) {
         r: parseNum(row['r'] || row['R'] || row['runs'] || 0),
         rbi: parseNum(row['rbi'] || row['RBI'] || 0),
         sb: parseNum(row['sb'] || row['SB'] || row['stolen_bases'] || row['stolenBases'] || 0),
-        bb: parseNum(row['bb'] || row['BB'] || row['walks'] || 0),
+        bb: bbVal + ibbVal + hbpVal,
         abs: parseNum(row['ab'] || row['AB'] || row['abs'] || row['atBats'] || 0),
       };
 
@@ -5007,17 +5889,40 @@ window.uploadWeeklyPitching = function(weekIndex) {
       if (!manager) manager = findColumn(row, ['manager', 'owner']);
       const isUnassigned = !manager;
 
+      // Convert IP: ".1" -> .33, ".2" -> .66 (representing 1/3 and 2/3 of an inning)
+      const rawIP = parseNum(row['ip'] || row['IP'] || 0);
+      const convertedIP = convertIP(rawIP);
+
+      // Combine BB + IBB + HBP into the BB scoring category
+      const pitBBVal = parseNum(row['bb'] || row['BB'] || row['walks'] || 0);
+      const pitIBBVal = parseNum(row['ibb'] || row['IBB'] || 0);
+      const pitHBPVal = parseNum(row['hbp'] || row['HBP'] || 0);
+
+      const gsVal = parseNum(row['gs'] || row['GS'] || 0);
+      const erVal = parseNum(row['er'] || row['ER'] || 0);
+
+      // Calculate QS: 1 GS, 5+ IP, 2 or fewer ER = 1 QS; 2+ GS = highlight (null)
+      let qsVal;
+      if (gsVal === 1 && convertedIP >= 5 && erVal <= 2) {
+        qsVal = 1;
+      } else if (gsVal >= 2) {
+        qsVal = null; // will be highlighted yellow in display
+      } else {
+        qsVal = 0;
+      }
+
       const stats = {
-        gs: parseNum(row['gs'] || row['GS'] || 0),
+        gs: gsVal,
         w: parseNum(row['w'] || row['W'] || row['wins'] || 0),
-        qs: parseNum(row['qs'] || row['QS'] || 0),
+        qs: qsVal,
+        qs_highlight: gsVal >= 2, // flag for yellow highlight
         cg: parseNum(row['cg'] || row['CG'] || 0),
         cgso: parseNum(row['cgso'] || row['CGSO'] || 0),
         nh: parseNum(row['nh'] || row['NH'] || 0),
-        ip: parseNum(row['ip'] || row['IP'] || 0),
+        ip: convertedIP,
         h: parseNum(row['h'] || row['H'] || row['hits'] || 0),
-        er: parseNum(row['er'] || row['ER'] || 0),
-        bb: parseNum(row['bb'] || row['BB'] || row['walks'] || 0),
+        er: erVal,
+        bb: pitBBVal + pitIBBVal + pitHBPVal,
         k: parseNum(row['k'] || row['K'] || row['so'] || row['SO'] || row['strikeouts'] || 0),
       };
 

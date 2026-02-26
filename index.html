@@ -35,6 +35,7 @@
     <div class="header-content">
       <div class="header-top">
         <h1><span class="header-ball">&#9918;</span> The Whit Merrifield Memorial Cup</h1>
+        <div id="online-users-bar" class="online-users-bar"></div>
         <div class="season-selector">
           <select id="season-select"></select>
         </div>
@@ -50,7 +51,6 @@
     <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
     <button class="nav-btn" data-tab="my-roster">Rosters</button>
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
-    <button class="nav-btn" data-tab="players">Player Stats</button>
     <button class="nav-btn" data-tab="trends">Trends</button>
     <button class="nav-btn" data-tab="league-info">League Info</button>
     <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
@@ -84,8 +84,8 @@
       </div>
     </section>
 
-    <!-- Player Stats -->
-    <section id="players" class="tab-content">
+    <!-- Player Stats (hidden - used internally for data) -->
+    <section id="players" class="tab-content" style="display:none !important;">
       <div class="card">
         <div class="player-type-toggle">
           <button class="type-btn active" data-type="batting">Batting</button>

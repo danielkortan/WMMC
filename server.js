@@ -539,6 +539,29 @@ function scheduleGSheetsSync() {
 }
 
 // ============================================================
+// Online Users Tracking
+// ============================================================
+const onlineUsers = {};
+
+app.post('/api/heartbeat', (req, res) => {
+  const { email, name } = req.body;
+  if (email && name) {
+    onlineUsers[email] = { name, timestamp: Date.now() };
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/online-users', (req, res) => {
+  // Clean up stale entries (older than 5 minutes)
+  const now = Date.now();
+  const FIVE_MIN = 5 * 60 * 1000;
+  for (const [email, data] of Object.entries(onlineUsers)) {
+    if (now - data.timestamp > FIVE_MIN) delete onlineUsers[email];
+  }
+  res.json(onlineUsers);
+});
+
+// ============================================================
 // Start
 // ============================================================
 
