@@ -4107,6 +4107,10 @@ async function renderGSheetsConfig() {
       fetch('/api/google-sheets/config'),
       fetch('/api/google-sheets/sync-status')
     ]);
+    if (!configResp.ok || !statusResp.ok) {
+      statusDiv.innerHTML = '<p class="text-muted">Could not load sync configuration (server unavailable).</p>';
+      return;
+    }
     const config = await configResp.json();
     const syncStatus = await statusResp.json();
 
@@ -4205,16 +4209,18 @@ window.saveGSheetsConfig = async function() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    const data = await resp.json();
     if (!resp.ok) {
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">${data.error}</div>`;
+      let errMsg = `Server error (${resp.status})`;
+      try { const err = await resp.json(); errMsg = err.error || errMsg; } catch {}
+      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">${errMsg}</div>`;
       return;
     }
+    const data = await resp.json();
     statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${data.spreadsheet_id}</div>`;
     apiKeyInput.value = '';
     renderGSheetsConfig();
   } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Failed to save: ${e.message}</div>`;
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Failed to save. Make sure the server is running.</div>`;
   }
 };
 
@@ -4228,11 +4234,13 @@ window.triggerGSheetsSync = async function() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ season: SELECTED_SEASON })
     });
-    const data = await resp.json();
     if (!resp.ok) {
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync failed: ${data.error}</div>`;
+      let errMsg = `Server error (${resp.status})`;
+      try { const err = await resp.json(); errMsg = err.error || errMsg; } catch {}
+      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync failed: ${errMsg}</div>`;
       return;
     }
+    const data = await resp.json();
 
     const r = data.result;
     statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
@@ -4244,7 +4252,7 @@ window.triggerGSheetsSync = async function() {
     await loadData();
     init();
   } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error: ${e.message}</div>`;
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error. Make sure the server is running.</div>`;
   }
 };
 
