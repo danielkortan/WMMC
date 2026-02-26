@@ -4092,89 +4092,23 @@ function renderScheduleDatesPreview() {
   preview.innerHTML = html;
 }
 
-// ---- Google Sheets Auto-Sync (Commissioner) ----
+// ---- Google Sheets Sync (Commissioner) ----
+// Fully client-side: config stored in localStorage, sync calls Google Sheets API directly from browser.
 
-async function renderGSheetsConfig() {
-  const statusDiv = document.getElementById('gsheets-status');
-  const logDiv = document.getElementById('gsheets-sync-log');
-  const urlInput = document.getElementById('gsheets-url');
-  const apiKeyInput = document.getElementById('gsheets-api-key');
-  const enabledCheckbox = document.getElementById('gsheets-enabled');
-  if (!statusDiv || !urlInput) return;
+function getGSheetsConfig() {
+  try { return JSON.parse(localStorage.getItem('wmmc_gsheets_config') || '{}'); } catch { return {}; }
+}
 
-  try {
-    const [configResp, statusResp] = await Promise.all([
-      fetch('/api/google-sheets/config'),
-      fetch('/api/google-sheets/sync-status')
-    ]);
-    if (!configResp.ok || !statusResp.ok) {
-      statusDiv.innerHTML = '<p class="text-muted">Could not load sync configuration (server unavailable).</p>';
-      return;
-    }
-    const config = await configResp.json();
-    const syncStatus = await statusResp.json();
+function saveGSheetsConfigLocal(config) {
+  localStorage.setItem('wmmc_gsheets_config', JSON.stringify(config));
+}
 
-    // Populate form fields
-    if (config.spreadsheet_id && !urlInput.value) {
-      urlInput.value = config.spreadsheet_id;
-    }
-    if (config.api_key_masked && !apiKeyInput.value) {
-      apiKeyInput.placeholder = config.api_key_masked;
-    }
-    enabledCheckbox.checked = config.enabled || false;
-
-    // Show sync status
-    let statusHtml = '';
-    if (syncStatus.last_sync) {
-      const syncDate = new Date(syncStatus.last_sync);
-      const timeAgo = getTimeAgo(syncDate);
-      const result = syncStatus.last_sync_result;
-
-      if (result && result.success) {
-        statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
-          <strong>Last sync:</strong> ${timeAgo} &mdash;
-          ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
-          (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} errors` : ''})
-        </div>`;
-      } else if (result) {
-        statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
-          <strong>Last sync failed:</strong> ${timeAgo} &mdash; ${result.error || 'Unknown error'}
-        </div>`;
-      }
-    }
-
-    if (syncStatus.enabled && syncStatus.next_sync) {
-      const nextDate = new Date(syncStatus.next_sync);
-      statusHtml += `<div class="gsheets-sync-status gsheets-sync-info">
-        <strong>Next auto-sync:</strong> ${nextDate.toLocaleString()}
-      </div>`;
-    }
-
-    statusDiv.innerHTML = statusHtml;
-
-    // Show sync log from season's upload_log
-    const seasons = getSeasons();
-    const sd = seasons[SELECTED_SEASON];
-    if (sd && sd.upload_log) {
-      const gsheetsLogs = sd.upload_log
-        .filter(l => l.type === 'gsheets_sync')
-        .slice(-5)
-        .reverse();
-      if (gsheetsLogs.length > 0) {
-        let logHtml = '<h3 style="margin-bottom:0.5rem;">Recent Syncs</h3><div class="gsheets-log-list">';
-        gsheetsLogs.forEach(l => {
-          logHtml += `<div class="gsheets-log-item">
-            <span class="gsheets-log-time">${l.timestamp}</span>
-            <span>${l.batting_imported} bat, ${l.pitching_imported} pit records</span>
-          </div>`;
-        });
-        logHtml += '</div>';
-        logDiv.innerHTML = logHtml;
-      }
-    }
-  } catch (e) {
-    statusDiv.innerHTML = `<p class="text-muted">Could not load sync configuration.</p>`;
-  }
+function extractSpreadsheetId(input) {
+  if (!input) return null;
+  const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
+  if (/^[a-zA-Z0-9_-]{20,}$/.test(input.trim())) return input.trim();
+  return null;
 }
 
 function getTimeAgo(date) {
@@ -4188,71 +4122,325 @@ function getTimeAgo(date) {
   return `${days}d ago`;
 }
 
-window.saveGSheetsConfig = async function() {
+function renderGSheetsConfig() {
+  const statusDiv = document.getElementById('gsheets-status');
+  const logDiv = document.getElementById('gsheets-sync-log');
+  const urlInput = document.getElementById('gsheets-url');
+  const apiKeyInput = document.getElementById('gsheets-api-key');
+  const enabledCheckbox = document.getElementById('gsheets-enabled');
+  if (!statusDiv || !urlInput) return;
+
+  const config = getGSheetsConfig();
+
+  if (config.spreadsheet_id && !urlInput.value) {
+    urlInput.value = config.spreadsheet_id;
+  }
+  if (config.api_key && !apiKeyInput.value) {
+    apiKeyInput.placeholder = config.api_key.slice(0, 8) + '...' + config.api_key.slice(-4);
+  }
+  enabledCheckbox.checked = config.enabled || false;
+
+  let statusHtml = '';
+  if (config.last_sync) {
+    const timeAgo = getTimeAgo(new Date(config.last_sync));
+    const result = config.last_sync_result;
+    if (result && result.success) {
+      statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
+        <strong>Last sync:</strong> ${timeAgo} &mdash;
+        ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
+        (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} errors` : ''})
+      </div>`;
+    } else if (result) {
+      statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
+        <strong>Last sync failed:</strong> ${timeAgo} &mdash; ${result.error || 'Unknown error'}
+      </div>`;
+    }
+  }
+  statusDiv.innerHTML = statusHtml;
+
+  // Show sync log from season's upload_log
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (sd && sd.upload_log) {
+    const gsheetsLogs = sd.upload_log
+      .filter(l => l.type === 'gsheets_sync')
+      .slice(-5)
+      .reverse();
+    if (gsheetsLogs.length > 0) {
+      let logHtml = '<h3 style="margin-bottom:0.5rem;">Recent Syncs</h3><div class="gsheets-log-list">';
+      gsheetsLogs.forEach(l => {
+        logHtml += `<div class="gsheets-log-item">
+          <span class="gsheets-log-time">${l.timestamp}</span>
+          <span>${l.batting_imported} bat, ${l.pitching_imported} pit records</span>
+        </div>`;
+      });
+      logHtml += '</div>';
+      logDiv.innerHTML = logHtml;
+    }
+  }
+}
+
+window.saveGSheetsConfig = function() {
   const statusDiv = document.getElementById('gsheets-status');
   const urlInput = document.getElementById('gsheets-url');
   const apiKeyInput = document.getElementById('gsheets-api-key');
   const enabledCheckbox = document.getElementById('gsheets-enabled');
 
-  const body = {
-    spreadsheet_url: urlInput.value.trim(),
-    enabled: enabledCheckbox.checked,
-    season: SELECTED_SEASON
-  };
-  // Only send API key if the user typed a new one
-  if (apiKeyInput.value.trim()) body.api_key = apiKeyInput.value.trim();
-
-  try {
-    statusDiv.innerHTML = '<p>Saving configuration...</p>';
-    const resp = await fetch('/api/google-sheets/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!resp.ok) {
-      let errMsg = `Server error (${resp.status})`;
-      try { const err = await resp.json(); errMsg = err.error || errMsg; } catch {}
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">${errMsg}</div>`;
-      return;
-    }
-    const data = await resp.json();
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${data.spreadsheet_id}</div>`;
-    apiKeyInput.value = '';
-    renderGSheetsConfig();
-  } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Failed to save. Make sure the server is running.</div>`;
+  const urlVal = urlInput.value.trim();
+  const spreadsheetId = extractSpreadsheetId(urlVal);
+  if (urlVal && !spreadsheetId) {
+    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">Could not extract spreadsheet ID from the provided URL.</div>';
+    return;
   }
+
+  const config = getGSheetsConfig();
+  if (spreadsheetId) config.spreadsheet_id = spreadsheetId;
+  if (apiKeyInput.value.trim()) config.api_key = apiKeyInput.value.trim();
+  config.enabled = enabledCheckbox.checked;
+  config.season = SELECTED_SEASON;
+
+  saveGSheetsConfigLocal(config);
+  statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${config.spreadsheet_id || '(none)'}</div>`;
+  apiKeyInput.value = '';
+  renderGSheetsConfig();
 };
+
+// ---- Client-side Google Sheets Sync ----
+
+async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName)}?key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    if (resp.status === 404 || resp.status === 400) return null;
+    const text = await resp.text();
+    throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return data.values || [];
+}
+
+function parseSheetRows(values) {
+  if (!values || values.length < 2) return [];
+  const headers = values[0].map(h => (h || '').trim());
+  const rows = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = {};
+    headers.forEach((h, j) => { row[h] = (values[i][j] || '').trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function gsFindCol(row, names) {
+  for (const name of names) {
+    for (const key of Object.keys(row)) {
+      if (key.toLowerCase() === name.toLowerCase()) return row[key];
+    }
+  }
+  return null;
+}
+
+function gsFindManagerForPlayer(sd, playerName, type) {
+  if (!sd.rosters || !playerName) return null;
+  const lcName = playerName.toLowerCase();
+  for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
+    for (const roster of Object.values(weekRosters)) {
+      const pool = type === 'batting' ? (roster.batters || []) : (roster.pitchers || []);
+      if (pool.some(p => p.toLowerCase() === lcName)) return manager;
+    }
+  }
+  return null;
+}
+
+function gsFindManagerForPlayerWeek(sd, playerName, type, round, week) {
+  if (!sd.rosters || !playerName) return null;
+  const lcName = playerName.toLowerCase();
+  const weekKey = `${round}|${week}`;
+  for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
+    const roster = weekRosters[weekKey];
+    if (!roster) continue;
+    const pool = type === 'batting' ? (roster.batters || []) : (roster.pitchers || []);
+    if (pool.some(p => p.toLowerCase() === lcName)) return manager;
+  }
+  return null;
+}
+
+function gsProcessBattingRows(rows, sd, scheduleWeek) {
+  let imported = 0, skipped = 0;
+  rows.forEach(row => {
+    const batter = gsFindCol(row, ['batter', 'player', 'name']);
+    if (!batter) return;
+    let manager = gsFindManagerForPlayerWeek(sd, batter, 'batting', scheduleWeek.round, scheduleWeek.week);
+    if (!manager) manager = gsFindManagerForPlayer(sd, batter, 'batting');
+    if (!manager) manager = gsFindCol(row, ['manager', 'owner']);
+    const isUnassigned = !manager;
+    const pn = v => parseFloat(v) || 0;
+    const stats = {
+      '1b': pn(gsFindCol(row, ['1b', '1B', 'singles'])),
+      '2b': pn(gsFindCol(row, ['2b', '2B', 'doubles'])),
+      '3b': pn(gsFindCol(row, ['3b', '3B', 'triples'])),
+      hr: pn(gsFindCol(row, ['hr', 'HR', 'home_runs', 'homeRuns'])),
+      r: pn(gsFindCol(row, ['r', 'R', 'runs'])),
+      rbi: pn(gsFindCol(row, ['rbi', 'RBI'])),
+      sb: pn(gsFindCol(row, ['sb', 'SB', 'stolen_bases', 'stolenBases'])),
+      bb: pn(gsFindCol(row, ['bb', 'BB', 'walks'])),
+      abs: pn(gsFindCol(row, ['ab', 'AB', 'abs', 'atBats'])),
+    };
+    const weeklyScore = calculateBattingScore(stats);
+    const existingManual = sd.weekly_batting.find(b =>
+      b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
+      b.batter === batter && b.manual_fields && b.manual_fields.length > 0
+    );
+    if (existingManual) return;
+    sd.weekly_batting = sd.weekly_batting.filter(b =>
+      !(b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
+        b.batter === batter && b.source === 'gsheets')
+    );
+    sd.weekly_batting.push({
+      round: scheduleWeek.round, week: scheduleWeek.week,
+      manager: manager || null, batter,
+      status: gsFindCol(row, ['status', 'Status']) || null,
+      ...stats, weekly_score: weeklyScore, total_score: weeklyScore, source: 'gsheets'
+    });
+    if (isUnassigned) skipped++; else imported++;
+  });
+  return { imported, skipped };
+}
+
+function gsProcessPitchingRows(rows, sd, scheduleWeek) {
+  let imported = 0, skipped = 0;
+  rows.forEach(row => {
+    const pitcher = gsFindCol(row, ['pitcher', 'player', 'name']);
+    if (!pitcher) return;
+    let manager = gsFindManagerForPlayerWeek(sd, pitcher, 'pitching', scheduleWeek.round, scheduleWeek.week);
+    if (!manager) manager = gsFindManagerForPlayer(sd, pitcher, 'pitching');
+    if (!manager) manager = gsFindCol(row, ['manager', 'owner']);
+    const isUnassigned = !manager;
+    const pn = v => parseFloat(v) || 0;
+    const stats = {
+      gs: pn(gsFindCol(row, ['gs', 'GS'])),
+      w: pn(gsFindCol(row, ['w', 'W', 'wins'])),
+      qs: pn(gsFindCol(row, ['qs', 'QS'])),
+      cg: pn(gsFindCol(row, ['cg', 'CG'])),
+      cgso: pn(gsFindCol(row, ['cgso', 'CGSO'])),
+      nh: pn(gsFindCol(row, ['nh', 'NH'])),
+      ip: pn(gsFindCol(row, ['ip', 'IP'])),
+      h: pn(gsFindCol(row, ['h', 'H', 'hits'])),
+      er: pn(gsFindCol(row, ['er', 'ER'])),
+      bb: pn(gsFindCol(row, ['bb', 'BB', 'walks'])),
+      k: pn(gsFindCol(row, ['k', 'K', 'so', 'SO', 'strikeouts'])),
+    };
+    const weeklyScore = calculatePitchingScore(stats);
+    const existingManual = sd.weekly_pitching.find(p =>
+      p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
+      p.pitcher === pitcher && p.manual_fields && p.manual_fields.length > 0
+    );
+    if (existingManual) return;
+    sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+      !(p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
+        p.pitcher === pitcher && p.source === 'gsheets')
+    );
+    sd.weekly_pitching.push({
+      round: scheduleWeek.round, week: scheduleWeek.week,
+      manager: manager || null, pitcher,
+      status: gsFindCol(row, ['status', 'Status']) || null,
+      ...stats, weekly_score: weeklyScore, source: 'gsheets'
+    });
+    if (isUnassigned) skipped++; else imported++;
+  });
+  return { imported, skipped };
+}
 
 window.triggerGSheetsSync = async function() {
   const statusDiv = document.getElementById('gsheets-status');
+  const config = getGSheetsConfig();
+
+  if (!config.spreadsheet_id) {
+    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">No spreadsheet URL configured. Save configuration first.</div>';
+    return;
+  }
+  if (!config.api_key) {
+    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">No API key configured. Save configuration first.</div>';
+    return;
+  }
+
   statusDiv.innerHTML = '<p>Syncing from Google Sheets... this may take a moment.</p>';
 
   try {
-    const resp = await fetch('/api/google-sheets/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ season: SELECTED_SEASON })
-    });
-    if (!resp.ok) {
-      let errMsg = `Server error (${resp.status})`;
-      try { const err = await resp.json(); errMsg = err.error || errMsg; } catch {}
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync failed: ${errMsg}</div>`;
-      return;
-    }
-    const data = await resp.json();
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (!sd) throw new Error('Season not found');
+    if (!sd.weekly_batting) sd.weekly_batting = [];
+    if (!sd.weekly_pitching) sd.weekly_pitching = [];
 
-    const r = data.result;
+    const results = [];
+    let totalBat = 0, totalPit = 0;
+
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const sched = SEASON_SCHEDULE[i];
+      const weekNum = i + 1;
+
+      try {
+        const batValues = await fetchSheetTab(config.spreadsheet_id, `Week ${weekNum} Batting`, config.api_key);
+        if (batValues && batValues.length > 1) {
+          const r = gsProcessBattingRows(parseSheetRows(batValues), sd, sched);
+          totalBat += r.imported;
+          results.push({ week: weekNum, type: 'batting', imported: r.imported, skipped: r.skipped });
+        }
+      } catch (e) {
+        results.push({ week: weekNum, type: 'batting', error: e.message });
+      }
+
+      try {
+        const pitValues = await fetchSheetTab(config.spreadsheet_id, `Week ${weekNum} Pitching`, config.api_key);
+        if (pitValues && pitValues.length > 1) {
+          const r = gsProcessPitchingRows(parseSheetRows(pitValues), sd, sched);
+          totalPit += r.imported;
+          results.push({ week: weekNum, type: 'pitching', imported: r.imported, skipped: r.skipped });
+        }
+      } catch (e) {
+        results.push({ week: weekNum, type: 'pitching', error: e.message });
+      }
+    }
+
+    // Log the sync
+    if (!sd.upload_log) sd.upload_log = [];
+    sd.upload_log.push({
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      type: 'gsheets_sync',
+      batting_imported: totalBat,
+      pitching_imported: totalPit,
+      details: results
+    });
+
+    saveSeason(SELECTED_SEASON, sd);
+
+    // Update config with sync status
+    config.last_sync = new Date().toISOString();
+    config.last_sync_result = {
+      success: true,
+      batting_imported: totalBat,
+      pitching_imported: totalPit,
+      weeks_with_data: results.filter(r => !r.error && r.imported > 0).length,
+      errors: results.filter(r => r.error).length,
+    };
+    saveGSheetsConfigLocal(config);
+
+    const weeksWithData = config.last_sync_result.weeks_with_data;
+    const errors = config.last_sync_result.errors;
     statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
-      Sync complete! ${r.batting_imported} batting, ${r.pitching_imported} pitching records.
-      ${r.weeks_with_data} weeks with data${r.errors > 0 ? `, ${r.errors} errors` : ''}.
+      Sync complete! ${totalBat} batting, ${totalPit} pitching records imported.
+      ${weeksWithData} weeks with data${errors > 0 ? `, ${errors} errors` : ''}.
     </div>`;
 
-    // Reload season data from server to pick up the synced stats
-    await loadData();
     init();
+    renderGSheetsConfig();
   } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error. Make sure the server is running.</div>`;
+    const config2 = getGSheetsConfig();
+    config2.last_sync = new Date().toISOString();
+    config2.last_sync_result = { success: false, error: e.message };
+    saveGSheetsConfigLocal(config2);
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error: ${e.message}</div>`;
   }
 };
 
