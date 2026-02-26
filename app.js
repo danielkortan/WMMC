@@ -1947,6 +1947,26 @@ function renderTrends() {
     }));
   }
 
+  // ---- Pool groups & registered manager names ----
+  const managers = getManagers();
+  const registeredNames = new Set(managers.map(m => m.name));
+  const poolGroups = {};
+  managers.forEach(m => {
+    if (m.pool) {
+      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
+      poolGroups[m.pool].push(m.name);
+    }
+  });
+  const poolNums = Object.keys(poolGroups).sort();
+  const hasPools = poolNums.length > 0;
+  const mgrPoolMap = {};
+  managers.forEach(m => { if (m.pool) mgrPoolMap[m.name] = m.pool; });
+
+  // ---- Filter data to registered managers only ----
+  teamWeekly = teamWeekly.filter(t => registeredNames.has(t.manager));
+  battingData = battingData.filter(b => registeredNames.has(b.manager));
+  pitchingData = pitchingData.filter(p => registeredNames.has(p.manager));
+
   if (teamWeekly.length === 0 && battingData.length === 0 && pitchingData.length === 0) {
     container.innerHTML = '<div class="card"><p>No scoring data available yet. Upload weekly stats via the Commissioner page.</p></div>';
     return;
@@ -1959,12 +1979,10 @@ function renderTrends() {
     ...pitchingData.map(p => `${p.round}|${p.week}`),
   ]);
 
-  // Map schedule entries to keyed objects, filter to present weeks
   const scheduleOrdered = SEASON_SCHEDULE
     .map(s => ({ key: `${s.round}|${s.week}`, round: s.round, week: s.week }))
     .filter(s => allWeekKeys.has(s.key));
 
-  // Any rounds not in SEASON_SCHEDULE go at end
   const unknownKeys = [...allWeekKeys].filter(k => !scheduleOrdered.find(s => s.key === k));
   unknownKeys.forEach(k => {
     const [round, week] = k.split('|');
@@ -1982,30 +2000,14 @@ function renderTrends() {
     return `${base} (${fmtDateRangeShort(dates[wi].start, dates[wi].end)})`;
   });
 
-  // ---- Unique sets ----
-  const allManagers = [...new Set([
-    ...teamWeekly.map(t => t.manager),
-    ...battingData.map(b => b.manager),
-    ...pitchingData.map(p => p.manager),
-  ])].sort();
+  // ---- Unique sets (only managers with actual data) ----
+  const allManagers = [...registeredNames].filter(name =>
+    teamWeekly.some(t => t.manager === name) ||
+    battingData.some(b => b.manager === name) ||
+    pitchingData.some(p => p.manager === name)
+  ).sort();
   const allBatters = [...new Set(battingData.map(b => b.player))].sort();
   const allPitchers = [...new Set(pitchingData.map(p => p.player))].sort();
-
-  // ---- Pool groups ----
-  const managers = getManagers();
-  const poolGroups = {};
-  managers.forEach(m => {
-    if (m.pool) {
-      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
-      poolGroups[m.pool].push(m.name);
-    }
-  });
-  const poolNums = Object.keys(poolGroups).sort();
-  const hasPools = poolNums.length > 0;
-
-  // Build manager→pool lookup
-  const mgrPoolMap = {};
-  managers.forEach(m => { if (m.pool) mgrPoolMap[m.name] = m.pool; });
 
   // ---- State ----
   let selectedManagers = new Set(allManagers);
