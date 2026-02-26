@@ -279,6 +279,7 @@ function enterApp(mgr) {
 
   document.getElementById('footer-year').textContent = CURRENT_YEAR;
   buildSeasonSelector();
+  setupNav();
   init();
 }
 
@@ -418,15 +419,18 @@ function init() {
 
   if (!seasonData) return;
 
-  if (seasonData.status === 'completed' && seasonData.data) {
-    DATA = seasonData.data;
-    showHistoricalSeason();
-  } else {
-    DATA = null;
-    showActiveSeason(seasonData);
+  try {
+    if (seasonData.status === 'completed' && seasonData.data) {
+      DATA = seasonData.data;
+      showHistoricalSeason();
+    } else {
+      DATA = null;
+      showActiveSeason(seasonData);
+    }
+  } catch (e) {
+    console.error('Error rendering season:', e);
   }
 
-  setupNav();
   setupMyRoster();
   renderLeagueInfo();
   renderCommissioner();
@@ -435,13 +439,17 @@ function init() {
 // ============================================================
 // Navigation
 // ============================================================
+let _navInitialized = false;
 function setupNav() {
+  if (_navInitialized) return;
+  _navInitialized = true;
   document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
       btn.classList.add('active');
-      document.getElementById(btn.dataset.tab).classList.add('active');
+      const section = document.getElementById(btn.dataset.tab);
+      if (section) section.classList.add('active');
       if (btn.dataset.tab === 'trends') renderTrends();
     });
   });
