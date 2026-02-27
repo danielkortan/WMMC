@@ -91,6 +91,12 @@ function fmtDateISO(d) {
 }
 
 // Short display:  "May 5 – 11" or "Jun 30 – Jul 6"
+function fmtShortDate(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  const mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${mo[d.getMonth()]} ${d.getDate()}`;
+}
+
 function fmtDateRangeShort(startStr, endStr) {
   const s = new Date(startStr + 'T12:00:00');
   const e = new Date(endStr + 'T12:00:00');
@@ -2951,7 +2957,6 @@ function renderRosterData(managerName, isCommissioner) {
   // ---- Roster Tabs ----
   html += `<div class="roster-tabs">
     <button class="roster-tab active" data-rtab="per-week" onclick="switchRosterTab(this, 'per-week')">Per-Week Roster</button>
-    <button class="roster-tab" data-rtab="dates-rostered" onclick="switchRosterTab(this, 'dates-rostered')">Dates Rostered</button>
     <button class="roster-tab" data-rtab="team-stats" onclick="switchRosterTab(this, 'team-stats')">Team Stats</button>
     <button class="roster-tab" data-rtab="swaps" onclick="switchRosterTab(this, 'swaps')">Swaps</button>
   </div>`;
@@ -2959,11 +2964,6 @@ function renderRosterData(managerName, isCommissioner) {
   // ---- Per-Week Roster Sections ----
   html += `<div class="roster-tab-content" id="rtab-per-week" style="display:block;">`;
   html += buildPerWeekRoster(managerName, isCommissioner, seasonData);
-  html += `</div>`;
-
-  // ---- Dates Rostered ----
-  html += `<div class="roster-tab-content" id="rtab-dates-rostered" style="display:none;">`;
-  html += buildDatesRosteredSection(managerName, seasonData);
   html += `</div>`;
 
   // ---- Team Stats Breakdown ----
@@ -3073,6 +3073,30 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     availPitchers = allPitPool.sort();
   }
 
+  // Swap log and schedule dates for inline date annotations
+  const approvedSwaps = isActive ? (seasonData.swaps || []).filter(s => s.manager === managerName && s.status === 'approved') : [];
+  const scheduleDates = getScheduleDates();
+
+  // Get inline date tag for a player in a given week
+  function playerDateTag(player, weekKey, weekIdx) {
+    if (!scheduleDates || !scheduleDates[weekIdx]) return '';
+    const weekDates = scheduleDates[weekIdx];
+    const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
+    const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+    const tags = [];
+    if (addSwap && addSwap.swap_date) {
+      tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
+    }
+    if (dropSwap && dropSwap.swap_date) {
+      tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
+    }
+    if (tags.length === 0) {
+      // Full week — show date range
+      return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
+    }
+    return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
+  }
+
   // Determine which weeks have roster data or uploaded stats for this manager
   const weeksWithData = new Set();
   batting.filter(b => b.manager === managerName).forEach(b => weeksWithData.add(`${b.round}|${b.week}`));
@@ -3108,6 +3132,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const [round, week] = weekKey.split('|');
     const schedEntry = SEASON_SCHEDULE.find(s => s.round === round && s.week === week);
     const label = schedEntry ? schedEntry.label : `${round} - ${week}`;
+    const weekIdx = SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
     const isCurrent = weekKey === latestDataWeek;
 
     // Get roster for this week
@@ -3163,7 +3188,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.batCumulative[batter] || 0;
         const cumRank = cumRankings.batRanks[batter];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${batter}${onRoster ? '' : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
+        html += `<td>${batter}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
         html += batStatCell(s, 'abs', s.abs || 0);
         html += batStatCell(s, '1b', s['1b'] || 0);
         html += batStatCell(s, '2b', s['2b'] || 0);
@@ -3208,7 +3233,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.pitCumulative[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${pitcher}${onRoster ? '' : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
+        html += `<td>${pitcher}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
         html += pitStatCell(s, 'gs', s.gs || 0);
         html += pitStatCell(s, 'w', s.w || 0);
         // QS: highlight yellow if pitcher had 2+ GS (qs_highlight flag)
@@ -3394,100 +3419,6 @@ window.switchRosterTab = function(btn, tabKey) {
   const target = document.getElementById('rtab-' + tabKey);
   if (target) target.style.display = 'block';
 };
-
-// Build "Dates Rostered" section showing start/end date for each player
-function buildDatesRosteredSection(managerName, seasonData) {
-  if (!seasonData || seasonData.status !== 'active') return '<p class="text-muted">Dates rostered is only available for active seasons.</p>';
-
-  const dates = getScheduleDates();
-  if (!dates || dates.length === 0) return '<p class="text-muted">Schedule dates not set. Set All-Star Game date in Commissioner page first.</p>';
-
-  const swaps = (seasonData.swaps || []).filter(s => s.manager === managerName && s.status === 'approved');
-
-  // Track rostered periods for each player
-  function computePlayerDates(type) {
-    const poolKey = type === 'batters' ? 'batters' : 'pitchers';
-    const playerDates = {};
-
-    SEASON_SCHEDULE.forEach((sched, weekIdx) => {
-      const weekKey = `${sched.round}|${sched.week}`;
-      const roster = seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey];
-      if (!roster) return;
-      const players = roster[poolKey] || [];
-      const weekDates = dates[weekIdx];
-      if (!weekDates) return;
-
-      players.forEach(player => {
-        if (!playerDates[player]) playerDates[player] = [];
-
-        // Find if player was added mid-week (swap log)
-        const addSwap = swaps.find(s => s.player_in === player && s.week_key === weekKey);
-        const startDate = addSwap ? addSwap.swap_date : weekDates.start;
-
-        // Find if player was dropped during this week
-        const dropSwap = swaps.find(s => s.player_out === player && s.week_key === weekKey);
-        const endDate = dropSwap ? dropSwap.swap_date : weekDates.end;
-
-        playerDates[player].push({ weekKey, weekIdx, startDate, endDate, label: sched.label });
-      });
-    });
-    return playerDates;
-  }
-
-  let html = '';
-
-  ['batters', 'pitchers'].forEach(type => {
-    const label = type === 'batters' ? 'Batters' : 'Pitchers';
-    const playerDates = computePlayerDates(type);
-    const playerNames = Object.keys(playerDates).sort();
-
-    html += `<div class="card" style="margin-bottom:1rem;">
-      <h3>${label} - Dates Rostered</h3>`;
-
-    if (playerNames.length === 0) {
-      html += '<p class="text-muted">No players rostered.</p>';
-    } else {
-      html += '<div class="table-wrapper"><table class="data-table compact-table"><thead><tr>';
-      html += '<th>Player</th><th>Start Date</th><th>End Date</th><th>Weeks</th>';
-      html += '</tr></thead><tbody>';
-
-      playerNames.forEach(player => {
-        const periods = playerDates[player];
-        // Merge contiguous periods
-        const merged = [];
-        periods.sort((a, b) => a.weekIdx - b.weekIdx);
-        periods.forEach(p => {
-          if (merged.length > 0) {
-            const last = merged[merged.length - 1];
-            if (last.weekIdx + 1 === p.weekIdx && last.endDate >= last.origEnd) {
-              // Contiguous week - extend
-              last.endDate = p.endDate;
-              last.origEnd = p.endDate;
-              last.weekCount++;
-              last.endLabel = p.label;
-              return;
-            }
-          }
-          merged.push({ ...p, weekCount: 1, origEnd: p.endDate, startLabel: p.label, endLabel: p.label });
-        });
-
-        merged.forEach(m => {
-          html += `<tr>
-            <td>${player}</td>
-            <td>${m.startDate}</td>
-            <td>${m.endDate}</td>
-            <td class="num">${m.weekCount} (${m.startLabel}${m.startLabel !== m.endLabel ? ' - ' + m.endLabel : ''})</td>
-          </tr>`;
-        });
-      });
-
-      html += '</tbody></table></div>';
-    }
-    html += '</div>';
-  });
-
-  return html;
-}
 
 window.toggleWeeklyScoring = function(safeId) {
   const body = document.getElementById(`wrs-body-${safeId}`);
