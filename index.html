@@ -128,65 +128,6 @@
       </div>
       <div id="roster-panel">
         <div id="roster-content"></div>
-        <!-- Manual Update (Commissioner Only) -->
-        <div class="card" id="manual-update-section" style="display:none;">
-          <h2>Manual Update (Commissioner)</h2>
-          <p class="upload-hint">Manually enter stats for a player for a specific week. Score will be calculated automatically.</p>
-          <div class="manual-update-form">
-            <div class="form-row">
-              <label class="upload-label">Manager</label>
-              <select id="manual-manager" class="form-select"></select>
-            </div>
-            <div class="form-row">
-              <label class="upload-label">Round / Week</label>
-              <select id="manual-week" class="form-select"></select>
-            </div>
-            <div class="form-row">
-              <label class="upload-label">Player Type</label>
-              <div class="player-type-toggle">
-                <button class="type-btn active" id="manual-type-batting">Batting</button>
-                <button class="type-btn" id="manual-type-pitching">Pitching</button>
-              </div>
-            </div>
-            <div class="form-row">
-              <label class="upload-label">Player Name</label>
-              <select id="manual-player-name" class="form-select"><option value="">Select player...</option></select>
-            </div>
-            <div id="manual-batting-fields">
-              <div class="stats-input-grid">
-                <div><label>AB</label><input type="number" id="manual-ab" value="0" min="0"></div>
-                <div><label>1B</label><input type="number" id="manual-1b" value="0" min="0"></div>
-                <div><label>2B</label><input type="number" id="manual-2b" value="0" min="0"></div>
-                <div><label>3B</label><input type="number" id="manual-3b" value="0" min="0"></div>
-                <div><label>HR</label><input type="number" id="manual-hr" value="0" min="0"></div>
-                <div><label>R</label><input type="number" id="manual-r" value="0" min="0"></div>
-                <div><label>RBI</label><input type="number" id="manual-rbi" value="0" min="0"></div>
-                <div><label>SB</label><input type="number" id="manual-sb" value="0" min="0"></div>
-                <div><label>BB</label><input type="number" id="manual-bb-bat" value="0" min="0"></div>
-              </div>
-            </div>
-            <div id="manual-pitching-fields" style="display:none;">
-              <div class="stats-input-grid">
-                <div><label>GS</label><input type="number" id="manual-gs" value="0" min="0"></div>
-                <div><label>W</label><input type="number" id="manual-w" value="0" min="0"></div>
-                <div><label>QS</label><input type="number" id="manual-qs" value="0" min="0"></div>
-                <div><label>CG</label><input type="number" id="manual-cg" value="0" min="0"></div>
-                <div><label>CGSO</label><input type="number" id="manual-cgso" value="0" min="0"></div>
-                <div><label>NH</label><input type="number" id="manual-nh" value="0" min="0"></div>
-                <div><label>IP</label><input type="number" id="manual-ip" value="0" min="0" step="0.1"></div>
-                <div><label>H</label><input type="number" id="manual-h" value="0" min="0"></div>
-                <div><label>ER</label><input type="number" id="manual-er" value="0" min="0"></div>
-                <div><label>BB</label><input type="number" id="manual-bb-pitch" value="0" min="0"></div>
-                <div><label>K</label><input type="number" id="manual-k" value="0" min="0"></div>
-              </div>
-            </div>
-            <div id="manual-score-preview" class="manual-score-preview"></div>
-            <div class="manual-update-actions">
-              <button class="btn btn-primary" id="manual-save-btn">Calculate & Save</button>
-            </div>
-            <div id="manual-update-status"></div>
-          </div>
-        </div>
       </div>
     </section>
 
