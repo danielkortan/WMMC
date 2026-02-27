@@ -860,9 +860,9 @@ function renderPPOverallContent(leaders, seeding) {
       html += '<div class="matchup-preview-grid">';
       const matchups = [
         { label: 'QF1', s1: seeding[0], s2: seeding[7] },
-        { label: 'QF2', s1: seeding[1], s2: seeding[6] },
-        { label: 'QF3', s1: seeding[2], s2: seeding[5] },
         { label: 'QF4', s1: seeding[3], s2: seeding[4] },
+        { label: 'QF3', s1: seeding[2], s2: seeding[5] },
+        { label: 'QF2', s1: seeding[1], s2: seeding[6] },
       ];
       matchups.forEach(m => {
         html += `<div class="matchup-preview">
@@ -1590,47 +1590,29 @@ function showActiveSeason(seasonData) {
   const managers = getManagers();
   const managerScores = computeManagerScores(seasonData);
 
-  if (managerScores.length > 0) {
-    const sorted = [...managerScores].sort((a, b) => b.total - a.total);
-    const top = sorted[0];
-    const bestBat = [...managerScores].sort((a, b) => b.batting - a.batting)[0];
-    const bestPitch = [...managerScores].sort((a, b) => b.pitching - a.pitching)[0];
-
-    grid.innerHTML = [
-      { label: 'Current Leader', value: fmt(top.total), detail: top.manager },
-      { label: 'Best Batting', value: fmt(bestBat.batting), detail: bestBat.manager },
-      { label: 'Best Pitching', value: fmt(bestPitch.pitching), detail: bestPitch.manager },
-    ].map(s => `
-      <div class="stat-card">
-        <div class="stat-label">${s.label}</div>
-        <div class="stat-value">${s.value}</div>
-        <div class="stat-detail">${s.detail}</div>
-      </div>
-    `).join('');
-  } else {
-    grid.innerHTML = `
-      <div class="stat-card">
-        <div class="stat-label">Managers</div>
-        <div class="stat-value">${managers.length}</div>
-        <div class="stat-detail">Registered</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Batters Pool</div>
-        <div class="stat-value">${(seasonData.batters_pool || []).length}</div>
-        <div class="stat-detail">Available</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Pitchers Pool</div>
-        <div class="stat-value">${(seasonData.pitchers_pool || []).length}</div>
-        <div class="stat-detail">Available</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Weeks Uploaded</div>
-        <div class="stat-value">${countUploadedWeeks(seasonData)}</div>
-        <div class="stat-detail">of 16</div>
-      </div>
-    `;
-  }
+  // Stats grid shows basic season info (leader cards moved to Pool Play section)
+  grid.innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Managers</div>
+      <div class="stat-value">${managers.length}</div>
+      <div class="stat-detail">Registered</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Batters Pool</div>
+      <div class="stat-value">${(seasonData.batters_pool || []).length}</div>
+      <div class="stat-detail">Available</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Pitchers Pool</div>
+      <div class="stat-value">${(seasonData.pitchers_pool || []).length}</div>
+      <div class="stat-detail">Available</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Weeks Uploaded</div>
+      <div class="stat-value">${countUploadedWeeks(seasonData)}</div>
+      <div class="stat-detail">of 16</div>
+    </div>
+  `;
 
   // Scoreboard content for active season
   const scoreboardContent = document.getElementById('scoreboard-content');
@@ -1754,20 +1736,36 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   const seeded = qualifiers.slice(0, 8);
 
-  // Build bracket matchups (1v8, 2v7, 3v6, 4v5)
+  // Build bracket matchups: Top half = 1v8, 4v5 / Bottom half = 3v6, 2v7
   const qfMatchups = [
     { label: 'QF1', s1: { seed: 1, name: seeded[0] }, s2: { seed: 8, name: seeded[7] } },
-    { label: 'QF2', s1: { seed: 2, name: seeded[1] }, s2: { seed: 7, name: seeded[6] } },
-    { label: 'QF3', s1: { seed: 3, name: seeded[2] }, s2: { seed: 6, name: seeded[5] } },
     { label: 'QF4', s1: { seed: 4, name: seeded[3] }, s2: { seed: 5, name: seeded[4] } },
+    { label: 'QF3', s1: { seed: 3, name: seeded[2] }, s2: { seed: 6, name: seeded[5] } },
+    { label: 'QF2', s1: { seed: 2, name: seeded[1] }, s2: { seed: 7, name: seeded[6] } },
   ];
 
-  // Compute round scores for matchups
+  // Compute round scores for matchups (with batting/pitching breakdown)
   function getRoundScore(manager, round) {
     let total = 0;
     batting.filter(b => b.manager === manager && b.round === round).forEach(b => total += (b.weekly_score || 0));
     pitching.filter(p => p.manager === manager && p.round === round).forEach(p => total += (p.weekly_score || 0));
     return Math.round(total * 100) / 100;
+  }
+  function getRoundBreakdown(manager, round) {
+    let bat = 0, pit = 0;
+    batting.filter(b => b.manager === manager && b.round === round).forEach(b => bat += (b.weekly_score || 0));
+    pitching.filter(p => p.manager === manager && p.round === round).forEach(p => pit += (p.weekly_score || 0));
+    bat = Math.round(bat * 100) / 100;
+    pit = Math.round(pit * 100) / 100;
+    const total = Math.round((bat + pit) * 100) / 100;
+    return { bat, pit, total };
+  }
+  function bracketScoreHtml(bd) {
+    if (bd.total <= 0) return '<span class="bracket-score">-</span>';
+    return `<span class="bracket-score-group">
+      <span class="bracket-score">${fmt(bd.total)}</span>
+      <span class="bracket-score-detail">${fmt(bd.bat)}B / ${fmt(bd.pit)}P</span>
+    </span>`;
   }
 
   const finalized = seasonData.finalized_rounds || [];
@@ -1781,22 +1779,22 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   html += '<div class="bracket-round"><div class="bracket-round-label">Quarterfinals</div>';
   const qfWinners = [];
   qfMatchups.forEach(m => {
-    const s1Score = getRoundScore(m.s1.name, 'QF');
-    const s2Score = getRoundScore(m.s2.name, 'QF');
+    const s1Bd = getRoundBreakdown(m.s1.name, 'QF');
+    const s2Bd = getRoundBreakdown(m.s2.name, 'QF');
     const qfDone = finalized.includes('QF');
-    const winner = qfDone ? (s1Score >= s2Score ? m.s1.name : m.s2.name) : null;
+    const winner = qfDone ? (s1Bd.total >= s2Bd.total ? m.s1.name : m.s2.name) : null;
     qfWinners.push(winner);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       <div class="bracket-team ${winner === m.s1.name ? 'bracket-winner' : ''}">
         <span class="bracket-seed">${m.s1.seed}</span>
         <span class="bracket-name">${m.s1.name}</span>
-        <span class="bracket-score">${s1Score > 0 ? fmt(s1Score) : '-'}</span>
+        ${bracketScoreHtml(s1Bd)}
       </div>
       <div class="bracket-team ${winner === m.s2.name ? 'bracket-winner' : ''}">
         <span class="bracket-seed">${m.s2.seed}</span>
         <span class="bracket-name">${m.s2.name}</span>
-        <span class="bracket-score">${s2Score > 0 ? fmt(s2Score) : '-'}</span>
+        ${bracketScoreHtml(s2Bd)}
       </div>
     </div>`;
   });
@@ -1811,22 +1809,22 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const sfWinners = [];
   const sfLosers = [];
   sfMatchups.forEach(m => {
-    const s1Score = m.t1 !== 'TBD' ? getRoundScore(m.t1, 'SF') : 0;
-    const s2Score = m.t2 !== 'TBD' ? getRoundScore(m.t2, 'SF') : 0;
+    const s1Bd = m.t1 !== 'TBD' ? getRoundBreakdown(m.t1, 'SF') : { bat: 0, pit: 0, total: 0 };
+    const s2Bd = m.t2 !== 'TBD' ? getRoundBreakdown(m.t2, 'SF') : { bat: 0, pit: 0, total: 0 };
     const sfDone = finalized.includes('SF');
-    const winner = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Score >= s2Score ? m.t1 : m.t2) : null;
-    const loser = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Score >= s2Score ? m.t2 : m.t1) : null;
+    const winner = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Bd.total >= s2Bd.total ? m.t1 : m.t2) : null;
+    const loser = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Bd.total >= s2Bd.total ? m.t2 : m.t1) : null;
     sfWinners.push(winner);
     sfLosers.push(loser);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       <div class="bracket-team ${winner === m.t1 ? 'bracket-winner' : ''}">
         <span class="bracket-name">${m.t1}</span>
-        <span class="bracket-score">${s1Score > 0 ? fmt(s1Score) : '-'}</span>
+        ${m.t1 !== 'TBD' ? bracketScoreHtml(s1Bd) : '<span class="bracket-score">-</span>'}
       </div>
       <div class="bracket-team ${winner === m.t2 ? 'bracket-winner' : ''}">
         <span class="bracket-name">${m.t2}</span>
-        <span class="bracket-score">${s2Score > 0 ? fmt(s2Score) : '-'}</span>
+        ${m.t2 !== 'TBD' ? bracketScoreHtml(s2Bd) : '<span class="bracket-score">-</span>'}
       </div>
     </div>`;
   });
@@ -1836,39 +1834,39 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   html += '<div class="bracket-round"><div class="bracket-round-label">Finals</div>';
   const f1 = sfWinners[0] || 'TBD';
   const f2 = sfWinners[1] || 'TBD';
-  const f1Score = f1 !== 'TBD' ? getRoundScore(f1, 'Finals') : 0;
-  const f2Score = f2 !== 'TBD' ? getRoundScore(f2, 'Finals') : 0;
+  const f1Bd = f1 !== 'TBD' ? getRoundBreakdown(f1, 'Finals') : { bat: 0, pit: 0, total: 0 };
+  const f2Bd = f2 !== 'TBD' ? getRoundBreakdown(f2, 'Finals') : { bat: 0, pit: 0, total: 0 };
   const finalsDone = finalized.includes('Finals');
-  const champion = finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? (f1Score >= f2Score ? f1 : f2) : null;
+  const champion = finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? (f1Bd.total >= f2Bd.total ? f1 : f2) : null;
 
   html += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
     <div class="bracket-team ${champion === f1 ? 'bracket-winner bracket-champion' : ''}">
       <span class="bracket-name">${f1}</span>
-      <span class="bracket-score">${f1Score > 0 ? fmt(f1Score) : '-'}</span>
+      ${f1 !== 'TBD' ? bracketScoreHtml(f1Bd) : '<span class="bracket-score">-</span>'}
     </div>
     <div class="bracket-team ${champion === f2 ? 'bracket-winner bracket-champion' : ''}">
       <span class="bracket-name">${f2}</span>
-      <span class="bracket-score">${f2Score > 0 ? fmt(f2Score) : '-'}</span>
+      ${f2 !== 'TBD' ? bracketScoreHtml(f2Bd) : '<span class="bracket-score">-</span>'}
     </div>
   </div>`;
 
   // 3rd Place
   const t1 = sfLosers[0] || 'TBD';
   const t2 = sfLosers[1] || 'TBD';
-  const t1Score = t1 !== 'TBD' ? getRoundScore(t1, 'Finals') : 0;
-  const t2Score = t2 !== 'TBD' ? getRoundScore(t2, 'Finals') : 0;
-  const thirdPlace = finalsDone && t1 !== 'TBD' && t2 !== 'TBD' ? (t1Score >= t2Score ? t1 : t2) : null;
+  const t1Bd = t1 !== 'TBD' ? getRoundBreakdown(t1, 'Finals') : { bat: 0, pit: 0, total: 0 };
+  const t2Bd = t2 !== 'TBD' ? getRoundBreakdown(t2, 'Finals') : { bat: 0, pit: 0, total: 0 };
+  const thirdPlace = finalsDone && t1 !== 'TBD' && t2 !== 'TBD' ? (t1Bd.total >= t2Bd.total ? t1 : t2) : null;
 
   html += `<div class="bracket-matchup" style="margin-top:1rem;">
     <div class="bracket-matchup-label">3rd Place</div>
     <div class="bracket-team ${thirdPlace === t1 ? 'bracket-winner' : ''}">
       <span class="bracket-name">${t1}</span>
-      <span class="bracket-score">${t1Score > 0 ? fmt(t1Score) : '-'}</span>
+      ${t1 !== 'TBD' ? bracketScoreHtml(t1Bd) : '<span class="bracket-score">-</span>'}
     </div>
     <div class="bracket-team ${thirdPlace === t2 ? 'bracket-winner' : ''}">
       <span class="bracket-name">${t2}</span>
-      <span class="bracket-score">${t2Score > 0 ? fmt(t2Score) : '-'}</span>
+      ${t2 !== 'TBD' ? bracketScoreHtml(t2Bd) : '<span class="bracket-score">-</span>'}
     </div>
   </div>`;
 
@@ -2051,6 +2049,25 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     <h3>Pool Play Overall</h3>
     ${renderOverallTable(overallScores)}
   </div>`;
+
+  // Pool Play leader stat cards (pool play scores only)
+  if (overallScores.length > 0 && overallScores[0].total > 0) {
+    const ppSorted = [...overallScores].sort((a, b) => b.total - a.total);
+    const ppTop = ppSorted[0];
+    const ppBestBat = [...overallScores].sort((a, b) => b.batting - a.batting)[0];
+    const ppBestPit = [...overallScores].sort((a, b) => b.pitching - a.pitching)[0];
+    const ppLeaderCards = [
+      { label: 'Pool Play Leader', value: fmt(ppTop.total), detail: ppTop.manager },
+      { label: 'Best Batting', value: fmt(ppBestBat.batting), detail: ppBestBat.manager },
+      { label: 'Best Pitching', value: fmt(ppBestPit.pitching), detail: ppBestPit.manager },
+    ];
+    html += `<div class="stats-grid pp-leader-cards">${ppLeaderCards.map(s => `
+      <div class="stat-card">
+        <div class="stat-label">${s.label}</div>
+        <div class="stat-value">${s.value}</div>
+        <div class="stat-detail">${s.detail}</div>
+      </div>`).join('')}</div>`;
+  }
 
   // Pool Play 1
   html += `<div class="scoreboard-section">
@@ -2964,6 +2981,10 @@ function renderRosterData(managerName, isCommissioner) {
   container.innerHTML = html;
   // Initialize type-to-search inputs after DOM is rendered
   setupPlayerSearchInputs();
+  // Initialize commissioner roster management view if present
+  if (document.getElementById('comm-roster-week')) {
+    window.updateCommRosterWeekView(managerName);
+  }
 }
 
 // Compute cumulative scores for all players across all weeks
@@ -3136,12 +3157,10 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (allBattersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
       html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
-      if (isCommissioner && isActive) html += '<th></th>';
       html += '</tr></thead><tbody>';
       [...allBattersThisWeek].sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0)).forEach(batter => {
         const s = batStatMap[batter] || {};
         const onRoster = weekRoster.batters.includes(batter);
-        const safeBatter = batter.replace(/'/g, "\\'");
         const wkRank = weekRanks.batRanks[batter];
         const cumScore = cumScores.batCumulative[batter] || 0;
         const cumRank = cumRankings.batRanks[batter];
@@ -3160,27 +3179,11 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
         html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
         html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
-        if (isCommissioner && isActive) {
-          html += `<td class="num wrs-actions">`;
-          html += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeBatter}','${weekKey}')" title="Edit stats">Edit</button>`;
-          if (onRoster) {
-            html += ` <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeBatter}','${weekKey}')">Drop</button>`;
-          }
-          html += `</td>`;
-        }
         html += '</tr>';
       });
       html += '</tbody></table></div>';
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No batters rostered this week.</p>';
-    }
-    // Commissioner: add batter for this week (type-to-search)
-    if (isCommissioner && isActive) {
-      html += `<div class="roster-add-row player-search-container">
-        <input type="text" id="add-bat-${safeId}" class="form-input player-search-input" placeholder="Type to search batters..." autocomplete="off" data-pool-type="batters" data-week-key="${weekKey}" data-manager="${safeMgr}">
-        <div class="player-search-results" id="results-bat-${safeId}"></div>
-        <button class="btn btn-sm btn-primary" onclick="addToRosterFromSearch('${safeMgr}','batters','add-bat-${safeId}','${weekKey}')">Add</button>
-      </div>`;
     }
 
     // Helper: render a pitching stat cell with manual highlight
@@ -3199,12 +3202,10 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (allPitchersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
       html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
-      if (isCommissioner && isActive) html += '<th></th>';
       html += '</tr></thead><tbody>';
       [...allPitchersThisWeek].sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0)).forEach(pitcher => {
         const s = pitStatMap[pitcher] || {};
         const onRoster = weekRoster.pitchers.includes(pitcher);
-        const safePitcher = pitcher.replace(/'/g, "\\'");
         const wkRank = weekRanks.pitRanks[pitcher];
         const cumScore = cumScores.pitCumulative[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
@@ -3231,27 +3232,11 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
         html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
         html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
-        if (isCommissioner && isActive) {
-          html += `<td class="num wrs-actions">`;
-          html += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safePitcher}','${weekKey}')" title="Edit stats">Edit</button>`;
-          if (onRoster) {
-            html += ` <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safePitcher}','${weekKey}')">Drop</button>`;
-          }
-          html += `</td>`;
-        }
         html += '</tr>';
       });
       html += '</tbody></table></div>';
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No pitchers rostered this week.</p>';
-    }
-    // Commissioner: add pitcher for this week (type-to-search)
-    if (isCommissioner && isActive) {
-      html += `<div class="roster-add-row player-search-container">
-        <input type="text" id="add-pit-${safeId}" class="form-input player-search-input" placeholder="Type to search pitchers..." autocomplete="off" data-pool-type="pitchers" data-week-key="${weekKey}" data-manager="${safeMgr}">
-        <div class="player-search-results" id="results-pit-${safeId}"></div>
-        <button class="btn btn-sm btn-primary" onclick="addToRosterFromSearch('${safeMgr}','pitchers','add-pit-${safeId}','${weekKey}')">Add</button>
-      </div>`;
     }
 
     // Week total footer
@@ -3815,6 +3800,47 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       });
       html += `</div>`;
     }
+  }
+
+  // Commissioner: Roster management (Add/Drop/Edit) per week
+  if (isCommissioner && isActive) {
+    const safeMgr = managerName.replace(/'/g, "\\'");
+    const allPool = seasonData.batters_pool || [];
+    const allPitPool = seasonData.pitchers_pool || [];
+
+    html += `<div class="card" style="margin-top:1rem;">
+      <h3>Commissioner Roster Management</h3>
+      <p class="text-muted" style="margin-bottom:0.75rem;">Add/drop players and edit stats for ${managerName}</p>`;
+
+    // Week selector
+    html += `<div class="form-row" style="margin-bottom:0.75rem;">
+      <label class="upload-label">Week</label>
+      <select id="comm-roster-week" class="form-select" style="max-width:280px;" onchange="updateCommRosterWeekView('${safeMgr}')">`;
+    SEASON_SCHEDULE.forEach((s, i) => {
+      const wk = `${s.round}|${s.week}`;
+      html += `<option value="${wk}">${s.label}</option>`;
+    });
+    html += `</select></div>`;
+
+    // Batter add/drop
+    html += `<div class="wrs-group-label">BATTERS</div>`;
+    html += `<div id="comm-roster-batters"></div>`;
+    html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
+      <input type="text" id="comm-add-bat" class="form-input player-search-input" placeholder="Type to search batters..." autocomplete="off" data-pool-type="batters" data-week-key="" data-manager="${safeMgr}">
+      <div class="player-search-results" id="results-comm-add-bat"></div>
+      <button class="btn btn-sm btn-primary" onclick="commAddPlayer('${safeMgr}','batters')">Add</button>
+    </div>`;
+
+    // Pitcher add/drop
+    html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS</div>`;
+    html += `<div id="comm-roster-pitchers"></div>`;
+    html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
+      <input type="text" id="comm-add-pit" class="form-input player-search-input" placeholder="Type to search pitchers..." autocomplete="off" data-pool-type="pitchers" data-week-key="" data-manager="${safeMgr}">
+      <div class="player-search-results" id="results-comm-add-pit"></div>
+      <button class="btn btn-sm btn-primary" onclick="commAddPlayer('${safeMgr}','pitchers')">Add</button>
+    </div>`;
+
+    html += `</div>`;
   }
 
   // All Swaps table (compact)
@@ -5304,10 +5330,88 @@ window.selectPlayerSearchResult = function(inputId, playerName) {
   const input = document.getElementById(inputId);
   if (input) {
     input.value = playerName;
-    const resultsId = inputId.replace('add-', 'results-');
-    const resultsDiv = document.getElementById(resultsId);
+    // Handle both 'add-' prefixed and 'comm-add-' prefixed results divs
+    let resultsDiv = document.getElementById(inputId.replace('add-', 'results-'));
+    if (!resultsDiv) resultsDiv = document.getElementById('results-' + inputId);
     if (resultsDiv) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; }
   }
+};
+
+// Commissioner roster management in the Swaps tab
+window.updateCommRosterWeekView = function(managerName) {
+  const weekSelect = document.getElementById('comm-roster-week');
+  if (!weekSelect) return;
+  const weekKey = weekSelect.value;
+
+  // Update search input data attributes
+  const batInput = document.getElementById('comm-add-bat');
+  const pitInput = document.getElementById('comm-add-pit');
+  if (batInput) batInput.dataset.weekKey = weekKey;
+  if (pitInput) pitInput.dataset.weekKey = weekKey;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.rosters) return;
+  const safeMgr = managerName.replace(/'/g, "\\'");
+
+  const [round, week] = weekKey.split('|');
+  const roster = sd.rosters[managerName] && sd.rosters[managerName][weekKey]
+    ? sd.rosters[managerName][weekKey] : { batters: [], pitchers: [] };
+
+  // Build batter list with drop/edit buttons
+  let batHtml = '';
+  if (roster.batters.length > 0) {
+    batHtml = '<div class="comm-player-list">';
+    roster.batters.forEach(b => {
+      const safeB = b.replace(/'/g, "\\'");
+      batHtml += `<div class="comm-player-item">
+        <span>${b}</span>
+        <span>
+          <button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button>
+          <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button>
+        </span>
+      </div>`;
+    });
+    batHtml += '</div>';
+  } else {
+    batHtml = '<p class="text-muted" style="font-size:0.82rem;">No batters rostered this week.</p>';
+  }
+  document.getElementById('comm-roster-batters').innerHTML = batHtml;
+
+  // Build pitcher list with drop/edit buttons
+  let pitHtml = '';
+  if (roster.pitchers.length > 0) {
+    pitHtml = '<div class="comm-player-list">';
+    roster.pitchers.forEach(p => {
+      const safeP = p.replace(/'/g, "\\'");
+      pitHtml += `<div class="comm-player-item">
+        <span>${p}</span>
+        <span>
+          <button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safeP}','${weekKey}')">Edit</button>
+          <button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button>
+        </span>
+      </div>`;
+    });
+    pitHtml += '</div>';
+  } else {
+    pitHtml = '<p class="text-muted" style="font-size:0.82rem;">No pitchers rostered this week.</p>';
+  }
+  document.getElementById('comm-roster-pitchers').innerHTML = pitHtml;
+
+  // Re-setup search inputs for the new week
+  setupPlayerSearchInputs();
+};
+
+window.commAddPlayer = function(manager, type) {
+  const inputId = type === 'batters' ? 'comm-add-bat' : 'comm-add-pit';
+  const input = document.getElementById(inputId);
+  const weekSelect = document.getElementById('comm-roster-week');
+  if (!input || !weekSelect) return;
+  const weekKey = weekSelect.value;
+  if (!weekKey) return;
+  window.addToRosterFromSearch(manager, type, inputId, weekKey);
+  // Refresh the view
+  setTimeout(() => window.updateCommRosterWeekView(manager), 100);
 };
 
 window.addToRoster = function(manager, type, selectId, weekKey) {
@@ -5518,8 +5622,26 @@ function renderWeeklyUploadSections() {
   batting.forEach(b => uploadedBatting.add(`${b.round}|${b.week}`));
   pitching.forEach(p => uploadedPitching.add(`${p.round}|${p.week}`));
 
+  // Determine the "current" week: first week without complete data, or last week with data
+  let currentWeekIndex = 0;
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    const wk = `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
+    if (uploadedBatting.has(wk) || uploadedPitching.has(wk)) {
+      currentWeekIndex = i;
+    }
+  }
+  // The next incomplete week is one after the last with data
+  const nextWeekIndex = Math.min(currentWeekIndex + 1, SEASON_SCHEDULE.length - 1);
+
   const dates = getScheduleDates();
   let html = '';
+
+  // Show All / Hide All buttons
+  html += `<div style="margin-bottom:0.75rem;display:flex;gap:0.5rem;">
+    <button class="btn btn-sm btn-secondary" onclick="toggleAllUploadWeeks(true)">Show All</button>
+    <button class="btn btn-sm btn-secondary" onclick="toggleAllUploadWeeks(false)">Hide All</button>
+  </div>`;
+
   SEASON_SCHEDULE.forEach((s, i) => {
     const weekKey = `${s.round}|${s.week}`;
     const hasBatting = uploadedBatting.has(weekKey);
@@ -5530,12 +5652,20 @@ function renderWeeklyUploadSections() {
     // Check if this week has a prior week for Advance Players
     const hasPriorWeek = i > 0;
 
+    // Auto-collapse: show current and next week expanded, collapse completed past weeks
+    const isCurrentOrNext = i >= currentWeekIndex && i <= nextWeekIndex;
+    const isExpanded = isCurrentOrNext;
+
     html += `
       <div class="weekly-upload-block ${isComplete ? 'upload-complete' : ''}">
-        <div class="weekly-upload-header">
+        <div class="weekly-upload-header upload-week-toggle" onclick="toggleUploadWeek(${i})" style="cursor:pointer;">
           <h3>${s.label}${dateStr ? ` <span class="week-dates-inline">(${dateStr})</span>` : ''}</h3>
-          <span class="badge ${isComplete ? 'badge-winner' : 'badge-wildcard'}">${isComplete ? 'Complete' : 'Pending'}</span>
-        </div>`;
+          <div style="display:flex;align-items:center;gap:0.5rem;">
+            <span class="badge ${isComplete ? 'badge-winner' : 'badge-wildcard'}">${isComplete ? 'Complete' : 'Pending'}</span>
+            <span class="upload-week-chevron" id="upload-chevron-${i}">${isExpanded ? '&#9660;' : '&#9654;'}</span>
+          </div>
+        </div>
+        <div class="upload-week-body" id="upload-week-body-${i}" style="display:${isExpanded ? 'block' : 'none'};">`;
 
     // Advance Players button (not for the first week)
     if (hasPriorWeek) {
@@ -5620,11 +5750,29 @@ function renderWeeklyUploadSections() {
       html += '</div>';
     }
 
-    html += `</div>`;
+    html += `</div></div>`; // close .upload-week-body and .weekly-upload-block
   });
 
   container.innerHTML = html;
 }
+
+window.toggleUploadWeek = function(weekIndex) {
+  const body = document.getElementById(`upload-week-body-${weekIndex}`);
+  const chevron = document.getElementById(`upload-chevron-${weekIndex}`);
+  if (!body) return;
+  const hidden = body.style.display === 'none';
+  body.style.display = hidden ? 'block' : 'none';
+  if (chevron) chevron.innerHTML = hidden ? '&#9660;' : '&#9654;';
+};
+
+window.toggleAllUploadWeeks = function(show) {
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    const body = document.getElementById(`upload-week-body-${i}`);
+    const chevron = document.getElementById(`upload-chevron-${i}`);
+    if (body) body.style.display = show ? 'block' : 'none';
+    if (chevron) chevron.innerHTML = show ? '&#9660;' : '&#9654;';
+  }
+};
 
 // Advance Players: copy per-week rosters from prior week to current week for all managers.
 // Creates zero-stat records for all advanced players. Marks the week as advanced to prevent re-clicking.
@@ -5653,14 +5801,29 @@ window.advancePlayers = function(weekIndex) {
   if (!sd.weekly_pitching) sd.weekly_pitching = [];
   let advanced = 0;
 
+  // Build a set of players dropped during or before the prior week
+  const swaps = sd.swaps || [];
+
   const managers = getManagers();
   managers.forEach(m => {
     if (!sd.rosters[m.name]) sd.rosters[m.name] = {};
     const priorRoster = sd.rosters[m.name][priorKey];
     if (priorRoster) {
-      // Only advance currently rostered players (not dropped ones)
-      const batters = [...(priorRoster.batters || [])];
-      const pitchers = [...(priorRoster.pitchers || [])];
+      // Filter out dropped players: only advance players still on the prior week's roster
+      // (removeFromRoster removes from the weekKey's array, so priorRoster is already correct)
+      // Also filter out any player that was dropped (player_out) in ANY week up to and including priorKey
+      const droppedBatters = new Set();
+      const droppedPitchers = new Set();
+      swaps.filter(s => s.manager === m.name && s.status === 'approved' && s.player_out && !s.player_in).forEach(s => {
+        // If this drop was for the prior week or current week, exclude the player
+        if (s.week_key === priorKey || s.week_key === currentKey) {
+          droppedBatters.add(s.player_out);
+          droppedPitchers.add(s.player_out);
+        }
+      });
+
+      const batters = (priorRoster.batters || []).filter(p => !droppedBatters.has(p));
+      const pitchers = (priorRoster.pitchers || []).filter(p => !droppedPitchers.has(p));
 
       // Copy roster to current week (don't overwrite existing)
       if (!sd.rosters[m.name][currentKey]) {

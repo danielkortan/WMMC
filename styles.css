@@ -3039,6 +3039,40 @@ body::before {
   border-color: var(--white);
 }
 
+/* ---- Commissioner Roster Management ---- */
+.comm-player-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.comm-player-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg-body);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.comm-player-item span:last-child {
+  display: flex;
+  gap: 0.3rem;
+}
+
+/* ---- Upload Week Minimize ---- */
+.upload-week-chevron {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.upload-week-toggle:hover {
+  background: var(--bg-body);
+  border-radius: 4px;
+}
+
 /* ---- Active Playoff Bracket ---- */
 .bracket-card.bracket-featured {
   border: 2px solid var(--accent);
@@ -3118,6 +3152,28 @@ body::before {
   color: var(--navy);
   min-width: 40px;
   text-align: right;
+}
+
+.bracket-score-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 50px;
+}
+
+.bracket-score-group .bracket-score {
+  min-width: unset;
+}
+
+.bracket-score-detail {
+  font-size: 0.65rem;
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.pp-leader-cards {
+  margin: 1rem 0;
 }
 
 @media (max-width: 768px) {
