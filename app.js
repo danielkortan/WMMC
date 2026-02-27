@@ -305,7 +305,15 @@ function handleLogin(email, password) {
     return;
   }
 
-  if (password !== LOGIN_PASSWORD) {
+  // Check per-manager password first, fall back to global default
+  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
+  const managerPassword = passwords[email];
+  if (managerPassword) {
+    if (password !== managerPassword) {
+      errEl.textContent = 'Incorrect password.';
+      return;
+    }
+  } else if (password !== LOGIN_PASSWORD) {
     errEl.textContent = 'Incorrect password.';
     return;
   }
@@ -2954,25 +2962,30 @@ function renderRosterData(managerName, isCommissioner) {
   </div>`;
   html += '</div>';
 
+  // Preserve the active tab when re-rendering
+  const activeTabBtn = document.querySelector('.roster-tab.active');
+  const activeTabKey = activeTabBtn ? activeTabBtn.dataset.rtab : 'per-week';
+
   // ---- Roster Tabs ----
+  const tabs = ['per-week', 'team-stats', 'swaps'];
   html += `<div class="roster-tabs">
-    <button class="roster-tab active" data-rtab="per-week" onclick="switchRosterTab(this, 'per-week')">Per-Week Roster</button>
-    <button class="roster-tab" data-rtab="team-stats" onclick="switchRosterTab(this, 'team-stats')">Team Stats</button>
-    <button class="roster-tab" data-rtab="swaps" onclick="switchRosterTab(this, 'swaps')">Swaps</button>
+    <button class="roster-tab${activeTabKey === 'per-week' ? ' active' : ''}" data-rtab="per-week" onclick="switchRosterTab(this, 'per-week')">Per-Week Roster</button>
+    <button class="roster-tab${activeTabKey === 'team-stats' ? ' active' : ''}" data-rtab="team-stats" onclick="switchRosterTab(this, 'team-stats')">Team Stats</button>
+    <button class="roster-tab${activeTabKey === 'swaps' ? ' active' : ''}" data-rtab="swaps" onclick="switchRosterTab(this, 'swaps')">Swaps</button>
   </div>`;
 
   // ---- Per-Week Roster Sections ----
-  html += `<div class="roster-tab-content" id="rtab-per-week" style="display:block;">`;
+  html += `<div class="roster-tab-content" id="rtab-per-week" style="display:${activeTabKey === 'per-week' ? 'block' : 'none'};">`;
   html += buildPerWeekRoster(managerName, isCommissioner, seasonData);
   html += `</div>`;
 
   // ---- Team Stats Breakdown ----
-  html += `<div class="roster-tab-content" id="rtab-team-stats" style="display:none;">`;
+  html += `<div class="roster-tab-content" id="rtab-team-stats" style="display:${activeTabKey === 'team-stats' ? 'block' : 'none'};">`;
   html += buildTeamStatsBreakdown(managerName, seasonData, p2m);
   html += `</div>`;
 
   // ---- Player Swaps ----
-  html += `<div class="roster-tab-content" id="rtab-swaps" style="display:none;">`;
+  html += `<div class="roster-tab-content" id="rtab-swaps" style="display:${activeTabKey === 'swaps' ? 'block' : 'none'};">`;
   html += buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m);
   html += `</div>`;
 
@@ -3801,6 +3814,133 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
   }
   html += '</div>';
 
+  // ---- Initial Player Submission ----
+  if (isActive) {
+    const safeMgr = managerName.replace(/'/g, "\\'");
+    const submission = seasonData.initial_submissions && seasonData.initial_submissions[managerName];
+    const isApproved = submission && submission.status === 'approved';
+    const isPending = submission && submission.status === 'pending';
+    const submittedBatters = submission ? (submission.batters || []) : [];
+    const submittedPitchers = submission ? (submission.pitchers || []) : [];
+
+    html += `<div class="card initial-submission-section" style="margin-top:1rem;">
+      <h3>Initial Player Submission</h3>
+      <p class="text-muted" style="margin-bottom:0.75rem;">Submit your initial roster: 4 batters and 3 pitchers</p>`;
+
+    if (isApproved) {
+      // Show approved roster (read-only)
+      html += `<div class="swap-badge swap-badge-approved" style="margin-bottom:0.75rem;">Approved by Commissioner</div>`;
+      html += `<div class="wrs-group-label">BATTERS (${submittedBatters.length}/4)</div>`;
+      html += '<div class="comm-player-list">';
+      submittedBatters.forEach(b => { html += `<div class="comm-player-item"><span>${b}</span></div>`; });
+      html += '</div>';
+      html += `<div class="wrs-group-label" style="margin-top:0.5rem;">PITCHERS (${submittedPitchers.length}/3)</div>`;
+      html += '<div class="comm-player-list">';
+      submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${p}</span></div>`; });
+      html += '</div>';
+    } else {
+      // Editable submission form
+      if (isPending) {
+        html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>`;
+      }
+
+      // Batters
+      html += `<div class="wrs-group-label">BATTERS (${submittedBatters.length}/4)</div>`;
+      html += `<div id="initial-sub-batters">`;
+      if (submittedBatters.length > 0) {
+        html += '<div class="comm-player-list">';
+        submittedBatters.forEach(b => {
+          const safeB = b.replace(/'/g, "\\'");
+          html += `<div class="comm-player-item">
+            <span>${b}</span>
+            <button class="btn btn-sm btn-danger" onclick="removeInitialPlayer('${safeMgr}','batters','${safeB}')">Remove</button>
+          </div>`;
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+      if (submittedBatters.length < 4) {
+        html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
+          <input type="text" id="initial-add-bat" class="form-input player-search-input" placeholder="Type to search batters..." autocomplete="off" data-pool-type="batters" data-week-key="initial" data-manager="${safeMgr}">
+          <div class="player-search-results" id="results-initial-add-bat"></div>
+          <button class="btn btn-sm btn-primary" onclick="addInitialPlayer('${safeMgr}','batters')">Add</button>
+        </div>`;
+      }
+
+      // Pitchers
+      html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${submittedPitchers.length}/3)</div>`;
+      html += `<div id="initial-sub-pitchers">`;
+      if (submittedPitchers.length > 0) {
+        html += '<div class="comm-player-list">';
+        submittedPitchers.forEach(p => {
+          const safeP = p.replace(/'/g, "\\'");
+          html += `<div class="comm-player-item">
+            <span>${p}</span>
+            <button class="btn btn-sm btn-danger" onclick="removeInitialPlayer('${safeMgr}','pitchers','${safeP}')">Remove</button>
+          </div>`;
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+      if (submittedPitchers.length < 3) {
+        html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
+          <input type="text" id="initial-add-pit" class="form-input player-search-input" placeholder="Type to search pitchers..." autocomplete="off" data-pool-type="pitchers" data-week-key="initial" data-manager="${safeMgr}">
+          <div class="player-search-results" id="results-initial-add-pit"></div>
+          <button class="btn btn-sm btn-primary" onclick="addInitialPlayer('${safeMgr}','pitchers')">Add</button>
+        </div>`;
+      }
+
+      // Submit button
+      if (!isPending && submittedBatters.length === 4 && submittedPitchers.length === 3) {
+        html += `<div style="margin-top:1rem;">
+          <button class="btn btn-primary" onclick="submitInitialRoster('${safeMgr}')">Submit for Approval</button>
+        </div>`;
+      } else if (isPending) {
+        html += `<p class="text-muted" style="margin-top:0.75rem;font-size:0.82rem;">You can still modify your roster until the commissioner approves it.</p>`;
+      } else {
+        html += `<p class="text-muted" style="margin-top:0.75rem;font-size:0.82rem;">Select exactly 4 batters and 3 pitchers to submit.</p>`;
+      }
+    }
+
+    // Commissioner approval section
+    if (isCommissioner && isActive) {
+      const allSubs = seasonData.initial_submissions || {};
+      const allManagers = getManagers();
+      const pendingSubs = allManagers.filter(m => {
+        const sub = allSubs[m.name];
+        return sub && sub.status === 'pending';
+      });
+
+      if (pendingSubs.length > 0) {
+        html += `<div class="swap-pending-card" style="margin-top:1rem;">
+          <h4>Pending Initial Roster Approvals</h4>`;
+        pendingSubs.forEach(m => {
+          const sub = allSubs[m.name];
+          const safeName = m.name.replace(/'/g, "\\'");
+          html += `<div class="swap-pending-item" id="initial-sub-${m.name.replace(/\s+/g, '-')}">
+            <div class="swap-pending-header">
+              <strong>${m.name}</strong>
+              <span class="swap-badge swap-badge-pending">Pending</span>
+            </div>
+            <div style="padding:0.5rem 0;">
+              <div style="font-size:0.82rem;"><strong>Batters:</strong> ${(sub.batters || []).join(', ') || 'None'}</div>
+              <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(sub.pitchers || []).join(', ') || 'None'}</div>
+            </div>
+            <div id="initial-edit-${m.name.replace(/\s+/g, '-')}" style="display:none;"></div>
+            <div class="swap-pending-actions">
+              <button class="btn btn-sm btn-success" onclick="approveInitialSubmission('${safeName}')">Approve</button>
+              <button class="btn btn-sm btn-secondary" onclick="editInitialSubmission('${safeName}')">Edit</button>
+              <button class="btn btn-sm btn-danger" onclick="denyInitialSubmission('${safeName}')">Deny</button>
+            </div>
+          </div>`;
+        });
+        html += `</div>`;
+      }
+    }
+
+    html += `</div>`; // .initial-submission-section
+  }
+
   html += '</div>'; // .player-swaps-section
   return html;
 }
@@ -4086,6 +4226,7 @@ function showCommissionerPanel() {
 
   renderPendingSwapRequests();
   renderManagersTable();
+  renderPasswordManagement();
   renderPlayerPoolDisplay();
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
@@ -4718,6 +4859,62 @@ window.deleteManager = function(index) {
   renderManagersTable();
 };
 
+// ---- Password Management ----
+function renderPasswordManagement() {
+  const container = document.getElementById('password-mgmt-table');
+  if (!container) return;
+
+  const managers = getManagers();
+  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
+
+  let html = '<table class="data-table"><thead><tr><th>Manager</th><th>Email</th><th>Password Status</th><th>Actions</th></tr></thead><tbody>';
+  managers.forEach(m => {
+    const hasCustomPw = !!passwords[m.email.toLowerCase()];
+    const statusText = hasCustomPw ? 'Custom password set' : 'Using default';
+    const statusClass = hasCustomPw ? 'swap-badge swap-badge-approved' : 'swap-badge swap-badge-pending';
+    const safeEmail = m.email.toLowerCase().replace(/'/g, "\\'");
+
+    html += `<tr>
+      <td>${m.name}</td>
+      <td>${m.email}</td>
+      <td><span class="${statusClass}" style="font-size:0.75rem;">${statusText}</span></td>
+      <td>
+        <div class="pw-action-row" style="display:flex;gap:0.35rem;align-items:center;">
+          <input type="text" id="pw-input-${m.email.toLowerCase().replace(/[^a-z0-9]/g, '-')}" class="form-input" placeholder="New password" style="max-width:140px;font-size:0.82rem;">
+          <button class="btn btn-sm btn-primary" onclick="setManagerPassword('${safeEmail}')">Set</button>
+          ${hasCustomPw ? `<button class="btn btn-sm btn-secondary" onclick="resetManagerPassword('${safeEmail}')">Reset to Default</button>` : ''}
+        </div>
+      </td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+
+  container.innerHTML = html;
+}
+
+window.setManagerPassword = function(email) {
+  const inputId = 'pw-input-' + email.replace(/[^a-z0-9]/g, '-');
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const newPw = input.value.trim();
+  if (!newPw) { alert('Please enter a password.'); return; }
+  if (newPw.length < 3) { alert('Password must be at least 3 characters.'); return; }
+
+  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
+  passwords[email] = newPw;
+  localStorage.setItem('wmmc_passwords', JSON.stringify(passwords));
+  input.value = '';
+  renderPasswordManagement();
+};
+
+window.resetManagerPassword = function(email) {
+  if (!confirm('Reset this manager\'s password to the default?')) return;
+  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
+  delete passwords[email];
+  localStorage.setItem('wmmc_passwords', JSON.stringify(passwords));
+  renderPasswordManagement();
+};
+
 // Commissioner: open inline stat editor for a player
 window.editPlayerStats = function(manager, statType, playerName, weekKey) {
   const [round, week] = weekKey.split('|');
@@ -4941,8 +5138,10 @@ function setupPlayerSearchInputs() {
   document.querySelectorAll('.player-search-input').forEach(input => {
     if (input._searchBound) return;
     input._searchBound = true;
-    const resultsId = input.id.replace('add-', 'results-');
-    const resultsDiv = document.getElementById(resultsId);
+    let resultsDiv = document.getElementById('results-' + input.id);
+    if (!resultsDiv) {
+      resultsDiv = document.getElementById(input.id.replace('add-', 'results-'));
+    }
     if (!resultsDiv) return;
 
     input.addEventListener('input', () => {
@@ -4956,9 +5155,16 @@ function setupPlayerSearchInputs() {
       const weekKey = input.dataset.weekKey;
       const manager = input.dataset.manager;
 
-      // Get already rostered players for this week
-      const roster = sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey];
-      const rostered = roster ? (roster[poolType] || []) : [];
+      // Get already rostered/selected players to exclude from results
+      let rostered = [];
+      if (weekKey === 'initial') {
+        // For initial submission, exclude players already in this manager's submission
+        const sub = sd.initial_submissions && sd.initial_submissions[manager];
+        rostered = sub ? (sub[poolType] || []) : [];
+      } else {
+        const roster = sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey];
+        rostered = roster ? (roster[poolType] || []) : [];
+      }
 
       const matches = pool.filter(p => {
         if (rostered.includes(p)) return false;
@@ -4988,6 +5194,175 @@ window.selectPlayerSearchResult = function(inputId, playerName) {
     if (!resultsDiv) resultsDiv = document.getElementById('results-' + inputId);
     if (resultsDiv) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; }
   }
+};
+
+// ---- Initial Player Submission Handlers ----
+window.addInitialPlayer = function(manager, type) {
+  const inputId = type === 'batters' ? 'initial-add-bat' : 'initial-add-pit';
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const player = input.value.trim();
+  if (!player) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const pool = type === 'batters' ? (sd.batters_pool || []) : (sd.pitchers_pool || []);
+  const match = pool.find(p => p.toLowerCase() === player.toLowerCase());
+  if (!match) { alert('Player not found in pool. Please select from suggestions.'); return; }
+
+  if (!sd.initial_submissions) sd.initial_submissions = {};
+  if (!sd.initial_submissions[manager]) sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
+  const sub = sd.initial_submissions[manager];
+
+  const maxCount = type === 'batters' ? 4 : 3;
+  if ((sub[type] || []).length >= maxCount) {
+    alert(`Maximum ${maxCount} ${type} allowed.`);
+    return;
+  }
+
+  if (!sub[type]) sub[type] = [];
+  if (sub[type].includes(match)) { alert('Player already in your submission.'); return; }
+  sub[type].push(match);
+
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.removeInitialPlayer = function(manager, type, player) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+  if (sub.status === 'approved') return;
+
+  sub[type] = (sub[type] || []).filter(p => p !== player);
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.submitInitialRoster = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+
+  if ((sub.batters || []).length !== 4 || (sub.pitchers || []).length !== 3) {
+    alert('You must select exactly 4 batters and 3 pitchers.');
+    return;
+  }
+
+  sub.status = 'pending';
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.approveInitialSubmission = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+
+  sub.status = 'approved';
+
+  // Add all players to Week 1 roster
+  const firstWeek = SEASON_SCHEDULE[0];
+  const weekKey = `${firstWeek.round}|${firstWeek.week}`;
+  if (!sd.rosters) sd.rosters = {};
+  if (!sd.rosters[manager]) sd.rosters[manager] = {};
+  if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+
+  (sub.batters || []).forEach(b => {
+    if (!sd.rosters[manager][weekKey].batters.includes(b)) {
+      sd.rosters[manager][weekKey].batters.push(b);
+    }
+  });
+  (sub.pitchers || []).forEach(p => {
+    if (!sd.rosters[manager][weekKey].pitchers.includes(p)) {
+      sd.rosters[manager][weekKey].pitchers.push(p);
+    }
+  });
+
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.editInitialSubmission = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+  const containerId = 'initial-edit-' + manager.replace(/\s+/g, '-');
+  const editDiv = document.getElementById(containerId);
+  if (!editDiv) return;
+
+  if (editDiv.style.display !== 'none') { editDiv.style.display = 'none'; return; }
+
+  const safeMgr = manager.replace(/'/g, "\\'");
+  let editHtml = '<div style="padding:0.5rem 0;">';
+
+  editHtml += '<div style="font-size:0.82rem;font-weight:600;margin-bottom:0.25rem;">Batters:</div>';
+  (sub.batters || []).forEach((b, i) => {
+    const pool = (sd.batters_pool || []).sort();
+    editHtml += `<div style="margin-bottom:0.25rem;">
+      <select class="form-select" style="max-width:220px;display:inline-block;font-size:0.82rem;" id="edit-init-bat-${manager.replace(/\s+/g, '-')}-${i}">
+        ${pool.map(p => `<option value="${p}"${p === b ? ' selected' : ''}>${p}</option>`).join('')}
+      </select></div>`;
+  });
+
+  editHtml += '<div style="font-size:0.82rem;font-weight:600;margin:0.5rem 0 0.25rem;">Pitchers:</div>';
+  (sub.pitchers || []).forEach((p, i) => {
+    const pool = (sd.pitchers_pool || []).sort();
+    editHtml += `<div style="margin-bottom:0.25rem;">
+      <select class="form-select" style="max-width:220px;display:inline-block;font-size:0.82rem;" id="edit-init-pit-${manager.replace(/\s+/g, '-')}-${i}">
+        ${pool.map(pl => `<option value="${pl}"${pl === p ? ' selected' : ''}>${pl}</option>`).join('')}
+      </select></div>`;
+  });
+
+  editHtml += `<button class="btn btn-sm btn-primary" style="margin-top:0.5rem;" onclick="saveInitialSubmissionEdits('${safeMgr}')">Save Changes</button>`;
+  editHtml += '</div>';
+
+  editDiv.innerHTML = editHtml;
+  editDiv.style.display = 'block';
+};
+
+window.saveInitialSubmissionEdits = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+  const idPrefix = manager.replace(/\s+/g, '-');
+
+  const newBatters = [];
+  for (let i = 0; i < (sub.batters || []).length; i++) {
+    const sel = document.getElementById(`edit-init-bat-${idPrefix}-${i}`);
+    if (sel) newBatters.push(sel.value);
+  }
+  const newPitchers = [];
+  for (let i = 0; i < (sub.pitchers || []).length; i++) {
+    const sel = document.getElementById(`edit-init-pit-${idPrefix}-${i}`);
+    if (sel) newPitchers.push(sel.value);
+  }
+
+  sub.batters = newBatters;
+  sub.pitchers = newPitchers;
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.denyInitialSubmission = function(manager) {
+  if (!confirm(`Deny initial roster submission for ${manager}? This will reset their submission.`)) return;
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions) return;
+  sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
 };
 
 // Commissioner roster management in the Swaps tab
