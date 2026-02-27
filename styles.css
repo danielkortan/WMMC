@@ -2281,6 +2281,20 @@ footer {
   vertical-align: middle;
 }
 
+.roster-date-tag {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: #6b7280;
+  margin-left: 0.35rem;
+  vertical-align: middle;
+}
+
+.roster-date-swap {
+  color: #d97706;
+  font-weight: 600;
+}
+
 .wrs-week-total {
   display: flex;
   justify-content: space-between;
