@@ -2893,8 +2893,6 @@ function setupMyRoster() {
       renderRosterData(selectedName, true);
     };
 
-    document.getElementById('manual-update-section').style.display = 'block';
-    setupManualUpdate();
   } else {
     // Regular manager: no dropdown needed
     managerSelect.style.display = 'none';
