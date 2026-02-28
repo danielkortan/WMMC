@@ -3797,9 +3797,6 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     });
     html += `</select></div>`;
 
-    // Week dates editor (populated dynamically)
-    html += `<div id="comm-roster-dates"></div>`;
-
     // Batters stats table (populated dynamically)
     html += `<div id="comm-roster-batters"></div>`;
     html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
@@ -5468,29 +5465,7 @@ window.updateCommRosterWeekView = function(managerName) {
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
   }
 
-  // Schedule dates for date editor
-  const weekDates = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx] : null;
 
-  // ---- Schedule Dates Editor ----
-  let datesHtml = '';
-  if (weekDates) {
-    datesHtml += `<div class="comm-dates-editor" style="margin-bottom:0.75rem;padding:0.5rem;background:var(--bg-body);border-radius:6px;">
-      <div style="font-size:0.82rem;font-weight:600;margin-bottom:0.35rem;">Week Dates</div>
-      <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
-        <div>
-          <label style="font-size:0.75rem;color:var(--text-muted);">Start</label>
-          <input type="date" id="comm-week-start" class="form-select" style="font-size:0.82rem;" value="${weekDates.start}">
-        </div>
-        <div>
-          <label style="font-size:0.75rem;color:var(--text-muted);">End</label>
-          <input type="date" id="comm-week-end" class="form-select" style="font-size:0.82rem;" value="${weekDates.end}">
-        </div>
-        <button class="btn btn-sm btn-primary" style="margin-top:0.85rem;" onclick="saveCommWeekDates('${weekKey}', ${weekIdx})">Save Dates</button>
-      </div>
-    </div>`;
-  }
-  const datesContainer = document.getElementById('comm-roster-dates');
-  if (datesContainer) datesContainer.innerHTML = datesHtml;
 
   // ---- Batters Table ----
   const batStatMap = {};
@@ -5643,35 +5618,6 @@ window.savePlayerDates = function(manager, player, weekKey, dateRowId) {
 
   // Refresh the commissioner view to show updated tags
   window.updateCommRosterWeekView(manager);
-};
-
-window.saveCommWeekDates = function(weekKey, weekIdx) {
-  const startInput = document.getElementById('comm-week-start');
-  const endInput = document.getElementById('comm-week-end');
-  if (!startInput || !endInput) return;
-
-  const newStart = startInput.value;
-  const newEnd = endInput.value;
-  if (!newStart || !newEnd) { alert('Please enter both start and end dates.'); return; }
-  if (newStart > newEnd) { alert('Start date must be before end date.'); return; }
-
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd) return;
-  if (!sd.schedule_dates) sd.schedule_dates = [];
-
-  // Ensure array is large enough
-  while (sd.schedule_dates.length <= weekIdx) {
-    sd.schedule_dates.push({ start: '', end: '' });
-  }
-
-  sd.schedule_dates[weekIdx] = { start: newStart, end: newEnd };
-  saveSeason(SELECTED_SEASON, sd);
-
-  // Re-render to update date tags everywhere
-  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
-  const managerName = document.getElementById('roster-manager-select') ? document.getElementById('roster-manager-select').value : '';
-  if (managerName) renderRosterData(managerName, isComm);
 };
 
 window.commAddPlayer = function(manager, type) {
