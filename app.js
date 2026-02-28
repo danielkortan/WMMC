@@ -3094,17 +3094,25 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   function playerDateTag(player, weekKey, weekIdx) {
     if (!scheduleDates || !scheduleDates[weekIdx]) return '';
     const weekDates = scheduleDates[weekIdx];
-    const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
-    const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+
+    // Check roster_dates first (commissioner-editable), then swap records, then week range
+    const rd = isActive && seasonData.roster_dates && seasonData.roster_dates[managerName]
+      && seasonData.roster_dates[managerName][weekKey] && seasonData.roster_dates[managerName][weekKey][player];
+
     const tags = [];
-    if (addSwap && addSwap.swap_date) {
-      tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
+    if (rd && rd.add_date) {
+      tags.push(`Added ${fmtShortDate(rd.add_date)}`);
+    } else {
+      const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
+      if (addSwap && addSwap.swap_date) tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
     }
-    if (dropSwap && dropSwap.swap_date) {
-      tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
+    if (rd && rd.drop_date) {
+      tags.push(`Dropped ${fmtShortDate(rd.drop_date)}`);
+    } else {
+      const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+      if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
     }
     if (tags.length === 0) {
-      // Full week — show date range
       return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
     }
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
@@ -3789,9 +3797,6 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     });
     html += `</select></div>`;
 
-    // Week dates editor (populated dynamically)
-    html += `<div id="comm-roster-dates"></div>`;
-
     // Batters stats table (populated dynamically)
     html += `<div id="comm-roster-batters"></div>`;
     html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
@@ -3852,9 +3857,21 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     const submittedBatters = submission ? (submission.batters || []) : [];
     const submittedPitchers = submission ? (submission.pitchers || []) : [];
 
+    const poolBatCount = (seasonData.batters_pool || []).length;
+    const poolPitCount = (seasonData.pitchers_pool || []).length;
+    const poolReady = poolBatCount > 0 && poolPitCount > 0;
+
     html += `<div class="card initial-submission-section" style="margin-top:1rem;">
       <h3>Initial Player Submission</h3>
       <p class="text-muted" style="margin-bottom:0.75rem;">Submit your initial roster: 4 batters and 3 pitchers</p>`;
+
+    if (!poolReady && !isApproved) {
+      html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);margin-bottom:0.75rem;">
+        <p class="text-muted" style="font-size:0.85rem;margin:0;">The player pool has not been uploaded yet. Please wait for the commissioner to upload the initial player pool files before selecting your roster.</p>
+      </div>`;
+    } else if (poolReady && !isApproved) {
+      html += `<p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">Player pool available: ${poolBatCount} batters, ${poolPitCount} pitchers</p>`;
+    }
 
     if (isApproved) {
       // Show approved roster (read-only)
@@ -3867,8 +3884,8 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       html += '<div class="comm-player-list">';
       submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${p}</span></div>`; });
       html += '</div>';
-    } else {
-      // Editable submission form
+    } else if (poolReady) {
+      // Editable submission form (only when pool is available)
       if (isPending) {
         html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>`;
       }
@@ -5431,41 +5448,36 @@ window.updateCommRosterWeekView = function(managerName) {
   const scheduleDates = getScheduleDates();
   const weekIdx = SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
 
-  function commDateTag(player) {
-    if (!scheduleDates || !scheduleDates[weekIdx]) return '';
-    const weekDates = scheduleDates[weekIdx];
+  // Roster dates lookup
+  const rosterDates = sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]
+    ? sd.roster_dates[managerName][weekKey] : {};
+
+  function getPlayerDates(player) {
+    const rd = rosterDates[player];
+    if (rd) return { add_date: rd.add_date || '', drop_date: rd.drop_date || '' };
+    // Fall back to swap records
     const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
     const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+    return {
+      add_date: (addSwap && addSwap.swap_date) || '',
+      drop_date: (dropSwap && dropSwap.swap_date) || ''
+    };
+  }
+
+  function commDateTag(player) {
+    const dates = getPlayerDates(player);
     const tags = [];
-    if (addSwap && addSwap.swap_date) tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
-    if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
-    if (tags.length === 0) return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
+    if (dates.add_date) tags.push(`Added ${fmtShortDate(dates.add_date)}`);
+    if (dates.drop_date) tags.push(`Dropped ${fmtShortDate(dates.drop_date)}`);
+    if (tags.length === 0) {
+      if (!scheduleDates || !scheduleDates[weekIdx]) return '';
+      const weekDates = scheduleDates[weekIdx];
+      return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
+    }
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
   }
 
-  // Schedule dates for date editor
-  const weekDates = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx] : null;
 
-  // ---- Schedule Dates Editor ----
-  let datesHtml = '';
-  if (weekDates) {
-    datesHtml += `<div class="comm-dates-editor" style="margin-bottom:0.75rem;padding:0.5rem;background:var(--bg-body);border-radius:6px;">
-      <div style="font-size:0.82rem;font-weight:600;margin-bottom:0.35rem;">Week Dates</div>
-      <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
-        <div>
-          <label style="font-size:0.75rem;color:var(--text-muted);">Start</label>
-          <input type="date" id="comm-week-start" class="form-select" style="font-size:0.82rem;" value="${weekDates.start}">
-        </div>
-        <div>
-          <label style="font-size:0.75rem;color:var(--text-muted);">End</label>
-          <input type="date" id="comm-week-end" class="form-select" style="font-size:0.82rem;" value="${weekDates.end}">
-        </div>
-        <button class="btn btn-sm btn-primary" style="margin-top:0.85rem;" onclick="saveCommWeekDates('${weekKey}', ${weekIdx})">Save Dates</button>
-      </div>
-    </div>`;
-  }
-  const datesContainer = document.getElementById('comm-roster-dates');
-  if (datesContainer) datesContainer.innerHTML = datesHtml;
 
   // ---- Batters Table ----
   const batStatMap = {};
@@ -5487,6 +5499,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const cumRank = cumRankings.batRanks[batter];
       const safeB = batter.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
+      const pDates = getPlayerDates(batter);
       batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
       batHtml += `<td>${batter}${onRoster ? commDateTag(batter) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
@@ -5506,6 +5519,14 @@ window.updateCommRosterWeekView = function(managerName) {
       batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
       if (onRoster) batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button>`;
       batHtml += `</td></tr>`;
+      // Date editor row
+      const dateRowId = `pdate-bat-${batter.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      batHtml += `<tr class="comm-date-row"><td colspan="15">`;
+      batHtml += `<div class="comm-player-dates">`;
+      batHtml += `<label>Add Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-add" value="${pDates.add_date}">`;
+      batHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
+      batHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeB}','${weekKey}','${dateRowId}')">Save</button>`;
+      batHtml += `</div></td></tr>`;
     });
     batHtml += '</tbody></table></div>';
   } else {
@@ -5533,6 +5554,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const cumRank = cumRankings.pitRanks[pitcher];
       const safeP = pitcher.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
+      const pDates = getPlayerDates(pitcher);
       pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
       pitHtml += `<td>${pitcher}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
       pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
@@ -5558,6 +5580,14 @@ window.updateCommRosterWeekView = function(managerName) {
       pitHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safeP}','${weekKey}')">Edit</button> `;
       if (onRoster) pitHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button>`;
       pitHtml += `</td></tr>`;
+      // Date editor row
+      const dateRowId = `pdate-pit-${pitcher.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      pitHtml += `<tr class="comm-date-row"><td colspan="17">`;
+      pitHtml += `<div class="comm-player-dates">`;
+      pitHtml += `<label>Add Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-add" value="${pDates.add_date}">`;
+      pitHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
+      pitHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeP}','${weekKey}','${dateRowId}')">Save</button>`;
+      pitHtml += `</div></td></tr>`;
     });
     pitHtml += '</tbody></table></div>';
   } else {
@@ -5579,33 +5609,27 @@ window.updateCommRosterWeekView = function(managerName) {
   setupPlayerSearchInputs();
 };
 
-window.saveCommWeekDates = function(weekKey, weekIdx) {
-  const startInput = document.getElementById('comm-week-start');
-  const endInput = document.getElementById('comm-week-end');
-  if (!startInput || !endInput) return;
-
-  const newStart = startInput.value;
-  const newEnd = endInput.value;
-  if (!newStart || !newEnd) { alert('Please enter both start and end dates.'); return; }
-  if (newStart > newEnd) { alert('Start date must be before end date.'); return; }
+window.savePlayerDates = function(manager, player, weekKey, dateRowId) {
+  const addInput = document.getElementById(dateRowId + '-add');
+  const dropInput = document.getElementById(dateRowId + '-drop');
+  if (!addInput || !dropInput) return;
 
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
-  if (!sd.schedule_dates) sd.schedule_dates = [];
 
-  // Ensure array is large enough
-  while (sd.schedule_dates.length <= weekIdx) {
-    sd.schedule_dates.push({ start: '', end: '' });
-  }
+  if (!sd.roster_dates) sd.roster_dates = {};
+  if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+  if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+  if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
 
-  sd.schedule_dates[weekIdx] = { start: newStart, end: newEnd };
+  sd.roster_dates[manager][weekKey][player].add_date = addInput.value || '';
+  sd.roster_dates[manager][weekKey][player].drop_date = dropInput.value || '';
+
   saveSeason(SELECTED_SEASON, sd);
 
-  // Re-render to update date tags everywhere
-  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
-  const managerName = document.getElementById('roster-manager-select') ? document.getElementById('roster-manager-select').value : '';
-  if (managerName) renderRosterData(managerName, isComm);
+  // Refresh the commissioner view to show updated tags
+  window.updateCommRosterWeekView(manager);
 };
 
 window.commAddPlayer = function(manager, type) {
@@ -5645,6 +5669,13 @@ window.addToRoster = function(manager, type, selectId, weekKey) {
       }
     });
 
+    // Store add date in roster_dates
+    if (!sd.roster_dates) sd.roster_dates = {};
+    if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+    if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+    if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
+    sd.roster_dates[manager][weekKey][player].add_date = new Date().toISOString().split('T')[0];
+
     // Create swap log entry for the add
     if (!sd.swaps) sd.swaps = [];
     sd.swaps.push({
@@ -5673,6 +5704,13 @@ window.removeFromRoster = function(manager, type, player, weekKey) {
   if (!sd.rosters || !sd.rosters[manager] || !sd.rosters[manager][weekKey]) return;
 
   sd.rosters[manager][weekKey][type] = (sd.rosters[manager][weekKey][type] || []).filter(p => p !== player);
+
+  // Store drop date in roster_dates
+  if (!sd.roster_dates) sd.roster_dates = {};
+  if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+  if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+  if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
+  sd.roster_dates[manager][weekKey][player].drop_date = new Date().toISOString().split('T')[0];
 
   // Create swap log entry for the drop
   if (!sd.swaps) sd.swaps = [];
@@ -5703,8 +5741,14 @@ function setupPlayerPoolUploads() {
       const sd = seasons[SELECTED_SEASON];
       sd.batters_pool = names;
       saveSeason(SELECTED_SEASON, sd);
-      document.getElementById('player-pool-status').innerHTML =
-        `<p class="success-text">Uploaded ${names.length} batters to the pool.</p>`;
+      const pitCount = (sd.pitchers_pool || []).length;
+      let msg = `<p class="success-text">Uploaded ${names.length} batters to the player pool.</p>`;
+      if (pitCount > 0) {
+        msg += `<p class="success-text">Player pool ready (${names.length} batters, ${pitCount} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
+      } else {
+        msg += `<p class="text-muted" style="font-size:0.85rem;">Upload pitchers to complete the player pool and enable Initial Player Submissions.</p>`;
+      }
+      document.getElementById('player-pool-status').innerHTML = msg;
       renderPlayerPoolDisplay();
       fileInput.value = '';
     });
@@ -5718,8 +5762,14 @@ function setupPlayerPoolUploads() {
       const sd = seasons[SELECTED_SEASON];
       sd.pitchers_pool = names;
       saveSeason(SELECTED_SEASON, sd);
-      document.getElementById('player-pool-status').innerHTML =
-        `<p class="success-text">Uploaded ${names.length} pitchers to the pool.</p>`;
+      const batCount = (sd.batters_pool || []).length;
+      let msg = `<p class="success-text">Uploaded ${names.length} pitchers to the player pool.</p>`;
+      if (batCount > 0) {
+        msg += `<p class="success-text">Player pool ready (${batCount} batters, ${names.length} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
+      } else {
+        msg += `<p class="text-muted" style="font-size:0.85rem;">Upload batters to complete the player pool and enable Initial Player Submissions.</p>`;
+      }
+      document.getElementById('player-pool-status').innerHTML = msg;
       renderPlayerPoolDisplay();
       fileInput.value = '';
     });
