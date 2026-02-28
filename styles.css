@@ -2976,6 +2976,33 @@ body::before {
   border-bottom: none;
 }
 
+/* ---- Commissioner Player Date Editor ---- */
+.comm-date-row td {
+  padding-top: 0 !important;
+  padding-bottom: 0.35rem !important;
+  border-top: none !important;
+}
+
+.comm-player-dates {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+}
+
+.comm-player-dates label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.comm-date-input {
+  font-size: 0.75rem !important;
+  padding: 0.15rem 0.3rem !important;
+  max-width: 130px;
+}
+
 /* ---- QS Yellow Highlight ---- */
 .qs-highlight {
   background-color: #fef3c7 !important;

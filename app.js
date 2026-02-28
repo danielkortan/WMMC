@@ -3094,17 +3094,25 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   function playerDateTag(player, weekKey, weekIdx) {
     if (!scheduleDates || !scheduleDates[weekIdx]) return '';
     const weekDates = scheduleDates[weekIdx];
-    const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
-    const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+
+    // Check roster_dates first (commissioner-editable), then swap records, then week range
+    const rd = isActive && seasonData.roster_dates && seasonData.roster_dates[managerName]
+      && seasonData.roster_dates[managerName][weekKey] && seasonData.roster_dates[managerName][weekKey][player];
+
     const tags = [];
-    if (addSwap && addSwap.swap_date) {
-      tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
+    if (rd && rd.add_date) {
+      tags.push(`Added ${fmtShortDate(rd.add_date)}`);
+    } else {
+      const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
+      if (addSwap && addSwap.swap_date) tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
     }
-    if (dropSwap && dropSwap.swap_date) {
-      tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
+    if (rd && rd.drop_date) {
+      tags.push(`Dropped ${fmtShortDate(rd.drop_date)}`);
+    } else {
+      const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+      if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
     }
     if (tags.length === 0) {
-      // Full week — show date range
       return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
     }
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
@@ -5431,15 +5439,32 @@ window.updateCommRosterWeekView = function(managerName) {
   const scheduleDates = getScheduleDates();
   const weekIdx = SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
 
-  function commDateTag(player) {
-    if (!scheduleDates || !scheduleDates[weekIdx]) return '';
-    const weekDates = scheduleDates[weekIdx];
+  // Roster dates lookup
+  const rosterDates = sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]
+    ? sd.roster_dates[managerName][weekKey] : {};
+
+  function getPlayerDates(player) {
+    const rd = rosterDates[player];
+    if (rd) return { add_date: rd.add_date || '', drop_date: rd.drop_date || '' };
+    // Fall back to swap records
     const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
     const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+    return {
+      add_date: (addSwap && addSwap.swap_date) || '',
+      drop_date: (dropSwap && dropSwap.swap_date) || ''
+    };
+  }
+
+  function commDateTag(player) {
+    const dates = getPlayerDates(player);
     const tags = [];
-    if (addSwap && addSwap.swap_date) tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
-    if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
-    if (tags.length === 0) return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
+    if (dates.add_date) tags.push(`Added ${fmtShortDate(dates.add_date)}`);
+    if (dates.drop_date) tags.push(`Dropped ${fmtShortDate(dates.drop_date)}`);
+    if (tags.length === 0) {
+      if (!scheduleDates || !scheduleDates[weekIdx]) return '';
+      const weekDates = scheduleDates[weekIdx];
+      return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
+    }
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
   }
 
@@ -5487,6 +5512,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const cumRank = cumRankings.batRanks[batter];
       const safeB = batter.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
+      const pDates = getPlayerDates(batter);
       batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
       batHtml += `<td>${batter}${onRoster ? commDateTag(batter) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
@@ -5506,6 +5532,14 @@ window.updateCommRosterWeekView = function(managerName) {
       batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
       if (onRoster) batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button>`;
       batHtml += `</td></tr>`;
+      // Date editor row
+      const dateRowId = `pdate-bat-${batter.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      batHtml += `<tr class="comm-date-row"><td colspan="15">`;
+      batHtml += `<div class="comm-player-dates">`;
+      batHtml += `<label>Add Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-add" value="${pDates.add_date}">`;
+      batHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
+      batHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeB}','${weekKey}','${dateRowId}')">Save</button>`;
+      batHtml += `</div></td></tr>`;
     });
     batHtml += '</tbody></table></div>';
   } else {
@@ -5533,6 +5567,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const cumRank = cumRankings.pitRanks[pitcher];
       const safeP = pitcher.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
+      const pDates = getPlayerDates(pitcher);
       pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
       pitHtml += `<td>${pitcher}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
       pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
@@ -5558,6 +5593,14 @@ window.updateCommRosterWeekView = function(managerName) {
       pitHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safeP}','${weekKey}')">Edit</button> `;
       if (onRoster) pitHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button>`;
       pitHtml += `</td></tr>`;
+      // Date editor row
+      const dateRowId = `pdate-pit-${pitcher.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      pitHtml += `<tr class="comm-date-row"><td colspan="17">`;
+      pitHtml += `<div class="comm-player-dates">`;
+      pitHtml += `<label>Add Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-add" value="${pDates.add_date}">`;
+      pitHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
+      pitHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeP}','${weekKey}','${dateRowId}')">Save</button>`;
+      pitHtml += `</div></td></tr>`;
     });
     pitHtml += '</tbody></table></div>';
   } else {
@@ -5577,6 +5620,29 @@ window.updateCommRosterWeekView = function(managerName) {
 
   // Re-setup search inputs for the new week
   setupPlayerSearchInputs();
+};
+
+window.savePlayerDates = function(manager, player, weekKey, dateRowId) {
+  const addInput = document.getElementById(dateRowId + '-add');
+  const dropInput = document.getElementById(dateRowId + '-drop');
+  if (!addInput || !dropInput) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  if (!sd.roster_dates) sd.roster_dates = {};
+  if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+  if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+  if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
+
+  sd.roster_dates[manager][weekKey][player].add_date = addInput.value || '';
+  sd.roster_dates[manager][weekKey][player].drop_date = dropInput.value || '';
+
+  saveSeason(SELECTED_SEASON, sd);
+
+  // Refresh the commissioner view to show updated tags
+  window.updateCommRosterWeekView(manager);
 };
 
 window.saveCommWeekDates = function(weekKey, weekIdx) {
@@ -5645,6 +5711,13 @@ window.addToRoster = function(manager, type, selectId, weekKey) {
       }
     });
 
+    // Store add date in roster_dates
+    if (!sd.roster_dates) sd.roster_dates = {};
+    if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+    if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+    if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
+    sd.roster_dates[manager][weekKey][player].add_date = new Date().toISOString().split('T')[0];
+
     // Create swap log entry for the add
     if (!sd.swaps) sd.swaps = [];
     sd.swaps.push({
@@ -5673,6 +5746,13 @@ window.removeFromRoster = function(manager, type, player, weekKey) {
   if (!sd.rosters || !sd.rosters[manager] || !sd.rosters[manager][weekKey]) return;
 
   sd.rosters[manager][weekKey][type] = (sd.rosters[manager][weekKey][type] || []).filter(p => p !== player);
+
+  // Store drop date in roster_dates
+  if (!sd.roster_dates) sd.roster_dates = {};
+  if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+  if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+  if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
+  sd.roster_dates[manager][weekKey][player].drop_date = new Date().toISOString().split('T')[0];
 
   // Create swap log entry for the drop
   if (!sd.swaps) sd.swaps = [];
