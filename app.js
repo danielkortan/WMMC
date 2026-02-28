@@ -3857,9 +3857,21 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     const submittedBatters = submission ? (submission.batters || []) : [];
     const submittedPitchers = submission ? (submission.pitchers || []) : [];
 
+    const poolBatCount = (seasonData.batters_pool || []).length;
+    const poolPitCount = (seasonData.pitchers_pool || []).length;
+    const poolReady = poolBatCount > 0 && poolPitCount > 0;
+
     html += `<div class="card initial-submission-section" style="margin-top:1rem;">
       <h3>Initial Player Submission</h3>
       <p class="text-muted" style="margin-bottom:0.75rem;">Submit your initial roster: 4 batters and 3 pitchers</p>`;
+
+    if (!poolReady && !isApproved) {
+      html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);margin-bottom:0.75rem;">
+        <p class="text-muted" style="font-size:0.85rem;margin:0;">The player pool has not been uploaded yet. Please wait for the commissioner to upload the initial player pool files before selecting your roster.</p>
+      </div>`;
+    } else if (poolReady && !isApproved) {
+      html += `<p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">Player pool available: ${poolBatCount} batters, ${poolPitCount} pitchers</p>`;
+    }
 
     if (isApproved) {
       // Show approved roster (read-only)
@@ -3872,8 +3884,8 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       html += '<div class="comm-player-list">';
       submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${p}</span></div>`; });
       html += '</div>';
-    } else {
-      // Editable submission form
+    } else if (poolReady) {
+      // Editable submission form (only when pool is available)
       if (isPending) {
         html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>`;
       }
@@ -5729,8 +5741,14 @@ function setupPlayerPoolUploads() {
       const sd = seasons[SELECTED_SEASON];
       sd.batters_pool = names;
       saveSeason(SELECTED_SEASON, sd);
-      document.getElementById('player-pool-status').innerHTML =
-        `<p class="success-text">Uploaded ${names.length} batters to the pool.</p>`;
+      const pitCount = (sd.pitchers_pool || []).length;
+      let msg = `<p class="success-text">Uploaded ${names.length} batters to the player pool.</p>`;
+      if (pitCount > 0) {
+        msg += `<p class="success-text">Player pool ready (${names.length} batters, ${pitCount} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
+      } else {
+        msg += `<p class="text-muted" style="font-size:0.85rem;">Upload pitchers to complete the player pool and enable Initial Player Submissions.</p>`;
+      }
+      document.getElementById('player-pool-status').innerHTML = msg;
       renderPlayerPoolDisplay();
       fileInput.value = '';
     });
@@ -5744,8 +5762,14 @@ function setupPlayerPoolUploads() {
       const sd = seasons[SELECTED_SEASON];
       sd.pitchers_pool = names;
       saveSeason(SELECTED_SEASON, sd);
-      document.getElementById('player-pool-status').innerHTML =
-        `<p class="success-text">Uploaded ${names.length} pitchers to the pool.</p>`;
+      const batCount = (sd.batters_pool || []).length;
+      let msg = `<p class="success-text">Uploaded ${names.length} pitchers to the player pool.</p>`;
+      if (batCount > 0) {
+        msg += `<p class="success-text">Player pool ready (${batCount} batters, ${names.length} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
+      } else {
+        msg += `<p class="text-muted" style="font-size:0.85rem;">Upload batters to complete the player pool and enable Initial Player Submissions.</p>`;
+      }
+      document.getElementById('player-pool-status').innerHTML = msg;
       renderPlayerPoolDisplay();
       fileInput.value = '';
     });
