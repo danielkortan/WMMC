@@ -9,6 +9,20 @@ const DB_FILE = path.join(__dirname, 'db.json');
 // Parse JSON bodies up to 50MB (season data can be large)
 app.use(express.json({ limit: '50mb' }));
 
+// Cache-busting: set no-cache on HTML so browsers always get the latest version.
+// JS/CSS/JSON get a short max-age (5 min) so they're re-validated frequently.
+app.use((req, res, next) => {
+  const url = req.url.split('?')[0]; // strip query params for extension check
+  if (url.endsWith('.html') || url === '/') {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+  } else if (url.endsWith('.js') || url.endsWith('.css') || url.endsWith('.json')) {
+    res.set('Cache-Control', 'public, max-age=300, must-revalidate'); // 5 minutes
+  }
+  next();
+});
+
 // Serve static files (index.html, app.js, styles.css, data.json, etc.)
 app.use(express.static(__dirname));
 
