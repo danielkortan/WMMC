@@ -49,6 +49,12 @@ function writeDB(data) {
 // API Endpoints
 // ============================================================
 
+// GET /api/version — return app version from package.json
+app.get('/api/version', (req, res) => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+  res.json({ version: pkg.version });
+});
+
 // GET /api/seasons — return all seasons
 app.get('/api/seasons', (req, res) => {
   const db = readDB();
