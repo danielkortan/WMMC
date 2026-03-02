@@ -5419,14 +5419,30 @@ window.approveInitialSubmission = function(manager) {
   if (!sd.rosters[manager]) sd.rosters[manager] = {};
   if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
 
+  // Use the PP1 Week 1 start date as each player's add_date
+  const pp1StartDate = sd.schedule_dates && sd.schedule_dates[0] ? sd.schedule_dates[0].start : null;
+  if (pp1StartDate) {
+    if (!sd.roster_dates) sd.roster_dates = {};
+    if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+    if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+  }
+
   (sub.batters || []).forEach(b => {
     if (!sd.rosters[manager][weekKey].batters.includes(b)) {
       sd.rosters[manager][weekKey].batters.push(b);
+    }
+    if (pp1StartDate) {
+      if (!sd.roster_dates[manager][weekKey][b]) sd.roster_dates[manager][weekKey][b] = {};
+      sd.roster_dates[manager][weekKey][b].add_date = pp1StartDate;
     }
   });
   (sub.pitchers || []).forEach(p => {
     if (!sd.rosters[manager][weekKey].pitchers.includes(p)) {
       sd.rosters[manager][weekKey].pitchers.push(p);
+    }
+    if (pp1StartDate) {
+      if (!sd.roster_dates[manager][weekKey][p]) sd.roster_dates[manager][weekKey][p] = {};
+      sd.roster_dates[manager][weekKey][p].add_date = pp1StartDate;
     }
   });
 
