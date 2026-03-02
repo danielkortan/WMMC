@@ -311,7 +311,7 @@ async function loadData() {
 
   // Always show footer year and version (independent of auth)
   document.getElementById('footer-year').textContent = CURRENT_YEAR;
-  fetch('/api/version').then(r => r.json()).then(d => {
+  fetch('/version.json').then(r => r.json()).then(d => {
     document.getElementById('footer-version').textContent = 'v' + d.version;
   }).catch(() => {});
 
