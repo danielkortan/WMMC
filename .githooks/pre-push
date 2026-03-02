@@ -1,0 +1,9 @@
+#!/bin/sh
+# Auto-update version.json with today's date before pushing
+DATE=$(date +%Y%m%d)
+CURRENT=$(grep -o '"version":"[^"]*"' version.json 2>/dev/null | grep -o '[0-9]*')
+if [ "$DATE" != "$CURRENT" ]; then
+  printf '{"version": "%s"}\n' "$DATE" > version.json
+  git add version.json
+  git commit -m "chore: update version to $DATE"
+fi
