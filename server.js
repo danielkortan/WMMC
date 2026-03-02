@@ -6,25 +6,33 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
 
+// Unique token generated every time the server starts. Appended to asset URLs
+// so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
+const ASSET_VERSION = Date.now();
+
 // Parse JSON bodies up to 50MB (season data can be large)
 app.use(express.json({ limit: '50mb' }));
 
-// Cache-busting: set no-cache on HTML so browsers always get the latest version.
-// JS/CSS/JSON get a short max-age (5 min) so they're re-validated frequently.
-app.use((req, res, next) => {
-  const url = req.url.split('?')[0]; // strip query params for extension check
-  if (url.endsWith('.html') || url === '/') {
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-  } else if (url.endsWith('.js') || url.endsWith('.css') || url.endsWith('.json')) {
-    res.set('Cache-Control', 'public, max-age=300, must-revalidate'); // 5 minutes
-  }
-  next();
+// Serve index.html through a dedicated route so we can inject the dynamic
+// version stamp and set aggressive no-cache headers that cannot be overridden.
+app.get(['/', '/index.html'], (req, res) => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
+    .replace(/\?v=\d+/g, '?v=' + ASSET_VERSION);
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.type('html').send(html);
 });
 
-// Serve static files (index.html, app.js, styles.css, data.json, etc.)
-app.use(express.static(__dirname));
+// Serve remaining static files (app.js, styles.css, data.json, etc.)
+app.use(express.static(__dirname, {
+  index: false, // index.html is handled by the route above
+  setHeaders(res, filePath) {
+    if (/\.(js|css|json)$/i.test(filePath)) {
+      res.set('Cache-Control', 'public, max-age=300, must-revalidate');
+    }
+  }
+}));
 
 // ============================================================
 // Database helpers
