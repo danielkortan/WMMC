@@ -309,6 +309,12 @@ async function loadData() {
     }).catch(() => {});
   }
 
+  // Always show footer year and version (independent of auth)
+  document.getElementById('footer-year').textContent = CURRENT_YEAR;
+  fetch('/api/version').then(r => r.json()).then(d => {
+    document.getElementById('footer-version').textContent = 'v' + d.version;
+  }).catch(() => {});
+
   // Check for existing auth session
   const savedAuth = localStorage.getItem('wmmc_logged_in_email');
   if (savedAuth) {
@@ -359,10 +365,6 @@ function enterApp(mgr) {
     commBtn.style.display = mgr.commissioner ? '' : 'none';
   }
 
-  document.getElementById('footer-year').textContent = CURRENT_YEAR;
-  fetch('/api/version').then(r => r.json()).then(d => {
-    document.getElementById('footer-version').textContent = 'v' + d.version;
-  }).catch(() => {});
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
