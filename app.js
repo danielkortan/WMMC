@@ -360,6 +360,9 @@ function enterApp(mgr) {
   }
 
   document.getElementById('footer-year').textContent = CURRENT_YEAR;
+  fetch('/api/version').then(r => r.json()).then(d => {
+    document.getElementById('footer-version').textContent = 'v' + d.version;
+  }).catch(() => {});
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
