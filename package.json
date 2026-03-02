@@ -4,7 +4,8 @@
   "description": "Whit Merrifield Memorial Cup Fantasy Baseball App",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "dependencies": {
     "express": "^4.21.0"
