@@ -529,6 +529,7 @@ function setupNav() {
       const section = document.getElementById(btn.dataset.tab);
       if (section) section.classList.add('active');
       if (btn.dataset.tab === 'trends') renderTrends();
+      if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
     });
   });
 }
@@ -652,6 +653,136 @@ window.togglePoolPlay = function() {
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? 'block' : 'none';
   btn.textContent = hidden ? 'Hide' : 'Show';
+};
+
+// Toggle the manager player detail pop-down in the scoreboard
+window.toggleManagerDetails = function(mgrKey, managerName) {
+  const row = document.getElementById('mgr-detail-' + mgrKey);
+  const arrow = document.getElementById('sb-arrow-' + mgrKey);
+  if (!row) return;
+
+  if (row.style.display !== 'none') {
+    row.style.display = 'none';
+    if (arrow) arrow.innerHTML = '&#9660;';
+    return;
+  }
+
+  const sd = getSeasons()[SELECTED_SEASON];
+  if (!sd) { row.style.display = ''; return; }
+
+  const mgrRosters = (sd.rosters || {})[managerName] || {};
+  const allBatters = new Set();
+  const allPitchers = new Set();
+  Object.values(mgrRosters).forEach(weekRoster => {
+    (weekRoster.batters || []).forEach(b => allBatters.add(b));
+    (weekRoster.pitchers || []).forEach(p => allPitchers.add(p));
+  });
+
+  // Find current (most recent) roster
+  const sortedWeeks = SEASON_SCHEDULE.map(s => `${s.round}|${s.week}`).filter(k => mgrRosters[k]);
+  const currentWeekKey = sortedWeeks[sortedWeeks.length - 1] || null;
+  const currentRoster = currentWeekKey ? mgrRosters[currentWeekKey] : { batters: [], pitchers: [] };
+  const activeBatters = new Set(currentRoster.batters || []);
+  const activePitchers = new Set(currentRoster.pitchers || []);
+
+  // Compute total points per player
+  function playerPts(name, type) {
+    const arr = type === 'batting' ? (sd.weekly_batting || []) : (sd.weekly_pitching || []);
+    const key = type === 'batting' ? 'batter' : 'pitcher';
+    return Math.round(arr.filter(r => r[key] === name && r.manager === managerName)
+      .reduce((s, r) => s + (r.weekly_score || 0), 0) * 100) / 100;
+  }
+
+  // Find player roster history: first/last week seen, swap reason
+  function playerHistory(name, batOrPit) {
+    let addDate = null, dropDate = null, swapReason = null;
+
+    // Walk through schedule weeks in order
+    let seenActive = false;
+    for (const sched of SEASON_SCHEDULE) {
+      const wk = `${sched.round}|${sched.week}`;
+      const weekRoster = mgrRosters[wk];
+      if (!weekRoster) continue;
+      const onRoster = (weekRoster[batOrPit] || []).includes(name);
+      if (onRoster && !seenActive) {
+        // Find week start date
+        const wi = SEASON_SCHEDULE.findIndex(s => s.round === sched.round && s.week === sched.week);
+        const dates = sd.schedule_dates;
+        addDate = (dates && dates[wi]) ? fmtShortDate(dates[wi].start) : wk;
+        seenActive = true;
+      } else if (!onRoster && seenActive && !dropDate) {
+        const wi = SEASON_SCHEDULE.findIndex(s => s.round === sched.round && s.week === sched.week);
+        const dates = sd.schedule_dates;
+        dropDate = (dates && dates[wi]) ? fmtShortDate(dates[wi].start) : wk;
+      }
+    }
+
+    // Check explicit roster_dates
+    const rdDates = ((sd.roster_dates || {})[managerName] || {});
+    for (const [wk, players] of Object.entries(rdDates)) {
+      if (players[name]) {
+        if (players[name].add_date) addDate = fmtShortDate(players[name].add_date);
+        if (players[name].drop_date) dropDate = fmtShortDate(players[name].drop_date);
+      }
+    }
+
+    // Check swaps
+    const swaps = (sd.swaps || []).filter(s =>
+      s.manager === managerName && s.player_out === name && s.status === 'approved');
+    if (swaps.length > 0) {
+      const last = swaps[swaps.length - 1];
+      swapReason = last.reason;
+      if (last.swap_date) dropDate = fmtShortDate(last.swap_date);
+    }
+
+    return { addDate, dropDate, swapReason };
+  }
+
+  // Build HTML for the pop-down
+  function buildPlayerRows(names, type, activeSet) {
+    const batOrPit = type === 'batting' ? 'batters' : 'pitchers';
+    if (names.size === 0) return '<tr><td colspan="3" class="text-muted" style="font-size:0.82rem;">None</td></tr>';
+    return [...names].sort().map(name => {
+      const pts = playerPts(name, type);
+      const isActive = activeSet.has(name);
+      const { addDate, dropDate, swapReason } = playerHistory(name, batOrPit);
+      let statusHtml;
+      if (isActive) {
+        statusHtml = `<span style="color:var(--success);font-size:0.78rem;font-weight:600;">Active</span>`;
+        if (addDate) statusHtml += `<br><span style="font-size:0.75rem;color:#888;">Added ${addDate}</span>`;
+      } else {
+        statusHtml = `<span style="color:#ef4444;font-size:0.78rem;">Not Rostered</span>`;
+        const info = [swapReason, addDate ? 'Added ' + addDate : null, dropDate ? 'Dropped ' + dropDate : null].filter(Boolean).join(' &bull; ');
+        if (info) statusHtml += `<br><span style="font-size:0.75rem;color:#888;">${info}</span>`;
+      }
+      return `<tr class="${isActive ? '' : 'dropped-player'}">
+        <td style="font-size:0.85rem;">${name}</td>
+        <td class="num" style="font-size:0.85rem;"><strong>${fmt(pts)}</strong></td>
+        <td style="font-size:0.82rem;">${statusHtml}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  const colspan = row.querySelector('td').getAttribute('colspan') || '6';
+  row.innerHTML = `<td colspan="${colspan}">
+    <div class="mgr-detail-panel">
+      <div class="mgr-detail-cols">
+        <div class="mgr-detail-section">
+          <div class="mgr-detail-header">Batters</div>
+          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th>Status</th></tr></thead>
+          <tbody>${buildPlayerRows(allBatters, 'batting', activeBatters)}</tbody></table>
+        </div>
+        <div class="mgr-detail-section">
+          <div class="mgr-detail-header">Pitchers</div>
+          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th>Status</th></tr></thead>
+          <tbody>${buildPlayerRows(allPitchers, 'pitching', activePitchers)}</tbody></table>
+        </div>
+      </div>
+    </div>
+  </td>`;
+
+  row.style.display = '';
+  if (arrow) arrow.innerHTML = '&#9650;';
 };
 
 function setupScoreboardTabs() {
@@ -1594,11 +1725,115 @@ function showActiveSeason(seasonData) {
 
   const banner = document.getElementById('champion-banner');
   banner.className = 'champion-banner banner-compact';
-  banner.innerHTML = `
-    <div class="champion-label"><span class="trophy">&#9918;</span> ${SELECTED_SEASON} WMMC Season</div>
-    <div class="champion-name">Season Active</div>
-    <div class="champion-details">Upload weekly stats via Commissioner page to track scores.</div>
-  `;
+
+  // Check if the current season already has a champion (Finals finalized)
+  const seasonFinalized = seasonData.finalized_rounds || [];
+  let currentChampion = null;
+  if (seasonFinalized.includes('Finals')) {
+    const batting = seasonData.weekly_batting || [];
+    const pitching = seasonData.weekly_pitching || [];
+    // Compute finalist scores from finalized bracket
+    // (reuse logic: highest Finals total from the two SF winners)
+    const sfWinners = [];
+    const sfLosers = [];
+    const managers = getManagers();
+    const poolGroups = {};
+    managers.forEach(m => { if (m.pool) { if (!poolGroups[m.pool]) poolGroups[m.pool] = []; poolGroups[m.pool].push(m.name); }});
+    function _getRoundScore(mgr, round) {
+      let t = 0;
+      batting.filter(b => b.manager === mgr && b.round === round).forEach(b => t += (b.weekly_score || 0));
+      pitching.filter(p => p.manager === mgr && p.round === round).forEach(p => t += (p.weekly_score || 0));
+      return t;
+    }
+    // Determine finalists: the two managers with the highest SF scores (who advanced)
+    const ppMap = {};
+    managers.forEach(m => { ppMap[m.name] = 0; });
+    batting.forEach(b => { if (b.manager && b.round === 'PP1') ppMap[b.manager] = (ppMap[b.manager] || 0) + (b.weekly_score || 0); });
+    batting.forEach(b => { if (b.manager && b.round === 'PP2') ppMap[b.manager] = (ppMap[b.manager] || 0) + (b.weekly_score || 0); });
+    pitching.forEach(p => { if (p.manager && p.round === 'PP1') ppMap[p.manager] = (ppMap[p.manager] || 0) + (p.weekly_score || 0); });
+    pitching.forEach(p => { if (p.manager && p.round === 'PP2') ppMap[p.manager] = (ppMap[p.manager] || 0) + (p.weekly_score || 0); });
+    const allPPWinners = new Set();
+    Object.entries(poolGroups).forEach(([pool, members]) => {
+      let b1 = null, b1s = -Infinity, b2 = null, b2s = -Infinity;
+      members.forEach(n => {
+        const pp1 = batting.filter(b => b.manager === n && b.round === 'PP1').reduce((s, b) => s + (b.weekly_score || 0), 0) +
+                    pitching.filter(p => p.manager === n && p.round === 'PP1').reduce((s, p) => s + (p.weekly_score || 0), 0);
+        const pp2 = batting.filter(b => b.manager === n && b.round === 'PP2').reduce((s, b) => s + (b.weekly_score || 0), 0) +
+                    pitching.filter(p => p.manager === n && p.round === 'PP2').reduce((s, p) => s + (p.weekly_score || 0), 0);
+        if (pp1 > b1s) { b1 = n; b1s = pp1; }
+        if (pp2 > b2s) { b2 = n; b2s = pp2; }
+      });
+      if (b1) allPPWinners.add(b1);
+      if (b2) allPPWinners.add(b2);
+    });
+    const totals = {};
+    managers.forEach(m => {
+      const pp1 = batting.filter(b => b.manager === m.name && b.round === 'PP1').reduce((s, b) => s + (b.weekly_score || 0), 0) +
+                  pitching.filter(p => p.manager === m.name && p.round === 'PP1').reduce((s, p) => s + (p.weekly_score || 0), 0);
+      const pp2 = batting.filter(b => b.manager === m.name && b.round === 'PP2').reduce((s, b) => s + (b.weekly_score || 0), 0) +
+                  pitching.filter(p => p.manager === m.name && p.round === 'PP2').reduce((s, p) => s + (p.weekly_score || 0), 0);
+      totals[m.name] = pp1 + pp2;
+    });
+    const seeded = [...[...allPPWinners].sort((a, b) => totals[b] - totals[a]),
+                    ...managers.filter(m => !allPPWinners.has(m.name)).map(m => m.name).sort((a, b) => totals[b] - totals[a])
+                   ].slice(0, 8);
+    if (seeded.length === 8) {
+      const qfW = [[seeded[0],seeded[7]],[seeded[3],seeded[4]],[seeded[2],seeded[5]],[seeded[1],seeded[6]]]
+        .map(([a, b]) => _getRoundScore(a,'QF') >= _getRoundScore(b,'QF') ? a : b);
+      [[qfW[0],qfW[1]],[qfW[2],qfW[3]]].forEach(([a, b]) => {
+        if (a && b) { sfWinners.push(_getRoundScore(a,'SF') >= _getRoundScore(b,'SF') ? a : b); sfLosers.push(_getRoundScore(a,'SF') >= _getRoundScore(b,'SF') ? b : a); }
+      });
+      if (sfWinners[0] && sfWinners[1]) {
+        currentChampion = _getRoundScore(sfWinners[0],'Finals') >= _getRoundScore(sfWinners[1],'Finals') ? sfWinners[0] : sfWinners[1];
+      }
+    }
+  }
+
+  if (currentChampion) {
+    banner.innerHTML = `
+      <div class="trophy">&#127942;</div>
+      <div class="champion-label">${SELECTED_SEASON} WMMC Champion</div>
+      <div class="champion-name">${currentChampion}</div>
+    `;
+    return;
+  }
+
+  // Check prior year for reigning champion
+  const seasons = getSeasons();
+  const years = Object.keys(seasons).map(Number).sort((a, b) => b - a);
+  let priorChampion = null;
+  let priorYear = null;
+  for (const yr of years) {
+    if (String(yr) === String(SELECTED_SEASON)) continue;
+    const priorSd = seasons[yr];
+    if (!priorSd) continue;
+    // Legacy completed season
+    if (priorSd.status === 'completed' && priorSd.data && priorSd.data.bracket && priorSd.data.bracket.finals && priorSd.data.bracket.finals.winner) {
+      priorChampion = priorSd.data.bracket.finals.winner;
+      priorYear = yr;
+      break;
+    }
+    // Active season that was finalized
+    if (priorSd.finalized_rounds && priorSd.finalized_rounds.includes('Finals')) {
+      // Get champion from that season's data (simplified: highest Finals scorer among SF winners)
+      // For now, check if champion stored in season data
+      if (priorSd.champion) { priorChampion = priorSd.champion; priorYear = yr; break; }
+    }
+  }
+
+  if (priorChampion) {
+    banner.innerHTML = `
+      <div class="champion-label"><span class="trophy">&#127942;</span> Reigning Champion</div>
+      <div class="champion-name">${priorChampion}</div>
+      <div class="champion-details">${priorYear} WMMC Champion &bull; ${SELECTED_SEASON} Season In Progress</div>
+    `;
+  } else {
+    banner.innerHTML = `
+      <div class="champion-label"><span class="trophy">&#9918;</span> ${SELECTED_SEASON} WMMC Season</div>
+      <div class="champion-name">Season Active</div>
+      <div class="champion-details">Upload weekly stats via Commissioner page to track scores.</div>
+    `;
+  }
 
   const grid = document.getElementById('stats-grid');
   const managers = getManagers();
@@ -2006,12 +2241,16 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <tbody>`;
       poolScores.forEach((m, i) => {
         const cls = hlClass(m.manager, section);
-        html += `<tr>
+        const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_');
+        html += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${m.manager.replace(/'/g, "\\'")}')">
           <td class="rank">${i + 1}</td>
-          <td><strong class="${cls}">${m.manager}</strong></td>
+          <td><strong class="${cls}">${m.manager}</strong> <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
           <td class="num">${fmt(m.batting)}</td>
           <td class="num">${fmt(m.pitching)}</td>
           <td class="num"><strong>${fmt(m.total)}</strong></td>
+        </tr>
+        <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${m.manager.replace(/"/g, '&quot;')}" style="display:none;">
+          <td colspan="5"><div class="mgr-detail-loading">Loading...</div></td>
         </tr>`;
       });
       html += '</tbody></table></div>';
@@ -2030,13 +2269,17 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       <thead><tr><th>#</th><th>Manager</th><th>Pool</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead><tbody>`;
     scores.forEach((m, i) => {
       const cls = hlClass(m.manager, 'overall');
-      tbl += `<tr>
+      const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_') + '_ov';
+      tbl += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${m.manager.replace(/'/g, "\\'")}')">
         <td class="rank">${i + 1}</td>
-        <td><strong class="${cls}">${m.manager}</strong></td>
+        <td><strong class="${cls}">${m.manager}</strong> <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
         <td>${mgrPool[m.manager] || ''}</td>
         <td class="num">${fmt(m.batting)}</td>
         <td class="num">${fmt(m.pitching)}</td>
         <td class="num"><strong>${fmt(m.total)}</strong></td>
+      </tr>
+      <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${m.manager.replace(/"/g, '&quot;')}" style="display:none;">
+        <td colspan="6"><div class="mgr-detail-loading">Loading...</div></td>
       </tr>`;
     });
     tbl += '</tbody></table>';
@@ -4019,6 +4262,58 @@ window.swapTypeToggle = function(type) {
   }
 };
 
+// Determine which schedule round the current date falls in (or the most recent active round)
+function getCurrentScheduleRound(sd) {
+  const dates = sd.schedule_dates;
+  if (!dates || dates.length === 0) return { round: 'PP1', weekKey: null };
+  const today = fmtDateISO(new Date());
+  // Find matching week
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    const d = dates[i];
+    if (!d) continue;
+    if (today >= d.start && today <= d.end) return { round: SEASON_SCHEDULE[i].round, weekKey: `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}` };
+  }
+  // Before first week: use PP1
+  if (dates[0] && today < dates[0].start) return { round: 'PP1', weekKey: `PP1|Week 1` };
+  // After last week: use Finals
+  const last = SEASON_SCHEDULE[SEASON_SCHEDULE.length - 1];
+  return { round: last.round, weekKey: `${last.round}|${last.week}` };
+}
+
+// Check swap limits for a manager submitting a swap request.
+// Returns null if OK, or an error string if the limit is exceeded.
+function checkSwapLimit(sd, managerName, reason) {
+  const { round } = getCurrentScheduleRound(sd);
+
+  // Only count approved or pending swaps (not denied) for this manager in this round
+  const managerSwaps = (sd.swaps || []).filter(s =>
+    s.manager === managerName &&
+    (s.status === 'approved' || s.status === 'pending') &&
+    s.round === round
+  );
+
+  // Pool Play: unlimited Drop/IL/Trade, but only 1 Free Swap per PP-round
+  if (round === 'PP1' || round === 'PP2') {
+    if (reason === 'Free Swap (one per round)') {
+      const used = managerSwaps.filter(s => s.reason === 'Free Swap (one per round)').length;
+      if (used >= 1) return `You have already used your Free Swap for ${round === 'PP1' ? 'Pool Play 1' : 'Pool Play 2'}. You may still use Drop, IL, or Trade swaps.`;
+    }
+    return null; // Drop/IL/Trade unlimited during pool play
+  }
+
+  // Playoffs (QF, SF, Finals): each type limited to 1 per round
+  if (round === 'QF' || round === 'SF' || round === 'Finals') {
+    const used = managerSwaps.filter(s => s.reason === reason).length;
+    if (used >= 1) {
+      const roundLabel = round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals';
+      return `You have already used a "${reason}" swap during the ${roundLabel}. Each swap type may only be used once per playoff round.`;
+    }
+    return null;
+  }
+
+  return null;
+}
+
 // Submit a swap request
 window.submitSwapRequest = function(managerName) {
   const errEl = document.getElementById('swap-form-error');
@@ -4047,6 +4342,16 @@ window.submitSwapRequest = function(managerName) {
 
   if (!sd.swaps) sd.swaps = [];
 
+  // Check swap limits for this round
+  const limitError = checkSwapLimit(sd, managerName, reason);
+  if (limitError) {
+    errEl.textContent = limitError;
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const { round, weekKey } = getCurrentScheduleRound(sd);
+
   const swap = {
     id: Date.now().toString(),
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
@@ -4056,6 +4361,8 @@ window.submitSwapRequest = function(managerName) {
     player_in: playerIn,
     reason: reason,
     swap_date: swapDate,
+    round: round,
+    week_key: weekKey,
     status: 'pending',
   };
 
@@ -4349,6 +4656,66 @@ function setupSeasonSetupToggle() {
     body.style.display = isHidden ? 'block' : 'none';
     btn.textContent = isHidden ? 'Hide' : 'Show';
   };
+
+  // Create New Season button
+  const createBtn = document.getElementById('create-new-season-btn');
+  const createStatus = document.getElementById('create-new-season-status');
+  if (createBtn) {
+    createBtn.onclick = () => {
+      const seasons = getSeasons();
+      const existingYears = Object.keys(seasons).map(Number).sort((a, b) => b - a);
+      const latestYear = existingYears.length > 0 ? existingYears[0] : CURRENT_YEAR;
+      const newYear = latestYear + 1;
+
+      if (seasons[newYear]) {
+        if (createStatus) createStatus.innerHTML = `<p style="color:var(--success);">Season ${newYear} already exists.</p>`;
+        return;
+      }
+
+      const confirmed = confirm(
+        `Create a new ${newYear} season?\n\n` +
+        'This will:\n' +
+        '  - Create a fresh season for ' + newYear + '\n' +
+        '  - Carry forward all manager accounts and pool assignments\n' +
+        '  - Start with empty player pools, rosters, and stats\n\n' +
+        'The current season will not be affected.'
+      );
+      if (!confirmed) return;
+
+      // Build the new season — managers carry forward (pool assignments preserved)
+      seasons[newYear] = {
+        status: 'active',
+        batters_pool: [],
+        pitchers_pool: [],
+        weekly_batting: [],
+        weekly_pitching: [],
+        rosters: {},
+        swaps: [],
+        upload_log: [],
+        team_weekly: [],
+        initial_submissions: {}
+      };
+
+      // Pre-populate rosters map for each manager (empty, but keyed)
+      const managers = getManagers();
+      managers.forEach(m => {
+        seasons[newYear].rosters[m.name] = {};
+        seasons[newYear].initial_submissions[m.name] = { batters: [], pitchers: [], status: 'draft' };
+      });
+
+      localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+      fetch('/api/seasons/' + newYear, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(seasons[newYear])
+      }).catch(() => {});
+
+      if (createStatus) createStatus.innerHTML = `<p style="color:var(--success);font-weight:600;">Season ${newYear} created! Switch to it using the season selector in the header.</p>`;
+
+      // Refresh the season selector
+      buildSeasonSelector();
+    };
+  }
 
   // Reset Season button
   const resetBtn = document.getElementById('reset-season-btn');
@@ -6519,6 +6886,276 @@ function parseNum(val) {
   const n = parseFloat(val);
   return isNaN(n) ? 0 : n;
 }
+
+// ============================================================
+// Hall of Fame
+// ============================================================
+function renderHallOfFame() {
+  const container = document.getElementById('hall-of-fame-content');
+  if (!container) return;
+
+  const seasons = getSeasons();
+
+  // Collect results from each season
+  // For active seasons: compute bracket results from finalized rounds
+  // For completed (legacy) seasons: read from bracket data
+  const records = {}; // manager name -> { wins, seconds, thirds, fourths, seasons, totalFinish }
+
+  function trackResult(manager, position) {
+    if (!manager || manager === 'TBD') return;
+    if (!records[manager]) records[manager] = { wins: 0, seconds: 0, thirds: 0, fourths: 0, seasons: 0, totalFinish: 0 };
+    records[manager].seasons++;
+    records[manager].totalFinish += position;
+    if (position === 1) records[manager].wins++;
+    else if (position === 2) records[manager].seconds++;
+    else if (position === 3) records[manager].thirds++;
+    else if (position === 4) records[manager].fourths++;
+  }
+
+  // Seasonal results table data
+  const seasonResults = []; // { year, champion, runnerUp, third, fourth }
+
+  Object.entries(seasons).sort((a, b) => Number(a[0]) - Number(b[0])).forEach(([year, sd]) => {
+    let champion = null, runnerUp = null, third = null, fourth = null;
+
+    // Completed (historical) season with legacy bracket data
+    if (sd.status === 'completed' && sd.data && sd.data.bracket) {
+      const b = sd.data.bracket;
+      if (b.finals && b.finals.winner) {
+        champion = b.finals.winner;
+        runnerUp = b.finals.manager1 === champion ? b.finals.manager2 : b.finals.manager1;
+      }
+      // 3rd/4th from third_place if present
+      if (b.third_place && b.third_place.winner) {
+        third = b.third_place.winner;
+        fourth = b.third_place.manager1 === third ? b.third_place.manager2 : b.third_place.manager1;
+      }
+    }
+
+    // Active season: compute from finalized_rounds + weekly stats
+    if (sd.finalized_rounds && sd.finalized_rounds.includes('Finals')) {
+      const batting = sd.weekly_batting || [];
+      const pitching = sd.weekly_pitching || [];
+
+      function getRoundScore(manager, round) {
+        let total = 0;
+        batting.filter(b => b.manager === manager && b.round === round).forEach(b => total += (b.weekly_score || 0));
+        pitching.filter(p => p.manager === manager && p.round === round).forEach(p => total += (p.weekly_score || 0));
+        return Math.round(total * 100) / 100;
+      }
+
+      // Determine seeding from pool play
+      const managers = getManagers();
+      const poolGroups = {};
+      managers.forEach(m => { if (m.pool) { if (!poolGroups[m.pool]) poolGroups[m.pool] = []; poolGroups[m.pool].push(m.name); }});
+
+      const ppMap = {};
+      managers.forEach(m => { if (m.pool) ppMap[m.name] = { pp1: 0, pp2: 0 }; });
+      batting.forEach(b => {
+        if (!b.manager || !ppMap[b.manager]) return;
+        if (b.round === 'PP1') ppMap[b.manager].pp1 += (b.weekly_score || 0);
+        if (b.round === 'PP2') ppMap[b.manager].pp2 += (b.weekly_score || 0);
+      });
+      pitching.forEach(p => {
+        if (!p.manager || !ppMap[p.manager]) return;
+        if (p.round === 'PP1') ppMap[p.manager].pp1 += (p.weekly_score || 0);
+        if (p.round === 'PP2') ppMap[p.manager].pp2 += (p.weekly_score || 0);
+      });
+
+      const pp1Winners = {}, pp2Winners = {};
+      Object.entries(poolGroups).forEach(([pool, members]) => {
+        const byPP1 = members.map(n => ({ n, s: (ppMap[n] ? ppMap[n].pp1 : 0) })).sort((a, b) => b.s - a.s);
+        const byPP2 = members.map(n => ({ n, s: (ppMap[n] ? ppMap[n].pp2 : 0) })).sort((a, b) => b.s - a.s);
+        if (byPP1[0] && byPP1[0].s > 0) pp1Winners[pool] = byPP1[0].n;
+        if (byPP2[0] && byPP2[0].s > 0) pp2Winners[pool] = byPP2[0].n;
+      });
+      const allPPWinners = new Set([...Object.values(pp1Winners), ...Object.values(pp2Winners)]);
+      const ppTotals = {};
+      managers.forEach(m => { ppTotals[m.name] = (ppMap[m.name] ? ppMap[m.name].pp1 + ppMap[m.name].pp2 : 0); });
+      const nonLeaders = managers.filter(m => !allPPWinners.has(m.name)).map(m => m.name).sort((a, b) => ppTotals[b] - ppTotals[a]);
+      const wildcards = nonLeaders.slice(0, Math.max(0, 8 - allPPWinners.size));
+      const seeded = [...[...allPPWinners].sort((a, b) => ppTotals[b] - ppTotals[a]), ...wildcards].slice(0, 8);
+
+      // QF matchups
+      const qfMatchups = [
+        [seeded[0], seeded[7]], [seeded[3], seeded[4]],
+        [seeded[2], seeded[5]], [seeded[1], seeded[6]]
+      ];
+      const qfWinners = qfMatchups.map(([t1, t2]) => {
+        if (!t1 || !t2) return null;
+        return getRoundScore(t1, 'QF') >= getRoundScore(t2, 'QF') ? t1 : t2;
+      });
+      const sfMatchups = [[qfWinners[0], qfWinners[1]], [qfWinners[2], qfWinners[3]]];
+      const sfWinners = sfMatchups.map(([t1, t2]) => {
+        if (!t1 || !t2) return null;
+        return getRoundScore(t1, 'SF') >= getRoundScore(t2, 'SF') ? t1 : t2;
+      });
+      const sfLosers = sfMatchups.map(([t1, t2], i) => {
+        const winner = sfWinners[i];
+        if (!t1 || !t2 || !winner) return null;
+        return winner === t1 ? t2 : t1;
+      });
+      const finalist1 = sfWinners[0], finalist2 = sfWinners[1];
+      const thirdTeam1 = sfLosers[0], thirdTeam2 = sfLosers[1];
+
+      if (finalist1 && finalist2) {
+        const f1score = getRoundScore(finalist1, 'Finals');
+        const f2score = getRoundScore(finalist2, 'Finals');
+        champion = f1score >= f2score ? finalist1 : finalist2;
+        runnerUp = champion === finalist1 ? finalist2 : finalist1;
+      }
+      if (thirdTeam1 && thirdTeam2) {
+        const t1score = getRoundScore(thirdTeam1, 'Finals');
+        const t2score = getRoundScore(thirdTeam2, 'Finals');
+        third = t1score >= t2score ? thirdTeam1 : thirdTeam2;
+        fourth = third === thirdTeam1 ? thirdTeam2 : thirdTeam1;
+      }
+    }
+
+    if (champion) {
+      seasonResults.push({ year, champion, runnerUp, third, fourth });
+      trackResult(champion, 1);
+      trackResult(runnerUp, 2);
+      trackResult(third, 3);
+      trackResult(fourth, 4);
+    }
+  });
+
+  // ---- Build HTML ----
+  let html = '';
+
+  // Trophy display for most recent champion
+  const lastResult = seasonResults[seasonResults.length - 1];
+  if (lastResult) {
+    html += `<div class="champion-banner" style="margin-bottom:1rem;">
+      <div class="trophy">&#127942;</div>
+      <div class="champion-label">${lastResult.year} WMMC Champion</div>
+      <div class="champion-name">${lastResult.champion}</div>
+    </div>`;
+  }
+
+  // Season-by-season results
+  html += '<div class="card">';
+  html += '<h2>Season Results</h2>';
+  if (seasonResults.length === 0) {
+    html += '<p class="text-muted">No completed seasons yet. Results will appear here once a season\'s Finals are finalized.</p>';
+  } else {
+    html += '<div class="table-wrapper"><table class="data-table">';
+    html += '<thead><tr><th>Year</th><th>&#127942; Champion</th><th>2nd Place</th><th>3rd Place</th><th>4th Place</th></tr></thead>';
+    html += '<tbody>';
+    [...seasonResults].reverse().forEach(r => {
+      html += `<tr>
+        <td><strong>${r.year}</strong></td>
+        <td><strong style="color:var(--accent);">&#127942; ${r.champion || '-'}</strong></td>
+        <td>${r.runnerUp || '-'}</td>
+        <td>${r.third || '-'}</td>
+        <td>${r.fourth || '-'}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  }
+  html += '</div>';
+
+  // All-Time Records table (sortable by column)
+  html += '<div class="card" style="margin-top:1rem;">';
+  html += '<h2>All-Time Records</h2>';
+  const allMgrs = Object.entries(records);
+  if (allMgrs.length === 0) {
+    html += '<p class="text-muted">No records yet.</p>';
+  } else {
+    // Sort by wins desc, then seconds, then thirds, then avg finish
+    const sorted = allMgrs.map(([name, r]) => ({
+      name,
+      ...r,
+      avgFinish: r.seasons > 0 ? Math.round((r.totalFinish / r.seasons) * 100) / 100 : 0
+    })).sort((a, b) => {
+      if (b.wins !== a.wins) return b.wins - a.wins;
+      if (b.seconds !== a.seconds) return b.seconds - a.seconds;
+      if (b.thirds !== a.thirds) return b.thirds - a.thirds;
+      return a.avgFinish - b.avgFinish;
+    });
+
+    html += '<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Ranked by championships, then runner-ups, then 3rd-place finishes, then average finish.</p>';
+    html += '<div class="table-wrapper"><table class="data-table" id="hof-table">';
+    html += '<thead><tr><th>#</th><th>Manager</th><th onclick="sortHOF(\'wins\')" style="cursor:pointer;">&#127942; Wins &#8597;</th><th onclick="sortHOF(\'seconds\')" style="cursor:pointer;">2nd &#8597;</th><th onclick="sortHOF(\'thirds\')" style="cursor:pointer;">3rd &#8597;</th><th onclick="sortHOF(\'fourths\')" style="cursor:pointer;">4th &#8597;</th><th onclick="sortHOF(\'seasons\')" style="cursor:pointer;">Seasons &#8597;</th><th onclick="sortHOF(\'avgFinish\')" style="cursor:pointer;">Avg Finish &#8597;</th></tr></thead>';
+    html += '<tbody id="hof-tbody">';
+    sorted.forEach((m, i) => {
+      html += `<tr>
+        <td class="rank">${i + 1}</td>
+        <td><strong>${m.name}</strong>${m.wins > 0 ? ' &#127942;'.repeat(Math.min(m.wins, 5)) : ''}</td>
+        <td class="num">${m.wins}</td>
+        <td class="num">${m.seconds}</td>
+        <td class="num">${m.thirds}</td>
+        <td class="num">${m.fourths}</td>
+        <td class="num">${m.seasons}</td>
+        <td class="num">${m.avgFinish.toFixed(2)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  }
+  html += '</div>';
+
+  container.innerHTML = html;
+
+  // Store sorted data for re-sort
+  container._hofData = { allMgrs, records };
+}
+
+let _hofSortCol = 'wins';
+let _hofSortAsc = false;
+window.sortHOF = function(col) {
+  if (_hofSortCol === col) { _hofSortAsc = !_hofSortAsc; }
+  else { _hofSortCol = col; _hofSortAsc = col === 'avgFinish'; }
+
+  const container = document.getElementById('hall-of-fame-content');
+  if (!container || !container._hofData) { renderHallOfFame(); return; }
+
+  const seasons = getSeasons();
+  const records = {};
+  function trackResult(manager, position) {
+    if (!manager || manager === 'TBD') return;
+    if (!records[manager]) records[manager] = { wins: 0, seconds: 0, thirds: 0, fourths: 0, seasons: 0, totalFinish: 0 };
+    records[manager].seasons++;
+    records[manager].totalFinish += position;
+    if (position === 1) records[manager].wins++;
+    else if (position === 2) records[manager].seconds++;
+    else if (position === 3) records[manager].thirds++;
+    else if (position === 4) records[manager].fourths++;
+  }
+  Object.entries(seasons).forEach(([year, sd]) => {
+    if (sd.status === 'completed' && sd.data && sd.data.bracket && sd.data.bracket.finals && sd.data.bracket.finals.winner) {
+      const b = sd.data.bracket;
+      trackResult(b.finals.winner, 1);
+      const ru = b.finals.manager1 === b.finals.winner ? b.finals.manager2 : b.finals.manager1;
+      trackResult(ru, 2);
+      if (b.third_place && b.third_place.winner) {
+        trackResult(b.third_place.winner, 3);
+        const f = b.third_place.manager1 === b.third_place.winner ? b.third_place.manager2 : b.third_place.manager1;
+        trackResult(f, 4);
+      }
+    }
+  });
+
+  const allMgrs = Object.entries(records).map(([name, r]) => ({
+    name, ...r, avgFinish: r.seasons > 0 ? Math.round((r.totalFinish / r.seasons) * 100) / 100 : 0
+  })).sort((a, b) => {
+    const av = a[col], bv = b[col];
+    return _hofSortAsc ? av - bv : bv - av;
+  });
+
+  const tbody = document.getElementById('hof-tbody');
+  if (!tbody) { renderHallOfFame(); return; }
+  tbody.innerHTML = allMgrs.map((m, i) => `<tr>
+    <td class="rank">${i + 1}</td>
+    <td><strong>${m.name}</strong>${m.wins > 0 ? ' &#127942;'.repeat(Math.min(m.wins, 5)) : ''}</td>
+    <td class="num">${m.wins}</td>
+    <td class="num">${m.seconds}</td>
+    <td class="num">${m.thirds}</td>
+    <td class="num">${m.fourths}</td>
+    <td class="num">${m.seasons}</td>
+    <td class="num">${m.avgFinish.toFixed(2)}</td>
+  </tr>`).join('');
+};
 
 // ============================================================
 // Helpers

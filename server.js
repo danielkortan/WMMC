@@ -495,6 +495,29 @@ function getNextSyncTime() {
   return next.toISOString();
 }
 
+// Check if today falls within the season's sync window:
+// day after PP1 starts (index 0) through day after Finals Week 2 ends (index 15)
+function isWithinSyncWindow(sd) {
+  if (!sd || !sd.schedule_dates || sd.schedule_dates.length < 16) return true; // no dates configured — always allow
+  const dates = sd.schedule_dates;
+  const pp1Start = dates[0] && dates[0].start;
+  const finalsEnd = dates[15] && dates[15].end;
+  if (!pp1Start || !finalsEnd) return true;
+
+  const todayISO = new Date().toISOString().split('T')[0];
+
+  // Sync window: day after PP1 starts → day after Finals ends
+  const syncStart = new Date(pp1Start + 'T12:00:00');
+  syncStart.setDate(syncStart.getDate() + 1);
+  const syncStartISO = syncStart.toISOString().split('T')[0];
+
+  const syncEnd = new Date(finalsEnd + 'T12:00:00');
+  syncEnd.setDate(syncEnd.getDate() + 1);
+  const syncEndISO = syncEnd.toISOString().split('T')[0];
+
+  return todayISO >= syncStartISO && todayISO <= syncEndISO;
+}
+
 function scheduleGSheetsSync() {
   if (syncTimer) clearTimeout(syncTimer);
 
@@ -513,10 +536,16 @@ function scheduleGSheetsSync() {
     const db2 = readDB();
     const cfg = db2.google_sheets_config || {};
     const season = cfg.season || now.getFullYear().toString();
+    const sd = (db2.seasons || {})[season];
 
-    syncGoogleSheets(season)
-      .then(result => console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`))
-      .catch(e => console.error(`[GSheets] Sync error: ${e.message}`));
+    // Only sync if within the season's date window
+    if (isWithinSyncWindow(sd)) {
+      syncGoogleSheets(season)
+        .then(result => console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`))
+        .catch(e => console.error(`[GSheets] Sync error: ${e.message}`));
+    } else {
+      console.log(`[GSheets] Skipping sync — outside season date window for ${season}`);
+    }
 
     // Schedule next run at 5am tomorrow
     const next = new Date();

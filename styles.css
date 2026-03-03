@@ -3217,6 +3217,76 @@ body::before {
   margin: 1rem 0;
 }
 
+/* ============================================================
+   Scoreboard Manager Detail Pop-down
+   ============================================================ */
+.sb-manager-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sb-manager-row:hover {
+  background: var(--bg-hover, rgba(0,0,0,0.04));
+}
+
+.sb-expand-arrow {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-left: 4px;
+  vertical-align: middle;
+  transition: transform 0.15s;
+}
+
+.sb-manager-detail-row td {
+  padding: 0;
+  border-top: none;
+}
+
+.mgr-detail-panel {
+  background: var(--bg-alt, #f8f9fa);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 4px 8px 8px;
+  padding: 0.75rem;
+}
+
+.mgr-detail-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.mgr-detail-header {
+  font-weight: 700;
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25rem;
+}
+
+.mgr-detail-loading {
+  padding: 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.dropped-player td {
+  opacity: 0.65;
+}
+
+/* ============================================================
+   Hall of Fame
+   ============================================================ */
+#hall-of-fame-content .data-table thead th[onclick] {
+  user-select: none;
+  color: var(--accent);
+}
+
+#hall-of-fame-content .data-table thead th[onclick]:hover {
+  text-decoration: underline;
+}
+
 @media (max-width: 768px) {
   .active-bracket {
     flex-direction: column;
@@ -3235,5 +3305,9 @@ body::before {
     white-space: nowrap;
     font-size: 0.78rem;
     padding: 0.4rem 0.75rem;
+  }
+
+  .mgr-detail-cols {
+    grid-template-columns: 1fr;
   }
 }
