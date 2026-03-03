@@ -56,6 +56,7 @@
     <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
     <button class="nav-btn" data-tab="trends">Trends</button>
     <button class="nav-btn" data-tab="league-info">League Info</button>
+    <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
     <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner</button>
   </nav>
 
@@ -119,6 +120,11 @@
       <div id="league-schedule-content"></div>
       <div id="league-scoring-content"></div>
       <div id="league-rules-content"></div>
+    </section>
+
+    <!-- Hall of Fame -->
+    <section id="hall-of-fame" class="tab-content">
+      <div id="hall-of-fame-content"></div>
     </section>
 
     <!-- Rosters -->
@@ -251,6 +257,14 @@
               </div>
               <div id="player-pool-status"></div>
               <div id="player-pool-display" style="margin-top:1rem;"></div>
+            </div>
+
+            <!-- Create New Season -->
+            <div class="reset-season-section" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border);">
+              <h3>Create New Season</h3>
+              <p class="upload-hint">Create a fresh season for the next year. Managers, pool assignments, and credentials carry forward. Player pools, rosters, stats, and swap history start clean.</p>
+              <button class="btn btn-primary" id="create-new-season-btn">Create New Season</button>
+              <div id="create-new-season-status" style="margin-top:0.5rem;"></div>
             </div>
 
             <!-- Reset Season -->
