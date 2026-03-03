@@ -126,6 +126,82 @@ function weekIndexFromKey(round, week) {
   return SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
 }
 
+// Determine the current scoring period from loaded stats data
+function getCurrentScoringPeriod(seasonData) {
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+
+  // Collect all unique round|week combinations that have data
+  const weekKeys = new Set();
+  batting.forEach(b => { if (b.round && b.week) weekKeys.add(`${b.round}|${b.week}`); });
+  pitching.forEach(p => { if (p.round && p.week) weekKeys.add(`${p.round}|${p.week}`); });
+
+  if (weekKeys.size === 0) return null;
+
+  // Normalize round variants (PP1P → PP1, PP2P → PP2)
+  const normalizeRound = r => r.replace(/P$/, '');
+
+  // Find the latest week by schedule index
+  let latestIdx = -1;
+  let latestRound = null;
+  let latestWeek = null;
+
+  weekKeys.forEach(key => {
+    const [round, week] = key.split('|');
+    const normRound = normalizeRound(round);
+    const idx = weekIndexFromKey(normRound, week);
+    if (idx > latestIdx) {
+      latestIdx = idx;
+      latestRound = normRound;
+      latestWeek = week;
+    }
+  });
+
+  if (latestIdx < 0) return null;
+
+  const scheduleEntry = SEASON_SCHEDULE[latestIdx];
+  const dates = getScheduleDates();
+  const dateRange = dates && dates[latestIdx] ? dates[latestIdx] : null;
+
+  // Round info
+  const roundWeeks = SEASON_SCHEDULE.filter(s => s.round === latestRound);
+  const weekNum = parseInt(latestWeek.replace('Week ', ''));
+  const totalRoundWeeks = roundWeeks.length;
+
+  // Round overall date range
+  let roundStartDate = null, roundEndDate = null;
+  if (dates) {
+    const roundIndices = SEASON_SCHEDULE
+      .map((s, i) => s.round === latestRound ? i : -1)
+      .filter(i => i >= 0);
+    if (roundIndices.length > 0 && dates[roundIndices[0]] && dates[roundIndices[roundIndices.length - 1]]) {
+      roundStartDate = dates[roundIndices[0]].start;
+      roundEndDate = dates[roundIndices[roundIndices.length - 1]].end;
+    }
+  }
+
+  const roundNames = {
+    'PP1': 'Pool Play 1',
+    'PP2': 'Pool Play 2',
+    'QF': 'Quarterfinals',
+    'SF': 'Semifinals',
+    'Finals': 'Finals'
+  };
+
+  return {
+    round: latestRound,
+    week: latestWeek,
+    label: scheduleEntry.label,
+    weekIndex: latestIdx,
+    weekNum,
+    totalRoundWeeks,
+    dateRange,
+    roundName: roundNames[latestRound] || latestRound,
+    roundStartDate,
+    roundEndDate,
+  };
+}
+
 // ============================================================
 // Data helpers (localStorage cache + server persistence)
 // ============================================================
@@ -233,6 +309,12 @@ async function loadData() {
     }).catch(() => {});
   }
 
+  // Always show footer year and version (independent of auth)
+  document.getElementById('footer-year').textContent = CURRENT_YEAR;
+  fetch('/version.json').then(r => r.json()).then(d => {
+    document.getElementById('footer-version').textContent = 'v' + d.version;
+  }).catch(() => {});
+
   // Check for existing auth session
   const savedAuth = localStorage.getItem('wmmc_logged_in_email');
   if (savedAuth) {
@@ -283,7 +365,6 @@ function enterApp(mgr) {
     commBtn.style.display = mgr.commissioner ? '' : 'none';
   }
 
-  document.getElementById('footer-year').textContent = CURRENT_YEAR;
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
@@ -1857,9 +1938,9 @@ function showActiveSeason(seasonData) {
       <div class="stat-detail">Available</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Weeks Uploaded</div>
+      <div class="stat-label">Scoring Period</div>
       <div class="stat-value">${countUploadedWeeks(seasonData)}</div>
-      <div class="stat-detail">of 16</div>
+      <div class="stat-detail">of 16 weeks</div>
     </div>
   `;
 
