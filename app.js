@@ -6893,33 +6893,31 @@ function parseNum(val) {
 
 // Authoritative historical results — add a new entry each year after Finals are finalized.
 const WMMC_HISTORICAL_RESULTS = [
-  { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: null,               fourth: null },
-  { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker',   fourth: null },
-  { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie', fourth: null },
-  { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Austin Johnson',   fourth: null },
-  { year: '2022', champion: 'Dan Kortan',      runnerUp: 'Alex Thalacker',  third: 'Ryan Sullivan',    fourth: null },
-  { year: '2023', champion: 'Austin Johnson',  runnerUp: 'Dan Kortan',      third: 'Anton Capria',     fourth: null },
-  { year: '2024', champion: 'Dan Kortan',      runnerUp: 'Ryan Courville',  third: 'Jamie Rogers',     fourth: null },
-  { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan',    fourth: null },
+  { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: null               },
+  { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker'   },
+  { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie' },
+  { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Austin Johnson'   },
+  { year: '2022', champion: 'Dan Kortan',      runnerUp: 'Alex Thalacker',  third: 'Ryan Sullivan'    },
+  { year: '2023', champion: 'Austin Johnson',  runnerUp: 'Dan Kortan',      third: 'Anton Capria'     },
+  { year: '2024', champion: 'Dan Kortan',      runnerUp: 'Ryan Courville',  third: 'Jamie Rogers'     },
+  { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan'    },
 ];
 
 function buildHofRecords(results) {
   const records = {};
   function track(name, pos) {
     if (!name) return;
-    if (!records[name]) records[name] = { wins: 0, seconds: 0, thirds: 0, fourths: 0, seasons: 0, totalFinish: 0 };
+    if (!records[name]) records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: 0, totalFinish: 0 };
     records[name].seasons++;
     records[name].totalFinish += pos;
     if (pos === 1) records[name].wins++;
     else if (pos === 2) records[name].seconds++;
     else if (pos === 3) records[name].thirds++;
-    else if (pos === 4) records[name].fourths++;
   }
   results.forEach(r => {
     track(r.champion, 1);
     track(r.runnerUp, 2);
     track(r.third, 3);
-    track(r.fourth, 4);
   });
   return records;
 }
@@ -6943,7 +6941,6 @@ function hofManagerRowHtml(m, i) {
     <td class="num">${m.wins}</td>
     <td class="num">${m.seconds}</td>
     <td class="num">${m.thirds}</td>
-    <td class="num">${m.fourths}</td>
     <td class="num">${m.seasons}</td>
     <td class="num">${m.avgFinish.toFixed(2)}</td>
   </tr>`;
@@ -6958,7 +6955,7 @@ function getHofAllResults() {
   Object.entries(seasons).sort((a, b) => Number(a[0]) - Number(b[0])).forEach(([year, sd]) => {
     if (historicalYears.has(year)) return;
 
-    let champion = null, runnerUp = null, third = null, fourth = null;
+    let champion = null, runnerUp = null, third = null;
 
     // Legacy completed season
     if (sd.status === 'completed' && sd.data && sd.data.bracket) {
@@ -6969,7 +6966,6 @@ function getHofAllResults() {
       }
       if (b.third_place && b.third_place.winner) {
         third = b.third_place.winner;
-        fourth = b.third_place.manager1 === third ? b.third_place.manager2 : b.third_place.manager1;
       }
     }
 
@@ -7008,13 +7004,12 @@ function getHofAllResults() {
           runnerUp = champion === sfW[0] ? sfW[1] : sfW[0];
         }
         if (sfL[0] && sfL[1]) {
-          third  = rs(sfL[0],'Finals') >= rs(sfL[1],'Finals') ? sfL[0] : sfL[1];
-          fourth = third === sfL[0] ? sfL[1] : sfL[0];
+          third = rs(sfL[0],'Finals') >= rs(sfL[1],'Finals') ? sfL[0] : sfL[1];
         }
       }
     }
 
-    if (champion) computed.push({ year, champion, runnerUp, third, fourth });
+    if (champion) computed.push({ year, champion, runnerUp, third });
   });
 
   return [...WMMC_HISTORICAL_RESULTS, ...computed].sort((a, b) => Number(a.year) - Number(b.year));
@@ -7043,14 +7038,13 @@ function renderHallOfFame() {
   // Season-by-season results table
   html += '<div class="card"><h2>Season Results</h2>';
   html += '<div class="table-wrapper"><table class="data-table">';
-  html += '<thead><tr><th>Year</th><th>&#127942; Champion</th><th>2nd Place</th><th>3rd Place</th><th>4th Place</th></tr></thead><tbody>';
+  html += '<thead><tr><th>Year</th><th>&#127942; Champion</th><th>2nd Place</th><th>3rd Place</th></tr></thead><tbody>';
   [...allResults].reverse().forEach(r => {
     html += `<tr>
       <td><strong>${r.year}</strong></td>
       <td><strong style="color:var(--accent);">&#127942; ${r.champion || '—'}</strong></td>
       <td>${r.runnerUp || '—'}</td>
       <td>${r.third    || '—'}</td>
-      <td>${r.fourth   || '—'}</td>
     </tr>`;
   });
   html += '</tbody></table></div></div>';
@@ -7063,7 +7057,6 @@ function renderHallOfFame() {
   html += `<th onclick="sortHOF('wins')" style="cursor:pointer;">&#127942; Wins &#8597;</th>`;
   html += `<th onclick="sortHOF('seconds')" style="cursor:pointer;">2nd &#8597;</th>`;
   html += `<th onclick="sortHOF('thirds')" style="cursor:pointer;">3rd &#8597;</th>`;
-  html += `<th onclick="sortHOF('fourths')" style="cursor:pointer;">4th &#8597;</th>`;
   html += `<th onclick="sortHOF('seasons')" style="cursor:pointer;">Seasons &#8597;</th>`;
   html += `<th onclick="sortHOF('avgFinish')" style="cursor:pointer;">Avg Finish &#8597;</th>`;
   html += '</tr></thead><tbody id="hof-tbody">';
