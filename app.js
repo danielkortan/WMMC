@@ -1819,7 +1819,7 @@ function showActiveSeason(seasonData) {
     const sfLosers = [];
     const managers = getManagers();
     const poolGroups = {};
-    managers.forEach(m => { if (m.pool) { if (!poolGroups[m.pool]) poolGroups[m.pool] = []; poolGroups[m.pool].push(m.name); }});
+    managers.forEach(m => { if (m.pool && m.active !== false) { if (!poolGroups[m.pool]) poolGroups[m.pool] = []; poolGroups[m.pool].push(m.name); }});
     function _getRoundScore(mgr, round) {
       let t = 0;
       batting.filter(b => b.manager === mgr && b.round === round).forEach(b => t += (b.weekly_score || 0));
@@ -1994,11 +1994,11 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const managerScores = computeManagerScores(seasonData);
   if (managerScores.length === 0) return '';
 
-  // Compute seeding from pool play scores
+  // Compute seeding from pool play scores (active managers only)
   const managers = getManagers();
   const poolGroups = {};
   managers.forEach(m => {
-    if (m.pool) {
+    if (m.pool && m.active !== false) {
       if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
       poolGroups[m.pool].push(m.name);
     }
@@ -2208,10 +2208,10 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  // Pool groups from manager pool assignments
+  // Pool groups from manager pool assignments (active managers only)
   const poolGroups = {};
   managers.forEach(m => {
-    if (m.pool) {
+    if (m.pool && m.active !== false) {
       if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
       poolGroups[m.pool].push(m.name);
     }
@@ -2222,7 +2222,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   function periodScores(roundFilter) {
     const mgrMap = {};
     managers.forEach(m => {
-      if (m.pool) mgrMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
+      if (m.pool && m.active !== false) mgrMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
     });
     batting.filter(b => roundFilter.includes(b.round)).forEach(b => {
       const mgr = b.manager; // use stored manager — banked points
@@ -2250,7 +2250,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   // Pool Play Overall = combined PP1 + PP2
   const overallMap = {};
   managers.forEach(m => {
-    if (m.pool) overallMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
+    if (m.pool && m.active !== false) overallMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
   });
   [...pp1Scores, ...pp2Scores].forEach(s => {
     if (!overallMap[s.manager]) overallMap[s.manager] = { manager: s.manager, batting: 0, pitching: 0, total: 0 };
@@ -2565,7 +2565,7 @@ function renderTrends() {
   const registeredNames = new Set(managers.map(m => m.name));
   const poolGroups = {};
   managers.forEach(m => {
-    if (m.pool) {
+    if (m.pool && m.active !== false) {
       if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
       poolGroups[m.pool].push(m.name);
     }
@@ -3211,18 +3211,30 @@ function setupMyRoster() {
   if (!loggedInMgr) return;
 
   const isCommissioner = !!loggedInMgr.commissioner;
+  const isActive = loggedInMgr.active !== false;
   const managerBar = document.getElementById('roster-manager-bar');
   const managerSelect = document.getElementById('roster-manager-select');
   const titleEl = document.getElementById('roster-title');
 
   managerBar.style.display = 'block';
 
+  // Inactive non-commissioner managers cannot manage rosters
+  if (!isActive && !isCommissioner) {
+    managerSelect.style.display = 'none';
+    ROSTER_VIEWING_MANAGER = loggedInMgr.name;
+    titleEl.textContent = loggedInMgr.name + "'s Roster";
+    document.getElementById('roster-content').innerHTML =
+      '<div class="card"><p style="color:var(--text-muted);">Your account is currently inactive. Contact the commissioner to be reactivated.</p></div>';
+    return;
+  }
+
   if (isCommissioner) {
     // Commissioner: show dropdown to switch between any manager's roster
     managerSelect.style.display = '';
-    managerSelect.innerHTML = managers.map(m =>
-      `<option value="${m.name}"${m.name === loggedInMgr.name ? ' selected' : ''}>${m.name}${m.commissioner ? ' (Commissioner)' : ''}</option>`
-    ).join('');
+    managerSelect.innerHTML = managers.map(m => {
+      const label = m.name + (m.commissioner ? ' (Commissioner)' : '') + (m.active === false ? ' (Inactive)' : '');
+      return `<option value="${m.name}"${m.name === loggedInMgr.name ? ' selected' : ''}>${label}</option>`;
+    }).join('');
 
     managerSelect.onchange = () => {
       const selectedName = managerSelect.value;
@@ -5269,33 +5281,49 @@ function renderManagersTable() {
   const managers = getManagers();
   const table = document.getElementById('managers-table');
 
+  const activeCount = managers.filter(m => m.active !== false).length;
+  const inactiveCount = managers.length - activeCount;
+
   table.innerHTML = `
     <thead>
       <tr>
-        <th>Name</th><th>Email</th><th>Pool</th><th>Commissioner</th><th>Actions</th>
+        <th>Name</th><th>Email</th><th>Pool</th><th>Active</th><th>Commissioner</th><th>Actions</th>
       </tr>
     </thead>
     <tbody>
-      ${managers.map((m, i) => `
-        <tr>
+      ${managers.map((m, i) => {
+        const isActive = m.active !== false;
+        return `
+        <tr style="${isActive ? '' : 'opacity:0.55;'}">
           <td><strong>${m.name}</strong></td>
           <td>${m.email}</td>
-          <td>${m.pool ? 'Pool ' + m.pool : '-'}</td>
+          <td>${isActive ? (m.pool ? 'Pool ' + m.pool : '-') : '<span style="color:var(--text-muted);">—</span>'}</td>
+          <td>${isActive ? '<span class="badge badge-winner">Active</span>' : '<span class="badge" style="background:#999;color:#fff;">Inactive</span>'}</td>
           <td>${m.commissioner ? '<span class="badge badge-winner">Yes</span>' : 'No'}</td>
           <td>
             <button class="btn btn-sm btn-secondary" onclick="editManager(${i})">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="deleteManager(${i})">Delete</button>
           </td>
-        </tr>
-      `).join('')}
+        </tr>`;
+      }).join('')}
     </tbody>
   `;
+
+  // Show active/inactive counts
+  const existingSummary = table.parentElement.querySelector('.manager-count-summary');
+  if (existingSummary) existingSummary.remove();
+  const summary = document.createElement('p');
+  summary.className = 'manager-count-summary';
+  summary.style.cssText = 'font-size:0.85rem;color:var(--text-light);margin-top:0.5rem;';
+  summary.textContent = `${activeCount} active, ${inactiveCount} inactive \u2014 ${managers.length} total managers`;
+  table.parentElement.insertBefore(summary, table.nextSibling);
 
   document.getElementById('save-manager-btn').onclick = () => {
     const name = document.getElementById('mgr-name').value.trim();
     const email = document.getElementById('mgr-email').value.trim().toLowerCase();
     const isCommissioner = document.getElementById('mgr-commissioner').checked;
-    const pool = parseInt(document.getElementById('mgr-pool').value) || null;
+    const isActive = document.getElementById('mgr-active').checked;
+    const pool = isActive ? (parseInt(document.getElementById('mgr-pool').value) || null) : null;
 
     if (!name || !email) {
       alert('Name and email are required.');
@@ -5305,7 +5333,7 @@ function renderManagersTable() {
     const managers = getManagers();
 
     if (editingManagerIndex >= 0) {
-      managers[editingManagerIndex] = { name, email, commissioner: isCommissioner, pool };
+      managers[editingManagerIndex] = { name, email, commissioner: isCommissioner, active: isActive, pool };
       editingManagerIndex = -1;
       document.getElementById('cancel-edit-btn').style.display = 'none';
     } else {
@@ -5313,13 +5341,14 @@ function renderManagersTable() {
         alert('A manager with this email already exists.');
         return;
       }
-      managers.push({ name, email, commissioner: isCommissioner, pool });
+      managers.push({ name, email, commissioner: isCommissioner, active: isActive, pool });
     }
 
     saveManagers(managers);
     document.getElementById('mgr-name').value = '';
     document.getElementById('mgr-email').value = '';
     document.getElementById('mgr-commissioner').checked = false;
+    document.getElementById('mgr-active').checked = true;
     document.getElementById('mgr-pool').value = '';
     renderManagersTable();
   };
@@ -5329,6 +5358,7 @@ function renderManagersTable() {
     document.getElementById('mgr-name').value = '';
     document.getElementById('mgr-email').value = '';
     document.getElementById('mgr-commissioner').checked = false;
+    document.getElementById('mgr-active').checked = true;
     document.getElementById('mgr-pool').value = '';
     document.getElementById('cancel-edit-btn').style.display = 'none';
   };
@@ -5340,6 +5370,7 @@ window.editManager = function(index) {
   document.getElementById('mgr-name').value = m.name;
   document.getElementById('mgr-email').value = m.email;
   document.getElementById('mgr-commissioner').checked = m.commissioner;
+  document.getElementById('mgr-active').checked = m.active !== false;
   document.getElementById('mgr-pool').value = m.pool || '';
   editingManagerIndex = index;
   document.getElementById('cancel-edit-btn').style.display = 'inline-block';
@@ -6984,33 +7015,58 @@ const WMMC_HISTORICAL_RESULTS = [
   { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan'    },
 ];
 
+// Number of seasons played (2018-2025 = 8 seasons). All 12 managers have played every season.
+const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
+
 function buildHofRecords(results) {
   const records = {};
-  function track(name, pos) {
-    if (!name) return;
-    if (!records[name]) records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: 0, totalFinish: 0 };
-    records[name].seasons++;
-    records[name].totalFinish += pos;
-    if (pos === 1) records[name].wins++;
-    else if (pos === 2) records[name].seconds++;
-    else if (pos === 3) records[name].thirds++;
-  }
+  // Collect all unique manager names across all results
+  const allNames = new Set();
   results.forEach(r => {
-    track(r.champion, 1);
-    track(r.runnerUp, 2);
-    track(r.third, 3);
+    if (r.champion) allNames.add(r.champion);
+    if (r.runnerUp) allNames.add(r.runnerUp);
+    if (r.third) allNames.add(r.third);
   });
+
+  // Initialize all known managers with base season count
+  allNames.forEach(name => {
+    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: WMMC_TOTAL_SEASONS_THROUGH_2025 };
+  });
+
+  // Count additional seasons beyond the historical period (2026+)
+  const extraSeasons = results.filter(r => Number(r.year) > 2025).length;
+
+  // Add extra seasons to all managers
+  if (extraSeasons > 0) {
+    // Only add extra seasons to managers who participated in those seasons
+    const postHistoricalNames = new Set();
+    results.filter(r => Number(r.year) > 2025).forEach(r => {
+      if (r.champion) postHistoricalNames.add(r.champion);
+      if (r.runnerUp) postHistoricalNames.add(r.runnerUp);
+      if (r.third) postHistoricalNames.add(r.third);
+    });
+    postHistoricalNames.forEach(name => {
+      if (records[name]) records[name].seasons = WMMC_TOTAL_SEASONS_THROUGH_2025 + extraSeasons;
+    });
+  }
+
+  // Tally placement finishes
+  results.forEach(r => {
+    if (r.champion && records[r.champion]) records[r.champion].wins++;
+    if (r.runnerUp && records[r.runnerUp]) records[r.runnerUp].seconds++;
+    if (r.third && records[r.third]) records[r.third].thirds++;
+  });
+
   return records;
 }
 
 function hofSortedManagers(records, col, asc) {
   return Object.entries(records).map(([name, r]) => ({
-    name, ...r,
-    avgFinish: r.seasons > 0 ? Math.round((r.totalFinish / r.seasons) * 100) / 100 : 0
+    name, ...r
   })).sort((a, b) => {
     const diff = asc ? a[col] - b[col] : b[col] - a[col];
     if (diff !== 0) return diff;
-    return a.avgFinish - b.avgFinish; // tiebreak: better avg finish
+    return b.wins - a.wins; // tiebreak: more wins
   });
 }
 
@@ -7023,18 +7079,19 @@ function hofManagerRowHtml(m, i) {
     <td class="num">${m.seconds}</td>
     <td class="num">${m.thirds}</td>
     <td class="num">${m.seasons}</td>
-    <td class="num">${m.avgFinish.toFixed(2)}</td>
   </tr>`;
 }
 
 function getHofAllResults() {
-  // Start with hardcoded historical data, then append any computed seasons not already covered
-  const historicalYears = new Set(WMMC_HISTORICAL_RESULTS.map(r => r.year));
+  // Use hardcoded historical data as the source of truth through 2025.
+  // Only auto-compute results for seasons AFTER the last historical year.
+  const lastHistoricalYear = Math.max(...WMMC_HISTORICAL_RESULTS.map(r => Number(r.year)));
   const seasons = getSeasons();
   const computed = [];
 
   Object.entries(seasons).sort((a, b) => Number(a[0]) - Number(b[0])).forEach(([year, sd]) => {
-    if (historicalYears.has(year)) return;
+    // Skip any year covered by historical data (prevents double-counting)
+    if (Number(year) <= lastHistoricalYear) return;
 
     let champion = null, runnerUp = null, third = null;
 
@@ -7059,7 +7116,7 @@ function getHofAllResults() {
       }
       const mgrs = getManagers();
       const pools = {};
-      mgrs.forEach(m => { if (m.pool) { if (!pools[m.pool]) pools[m.pool] = []; pools[m.pool].push(m.name); }});
+      mgrs.forEach(m => { if (m.pool && m.active !== false) { if (!pools[m.pool]) pools[m.pool] = []; pools[m.pool].push(m.name); }});
       const ppTotals = {};
       mgrs.forEach(m => { ppTotals[m.name] = rs(m.name, 'PP1') + rs(m.name, 'PP2'); });
       const ppWinners = new Set();
@@ -7139,7 +7196,6 @@ function renderHallOfFame() {
   html += `<th onclick="sortHOF('seconds')" style="cursor:pointer;">2nd &#8597;</th>`;
   html += `<th onclick="sortHOF('thirds')" style="cursor:pointer;">3rd &#8597;</th>`;
   html += `<th onclick="sortHOF('seasons')" style="cursor:pointer;">Seasons &#8597;</th>`;
-  html += `<th onclick="sortHOF('avgFinish')" style="cursor:pointer;">Avg Finish &#8597;</th>`;
   html += '</tr></thead><tbody id="hof-tbody">';
   sorted.forEach((m, i) => { html += hofManagerRowHtml(m, i); });
   html += '</tbody></table></div></div>';
@@ -7151,7 +7207,7 @@ let _hofSortCol = 'wins';
 let _hofSortAsc = false;
 window.sortHOF = function(col) {
   if (_hofSortCol === col) { _hofSortAsc = !_hofSortAsc; }
-  else { _hofSortCol = col; _hofSortAsc = (col === 'avgFinish'); }
+  else { _hofSortCol = col; _hofSortAsc = false; }
 
   const tbody = document.getElementById('hof-tbody');
   if (!tbody) { renderHallOfFame(); return; }
