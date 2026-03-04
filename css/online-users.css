@@ -1,0 +1,34 @@
+/* ---- Rank Cell ---- */
+.rank-cell {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ---- Online Users ---- */
+.online-users-bar {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.online-user-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--navy);
+  color: var(--white);
+  font-size: 0.65rem;
+  font-weight: 700;
+  cursor: default;
+  border: 2px solid rgba(255,255,255,0.3);
+}
+
+.online-user-chip.online-user-me {
+  background: var(--accent);
+  border-color: var(--white);
+}

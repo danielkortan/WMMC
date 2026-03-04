@@ -5,6 +5,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
+const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || '123';
 
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
@@ -12,6 +13,44 @@ const ASSET_VERSION = Date.now();
 
 // Parse JSON bodies up to 50MB (season data can be large)
 app.use(express.json({ limit: '50mb' }));
+
+// ============================================================
+// Security middleware
+// ============================================================
+
+// Simple rate limiter for POST endpoints
+const rateLimits = {};
+const RATE_WINDOW_MS = 60 * 1000; // 1 minute
+const RATE_MAX_REQUESTS = 60;
+
+function rateLimit(req, res, next) {
+  if (req.method !== 'POST') return next();
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  if (!rateLimits[ip] || now - rateLimits[ip].start > RATE_WINDOW_MS) {
+    rateLimits[ip] = { start: now, count: 1 };
+  } else {
+    rateLimits[ip].count++;
+  }
+  if (rateLimits[ip].count > RATE_MAX_REQUESTS) {
+    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+  }
+  next();
+}
+
+app.use(rateLimit);
+
+// Security headers
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// ============================================================
+// Static file serving
+// ============================================================
 
 // Serve index.html through a dedicated route so we can inject the dynamic
 // version stamp and set aggressive no-cache headers that cannot be overridden.
@@ -24,7 +63,7 @@ app.get(['/', '/index.html'], (req, res) => {
   res.type('html').send(html);
 });
 
-// Serve remaining static files (app.js, styles.css, data.json, etc.)
+// Serve remaining static files (js/, css/, data.json, etc.)
 app.use(express.static(__dirname, {
   index: false, // index.html is handled by the route above
   setHeaders(res, filePath) {
@@ -46,12 +85,93 @@ function readDB() {
   } catch (e) {
     console.error('Error reading db.json:', e.message);
   }
-  return { seasons: {}, managers: [] };
+  return { seasons: {}, managers: [], audit_log: [] };
 }
 
 function writeDB(data) {
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
 }
+
+// ============================================================
+// Audit log helpers
+// ============================================================
+
+const MAX_AUDIT_ENTRIES = 500;
+
+function addAuditEntry(db, action, details, email) {
+  if (!db.audit_log) db.audit_log = [];
+  db.audit_log.unshift({
+    timestamp: new Date().toISOString(),
+    action,
+    details,
+    email: email || 'system'
+  });
+  // Prune to max entries
+  if (db.audit_log.length > MAX_AUDIT_ENTRIES) {
+    db.audit_log = db.audit_log.slice(0, MAX_AUDIT_ENTRIES);
+  }
+}
+
+// ============================================================
+// Input validation helpers
+// ============================================================
+
+function isValidYear(year) {
+  const n = parseInt(year, 10);
+  return !isNaN(n) && n >= 2000 && n <= 2100;
+}
+
+function isValidEmail(email) {
+  return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function sanitizeString(str) {
+  if (typeof str !== 'string') return '';
+  return str.trim().slice(0, 500);
+}
+
+// ============================================================
+// Authentication endpoint
+// ============================================================
+
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+
+  const db = readDB();
+  const managers = db.managers || [];
+  const manager = managers.find(m => m.email && m.email.toLowerCase() === email.toLowerCase());
+
+  if (!manager) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  // Check manager-specific password first, then global password
+  const expectedPassword = manager.password || LOGIN_PASSWORD;
+  if (password !== expectedPassword) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  addAuditEntry(db, 'login', { email: manager.email }, manager.email);
+  writeDB(db);
+
+  res.json({ ok: true, manager: { name: manager.name, email: manager.email, commissioner: manager.commissioner || false } });
+});
+
+// ============================================================
+// Login password endpoint (for client to get global password)
+// ============================================================
+
+app.get('/api/login-password', (req, res) => {
+  res.json({ password: LOGIN_PASSWORD });
+});
 
 // ============================================================
 // API Endpoints
@@ -65,7 +185,11 @@ app.get('/api/seasons', (req, res) => {
 
 // POST /api/seasons — save all seasons (full replace)
 app.post('/api/seasons', (req, res) => {
+  if (!req.body || typeof req.body !== 'object') {
+    return res.status(400).json({ error: 'Request body must be an object' });
+  }
   const db = readDB();
+  addAuditEntry(db, 'seasons_save_all', { seasonCount: Object.keys(req.body).length }, req.get('X-User-Email'));
   db.seasons = req.body;
   writeDB(db);
   res.json({ ok: true });
@@ -73,8 +197,15 @@ app.post('/api/seasons', (req, res) => {
 
 // POST /api/seasons/:year — save a single season
 app.post('/api/seasons/:year', (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  if (!req.body || typeof req.body !== 'object') {
+    return res.status(400).json({ error: 'Request body must be an object' });
+  }
   const db = readDB();
   if (!db.seasons) db.seasons = {};
+  addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
   db.seasons[req.params.year] = req.body;
   writeDB(db);
   res.json({ ok: true });
@@ -83,15 +214,32 @@ app.post('/api/seasons/:year', (req, res) => {
 // GET /api/managers — return managers list
 app.get('/api/managers', (req, res) => {
   const db = readDB();
-  res.json(db.managers || []);
+  // Strip passwords from response
+  const managers = (db.managers || []).map(m => {
+    const { password, ...safe } = m;
+    return safe;
+  });
+  res.json(managers);
 });
 
 // POST /api/managers — save managers list
 app.post('/api/managers', (req, res) => {
+  if (!Array.isArray(req.body)) {
+    return res.status(400).json({ error: 'Request body must be an array' });
+  }
   const db = readDB();
+  addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
   db.managers = req.body;
   writeDB(db);
   res.json({ ok: true });
+});
+
+// GET /api/audit-log — return recent audit log entries
+app.get('/api/audit-log', (req, res) => {
+  const db = readDB();
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, MAX_AUDIT_ENTRIES);
+  const log = (db.audit_log || []).slice(0, limit);
+  res.json(log);
 });
 
 // ============================================================
@@ -354,6 +502,18 @@ function processPitchingRows(rows, sd, scheduleWeek) {
   return { imported, skipped };
 }
 
+// ============================================================
+// Sync history pruning
+// ============================================================
+
+const MAX_SYNC_HISTORY = 50;
+
+function pruneSyncHistory(sd) {
+  if (sd.upload_log && sd.upload_log.length > MAX_SYNC_HISTORY) {
+    sd.upload_log = sd.upload_log.slice(-MAX_SYNC_HISTORY);
+  }
+}
+
 // Main sync function — fetches all available weeks from the sheet
 async function syncGoogleSheets(year) {
   const db = readDB();
@@ -413,6 +573,9 @@ async function syncGoogleSheets(year) {
     details: results
   });
 
+  // Prune sync history to prevent indefinite growth
+  pruneSyncHistory(sd);
+
   // Save
   if (!db.seasons) db.seasons = {};
   db.seasons[year] = sd;
@@ -428,6 +591,12 @@ async function syncGoogleSheets(year) {
     details: results
   };
   db.google_sheets_config = config;
+
+  addAuditEntry(db, 'gsheets_sync', {
+    year,
+    batting_imported: totalBatImported,
+    pitching_imported: totalPitImported
+  });
 
   writeDB(db);
 
@@ -446,6 +615,7 @@ app.get('/api/google-sheets/config', (req, res) => {
   const safeConfig = { ...config };
   if (safeConfig.api_key) {
     safeConfig.api_key_masked = safeConfig.api_key.slice(0, 8) + '...' + safeConfig.api_key.slice(-4);
+    delete safeConfig.api_key;
   }
   res.json(safeConfig);
 });
@@ -466,6 +636,7 @@ app.post('/api/google-sheets/config', (req, res) => {
   if (typeof enabled === 'boolean') db.google_sheets_config.enabled = enabled;
   if (season) db.google_sheets_config.season = season;
 
+  addAuditEntry(db, 'gsheets_config_update', { enabled, season }, req.get('X-User-Email'));
   writeDB(db);
   scheduleGSheetsSync(); // reconfigure scheduler
 
@@ -597,7 +768,7 @@ const onlineUsers = {};
 app.post('/api/heartbeat', (req, res) => {
   const { email, name } = req.body;
   if (email && name) {
-    onlineUsers[email] = { name, timestamp: Date.now() };
+    onlineUsers[sanitizeString(email)] = { name: sanitizeString(name), timestamp: Date.now() };
   }
   res.json({ ok: true });
 });
@@ -613,13 +784,22 @@ app.get('/api/online-users', (req, res) => {
 });
 
 // ============================================================
+// Global error handler
+// ============================================================
+
+app.use((err, req, res, _next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ============================================================
 // Start
 // ============================================================
 
 app.listen(PORT, () => {
   console.log(`WMMC server running at http://localhost:${PORT}`);
   if (!fs.existsSync(DB_FILE)) {
-    writeDB({ seasons: {}, managers: [] });
+    writeDB({ seasons: {}, managers: [], audit_log: [] });
     console.log('Created empty db.json');
   }
   // Start the Google Sheets sync scheduler
