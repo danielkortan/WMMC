@@ -1,0 +1,11 @@
+/* ============================================================
+   Hall of Fame
+   ============================================================ */
+#hall-of-fame-content .data-table thead th[onclick] {
+  user-select: none;
+  color: var(--accent);
+}
+
+#hall-of-fame-content .data-table thead th[onclick]:hover {
+  text-decoration: underline;
+}

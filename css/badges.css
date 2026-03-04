@@ -1,0 +1,100 @@
+/* Qualifiers & Awards */
+.qualifier-item, .award-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.qualifier-item:last-child, .award-item:last-child {
+  border-bottom: none;
+}
+
+.qualifier-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badge-winner { background: #dcfce7; color: #166534; }
+.badge-wildcard { background: #dbeafe; color: #1e40af; }
+
+.award-item .award-label {
+  font-size: 0.8rem;
+  color: var(--text-light);
+  font-weight: 600;
+}
+
+.award-item .award-value {
+  text-align: right;
+}
+
+.award-item .award-manager {
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.award-item .award-score {
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+/* Rules */
+#rules-content {
+  line-height: 1.8;
+}
+
+#rules-content p {
+  margin-bottom: 0.75rem;
+}
+
+#rules-content .rule-heading {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--primary);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.scoring-table {
+  max-width: 300px;
+}
+
+.scoring-table td:last-child {
+  text-align: right;
+  font-weight: 700;
+}
+
+.positive { color: var(--success); }
+.negative { color: var(--danger); }
+
+/* Swap / Transaction styling */
+.swap-type {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.swap-free { background: #dbeafe; color: #1e40af; }
+.swap-il { background: #fef3c7; color: #92400e; }
+.swap-drop { background: #fee2e2; color: #991b1b; }
+.swap-trade { background: #dcfce7; color: #166534; }
+
+.player-out { color: var(--danger); }
+.player-in { color: var(--success); }
+
+/* ============================================================ */
+/* Commissioner Styles */
+/* ============================================================ */
