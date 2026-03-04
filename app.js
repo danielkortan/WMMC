@@ -284,6 +284,10 @@ function enterApp(mgr) {
   }
 
   document.getElementById('footer-year').textContent = CURRENT_YEAR;
+  fetch('version.json').then(r => r.json()).then(v => {
+    const el = document.getElementById('footer-version');
+    if (el && v.version) el.textContent = 'v' + v.version;
+  }).catch(() => {});
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
