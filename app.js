@@ -634,7 +634,6 @@ function showHistoricalSeason() {
 // ============================================================
 function renderScoreboard() {
   renderChampionBanner();
-  renderStatsGrid();
   renderScoreboardContent();
 }
 
@@ -1028,29 +1027,6 @@ function setupBannerPreviewDrag(el, onDelta) {
   });
 }
 
-function renderStatsGrid() {
-  const grid = document.getElementById('stats-grid');
-
-  if (!DATA || !DATA.scoreboard || !DATA.scoreboard.stats) {
-    grid.innerHTML = '';
-    return;
-  }
-
-  const stats = DATA.scoreboard.stats;
-  const statCards = [
-    { label: 'Best PP Total', value: fmt(stats.overall.best_pp_total.score), detail: stats.overall.best_pp_total.manager },
-    { label: 'Best Total Batting', value: fmt(stats.overall.best_batting.score), detail: stats.overall.best_batting.manager },
-    { label: 'Best Total Pitching', value: fmt(stats.overall.best_pitching.score), detail: stats.overall.best_pitching.manager },
-    { label: 'Best Single Round', value: fmt(stats.overall.best_round.score), detail: stats.overall.best_round.manager },
-  ];
-  grid.innerHTML = statCards.map(s => `
-    <div class="stat-card">
-      <div class="stat-label">${s.label}</div>
-      <div class="stat-value">${s.value}</div>
-      <div class="stat-detail">${s.detail}</div>
-    </div>
-  `).join('');
-}
 
 function renderScoreboardContent() {
   const container = document.getElementById('scoreboard-content');
@@ -2178,33 +2154,8 @@ function showActiveSeason(seasonData) {
   // Render the unified champion banner (same layout as historical seasons)
   renderChampionBanner();
 
-  const grid = document.getElementById('stats-grid');
   const managers = getManagers();
   const managerScores = computeManagerScores(seasonData);
-
-  // Stats grid shows basic season info (leader cards moved to Pool Play section)
-  grid.innerHTML = `
-    <div class="stat-card">
-      <div class="stat-label">Managers</div>
-      <div class="stat-value">${managers.length}</div>
-      <div class="stat-detail">Registered</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Batters Pool</div>
-      <div class="stat-value">${(seasonData.batters_pool || []).length}</div>
-      <div class="stat-detail">Available</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Pitchers Pool</div>
-      <div class="stat-value">${(seasonData.pitchers_pool || []).length}</div>
-      <div class="stat-detail">Available</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Scoring Period</div>
-      <div class="stat-value">${countUploadedWeeks(seasonData)}</div>
-      <div class="stat-detail">of 16 weeks</div>
-    </div>
-  `;
 
   // Scoreboard content for active season
   const scoreboardContent = document.getElementById('scoreboard-content');
