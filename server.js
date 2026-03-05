@@ -243,6 +243,53 @@ app.get('/api/audit-log', (req, res) => {
 });
 
 // ============================================================
+// Banner Background Config
+// ============================================================
+
+// GET /api/banner-config — return banner background configuration
+app.get('/api/banner-config', (req, res) => {
+  const db = readDB();
+  res.json(db.banner_config || null);
+});
+
+// POST /api/banner-config — save banner background configuration
+// Body: { imageData, posX, posY, scale } or null to clear
+app.post('/api/banner-config', (req, res) => {
+  const db = readDB();
+  const body = req.body;
+
+  if (body === null || (typeof body === 'object' && body.clear)) {
+    db.banner_config = null;
+    addAuditEntry(db, 'banner_config_clear', {}, req.get('X-User-Email'));
+    writeDB(db);
+    return res.json({ ok: true });
+  }
+
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Invalid request body' });
+  }
+
+  const { imageData, posX, posY, scale } = body;
+
+  // Validate imageData is a data URL for an image
+  if (imageData && (typeof imageData !== 'string' || !imageData.startsWith('data:image/'))) {
+    return res.status(400).json({ error: 'imageData must be an image data URL' });
+  }
+
+  // Validate numeric fields
+  const config = {};
+  if (imageData) config.imageData = imageData;
+  config.posX = typeof posX === 'number' ? Math.max(0, Math.min(100, posX)) : 50;
+  config.posY = typeof posY === 'number' ? Math.max(0, Math.min(100, posY)) : 50;
+  config.scale = typeof scale === 'number' ? Math.max(0.5, Math.min(5, scale)) : 1;
+
+  db.banner_config = config;
+  addAuditEntry(db, 'banner_config_save', { hasImage: !!imageData }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// ============================================================
 // Scoring (mirrored from client for server-side processing)
 // ============================================================
 

@@ -9,6 +9,7 @@ let SELECTED_SEASON = null;
 let COMMISSIONER_EMAIL = null;
 let ROSTER_EMAIL = null;
 let LOGGED_IN_EMAIL = null;
+let BANNER_BG_CONFIG = null;  // Custom banner background config { imageData, posX, posY, scale }
 
 // Google Sign-In Client ID — set this to enable Google login
 const GOOGLE_CLIENT_ID = '';
@@ -308,6 +309,9 @@ async function loadData() {
       body: JSON.stringify(seasons[CURRENT_YEAR])
     }).catch(() => {});
   }
+
+  // Load banner background config from server
+  await loadBannerConfig();
 
   // Always show footer year and version (independent of auth)
   document.getElementById('footer-year').textContent = CURRENT_YEAR;
@@ -686,6 +690,41 @@ function renderChampionBanner() {
        </div>`
     : '';
 
+  // Apply custom background if configured
+  applyBannerBackground(banner, rightHtml, footerHtml);
+}
+
+// Build base banner HTML and apply the custom background (or default gradient)
+function applyBannerBackground(banner, rightHtml, footerHtml) {
+  if (!BANNER_BG_CONFIG || !BANNER_BG_CONFIG.imageData) {
+    // Default gradient banner — clear any inline bg styles
+    banner.style.backgroundImage = '';
+    banner.style.backgroundSize = '';
+    banner.style.backgroundPosition = '';
+    banner.classList.remove('has-custom-bg');
+    banner.innerHTML = `
+      <div class="banner-main">
+        <div class="banner-left">
+          <div class="banner-title">WMMC ${SELECTED_SEASON}</div>
+        </div>
+        ${rightHtml}
+      </div>
+      ${footerHtml}
+    `;
+    return;
+  }
+
+  const { imageData, posX = 50, posY = 50, scale = 1 } = BANNER_BG_CONFIG;
+  const bgSize = (scale * 100) + '%';
+  const bgPos = posX + '% ' + posY + '%';
+
+  banner.style.backgroundImage = `url(${imageData})`;
+  banner.style.backgroundSize = bgSize;
+  banner.style.backgroundPosition = bgPos;
+  banner.style.backgroundRepeat = 'no-repeat';
+  banner.classList.add('has-custom-bg');
+
+  // Set initial content immediately without backing so the banner is not blank
   banner.innerHTML = `
     <div class="banner-main">
       <div class="banner-left">
@@ -695,6 +734,298 @@ function renderChampionBanner() {
     </div>
     ${footerHtml}
   `;
+
+  // Then run contrast analysis and update classes if needed
+  const bannerW = banner.offsetWidth || 900;
+  const bannerH = banner.offsetHeight || 140;
+  analyzeImageContrast(imageData, posX, posY, scale, bannerW, bannerH)
+    .then(({ leftNeedsBacking, rightNeedsBacking }) => {
+      const leftEl = banner.querySelector('.banner-left');
+      const rightEl = banner.querySelector('.banner-right');
+      if (leftEl && leftNeedsBacking) leftEl.classList.add('text-backing');
+      if (rightEl && rightNeedsBacking) rightEl.classList.add('text-backing');
+    });
+}
+
+// Analyse brightness of left and right halves of the banner image region.
+// Returns { leftNeedsBacking, rightNeedsBacking } booleans.
+async function analyzeImageContrast(imageDataUrl, posX, posY, scale, bannerW, bannerH) {
+  try {
+    const img = await loadImage(imageDataUrl);
+    const canvas = document.createElement('canvas');
+    const sampleW = 400;
+    const sampleH = 120;
+    canvas.width = sampleW;
+    canvas.height = sampleH;
+    const ctx = canvas.getContext('2d');
+
+    // Calculate how the image would be rendered at the given scale/position
+    const imgAspect = img.width / img.height;
+    const bannerAspect = bannerW / bannerH;
+    // Compute the rendered size of the image (mimic CSS background-size: N% cover-ish)
+    let renderedW, renderedH;
+    const scaleFactor = scale; // e.g. 1.0 = 100% width fill
+    renderedW = bannerW * scaleFactor;
+    renderedH = renderedW / imgAspect;
+    if (renderedH < bannerH * scaleFactor) {
+      renderedH = bannerH * scaleFactor;
+      renderedW = renderedH * imgAspect;
+    }
+
+    // Offset from posX/posY percentages
+    const offX = (posX / 100) * (bannerW - renderedW);
+    const offY = (posY / 100) * (bannerH - renderedH);
+
+    // Draw a sampleW×sampleH version of the rendered image region
+    const sx = -offX * (sampleW / bannerW);
+    const sy = -offY * (sampleH / bannerH);
+    const sw = renderedW * (sampleW / bannerW);
+    const sh = renderedH * (sampleH / bannerH);
+    ctx.drawImage(img, sx, sy, sw, sh);
+
+    const leftData = ctx.getImageData(0, 0, sampleW / 2, sampleH).data;
+    const rightData = ctx.getImageData(sampleW / 2, 0, sampleW / 2, sampleH).data;
+
+    const leftLuminance = averageLuminance(leftData);
+    const rightLuminance = averageLuminance(rightData);
+
+    // White text passes WCAG AA when bg luminance <= 0.18
+    // Add some extra headroom — use 0.25 as the threshold
+    return {
+      leftNeedsBacking: leftLuminance > 0.25,
+      rightNeedsBacking: rightLuminance > 0.25
+    };
+  } catch (e) {
+    // On error, assume backing is needed for safety
+    return { leftNeedsBacking: true, rightNeedsBacking: true };
+  }
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function averageLuminance(pixelData) {
+  let total = 0;
+  const pixels = pixelData.length / 4;
+  for (let i = 0; i < pixelData.length; i += 4) {
+    const r = pixelData[i] / 255;
+    const g = pixelData[i + 1] / 255;
+    const b = pixelData[i + 2] / 255;
+    // Linearise sRGB
+    const rL = r <= 0.04045 ? r / 12.92 : Math.pow((r + 0.055) / 1.055, 2.4);
+    const gL = g <= 0.04045 ? g / 12.92 : Math.pow((g + 0.055) / 1.055, 2.4);
+    const bL = b <= 0.04045 ? b / 12.92 : Math.pow((b + 0.055) / 1.055, 2.4);
+    total += 0.2126 * rL + 0.7152 * gL + 0.0722 * bL;
+  }
+  return total / pixels;
+}
+
+// ---- Banner Background Config API helpers ----
+
+async function loadBannerConfig() {
+  try {
+    const resp = await fetch('/api/banner-config');
+    if (resp.ok) {
+      const config = await resp.json();
+      BANNER_BG_CONFIG = config;
+    }
+  } catch (e) {
+    // Server unavailable, no custom banner
+  }
+}
+
+async function saveBannerConfig(config) {
+  BANNER_BG_CONFIG = config;
+  try {
+    const resp = await fetch('/api/banner-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Email': LOGGED_IN_EMAIL || '' },
+      body: JSON.stringify(config)
+    });
+    return resp.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ---- Commissioner Banner Background UI ----
+
+function renderBannerBgSection() {
+  const fileInput = document.getElementById('banner-bg-file');
+  const editor = document.getElementById('banner-bg-editor');
+  const preview = document.getElementById('banner-bg-preview');
+  const scaleInput = document.getElementById('banner-bg-scale');
+  const scaleVal = document.getElementById('banner-bg-scale-val');
+  const saveBtn = document.getElementById('banner-bg-save-btn');
+  const removeBtn = document.getElementById('banner-bg-remove-btn');
+  const status = document.getElementById('banner-bg-status');
+  const titlePreview = document.getElementById('bbp-title-preview');
+
+  if (!fileInput) return;
+
+  if (titlePreview) titlePreview.textContent = 'WMMC ' + SELECTED_SEASON;
+
+  // State for the current editing session
+  let currentImageData = BANNER_BG_CONFIG ? BANNER_BG_CONFIG.imageData : null;
+  let currentPosX = BANNER_BG_CONFIG ? (BANNER_BG_CONFIG.posX || 50) : 50;
+  let currentPosY = BANNER_BG_CONFIG ? (BANNER_BG_CONFIG.posY || 50) : 50;
+  let currentScale = BANNER_BG_CONFIG ? (BANNER_BG_CONFIG.scale || 1) : 1;
+
+  // Show editor if config already exists
+  if (currentImageData) {
+    applyPreviewBg(preview, currentImageData, currentPosX, currentPosY, currentScale);
+    scaleInput.value = Math.round(currentScale * 100);
+    scaleVal.textContent = Math.round(currentScale * 100) + '%';
+    editor.style.display = 'block';
+  }
+
+  // File input change handler
+  fileInput.onchange = function() {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      currentImageData = e.target.result;
+      currentPosX = 50;
+      currentPosY = 50;
+      currentScale = 1;
+      scaleInput.value = 100;
+      scaleVal.textContent = '100%';
+      applyPreviewBg(preview, currentImageData, currentPosX, currentPosY, currentScale);
+      editor.style.display = 'block';
+      status.textContent = '';
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Scale slider handler
+  scaleInput.oninput = function() {
+    currentScale = parseInt(scaleInput.value) / 100;
+    scaleVal.textContent = scaleInput.value + '%';
+    applyPreviewBg(preview, currentImageData, currentPosX, currentPosY, currentScale);
+  };
+
+  // Drag-to-reposition on the preview
+  setupBannerPreviewDrag(preview, function(dx, dy) {
+    // dx/dy are pixel deltas in preview coordinates (preview is ~600px wide, 140px tall)
+    const previewRect = preview.getBoundingClientRect();
+    const pW = previewRect.width || 500;
+    const pH = previewRect.height || 140;
+    // Convert pixel delta to percentage delta
+    const dpx = -(dx / pW) * 100;
+    const dpy = -(dy / pH) * 100;
+    currentPosX = Math.max(0, Math.min(100, currentPosX + dpx));
+    currentPosY = Math.max(0, Math.min(100, currentPosY + dpy));
+    applyPreviewBg(preview, currentImageData, currentPosX, currentPosY, currentScale);
+  });
+
+  // Save button
+  saveBtn.onclick = async function() {
+    if (!currentImageData) {
+      status.innerHTML = '<span style="color:var(--danger)">No image selected.</span>';
+      return;
+    }
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    const ok = await saveBannerConfig({
+      imageData: currentImageData,
+      posX: currentPosX,
+      posY: currentPosY,
+      scale: currentScale
+    });
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save Background';
+    if (ok) {
+      status.innerHTML = '<span style="color:var(--success)">Background saved! Refresh the dashboard to see it.</span>';
+      renderChampionBanner();
+    } else {
+      status.innerHTML = '<span style="color:var(--danger)">Failed to save. Please try again.</span>';
+    }
+  };
+
+  // Remove button
+  removeBtn.onclick = async function() {
+    if (!confirm('Remove the custom banner background?')) return;
+    removeBtn.disabled = true;
+    removeBtn.textContent = 'Removing…';
+    const ok = await saveBannerConfig({ clear: true });
+    BANNER_BG_CONFIG = null;
+    removeBtn.disabled = false;
+    removeBtn.textContent = 'Remove Background';
+    currentImageData = null;
+    editor.style.display = 'none';
+    fileInput.value = '';
+    if (ok) {
+      status.innerHTML = '<span style="color:var(--success)">Background removed.</span>';
+      renderChampionBanner();
+    } else {
+      status.innerHTML = '<span style="color:var(--danger)">Failed to remove. Please try again.</span>';
+    }
+  };
+}
+
+function applyPreviewBg(previewEl, imageData, posX, posY, scale) {
+  if (!imageData) return;
+  const bgSize = (scale * 100) + '%';
+  const bgPos = posX + '% ' + posY + '%';
+  previewEl.style.backgroundImage = `url(${imageData})`;
+  previewEl.style.backgroundSize = bgSize;
+  previewEl.style.backgroundPosition = bgPos;
+  previewEl.style.backgroundRepeat = 'no-repeat';
+}
+
+function setupBannerPreviewDrag(el, onDelta) {
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  el.addEventListener('mousedown', function(e) {
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    onDelta(dx, dy);
+  });
+
+  document.addEventListener('mouseup', function() {
+    dragging = false;
+  });
+
+  // Touch support
+  el.addEventListener('touchstart', function(e) {
+    dragging = true;
+    lastX = e.touches[0].clientX;
+    lastY = e.touches[0].clientY;
+    e.preventDefault();
+  }, { passive: false });
+
+  el.addEventListener('touchmove', function(e) {
+    if (!dragging) return;
+    const dx = e.touches[0].clientX - lastX;
+    const dy = e.touches[0].clientY - lastY;
+    lastX = e.touches[0].clientX;
+    lastY = e.touches[0].clientY;
+    onDelta(dx, dy);
+    e.preventDefault();
+  }, { passive: false });
+
+  el.addEventListener('touchend', function() {
+    dragging = false;
+  });
 }
 
 function renderStatsGrid() {
@@ -4601,6 +4932,7 @@ function showCommissionerPanel() {
   document.getElementById('commissioner-name').textContent = mgr ? mgr.name : COMMISSIONER_EMAIL;
   document.getElementById('season-setup-title').textContent = `${SELECTED_SEASON} Season Setup`;
 
+  renderBannerBgSection();
   renderPendingSwapRequests();
   renderManagersTable();
   renderPasswordManagement();

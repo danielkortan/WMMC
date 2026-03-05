@@ -50,6 +50,33 @@
   border-bottom: 4px solid var(--accent);
 }
 
+/* Custom image background — suppress the default gradient */
+.champion-banner.has-custom-bg {
+  background-color: #001a3e;
+}
+
+/* Dark overlay on top of the image to keep text legible by default */
+.champion-banner.has-custom-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg,
+    rgba(0, 20, 60, 0.45) 0%,
+    rgba(0, 20, 60, 0.25) 50%,
+    rgba(0, 20, 60, 0.45) 100%);
+  z-index: 0;
+  border-radius: inherit;
+}
+
+/* Text backing — applied when image is bright in that region */
+.text-backing {
+  background: rgba(0, 0, 0, 0.55) !important;
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem !important;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
 /* Compact variant for active season */
 .champion-banner.banner-compact {
   padding: 1rem 1.5rem;
