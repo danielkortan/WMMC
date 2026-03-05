@@ -893,6 +893,28 @@ app.listen(PORT, () => {
     writeDB({ seasons: {}, managers: [], audit_log: [] });
     console.log('Created empty db.json');
   }
+
+  // Auto-seed managers from data.json if db.json has none
+  const db = readDB();
+  if (!db.managers || db.managers.length === 0) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(__dirname, 'data.json'), 'utf8'));
+      const emailMap = data.email_map || {};
+      if (Object.keys(emailMap).length > 0) {
+        db.managers = Object.entries(emailMap).map(([email, name]) => ({
+          name,
+          email,
+          commissioner: email === 'daniel.kortan@gmail.com',
+          active: true,
+        }));
+        writeDB(db);
+        console.log(`Seeded ${db.managers.length} managers from data.json`);
+      }
+    } catch (e) {
+      console.error('Could not seed managers from data.json:', e.message);
+    }
+  }
+
   // Start the Google Sheets sync scheduler
   scheduleGSheetsSync();
 });
