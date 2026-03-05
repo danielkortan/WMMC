@@ -1,0 +1,68 @@
+[
+  {
+    "name": "Daniel Kortan",
+    "email": "daniel.kortan@gmail.com",
+    "commissioner": true,
+    "active": true
+  },
+  {
+    "name": "Cam McCallum",
+    "email": "cammc15@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Marcus Gillespie",
+    "email": "marcusgillespie92@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Ryan Sullivan",
+    "email": "rmsullivan323@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Ryan Courville",
+    "email": "ryan.courville5@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Chris Bentivegna",
+    "email": "cbenti60@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Joey Auclair",
+    "email": "jauclair323@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Jamie Rogers",
+    "email": "jrogersdgmu@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Anton Capria",
+    "email": "anton.t.capria@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Alex Thalacker",
+    "email": "athalack23@gmail.com",
+    "commissioner": false,
+    "active": true
+  },
+  {
+    "name": "Austin Johnson",
+    "email": "austinjohns106@gmail.com",
+    "commissioner": false,
+    "active": true
+  }
+]
