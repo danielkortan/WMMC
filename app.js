@@ -4377,12 +4377,12 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     })}</script>`;
   }
 
-  // Commissioner: pending swaps from ALL managers
+  // Commissioner: pending swaps for THIS manager only
   if (isCommissioner && isActive) {
-    const pendingSwaps = allSwaps.filter(s => s.status === 'pending');
+    const pendingSwaps = mySwaps.filter(s => s.status === 'pending');
     if (pendingSwaps.length > 0) {
       html += `<div class="swap-pending-card">
-        <h3>Pending Approvals</h3>`;
+        <h3>Pending Swap Approvals</h3>`;
       pendingSwaps.forEach(s => {
         html += `<div class="swap-pending-item" id="swap-item-${s.id}">
           <div class="swap-pending-header">
@@ -4566,14 +4566,20 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       }
 
       // Submit button
-      if (!isPending && submittedBatters.length === 4 && submittedPitchers.length === 3) {
+      if (!isPending) {
+        const allSelected = submittedBatters.length === 4 && submittedPitchers.length === 3;
+        const missingBatters = 4 - submittedBatters.length;
+        const missingPitchers = 3 - submittedPitchers.length;
+        const parts = [];
+        if (missingBatters > 0) parts.push(`${missingBatters} batter${missingBatters > 1 ? 's' : ''}`);
+        if (missingPitchers > 0) parts.push(`${missingPitchers} pitcher${missingPitchers > 1 ? 's' : ''}`);
+        const hint = allSelected ? '' : `Still need: ${parts.join(' and ')}.`;
         html += `<div style="margin-top:1rem;">
-          <button class="btn btn-primary" onclick="submitInitialRoster('${safeMgr}')">Submit for Approval</button>
+          <button class="btn btn-primary"${allSelected ? `` : ` disabled style="opacity:0.45;cursor:not-allowed;"`} onclick="${allSelected ? `submitInitialRoster('${safeMgr}')` : ''}">Submit for Approval</button>
+          <p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">${allSelected ? 'All players selected — ready to submit.' : `Select all 4 batters and 3 pitchers before submitting. ${hint}`}</p>
         </div>`;
       } else if (isPending) {
         html += `<p class="text-muted" style="margin-top:0.75rem;font-size:0.82rem;">You can still modify your roster until the commissioner approves it.</p>`;
-      } else {
-        html += `<p class="text-muted" style="margin-top:0.75rem;font-size:0.82rem;">Select exactly 4 batters and 3 pitchers to submit.</p>`;
       }
     }
 
@@ -4982,23 +4988,50 @@ function renderPendingSwapRequests() {
 
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
-  if (!sd || !sd.swaps) {
-    container.innerHTML = '<p class="text-muted">No pending swap requests.</p>';
-    return;
-  }
-
-  const pendingSwaps = sd.swaps.filter(s => s.status === 'pending');
-  if (pendingSwaps.length === 0) {
-    container.innerHTML = '<p class="text-muted">No pending swap requests.</p>';
+  if (!sd) {
+    container.innerHTML = '<p class="text-muted">No pending requests.</p>';
     return;
   }
 
   let html = '';
+
+  // Pending initial roster submissions
+  const managers = getManagers();
+  const allSubs = sd.initial_submissions || {};
+  const pendingInits = managers.filter(m => {
+    const sub = allSubs[m.name];
+    return sub && sub.status === 'pending';
+  });
+  pendingInits.forEach(m => {
+    const sub = allSubs[m.name];
+    const safeName = m.name.replace(/'/g, "\\'");
+    const idSafe = m.name.replace(/\s+/g, '-');
+    html += `<div class="swap-pending-item" id="comm-init-item-${idSafe}">
+      <div class="swap-pending-header">
+        <strong>${m.name}</strong>
+        <span class="swap-badge swap-badge-pending">Initial Roster Pending</span>
+      </div>
+      <div class="swap-pending-details" style="flex-direction:column;align-items:flex-start;gap:0.15rem;">
+        <span><strong>Batters:</strong> ${(sub.batters || []).join(', ') || 'None'}</span>
+        <span><strong>Pitchers:</strong> ${(sub.pitchers || []).join(', ') || 'None'}</span>
+      </div>
+      <div id="comm-initial-edit-${idSafe}" style="display:none;"></div>
+      <div class="swap-pending-actions">
+        <button class="btn btn-sm btn-success" onclick="approveInitialSubmission('${safeName}')">Approve</button>
+        <button class="btn btn-sm btn-secondary" onclick="editInitialSubmissionComm('${safeName}')">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="denyInitialSubmission('${safeName}')">Deny</button>
+        <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${safeName}')">View Roster</button>
+      </div>
+    </div>`;
+  });
+
+  // Pending in-season swaps
+  const pendingSwaps = (sd.swaps || []).filter(s => s.status === 'pending');
   pendingSwaps.forEach(s => {
     html += `<div class="swap-pending-item" id="comm-swap-item-${s.id}">
       <div class="swap-pending-header">
         <strong>${s.manager || 'Unknown'}</strong>
-        <span class="swap-badge swap-badge-pending">Pending</span>
+        <span class="swap-badge swap-badge-pending">Swap Pending</span>
       </div>
       <div class="swap-pending-details">
         <span>${s.player_out || '?'} &rarr; ${s.player_in || '?'}</span>
@@ -5012,6 +5045,11 @@ function renderPendingSwapRequests() {
       </div>
     </div>`;
   });
+
+  if (!html) {
+    container.innerHTML = '<p class="text-muted">No pending requests.</p>';
+    return;
+  }
 
   container.innerHTML = html;
 }
@@ -5684,11 +5722,10 @@ function renderPasswordManagement() {
   if (!container) return;
 
   const managers = getManagers();
-  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
 
   let html = '<table class="data-table"><thead><tr><th>Manager</th><th>Email</th><th>Password Status</th><th>Actions</th></tr></thead><tbody>';
   managers.forEach(m => {
-    const hasCustomPw = !!passwords[m.email.toLowerCase()];
+    const hasCustomPw = !!m.hasCustomPassword;
     const statusText = hasCustomPw ? 'Custom password set' : 'Using default';
     const statusClass = hasCustomPw ? 'swap-badge swap-badge-approved' : 'swap-badge swap-badge-pending';
     const safeEmail = m.email.toLowerCase().replace(/'/g, "\\'");
@@ -5727,6 +5764,7 @@ window.setManagerPassword = async function(email) {
     });
     if (!resp.ok) { alert('Failed to update password. Please try again.'); return; }
     input.value = '';
+    await syncFromServer();
     renderPasswordManagement();
   } catch (e) {
     alert('Failed to update password. Please check your connection.');
@@ -5741,6 +5779,7 @@ window.resetManagerPassword = async function(email) {
       headers: { 'X-User-Email': LOGGED_IN_EMAIL || '' }
     });
     if (!resp.ok) { alert('Failed to reset password. Please try again.'); return; }
+    await syncFromServer();
     renderPasswordManagement();
   } catch (e) {
     alert('Failed to reset password. Please check your connection.');
@@ -5965,6 +6004,10 @@ window.addToRosterFromSearch = function(manager, type, inputId, weekKey) {
   window.addToRoster(manager, type, inputId, weekKey);
 };
 
+function stripAccents(str) {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 // Setup player search event listeners (called after roster HTML is rendered)
 function setupPlayerSearchInputs() {
   document.querySelectorAll('.player-search-input').forEach(input => {
@@ -5977,7 +6020,7 @@ function setupPlayerSearchInputs() {
     if (!resultsDiv) return;
 
     input.addEventListener('input', () => {
-      const query = input.value.trim().toLowerCase();
+      const query = stripAccents(input.value.trim().toLowerCase());
       if (query.length < 1) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
 
       const seasons = getSeasons();
@@ -6000,8 +6043,9 @@ function setupPlayerSearchInputs() {
 
       const matches = pool.filter(p => {
         if (rostered.includes(p)) return false;
-        const parts = p.toLowerCase().split(/\s+/);
-        return parts.some(part => part.startsWith(query)) || p.toLowerCase().includes(query);
+        const norm = stripAccents(p.toLowerCase());
+        const parts = norm.split(/\s+/);
+        return parts.some(part => part.startsWith(query)) || norm.includes(query);
       }).slice(0, 8);
 
       if (matches.length === 0) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
@@ -6087,6 +6131,7 @@ window.submitInitialRoster = function(manager) {
 
   sub.status = 'pending';
   saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
 };
@@ -6134,6 +6179,7 @@ window.approveInitialSubmission = function(manager) {
   });
 
   saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
 };
@@ -6198,6 +6244,7 @@ window.saveInitialSubmissionEdits = function(manager) {
   sub.batters = newBatters;
   sub.pitchers = newPitchers;
   saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
 };
@@ -6209,8 +6256,73 @@ window.denyInitialSubmission = function(manager) {
   if (!sd.initial_submissions) return;
   sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
   saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
+};
+
+// Edit initial submission from the Commissioner Pending Swap Requests tab
+window.editInitialSubmissionComm = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+  const idSafe = manager.replace(/\s+/g, '-');
+  const editDiv = document.getElementById('comm-initial-edit-' + idSafe);
+  if (!editDiv) return;
+
+  if (editDiv.style.display !== 'none') { editDiv.style.display = 'none'; return; }
+
+  const safeMgr = manager.replace(/'/g, "\\'");
+  let editHtml = '<div style="padding:0.5rem 0;">';
+
+  editHtml += '<div style="font-size:0.82rem;font-weight:600;margin-bottom:0.25rem;">Batters:</div>';
+  (sub.batters || []).forEach((b, i) => {
+    const pool = (sd.batters_pool || []).sort();
+    editHtml += `<div style="margin-bottom:0.25rem;">
+      <select class="form-select" style="max-width:220px;display:inline-block;font-size:0.82rem;" id="comm-edit-init-bat-${idSafe}-${i}">
+        ${pool.map(p => `<option value="${p}"${p === b ? ' selected' : ''}>${p}</option>`).join('')}
+      </select></div>`;
+  });
+
+  editHtml += '<div style="font-size:0.82rem;font-weight:600;margin:0.5rem 0 0.25rem;">Pitchers:</div>';
+  (sub.pitchers || []).forEach((p, i) => {
+    const pool = (sd.pitchers_pool || []).sort();
+    editHtml += `<div style="margin-bottom:0.25rem;">
+      <select class="form-select" style="max-width:220px;display:inline-block;font-size:0.82rem;" id="comm-edit-init-pit-${idSafe}-${i}">
+        ${pool.map(pl => `<option value="${pl}"${pl === p ? ' selected' : ''}>${pl}</option>`).join('')}
+      </select></div>`;
+  });
+
+  editHtml += `<button class="btn btn-sm btn-primary" style="margin-top:0.5rem;" onclick="saveInitialSubmissionEditsComm('${safeMgr}')">Save Changes</button>`;
+  editHtml += '</div>';
+
+  editDiv.innerHTML = editHtml;
+  editDiv.style.display = 'block';
+};
+
+window.saveInitialSubmissionEditsComm = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  const sub = sd.initial_submissions[manager];
+  const idSafe = manager.replace(/\s+/g, '-');
+
+  const newBatters = [];
+  for (let i = 0; i < (sub.batters || []).length; i++) {
+    const sel = document.getElementById(`comm-edit-init-bat-${idSafe}-${i}`);
+    if (sel) newBatters.push(sel.value);
+  }
+  const newPitchers = [];
+  for (let i = 0; i < (sub.pitchers || []).length; i++) {
+    const sel = document.getElementById(`comm-edit-init-pit-${idSafe}-${i}`);
+    if (sel) newPitchers.push(sel.value);
+  }
+
+  sub.batters = newBatters;
+  sub.pitchers = newPitchers;
+  saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
 };
 
 // Commissioner roster management in the Swaps tab
@@ -7495,6 +7607,13 @@ function hofSortedManagers(records, col, asc) {
     }
     const diff = asc ? a[col] - b[col] : b[col] - a[col];
     if (diff !== 0) return diff;
+    // Tiebreaker: for wins column use avgFinish (lower is better), else fall back to wins desc
+    if (col === 'wins') {
+      if (a.avgFinish === null && b.avgFinish === null) return 0;
+      if (a.avgFinish === null) return 1;
+      if (b.avgFinish === null) return -1;
+      return a.avgFinish - b.avgFinish;
+    }
     return b.wins - a.wins;
   });
 }
@@ -7671,7 +7790,8 @@ function fmt(val) {
   if (val == null || val === '' || val === 'None') return '-';
   const num = parseFloat(val);
   if (isNaN(num)) return val;
-  return num % 1 === 0 ? num.toLocaleString() : num.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+  const str = num % 1 === 0 ? num.toLocaleString() : num.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+  return Math.floor(num) === 69 ? str + ' ❤️' : str;
 }
 
 
