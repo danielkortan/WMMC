@@ -6004,6 +6004,10 @@ window.addToRosterFromSearch = function(manager, type, inputId, weekKey) {
   window.addToRoster(manager, type, inputId, weekKey);
 };
 
+function stripAccents(str) {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 // Setup player search event listeners (called after roster HTML is rendered)
 function setupPlayerSearchInputs() {
   document.querySelectorAll('.player-search-input').forEach(input => {
@@ -6016,7 +6020,7 @@ function setupPlayerSearchInputs() {
     if (!resultsDiv) return;
 
     input.addEventListener('input', () => {
-      const query = input.value.trim().toLowerCase();
+      const query = stripAccents(input.value.trim().toLowerCase());
       if (query.length < 1) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
 
       const seasons = getSeasons();
@@ -6039,8 +6043,9 @@ function setupPlayerSearchInputs() {
 
       const matches = pool.filter(p => {
         if (rostered.includes(p)) return false;
-        const parts = p.toLowerCase().split(/\s+/);
-        return parts.some(part => part.startsWith(query)) || p.toLowerCase().includes(query);
+        const norm = stripAccents(p.toLowerCase());
+        const parts = norm.split(/\s+/);
+        return parts.some(part => part.startsWith(query)) || norm.includes(query);
       }).slice(0, 8);
 
       if (matches.length === 0) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
