@@ -7778,7 +7778,8 @@ function fmt(val) {
   if (val == null || val === '' || val === 'None') return '-';
   const num = parseFloat(val);
   if (isNaN(num)) return val;
-  return num % 1 === 0 ? num.toLocaleString() : num.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+  const str = num % 1 === 0 ? num.toLocaleString() : num.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+  return Math.floor(num) === 69 ? str + ' ❤️' : str;
 }
 
 
