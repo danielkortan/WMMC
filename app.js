@@ -13,7 +13,7 @@ let BANNER_BG_CONFIG = null;  // Custom banner background config { imageData, po
 
 // Google Sign-In Client ID — set this to enable Google login
 const GOOGLE_CLIENT_ID = '';
-const LOGIN_PASSWORD = '123';
+const LOGIN_PASSWORD = 'WelcometoHell123';
 
 // Scoring rubric (constant)
 const SCORING = {
