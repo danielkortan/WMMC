@@ -6936,7 +6936,8 @@ function parseNum(val) {
 
 // Authoritative historical results — add a new entry each year after Finals are finalized.
 const WMMC_HISTORICAL_RESULTS = [
-  { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: null               },
+  { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: 'Dan Kortan',
+    standings: { 'Cam McCallum': 1, 'Alex Thalacker': 2, 'Dan Kortan': 3, 'Ryan Sullivan': 4, 'Chris Bentivegna': 5, 'Anton Capria': 6, 'Jamie Rogers': 7, 'Ryan Courville': 8, 'Stephen Farmer': 9, 'Marcus Gillespie': 10, 'Austin Johnson': 11 } },
   { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker',
     standings: { 'Joey Auclair': 1, 'Cam McCallum': 2, 'Alex Thalacker': 3, 'Chris Bentivegna': 4, 'Dan Kortan': 5, 'Ryan Sullivan': 6, 'Jamie Rogers': 7, 'Anton Capria': 8, 'Austin Johnson': 9, 'Stephen Farmer': 10, 'Ryan Courville': 11, 'Marcus Gillespie': 12 } },
   { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie',
@@ -6954,10 +6955,12 @@ const WMMC_HISTORICAL_RESULTS = [
 ];
 
 // Number of historical seasons (2018-2025 = 8 seasons).
-// Most managers played all 8 seasons; Stephen Farmer played only 2019, Edgar Rivas missed 2019.
+// Number of historical seasons (2018-2025 = 8 seasons).
+// Stephen Farmer played 2018-2019 (2 seasons), Joey Auclair joined in 2019 (7 seasons),
+// Edgar Rivas joined in 2020 (6 seasons). All other managers played all 8 seasons.
 const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
 // Per-manager season overrides for managers who didn't play every historical season
-const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 1, 'Edgar Rivas': 7 };
+const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 2, 'Joey Auclair': 7, 'Edgar Rivas': 6 };
 
 // Compute full 1-12 standings from a live season's data.
 // Returns { champion, runnerUp, third, standings: { 'Name': position } } or null if not enough data.
