@@ -6938,7 +6938,8 @@ function parseNum(val) {
 const WMMC_HISTORICAL_RESULTS = [
   { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: null               },
   { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker'   },
-  { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie' },
+  { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie',
+    standings: { 'Ryan Sullivan': 1, 'Dan Kortan': 2, 'Marcus Gillespie': 3, 'Cam McCallum': 4, 'Ryan Courville': 5, 'Joey Auclair': 6, 'Austin Johnson': 7, 'Edgar Rivas': 8, 'Anton Capria': 9, 'Jamie Rogers': 10, 'Alex Thalacker': 11, 'Chris Bentivegna': 12 } },
   { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Joey Auclair',
     standings: { 'Ryan Sullivan': 1, 'Dan Kortan': 2, 'Joey Auclair': 3, 'Austin Johnson': 4, 'Chris Bentivegna': 5, 'Ryan Courville': 6, 'Anton Capria': 7, 'Marcus Gillespie': 8, 'Cam McCallum': 9, 'Jamie Rogers': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
   { year: '2022', champion: 'Dan Kortan',      runnerUp: 'Alex Thalacker',  third: 'Ryan Sullivan',
