@@ -228,8 +228,52 @@ app.post('/api/managers', (req, res) => {
     return res.status(400).json({ error: 'Request body must be an array' });
   }
   const db = readDB();
+  // Preserve existing passwords — the client never receives them (stripped in GET),
+  // so we must carry them forward from the current db record.
+  const existingPasswords = {};
+  (db.managers || []).forEach(m => {
+    if (m.email && m.password) existingPasswords[m.email.toLowerCase()] = m.password;
+  });
+  db.managers = req.body.map(m => {
+    const emailKey = (m.email || '').toLowerCase();
+    if (!m.password && existingPasswords[emailKey]) {
+      return { ...m, password: existingPasswords[emailKey] };
+    }
+    return m;
+  });
   addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
-  db.managers = req.body;
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// POST /api/managers/:email/password — set a manager's password
+app.post('/api/managers/:email/password', (req, res) => {
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  const { password } = req.body || {};
+  if (!password || typeof password !== 'string' || password.trim().length < 3) {
+    return res.status(400).json({ error: 'Password must be at least 3 characters' });
+  }
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  manager.password = password.trim();
+  addAuditEntry(db, 'manager_password_set', { email }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// DELETE /api/managers/:email/password — reset a manager's password to the global default
+app.delete('/api/managers/:email/password', (req, res) => {
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  delete manager.password;
+  addAuditEntry(db, 'manager_password_reset', { email }, req.get('X-User-Email'));
   writeDB(db);
   res.json({ ok: true });
 });
