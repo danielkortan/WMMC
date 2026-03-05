@@ -7514,11 +7514,16 @@ function renderHallOfFame() {
       const rows = Object.entries(r.standings).sort((a, b) => a[1] - b[1])
         .map(([name, pos]) => {
           const posLabel = pos === 1 ? '&#127942;' : pos <= 3 ? `<strong>${pos}</strong>` : pos;
-          return `<tr><td class="num">${posLabel}</td><td>${name}</td></tr>`;
+          let round;
+          if (pos <= 2) round = 'Finals';
+          else if (pos <= 4) round = 'Consolation';
+          else if (pos <= 8) round = 'Quarterfinals';
+          else round = 'Did Not Qualify';
+          return `<tr><td class="num">${posLabel}</td><td>${name}</td><td>${round}</td></tr>`;
         }).join('');
       html += `<tr id="hof-standings-${r.year}" style="display:none;"><td colspan="5" style="padding:0 0.5rem 0.5rem;">
         <table class="data-table" style="margin:0;">
-          <thead><tr><th>#</th><th>Manager</th></tr></thead>
+          <thead><tr><th>#</th><th>Manager</th><th>Round</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </td></tr>`;
