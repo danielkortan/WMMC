@@ -482,3 +482,120 @@ footer {
     font-size: 0.9rem;
   }
 }
+
+/* ============================================================ */
+/* Commissioner Sub-tabs                                        */
+/* ============================================================ */
+
+.comm-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1.25rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.comm-tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  padding: 0.65rem 1.2rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.18s, border-color 0.18s;
+}
+
+.comm-tab-btn:hover {
+  color: var(--primary);
+}
+
+.comm-tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--accent);
+}
+
+.comm-tab-content {
+  display: none;
+}
+
+.comm-tab-content.active {
+  display: block;
+}
+
+/* ============================================================ */
+/* Combined Manager Table (inline edit)                         */
+/* ============================================================ */
+
+.mgr-section-header {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0 0 0.6rem;
+  color: var(--text);
+}
+
+.mgr-section-header .mgr-count {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.mgr-inactive-section {
+  margin-top: 1.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.mgr-inactive-section .mgr-section-header {
+  color: var(--text-muted);
+}
+
+.add-mgr-area {
+  margin-top: 0.75rem;
+}
+
+.add-mgr-form {
+  display: none;
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  background: var(--bg-body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.add-mgr-form h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.add-mgr-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.mgr-pw-cell {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mgr-pw-input {
+  max-width: 110px;
+  font-size: 0.78rem !important;
+  padding: 0.2rem 0.4rem !important;
+}
+
+@media (max-width: 900px) {
+  .comm-tab-btn {
+    padding: 0.55rem 0.8rem;
+    font-size: 0.83rem;
+  }
+}

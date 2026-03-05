@@ -148,173 +148,171 @@
           <p>Logged in as <strong id="commissioner-name"></strong></p>
         </div>
 
-        <!-- Banner Background -->
-        <div class="card">
-          <h2>Banner Background</h2>
-          <p class="upload-hint">Upload a custom image to use as the banner background. Drag the preview to reposition, use the slider to resize.</p>
-          <div id="banner-bg-section">
-            <div class="banner-bg-upload-row">
-              <label class="upload-label">Image File</label>
-              <input type="file" id="banner-bg-file" accept="image/*">
+        <!-- Commissioner Sub-tabs -->
+        <div class="comm-tabs">
+          <button class="comm-tab-btn active" data-comm-tab="comm-tab-swaps">Swaps</button>
+          <button class="comm-tab-btn" data-comm-tab="comm-tab-stats-data">Stats Data</button>
+          <button class="comm-tab-btn" data-comm-tab="comm-tab-managers">Managers</button>
+          <button class="comm-tab-btn" data-comm-tab="comm-tab-season-setup">Season Setup</button>
+        </div>
+
+        <!-- TAB: Swaps -->
+        <div id="comm-tab-swaps" class="comm-tab-content active">
+          <div class="card">
+            <h2>Pending Swap Requests</h2>
+            <div id="pending-swaps-list"></div>
+          </div>
+          <div class="card">
+            <h2>Swap Log</h2>
+            <div id="swap-log-list"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Stats Data -->
+        <div id="comm-tab-stats-data" class="comm-tab-content">
+          <!-- Google Sheets Auto-Sync -->
+          <div class="card">
+            <h2>Google Sheets Auto-Sync</h2>
+            <p class="upload-hint">Link a Google Sheet to automatically pull weekly stats daily at 5:00 AM. The sheet must have tabs named like "Week 1 Batting", "Week 1 Pitching", etc. Manual uploads above will still work and take priority over synced data.</p>
+            <div id="gsheets-config-form">
+              <div class="form-row" style="margin-top:0.75rem;">
+                <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
+                <input type="text" id="gsheets-url" class="form-input" placeholder="https://docs.google.com/spreadsheets/d/...">
+              </div>
+              <div class="form-row">
+                <label class="upload-label">Google API Key</label>
+                <input type="text" id="gsheets-api-key" class="form-input" placeholder="AIza...">
+                <p class="upload-hint" style="margin-top:0.25rem;">Required. Create at <em>console.cloud.google.com</em> &rarr; APIs &amp; Services &rarr; Credentials. Enable the Google Sheets API.</p>
+              </div>
+              <div class="form-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="gsheets-enabled"> Enable daily auto-sync (5:00 AM)
+                </label>
+              </div>
+              <div class="gsheets-actions" style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <button class="btn btn-primary" onclick="saveGSheetsConfig()">Save Configuration</button>
+                <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
+              </div>
+              <div id="gsheets-status" style="margin-top:0.75rem;"></div>
             </div>
-            <div id="banner-bg-editor" style="display:none;">
-              <div class="banner-bg-preview-wrap" id="banner-bg-preview-wrap">
-                <div id="banner-bg-preview" class="banner-bg-preview">
-                  <div class="bbp-content">
-                    <div class="bbp-left">
-                      <div class="bbp-title" id="bbp-title-preview">WMMC</div>
-                    </div>
-                    <div class="bbp-right">
-                      <div class="bbp-champ-label">Reigning Champion</div>
-                      <div class="bbp-champ-name">Champion Name</div>
+            <div id="gsheets-sync-log" style="margin-top:1rem;"></div>
+          </div>
+          <!-- Weekly Stat Uploads -->
+          <div class="card">
+            <h2>Weekly Stat Uploads</h2>
+            <div id="weekly-upload-sections"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Managers -->
+        <div id="comm-tab-managers" class="comm-tab-content">
+          <div class="card">
+            <h2>Managers</h2>
+            <div id="managers-combined-view"></div>
+            <!-- Hidden legacy elements kept for any residual references -->
+            <table id="managers-table" style="display:none;"></table>
+            <div id="password-mgmt-table" style="display:none;"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Season Setup -->
+        <div id="comm-tab-season-setup" class="comm-tab-content">
+          <!-- Banner Background -->
+          <div class="card">
+            <h2>Banner Background</h2>
+            <p class="upload-hint">Upload a custom image to use as the banner background. Drag the preview to reposition, use the slider to resize.</p>
+            <div id="banner-bg-section">
+              <div class="banner-bg-upload-row">
+                <label class="upload-label">Image File</label>
+                <input type="file" id="banner-bg-file" accept="image/*">
+              </div>
+              <div id="banner-bg-editor" style="display:none;">
+                <div class="banner-bg-preview-wrap" id="banner-bg-preview-wrap">
+                  <div id="banner-bg-preview" class="banner-bg-preview">
+                    <div class="bbp-content">
+                      <div class="bbp-left">
+                        <div class="bbp-title" id="bbp-title-preview">WMMC</div>
+                      </div>
+                      <div class="bbp-right">
+                        <div class="bbp-champ-label">Reigning Champion</div>
+                        <div class="bbp-champ-name">Champion Name</div>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-              <div class="banner-bg-controls">
-                <div class="banner-bg-ctrl-row">
-                  <label>Scale</label>
-                  <input type="range" id="banner-bg-scale" min="50" max="300" value="100" step="5">
-                  <span id="banner-bg-scale-val">100%</span>
-                </div>
-                <p class="upload-hint" style="margin:0.25rem 0 0.5rem;">Drag the preview image to reposition it.</p>
-                <div class="banner-bg-actions">
-                  <button class="btn btn-primary" id="banner-bg-save-btn">Save Background</button>
-                  <button class="btn btn-danger" id="banner-bg-remove-btn">Remove Background</button>
-                </div>
-              </div>
-            </div>
-            <div id="banner-bg-status" style="margin-top:0.5rem;"></div>
-          </div>
-        </div>
-
-        <!-- Pending Swap Requests (top priority) -->
-        <div class="card">
-          <h2>Pending Swap Requests</h2>
-          <div id="pending-swaps-list"></div>
-        </div>
-
-        <!-- Weekly Stat Uploads -->
-        <div class="card">
-          <h2>Weekly Stat Uploads</h2>
-          <div id="weekly-upload-sections"></div>
-        </div>
-
-        <!-- Google Sheets Auto-Sync -->
-        <div class="card">
-          <h2>Google Sheets Auto-Sync</h2>
-          <p class="upload-hint">Link a Google Sheet to automatically pull weekly stats daily at 5:00 AM. The sheet must have tabs named like "Week 1 Batting", "Week 1 Pitching", etc. Manual uploads above will still work and take priority over synced data.</p>
-          <div id="gsheets-config-form">
-            <div class="form-row" style="margin-top:0.75rem;">
-              <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
-              <input type="text" id="gsheets-url" class="form-input" placeholder="https://docs.google.com/spreadsheets/d/...">
-            </div>
-            <div class="form-row">
-              <label class="upload-label">Google API Key</label>
-              <input type="text" id="gsheets-api-key" class="form-input" placeholder="AIza...">
-              <p class="upload-hint" style="margin-top:0.25rem;">Required. Create at <em>console.cloud.google.com</em> &rarr; APIs &amp; Services &rarr; Credentials. Enable the Google Sheets API.</p>
-            </div>
-            <div class="form-row">
-              <label class="checkbox-label">
-                <input type="checkbox" id="gsheets-enabled"> Enable daily auto-sync (5:00 AM)
-              </label>
-            </div>
-            <div class="gsheets-actions" style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
-              <button class="btn btn-primary" onclick="saveGSheetsConfig()">Save Configuration</button>
-              <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
-            </div>
-            <div id="gsheets-status" style="margin-top:0.75rem;"></div>
-          </div>
-          <div id="gsheets-sync-log" style="margin-top:1rem;"></div>
-        </div>
-
-        <!-- Manager Management -->
-        <div class="card">
-          <h2>Manage Managers</h2>
-          <table id="managers-table" class="data-table"></table>
-          <div class="add-manager-form" style="margin-top:1rem;">
-            <h3>Add / Edit Manager</h3>
-            <input type="text" id="mgr-name" placeholder="Full Name">
-            <input type="email" id="mgr-email" placeholder="Email">
-            <label class="checkbox-label">
-              <input type="checkbox" id="mgr-commissioner"> Commissioner
-            </label>
-            <label class="checkbox-label">
-              <input type="checkbox" id="mgr-active" checked> Active
-            </label>
-            <select id="mgr-pool" class="form-select" style="min-width:100px;max-width:150px;">
-              <option value="">No Pool</option>
-              <option value="1">Pool 1</option>
-              <option value="2">Pool 2</option>
-              <option value="3">Pool 3</option>
-            </select>
-            <button class="btn btn-primary" id="save-manager-btn">Save Manager</button>
-            <button class="btn btn-secondary" id="cancel-edit-btn" style="display:none;">Cancel</button>
-          </div>
-        </div>
-
-        <!-- Password Management -->
-        <div class="card">
-          <h2>Password Management</h2>
-          <p class="upload-hint">Set or reset passwords for managers. Managers will use these passwords to log in via email/password.</p>
-          <div id="password-mgmt-table"></div>
-        </div>
-
-        <!-- Season Schedule Date -->
-        <div class="card">
-          <h2>Season Schedule Dates</h2>
-          <div class="asg-date-section">
-            <label class="upload-label">Date of All-Star Game</label>
-            <p class="upload-hint">Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the prior Monday as Week 1 start.</p>
-            <div class="asg-date-row">
-              <input type="date" id="asg-date-input">
-              <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
-            </div>
-            <div id="asg-date-status"></div>
-          </div>
-          <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
-        </div>
-
-        <!-- Season Setup (collapsible) -->
-        <div class="card">
-          <div class="roster-header" style="cursor:pointer;" id="season-setup-toggle">
-            <h2 id="season-setup-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Season Setup</h2>
-            <span class="btn btn-sm btn-secondary" id="season-setup-toggle-btn">Show</span>
-          </div>
-          <div id="season-setup-body" style="display:none;margin-top:1rem;">
-            <div class="upload-section">
-              <h3>Upload Initial Player Pool (Names Only)</h3>
-              <p class="upload-hint">Upload CSV files with player names. Batter file should have a column named "Name" or "Player". Pitcher file should have a column named "Name" or "Player".</p>
-              <div class="two-col" style="margin-top:0.75rem;">
-                <div>
-                  <label class="upload-label">Batters CSV</label>
-                  <input type="file" id="upload-batters-pool" accept=".csv">
-                  <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
-                </div>
-                <div>
-                  <label class="upload-label">Pitchers CSV</label>
-                  <input type="file" id="upload-pitchers-pool" accept=".csv">
-                  <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
+                <div class="banner-bg-controls">
+                  <div class="banner-bg-ctrl-row">
+                    <label>Scale</label>
+                    <input type="range" id="banner-bg-scale" min="50" max="300" value="100" step="5">
+                    <span id="banner-bg-scale-val">100%</span>
+                  </div>
+                  <p class="upload-hint" style="margin:0.25rem 0 0.5rem;">Drag the preview image to reposition it.</p>
+                  <div class="banner-bg-actions">
+                    <button class="btn btn-primary" id="banner-bg-save-btn">Save Background</button>
+                    <button class="btn btn-danger" id="banner-bg-remove-btn">Remove Background</button>
+                  </div>
                 </div>
               </div>
-              <div id="player-pool-status"></div>
-              <div id="player-pool-display" style="margin-top:1rem;"></div>
+              <div id="banner-bg-status" style="margin-top:0.5rem;"></div>
             </div>
+          </div>
 
-            <!-- Create New Season -->
-            <div class="reset-season-section" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border);">
-              <h3>Create New Season</h3>
-              <p class="upload-hint">Create a fresh season for the next year. Managers, pool assignments, and credentials carry forward. Player pools, rosters, stats, and swap history start clean.</p>
-              <button class="btn btn-primary" id="create-new-season-btn">Create New Season</button>
-              <div id="create-new-season-status" style="margin-top:0.5rem;"></div>
+          <!-- Season Schedule -->
+          <div class="card">
+            <h2>Season Schedule</h2>
+            <div class="asg-date-section">
+              <label class="upload-label">Date of All-Star Game</label>
+              <p class="upload-hint">Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the prior Monday as Week 1 start.</p>
+              <div class="asg-date-row">
+                <input type="date" id="asg-date-input">
+                <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
+              </div>
+              <div id="asg-date-status"></div>
             </div>
+            <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
+          </div>
 
-            <!-- Reset Season -->
-            <div class="reset-season-section" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border);">
-              <h3>Reset Season</h3>
-              <p class="upload-hint">Clear all player pools, rosters, uploaded stats, and swap history for the current season. Manager names, emails, pool assignments, and credentials will not be affected.</p>
-              <button class="btn btn-danger" id="reset-season-btn">Reset Season Data</button>
-              <div id="reset-season-status" style="margin-top:0.5rem;"></div>
+          <!-- Initial Player Pool (collapsible) -->
+          <div class="card">
+            <div class="roster-header" style="cursor:pointer;" id="season-setup-toggle">
+              <h2 id="season-setup-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Initial Player Pool</h2>
+              <span class="btn btn-sm btn-secondary" id="season-setup-toggle-btn">Show</span>
+            </div>
+            <div id="season-setup-body" style="display:none;margin-top:1rem;">
+              <div class="upload-section">
+                <h3>Upload Initial Player Pool (Names Only)</h3>
+                <p class="upload-hint">Upload CSV files with player names. Batter file should have a column named "Name" or "Player". Pitcher file should have a column named "Name" or "Player".</p>
+                <div class="two-col" style="margin-top:0.75rem;">
+                  <div>
+                    <label class="upload-label">Batters CSV</label>
+                    <input type="file" id="upload-batters-pool" accept=".csv">
+                    <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
+                  </div>
+                  <div>
+                    <label class="upload-label">Pitchers CSV</label>
+                    <input type="file" id="upload-pitchers-pool" accept=".csv">
+                    <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
+                  </div>
+                </div>
+                <div id="player-pool-status"></div>
+                <div id="player-pool-display" style="margin-top:1rem;"></div>
+              </div>
+
+              <!-- Create New Season -->
+              <div class="reset-season-section" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border);">
+                <h3>Create New Season</h3>
+                <p class="upload-hint">Create a fresh season for the next year. Managers, pool assignments, and credentials carry forward. Player pools, rosters, stats, and swap history start clean.</p>
+                <button class="btn btn-primary" id="create-new-season-btn">Create New Season</button>
+                <div id="create-new-season-status" style="margin-top:0.5rem;"></div>
+              </div>
+
+              <!-- Reset Season -->
+              <div class="reset-season-section" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border);">
+                <h3>Reset Season</h3>
+                <p class="upload-hint">Clear all player pools, rosters, uploaded stats, and swap history for the current season. Manager names, emails, pool assignments, and credentials will not be affected.</p>
+                <button class="btn btn-danger" id="reset-season-btn">Reset Season Data</button>
+                <div id="reset-season-status" style="margin-top:0.5rem;"></div>
+              </div>
             </div>
           </div>
         </div>

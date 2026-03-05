@@ -4808,6 +4808,9 @@ window.approveSwap = function(swapId) {
   swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
   saveSeason(SELECTED_SEASON, sd);
 
+  renderPendingSwapRequests();
+  renderSwapLog();
+
   // Find logged-in manager name and re-render
   const mgrs = getManagers();
   const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
@@ -4828,6 +4831,9 @@ window.denySwap = function(swapId) {
   swap.status = 'denied';
   swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
   saveSeason(SELECTED_SEASON, sd);
+
+  renderPendingSwapRequests();
+  renderSwapLog();
 
   const mgrs = getManagers();
   const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
@@ -4967,18 +4973,75 @@ function showCommissionerPanel() {
   const managers = getManagers();
   const mgr = managers.find(m => m.email.toLowerCase() === COMMISSIONER_EMAIL);
   document.getElementById('commissioner-name').textContent = mgr ? mgr.name : COMMISSIONER_EMAIL;
-  document.getElementById('season-setup-title').textContent = `${SELECTED_SEASON} Season Setup`;
+  document.getElementById('season-setup-title').textContent = `${SELECTED_SEASON} Initial Player Pool`;
 
+  setupCommTabs();
   renderBannerBgSection();
   renderPendingSwapRequests();
+  renderSwapLog();
   renderManagersTable();
-  renderPasswordManagement();
   renderPlayerPoolDisplay();
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
   setupASGDateInput();
   renderGSheetsConfig();
+}
+
+function setupCommTabs() {
+  document.querySelectorAll('.comm-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.comm-tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.comm-tab-content').forEach(t => t.classList.remove('active'));
+      btn.classList.add('active');
+      const target = document.getElementById(btn.dataset.commTab);
+      if (target) target.classList.add('active');
+    });
+  });
+}
+
+function renderSwapLog() {
+  const container = document.getElementById('swap-log-list');
+  if (!container) return;
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const allSwaps = (sd && sd.swaps) ? [...sd.swaps] : [];
+
+  if (allSwaps.length === 0) {
+    container.innerHTML = '<p class="text-muted">No swap history yet.</p>';
+    return;
+  }
+
+  // Most recent first
+  allSwaps.sort((a, b) => {
+    const ta = a.timestamp || a.swap_date || '';
+    const tb = b.timestamp || b.swap_date || '';
+    return tb.localeCompare(ta);
+  });
+
+  const statusBadge = s => {
+    if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
+    if (s.status === 'denied')   return '<span class="swap-badge swap-badge-denied">Denied</span>';
+    return '<span class="swap-badge swap-badge-pending">Pending</span>';
+  };
+
+  let html = '<table class="data-table"><thead><tr><th>Manager</th><th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
+  allSwaps.forEach(s => {
+    const date = s.timestamp ? s.timestamp.slice(0, 10) : (s.swap_date || '');
+    const outTxt = s.player_out || '—';
+    const inTxt  = s.player_in  || '—';
+    const reason = s.reason || '';
+    html += `<tr>
+      <td>${s.manager || '—'}</td>
+      <td>${outTxt}</td>
+      <td>${inTxt}</td>
+      <td style="white-space:nowrap;font-size:0.82rem;">${date}</td>
+      <td>${statusBadge(s)}</td>
+      <td style="font-size:0.82rem;color:var(--text-muted);">${reason}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
 }
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
@@ -5607,48 +5670,86 @@ window.triggerGSheetsSync = async function() {
 };
 
 // ---- Manager Management ----
-let editingManagerIndex = -1;
+
+function _mgrPwCell(m) {
+  const hasCustomPw = !!m.hasCustomPassword;
+  const pwInputId = 'pw-input-' + m.email.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  const safeEmail = m.email.toLowerCase().replace(/'/g, "\\'");
+  return `<div class="mgr-pw-cell">
+    <span class="${hasCustomPw ? 'swap-badge swap-badge-approved' : 'swap-badge swap-badge-pending'}" style="font-size:0.7rem;">${hasCustomPw ? 'Custom' : 'Default'}</span>
+    <input type="text" id="${pwInputId}" class="form-input mgr-pw-input" placeholder="New password">
+    <button class="btn btn-sm btn-primary" onclick="setManagerPassword('${safeEmail}')" style="font-size:0.75rem;padding:0.2rem 0.45rem;">Set</button>
+    ${hasCustomPw ? `<button class="btn btn-sm btn-secondary" onclick="resetManagerPassword('${safeEmail}')" style="font-size:0.75rem;padding:0.2rem 0.45rem;">Reset</button>` : ''}
+  </div>`;
+}
+
+function _mgrNormalRow(m, idx) {
+  const poolLabel = m.pool ? 'Pool ' + m.pool : '—';
+  return `<tr id="mgr-row-${idx}">
+    <td><strong>${m.name}</strong></td>
+    <td style="font-size:0.85rem;">${m.email}</td>
+    <td>${m.active !== false ? poolLabel : '<span style="color:var(--text-muted)">—</span>'}</td>
+    <td>${m.commissioner ? '<span class="swap-badge swap-badge-approved" style="font-size:0.72rem;">Yes</span>' : '<span style="color:var(--text-muted);font-size:0.85rem;">No</span>'}</td>
+    <td>${_mgrPwCell(m)}</td>
+    <td style="white-space:nowrap;">
+      <button class="btn btn-sm btn-secondary" onclick="inlineEditManager(${idx})">Edit</button>
+      <button class="btn btn-sm btn-danger" onclick="deleteManager(${idx})">Delete</button>
+    </td>
+  </tr>`;
+}
 
 function renderManagersTable() {
+  const container = document.getElementById('managers-combined-view');
+  if (!container) return;
+
   const managers = getManagers();
-  const table = document.getElementById('managers-table');
+  const activeList = managers.map((m, i) => ({...m, _idx: i})).filter(m => m.active !== false);
+  const inactiveList = managers.map((m, i) => ({...m, _idx: i})).filter(m => m.active === false);
 
-  const activeCount = managers.filter(m => m.active !== false).length;
-  const inactiveCount = managers.length - activeCount;
+  const tableHead = `<thead><tr>
+    <th>Name</th><th>Email</th><th>Pool</th><th>Commissioner</th><th>Password</th><th>Actions</th>
+  </tr></thead>`;
 
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Name</th><th>Email</th><th>Pool</th><th>Active</th><th>Commissioner</th><th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${managers.map((m, i) => {
-        const isActive = m.active !== false;
-        return `
-        <tr style="${isActive ? '' : 'opacity:0.55;'}">
-          <td><strong>${m.name}</strong></td>
-          <td>${m.email}</td>
-          <td>${isActive ? (m.pool ? 'Pool ' + m.pool : '-') : '<span style="color:var(--text-muted);">—</span>'}</td>
-          <td>${isActive ? '<span class="badge badge-winner">Active</span>' : '<span class="badge" style="background:#999;color:#fff;">Inactive</span>'}</td>
-          <td>${m.commissioner ? '<span class="badge badge-winner">Yes</span>' : 'No'}</td>
-          <td>
-            <button class="btn btn-sm btn-secondary" onclick="editManager(${i})">Edit</button>
-            <button class="btn btn-sm btn-danger" onclick="deleteManager(${i})">Delete</button>
-          </td>
-        </tr>`;
-      }).join('')}
-    </tbody>
-  `;
+  let html = `<p class="mgr-section-header">Active Managers <span class="mgr-count">(${activeList.length})</span></p>`;
+  if (activeList.length > 0) {
+    html += `<table class="data-table">${tableHead}<tbody>`;
+    html += activeList.map(m => _mgrNormalRow(m, m._idx)).join('');
+    html += '</tbody></table>';
+  } else {
+    html += '<p class="text-muted" style="font-size:0.87rem;">No active managers.</p>';
+  }
 
-  // Show active/inactive counts
-  const existingSummary = table.parentElement.querySelector('.manager-count-summary');
-  if (existingSummary) existingSummary.remove();
-  const summary = document.createElement('p');
-  summary.className = 'manager-count-summary';
-  summary.style.cssText = 'font-size:0.85rem;color:var(--text-light);margin-top:0.5rem;';
-  summary.textContent = `${activeCount} active, ${inactiveCount} inactive \u2014 ${managers.length} total managers`;
-  table.parentElement.insertBefore(summary, table.nextSibling);
+  // Add new manager form
+  html += `<div class="add-mgr-area">
+    <button class="btn btn-sm btn-primary" id="show-add-mgr-btn" onclick="showAddManagerForm()">+ Add Manager</button>
+    <div class="add-mgr-form" id="add-mgr-form">
+      <h4>Add New Manager</h4>
+      <div class="add-mgr-fields">
+        <input type="text" id="mgr-name" class="form-input" placeholder="Full Name" style="min-width:130px;">
+        <input type="email" id="mgr-email" class="form-input" placeholder="Email" style="min-width:160px;">
+        <select id="mgr-pool" class="form-select" style="min-width:95px;">
+          <option value="">No Pool</option>
+          <option value="1">Pool 1</option>
+          <option value="2">Pool 2</option>
+          <option value="3">Pool 3</option>
+        </select>
+        <label class="checkbox-label"><input type="checkbox" id="mgr-commissioner"> Commissioner</label>
+        <label class="checkbox-label"><input type="checkbox" id="mgr-active" checked> Active</label>
+        <button class="btn btn-sm btn-primary" id="save-manager-btn">Save</button>
+        <button class="btn btn-sm btn-secondary" id="cancel-edit-btn" onclick="hideAddManagerForm()">Cancel</button>
+      </div>
+    </div>
+  </div>`;
+
+  if (inactiveList.length > 0) {
+    html += `<div class="mgr-inactive-section">
+      <p class="mgr-section-header">Inactive Managers <span class="mgr-count">(${inactiveList.length})</span></p>
+      <table class="data-table">${tableHead}<tbody>`;
+    html += inactiveList.map(m => _mgrNormalRow(m, m._idx)).join('');
+    html += '</tbody></table></div>';
+  }
+
+  container.innerHTML = html;
 
   document.getElementById('save-manager-btn').onclick = () => {
     const name = document.getElementById('mgr-name').value.trim();
@@ -5656,56 +5757,86 @@ function renderManagersTable() {
     const isCommissioner = document.getElementById('mgr-commissioner').checked;
     const isActive = document.getElementById('mgr-active').checked;
     const pool = isActive ? (parseInt(document.getElementById('mgr-pool').value) || null) : null;
-
-    if (!name || !email) {
-      alert('Name and email are required.');
-      return;
+    if (!name || !email) { alert('Name and email are required.'); return; }
+    const mgrs = getManagers();
+    if (mgrs.find(m => m.email.toLowerCase() === email)) {
+      alert('A manager with this email already exists.'); return;
     }
-
-    const managers = getManagers();
-
-    if (editingManagerIndex >= 0) {
-      managers[editingManagerIndex] = { name, email, commissioner: isCommissioner, active: isActive, pool };
-      editingManagerIndex = -1;
-      document.getElementById('cancel-edit-btn').style.display = 'none';
-    } else {
-      if (managers.find(m => m.email.toLowerCase() === email)) {
-        alert('A manager with this email already exists.');
-        return;
-      }
-      managers.push({ name, email, commissioner: isCommissioner, active: isActive, pool });
-    }
-
-    saveManagers(managers);
-    document.getElementById('mgr-name').value = '';
-    document.getElementById('mgr-email').value = '';
-    document.getElementById('mgr-commissioner').checked = false;
-    document.getElementById('mgr-active').checked = true;
-    document.getElementById('mgr-pool').value = '';
+    mgrs.push({ name, email, commissioner: isCommissioner, active: isActive, pool });
+    saveManagers(mgrs);
     renderManagersTable();
-  };
-
-  document.getElementById('cancel-edit-btn').onclick = () => {
-    editingManagerIndex = -1;
-    document.getElementById('mgr-name').value = '';
-    document.getElementById('mgr-email').value = '';
-    document.getElementById('mgr-commissioner').checked = false;
-    document.getElementById('mgr-active').checked = true;
-    document.getElementById('mgr-pool').value = '';
-    document.getElementById('cancel-edit-btn').style.display = 'none';
   };
 }
 
-window.editManager = function(index) {
-  const managers = getManagers();
-  const m = managers[index];
-  document.getElementById('mgr-name').value = m.name;
-  document.getElementById('mgr-email').value = m.email;
-  document.getElementById('mgr-commissioner').checked = m.commissioner;
-  document.getElementById('mgr-active').checked = m.active !== false;
-  document.getElementById('mgr-pool').value = m.pool || '';
-  editingManagerIndex = index;
-  document.getElementById('cancel-edit-btn').style.display = 'inline-block';
+window.showAddManagerForm = function() {
+  document.getElementById('add-mgr-form').style.display = 'block';
+  document.getElementById('show-add-mgr-btn').style.display = 'none';
+};
+
+window.hideAddManagerForm = function() {
+  document.getElementById('add-mgr-form').style.display = 'none';
+  document.getElementById('show-add-mgr-btn').style.display = 'inline-block';
+  ['mgr-name','mgr-email'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('mgr-commissioner').checked = false;
+  document.getElementById('mgr-active').checked = true;
+  document.getElementById('mgr-pool').value = '';
+};
+
+window.inlineEditManager = function(idx) {
+  const row = document.getElementById('mgr-row-' + idx);
+  if (!row) return;
+  const m = getManagers()[idx];
+  if (!m) return;
+  const safeEmail = m.email.toLowerCase().replace(/'/g, "\\'");
+  const hasCustomPw = !!m.hasCustomPassword;
+  const pwInputId = 'pw-input-' + m.email.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  row.innerHTML = `
+    <td><input type="text" id="inline-mgr-name-${idx}" class="form-input" value="${m.name.replace(/"/g, '&quot;')}" style="min-width:110px;"></td>
+    <td><input type="email" id="inline-mgr-email-${idx}" class="form-input" value="${m.email}" style="min-width:130px;font-size:0.83rem;"></td>
+    <td>
+      <select id="inline-mgr-pool-${idx}" class="form-select" style="min-width:80px;">
+        <option value="">None</option>
+        <option value="1" ${m.pool == 1 ? 'selected' : ''}>Pool 1</option>
+        <option value="2" ${m.pool == 2 ? 'selected' : ''}>Pool 2</option>
+        <option value="3" ${m.pool == 3 ? 'selected' : ''}>Pool 3</option>
+      </select>
+    </td>
+    <td>
+      <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;white-space:nowrap;">
+        <input type="checkbox" id="inline-mgr-comm-${idx}" ${m.commissioner ? 'checked' : ''}> Comm
+      </label>
+      <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;white-space:nowrap;margin-top:0.2rem;">
+        <input type="checkbox" id="inline-mgr-active-${idx}" ${m.active !== false ? 'checked' : ''}> Active
+      </label>
+    </td>
+    <td>
+      <div class="mgr-pw-cell">
+        <span class="${hasCustomPw ? 'swap-badge swap-badge-approved' : 'swap-badge swap-badge-pending'}" style="font-size:0.7rem;">${hasCustomPw ? 'Custom' : 'Default'}</span>
+        <input type="text" id="${pwInputId}" class="form-input mgr-pw-input" placeholder="New password">
+        <button class="btn btn-sm btn-primary" onclick="setManagerPassword('${safeEmail}')" style="font-size:0.75rem;padding:0.2rem 0.45rem;">Set</button>
+        ${hasCustomPw ? `<button class="btn btn-sm btn-secondary" onclick="resetManagerPassword('${safeEmail}')" style="font-size:0.75rem;padding:0.2rem 0.45rem;">Reset</button>` : ''}
+      </div>
+    </td>
+    <td style="white-space:nowrap;">
+      <button class="btn btn-sm btn-success" onclick="saveInlineManager(${idx})">Save</button>
+      <button class="btn btn-sm btn-secondary" onclick="renderManagersTable()">Cancel</button>
+    </td>`;
+};
+
+window.saveInlineManager = function(idx) {
+  const name = document.getElementById('inline-mgr-name-' + idx)?.value.trim();
+  const email = document.getElementById('inline-mgr-email-' + idx)?.value.trim().toLowerCase();
+  const isCommissioner = document.getElementById('inline-mgr-comm-' + idx)?.checked;
+  const isActive = document.getElementById('inline-mgr-active-' + idx)?.checked;
+  const pool = isActive ? (parseInt(document.getElementById('inline-mgr-pool-' + idx)?.value) || null) : null;
+  if (!name || !email) { alert('Name and email are required.'); return; }
+  const mgrs = getManagers();
+  if (mgrs.find((m, i) => i !== idx && m.email.toLowerCase() === email)) {
+    alert('A manager with this email already exists.'); return;
+  }
+  mgrs[idx] = { ...mgrs[idx], name, email, commissioner: isCommissioner, active: isActive, pool };
+  saveManagers(mgrs);
+  renderManagersTable();
 };
 
 window.deleteManager = function(index) {
@@ -5717,35 +5848,9 @@ window.deleteManager = function(index) {
 };
 
 // ---- Password Management ----
+// Password UI is now merged into the combined manager view (renderManagersTable).
 function renderPasswordManagement() {
-  const container = document.getElementById('password-mgmt-table');
-  if (!container) return;
-
-  const managers = getManagers();
-
-  let html = '<table class="data-table"><thead><tr><th>Manager</th><th>Email</th><th>Password Status</th><th>Actions</th></tr></thead><tbody>';
-  managers.forEach(m => {
-    const hasCustomPw = !!m.hasCustomPassword;
-    const statusText = hasCustomPw ? 'Custom password set' : 'Using default';
-    const statusClass = hasCustomPw ? 'swap-badge swap-badge-approved' : 'swap-badge swap-badge-pending';
-    const safeEmail = m.email.toLowerCase().replace(/'/g, "\\'");
-
-    html += `<tr>
-      <td>${m.name}</td>
-      <td>${m.email}</td>
-      <td><span class="${statusClass}" style="font-size:0.75rem;">${statusText}</span></td>
-      <td>
-        <div class="pw-action-row" style="display:flex;gap:0.35rem;align-items:center;">
-          <input type="text" id="pw-input-${m.email.toLowerCase().replace(/[^a-z0-9]/g, '-')}" class="form-input" placeholder="New password" style="max-width:140px;font-size:0.82rem;">
-          <button class="btn btn-sm btn-primary" onclick="setManagerPassword('${safeEmail}')">Set</button>
-          ${hasCustomPw ? `<button class="btn btn-sm btn-secondary" onclick="resetManagerPassword('${safeEmail}')">Reset to Default</button>` : ''}
-        </div>
-      </td>
-    </tr>`;
-  });
-  html += '</tbody></table>';
-
-  container.innerHTML = html;
+  renderManagersTable();
 }
 
 window.setManagerPassword = async function(email) {
