@@ -7039,7 +7039,7 @@ const WMMC_HISTORICAL_RESULTS = [
   { year: '2024', champion: 'Dan Kortan',      runnerUp: 'Ryan Courville',  third: 'Jamie Rogers',
     standings: { 'Dan Kortan': 1, 'Ryan Courville': 2, 'Jamie Rogers': 3, 'Austin Johnson': 4, 'Marcus Gillespie': 5, 'Anton Capria': 6, 'Cam McCallum': 7, 'Chris Bentivegna': 8, 'Joey Auclair': 9, 'Ryan Sullivan': 10, 'Alex Thalacker': 11, 'Edgar Rivas': 12 } },
   { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan',
-    standings: { 'Joey Auclair': 1, 'Anton Capria': 2, 'Ryan Sullivan': 3, 'Cam McCallum': 4, 'Marcus Gillespie': 5, 'Dan Kortan': 6, 'Jamie Rogers': 7, 'Cam McCallum': 8, 'Ryan Courville': 9, 'Chris Bentivegna': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
+    standings: { 'Joey Auclair': 1, 'Anton Capria': 2, 'Ryan Sullivan': 3, 'Cam McCallum': 4, 'Marcus Gillespie': 5, 'Dan Kortan': 6, 'Jamie Rogers': 7, 'Austin Johnson': 8, 'Ryan Courville': 9, 'Chris Bentivegna': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
 ];
 
 // Number of seasons played (2018-2025 = 8 seasons). All 12 managers have played every season.
