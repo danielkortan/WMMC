@@ -6937,7 +6937,8 @@ function parseNum(val) {
 // Authoritative historical results — add a new entry each year after Finals are finalized.
 const WMMC_HISTORICAL_RESULTS = [
   { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: null               },
-  { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker'   },
+  { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker',
+    standings: { 'Joey Auclair': 1, 'Cam McCallum': 2, 'Alex Thalacker': 3, 'Chris Bentivegna': 4, 'Dan Kortan': 5, 'Ryan Sullivan': 6, 'Jamie Rogers': 7, 'Anton Capria': 8, 'Austin Johnson': 9, 'Stephen Farmer': 10, 'Ryan Courville': 11, 'Marcus Gillespie': 12 } },
   { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie',
     standings: { 'Ryan Sullivan': 1, 'Dan Kortan': 2, 'Marcus Gillespie': 3, 'Cam McCallum': 4, 'Ryan Courville': 5, 'Joey Auclair': 6, 'Austin Johnson': 7, 'Edgar Rivas': 8, 'Anton Capria': 9, 'Jamie Rogers': 10, 'Alex Thalacker': 11, 'Chris Bentivegna': 12 } },
   { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Joey Auclair',
@@ -6952,8 +6953,11 @@ const WMMC_HISTORICAL_RESULTS = [
     standings: { 'Joey Auclair': 1, 'Anton Capria': 2, 'Ryan Sullivan': 3, 'Cam McCallum': 4, 'Marcus Gillespie': 5, 'Dan Kortan': 6, 'Jamie Rogers': 7, 'Austin Johnson': 8, 'Ryan Courville': 9, 'Chris Bentivegna': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
 ];
 
-// Number of seasons played (2018-2025 = 8 seasons). All 12 managers have played every season.
+// Number of historical seasons (2018-2025 = 8 seasons).
+// Most managers played all 8 seasons; Stephen Farmer played only 2019, Edgar Rivas missed 2019.
 const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
+// Per-manager season overrides for managers who didn't play every historical season
+const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 1, 'Edgar Rivas': 7 };
 
 // Compute full 1-12 standings from a live season's data.
 // Returns { champion, runnerUp, third, standings: { 'Name': position } } or null if not enough data.
@@ -7044,7 +7048,8 @@ function buildHofRecords(results) {
   allNames.forEach(name => {
     const positionCounts = {};
     for (let i = 1; i <= 12; i++) positionCounts[i] = 0;
-    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: WMMC_TOTAL_SEASONS_THROUGH_2025, totalFinish: 0, finishCount: 0, positionCounts };
+    const baseSeasonsForManager = WMMC_SEASON_OVERRIDES[name] !== undefined ? WMMC_SEASON_OVERRIDES[name] : WMMC_TOTAL_SEASONS_THROUGH_2025;
+    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: baseSeasonsForManager, totalFinish: 0, finishCount: 0, positionCounts };
   });
 
   // Count additional seasons beyond the historical period (2026+)
