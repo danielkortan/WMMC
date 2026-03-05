@@ -341,6 +341,43 @@ async function loadData() {
 }
 
 // ============================================================
+// Live server sync — fetches fresh seasons + managers, updates
+// localStorage, returns true if anything changed.
+// ============================================================
+async function syncFromServer() {
+  try {
+    const [seasonsResp, managersResp] = await Promise.all([
+      fetch('/api/seasons'),
+      fetch('/api/managers')
+    ]);
+    let changed = false;
+    if (seasonsResp.ok) {
+      const serverSeasons = await seasonsResp.json();
+      if (serverSeasons && Object.keys(serverSeasons).length > 0) {
+        const incoming = JSON.stringify(serverSeasons);
+        if (localStorage.getItem('wmmc_seasons') !== incoming) {
+          localStorage.setItem('wmmc_seasons', incoming);
+          changed = true;
+        }
+      }
+    }
+    if (managersResp.ok) {
+      const serverManagers = await managersResp.json();
+      if (serverManagers && serverManagers.length > 0) {
+        const incoming = JSON.stringify(serverManagers);
+        if (localStorage.getItem('wmmc_managers') !== incoming) {
+          localStorage.setItem('wmmc_managers', incoming);
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ============================================================
 // Authentication
 // ============================================================
 function findManagerByEmail(email) {
@@ -372,7 +409,32 @@ function enterApp(mgr) {
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
+
+  // Restore the tab the user was on before refreshing
+  const savedTab = localStorage.getItem('wmmc_active_tab');
+  if (savedTab) {
+    const targetBtn = document.querySelector(`.nav-btn[data-tab="${savedTab}"]`);
+    const targetSection = document.getElementById(savedTab);
+    if (targetBtn && targetSection) {
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      targetBtn.classList.add('active');
+      targetSection.classList.add('active');
+    }
+  }
+
   init();
+  // Trigger tab-specific renders for tabs that need them
+  if (savedTab === 'trends') renderTrends();
+  if (savedTab === 'hall-of-fame') renderHallOfFame();
+
+  // Poll for changes every 45 seconds so logged-in users always see
+  // the latest data without needing a page refresh.
+  setInterval(async () => {
+    if (!LOGGED_IN_EMAIL) return;
+    const changed = await syncFromServer();
+    if (changed) init();
+  }, 45000);
 }
 
 async function handleLogin(email, password) {
@@ -569,8 +631,9 @@ function buildSeasonSelector() {
   select.value = String(CURRENT_YEAR);
   SELECTED_SEASON = String(CURRENT_YEAR);
 
-  select.addEventListener('change', () => {
+  select.addEventListener('change', async () => {
     SELECTED_SEASON = select.value;
+    await syncFromServer();
     init();
   });
 }
@@ -606,12 +669,16 @@ function setupNav() {
   if (_navInitialized) return;
   _navInitialized = true;
   document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
       btn.classList.add('active');
       const section = document.getElementById(btn.dataset.tab);
       if (section) section.classList.add('active');
+      localStorage.setItem('wmmc_active_tab', btn.dataset.tab);
+      // Always pull fresh data from server before rendering the new tab
+      await syncFromServer();
+      init();
       if (btn.dataset.tab === 'trends') renderTrends();
       if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
     });
