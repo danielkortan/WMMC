@@ -3312,6 +3312,24 @@ body::before {
   text-decoration: underline;
 }
 
+/* All-Time Records wide table */
+.hof-records-table {
+  font-size: 0.82rem;
+}
+.hof-records-table th,
+.hof-records-table td {
+  padding: 0.35rem 0.45rem;
+  white-space: nowrap;
+}
+.hof-records-table th:first-child,
+.hof-records-table td:first-child {
+  width: 2rem;
+}
+.hof-records-table th:nth-child(2),
+.hof-records-table td:nth-child(2) {
+  min-width: 7rem;
+}
+
 @media (max-width: 768px) {
   .active-bracket {
     flex-direction: column;

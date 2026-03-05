@@ -7036,8 +7036,10 @@ const WMMC_HISTORICAL_RESULTS = [
   { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Austin Johnson'   },
   { year: '2022', champion: 'Dan Kortan',      runnerUp: 'Alex Thalacker',  third: 'Ryan Sullivan'    },
   { year: '2023', champion: 'Austin Johnson',  runnerUp: 'Dan Kortan',      third: 'Anton Capria'     },
-  { year: '2024', champion: 'Dan Kortan',      runnerUp: 'Ryan Courville',  third: 'Jamie Rogers'     },
-  { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan'    },
+  { year: '2024', champion: 'Dan Kortan',      runnerUp: 'Ryan Courville',  third: 'Jamie Rogers',
+    standings: { 'Dan Kortan': 1, 'Ryan Courville': 2, 'Jamie Rogers': 3, 'Austin Johnson': 4, 'Marcus Gillespie': 5, 'Anton Capria': 6, 'Cam McCallum': 7, 'Chris Bentivegna': 8, 'Joey Auclair': 9, 'Ryan Sullivan': 10, 'Alex Thalacker': 11, 'Edgar Rivas': 12 } },
+  { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan',
+    standings: { 'Joey Auclair': 1, 'Anton Capria': 2, 'Ryan Sullivan': 3, 'Cam McCallum': 4, 'Marcus Gillespie': 5, 'Dan Kortan': 6, 'Jamie Rogers': 7, 'Cam McCallum': 8, 'Ryan Courville': 9, 'Chris Bentivegna': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
 ];
 
 // Number of seasons played (2018-2025 = 8 seasons). All 12 managers have played every season.
@@ -7128,9 +7130,11 @@ function buildHofRecords(results) {
     if (r.standings) Object.keys(r.standings).forEach(n => allNames.add(n));
   });
 
-  // Initialize all known managers with base season count
+  // Initialize all known managers with base season count and position buckets
   allNames.forEach(name => {
-    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: WMMC_TOTAL_SEASONS_THROUGH_2025, totalFinish: 0, finishCount: 0 };
+    const positionCounts = {};
+    for (let i = 1; i <= 12; i++) positionCounts[i] = 0;
+    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: WMMC_TOTAL_SEASONS_THROUGH_2025, totalFinish: 0, finishCount: 0, positionCounts };
   });
 
   // Count additional seasons beyond the historical period (2026+)
@@ -7157,12 +7161,17 @@ function buildHofRecords(results) {
     if (r.third && records[r.third]) records[r.third].thirds++;
     if (r.standings) {
       Object.entries(r.standings).forEach(([name, pos]) => {
-        if (records[name]) { records[name].totalFinish += pos; records[name].finishCount++; }
+        if (records[name]) {
+          records[name].totalFinish += pos;
+          records[name].finishCount++;
+          if (records[name].positionCounts[pos] !== undefined) records[name].positionCounts[pos]++;
+        }
       });
     }
   });
 
-  // Compute avgFinish (null until a full-standings season exists)
+  // Compute avgFinish — only from seasons with full standings data provided directly
+  // (2024/2025 historical + any 2026+ season finalized within the app)
   Object.values(records).forEach(r => {
     r.avgFinish = r.finishCount > 0 ? r.totalFinish / r.finishCount : null;
   });
@@ -7175,29 +7184,39 @@ function hofSortedManagers(records, col, asc) {
     name, ...r
   })).sort((a, b) => {
     if (col === 'avgFinish') {
-      // Null values (no full-standings data yet) sort last
       if (a.avgFinish === null && b.avgFinish === null) return 0;
       if (a.avgFinish === null) return 1;
       if (b.avgFinish === null) return -1;
       const diff = asc ? a.avgFinish - b.avgFinish : b.avgFinish - a.avgFinish;
       return diff !== 0 ? diff : b.wins - a.wins;
     }
+    // Support sorting by position columns (pos1..pos12)
+    const posMatch = col.match(/^pos(\d+)$/);
+    if (posMatch) {
+      const p = parseInt(posMatch[1]);
+      const aVal = a.positionCounts ? (a.positionCounts[p] || 0) : 0;
+      const bVal = b.positionCounts ? (b.positionCounts[p] || 0) : 0;
+      const diff = asc ? aVal - bVal : bVal - aVal;
+      return diff !== 0 ? diff : b.wins - a.wins;
+    }
     const diff = asc ? a[col] - b[col] : b[col] - a[col];
     if (diff !== 0) return diff;
-    return b.wins - a.wins; // tiebreak: more wins
+    return b.wins - a.wins;
   });
 }
 
 function hofManagerRowHtml(m, i, hasAvg) {
   const trophies = m.wins > 0 ? ' ' + '&#127942;'.repeat(Math.min(m.wins, 5)) : '';
-  const avgCell = hasAvg ? `<td class="num">${m.avgFinish !== null ? m.avgFinish.toFixed(2) : '—'}</td>` : '';
+  let posCells = '';
+  for (let p = 1; p <= 12; p++) {
+    const count = m.positionCounts ? (m.positionCounts[p] || 0) : 0;
+    posCells += `<td class="num">${count || '—'}</td>`;
+  }
+  const avgCell = hasAvg ? `<td class="num">${m.avgFinish !== null ? m.avgFinish.toFixed(1) : '—'}</td>` : '';
   return `<tr>
     <td class="rank">${i + 1}</td>
     <td><strong>${m.name}</strong>${trophies}</td>
-    <td class="num">${m.wins}</td>
-    <td class="num">${m.seconds}</td>
-    <td class="num">${m.thirds}</td>
-    <td class="num">${m.seasons}</td>
+    ${posCells}
     ${avgCell}
   </tr>`;
 }
@@ -7261,24 +7280,26 @@ function renderHallOfFame() {
     </div>`;
   }
 
-  // Season-by-season results table
+  // Season-by-season results table with expandable full standings
   html += '<div class="card"><h2>Season Results</h2>';
   html += '<div class="table-wrapper"><table class="data-table">';
   html += '<thead><tr><th>Year</th><th>&#127942; Champion</th><th>2nd Place</th><th>3rd Place</th><th></th></tr></thead><tbody>';
   [...allResults].reverse().forEach(r => {
-    const toggleBtn = r.standings
-      ? `<button class="btn btn-sm btn-secondary" onclick="toggleHofStandings('${r.year}')">Full &#9660;</button>`
-      : '';
+    const hasStandings = !!r.standings;
+    const toggleBtn = `<button class="btn btn-sm btn-secondary" onclick="toggleHofStandings('${r.year}')" id="hof-toggle-btn-${r.year}">${hasStandings ? 'Full &#9660;' : ''}</button>`;
     html += `<tr>
       <td><strong>${r.year}</strong></td>
       <td><strong style="color:var(--accent);">&#127942; ${r.champion || '—'}</strong></td>
       <td>${r.runnerUp || '—'}</td>
       <td>${r.third    || '—'}</td>
-      <td>${toggleBtn}</td>
+      <td>${hasStandings ? toggleBtn : ''}</td>
     </tr>`;
-    if (r.standings) {
+    if (hasStandings) {
       const rows = Object.entries(r.standings).sort((a, b) => a[1] - b[1])
-        .map(([name, pos]) => `<tr><td class="num">${pos}</td><td>${name}</td></tr>`).join('');
+        .map(([name, pos]) => {
+          const posLabel = pos === 1 ? '&#127942;' : pos <= 3 ? `<strong>${pos}</strong>` : pos;
+          return `<tr><td class="num">${posLabel}</td><td>${name}</td></tr>`;
+        }).join('');
       html += `<tr id="hof-standings-${r.year}" style="display:none;"><td colspan="5" style="padding:0 0.5rem 0.5rem;">
         <table class="data-table" style="margin:0;">
           <thead><tr><th>#</th><th>Manager</th></tr></thead>
@@ -7289,16 +7310,16 @@ function renderHallOfFame() {
   });
   html += '</tbody></table></div></div>';
 
-  // All-time records table
+  // All-time records table — shows all 12 finishing positions
   html += '<div class="card" style="margin-top:1rem;"><h2>All-Time Records</h2>';
-  html += '<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Click a column header to sort.</p>';
-  html += '<div class="table-wrapper"><table class="data-table" id="hof-table"><thead><tr>';
+  html += '<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Click a column header to sort. Position counts based on seasons with full standings data.</p>';
+  html += '<div class="table-wrapper"><table class="data-table hof-records-table" id="hof-table"><thead><tr>';
   html += '<th>#</th><th>Manager</th>';
-  html += `<th onclick="sortHOF('wins')" style="cursor:pointer;">&#127942; Wins &#8597;</th>`;
-  html += `<th onclick="sortHOF('seconds')" style="cursor:pointer;">2nd &#8597;</th>`;
-  html += `<th onclick="sortHOF('thirds')" style="cursor:pointer;">3rd &#8597;</th>`;
-  html += `<th onclick="sortHOF('seasons')" style="cursor:pointer;">Seasons &#8597;</th>`;
-  if (hasAvg) html += `<th onclick="sortHOF('avgFinish')" style="cursor:pointer;">Avg Finish &#8597;</th>`;
+  for (let p = 1; p <= 12; p++) {
+    const label = p === 1 ? '&#127942;' : p + positionSuffix(p);
+    html += `<th onclick="sortHOF('pos${p}')" style="cursor:pointer;" title="${ordinal(p)} place finishes">${label} &#8597;</th>`;
+  }
+  if (hasAvg) html += `<th onclick="sortHOF('avgFinish')" style="cursor:pointer;">Avg &#8597;</th>`;
   html += '</tr></thead><tbody id="hof-tbody">';
   sorted.forEach((m, i) => { html += hofManagerRowHtml(m, i, hasAvg); });
   html += '</tbody></table></div></div>';
@@ -7306,6 +7327,14 @@ function renderHallOfFame() {
   container.innerHTML = html;
   container._hasAvg = hasAvg;
 }
+
+function positionSuffix(n) {
+  if (n === 1) return 'st';
+  if (n === 2) return 'nd';
+  if (n === 3) return 'rd';
+  return 'th';
+}
+function ordinal(n) { return n + positionSuffix(n); }
 
 window.toggleHofStandings = function(year) {
   const row = document.getElementById('hof-standings-' + year);
@@ -7317,7 +7346,7 @@ let _hofSortCol = 'wins';
 let _hofSortAsc = false;
 window.sortHOF = function(col) {
   if (_hofSortCol === col) { _hofSortAsc = !_hofSortAsc; }
-  else { _hofSortCol = col; _hofSortAsc = col === 'avgFinish'; } // avgFinish: lower is better, default asc
+  else { _hofSortCol = col; _hofSortAsc = (col === 'avgFinish'); } // avgFinish: lower is better, default asc
 
   const tbody = document.getElementById('hof-tbody');
   if (!tbody) { renderHallOfFame(); return; }
