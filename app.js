@@ -638,22 +638,47 @@ function renderChampionBanner() {
   const banner = document.getElementById('champion-banner');
   banner.className = 'champion-banner';
 
-  if (!DATA || !DATA.bracket || !DATA.bracket.finals) {
-    banner.innerHTML = `<div class="trophy">&#127942;</div>
-      <div class="champion-label">${SELECTED_SEASON} WMMC Season</div>
-      <div class="champion-name">Season In Progress</div>`;
-    return;
+  const seasonComplete = DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner;
+
+  // Determine the reigning champion (champion of the most recent completed season)
+  let reigningChampion = null;
+  let reigningYear = null;
+  if (seasonComplete) {
+    reigningChampion = DATA.bracket.finals.winner;
+    reigningYear = SELECTED_SEASON;
+  } else {
+    // Look back through historical results for the most recent champion before this season
+    const prevYear = String(parseInt(SELECTED_SEASON) - 1);
+    const hist = [...WMMC_HISTORICAL_RESULTS].reverse().find(r => parseInt(r.year) < parseInt(SELECTED_SEASON));
+    if (hist) { reigningChampion = hist.champion; reigningYear = hist.year; }
   }
 
-  const finals = DATA.bracket.finals;
+  // Determine current round label for in-progress seasons
+  let footerHtml = '';
+  if (!seasonComplete) {
+    const sd = (getSeasons() || {})[SELECTED_SEASON];
+    const period = sd ? getCurrentScoringPeriod(sd) : null;
+    const roundLabel = period ? period.roundName : null;
+    const roundPart = roundLabel ? ` &nbsp;|&nbsp; ${roundLabel} — In Progress` : '';
+    footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Season In Progress${roundPart}</div>`;
+  }
+
+  const rightHtml = reigningChampion
+    ? `<div class="banner-right">
+        <div class="banner-champ-label">&#127942; ${reigningYear} Champion</div>
+        <div class="banner-champ-name">${reigningChampion}</div>
+       </div>`
+    : '';
+
   banner.innerHTML = `
-    <div class="trophy">&#127942;</div>
-    <div class="champion-label">${SELECTED_SEASON} WMMC Champion</div>
-    <div class="champion-name">${finals.winner}</div>
-    <div class="champion-details">
-      Finals: ${finals.winner} ${finals.score2} - ${finals.score1} ${finals.manager1}<br>
-      Batting: ${finals.batting2} | Pitching: ${finals.pitching2}
+    <div class="banner-main">
+      <div class="banner-left">
+        <div class="banner-title">WMMC</div>
+        <div class="banner-season">${SELECTED_SEASON}</div>
+      </div>
+      ${rightHtml}
     </div>
+    ${footerHtml}
   `;
 }
 
