@@ -4566,14 +4566,20 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       }
 
       // Submit button
-      if (!isPending && submittedBatters.length === 4 && submittedPitchers.length === 3) {
+      if (!isPending) {
+        const allSelected = submittedBatters.length === 4 && submittedPitchers.length === 3;
+        const missingBatters = 4 - submittedBatters.length;
+        const missingPitchers = 3 - submittedPitchers.length;
+        const parts = [];
+        if (missingBatters > 0) parts.push(`${missingBatters} batter${missingBatters > 1 ? 's' : ''}`);
+        if (missingPitchers > 0) parts.push(`${missingPitchers} pitcher${missingPitchers > 1 ? 's' : ''}`);
+        const hint = allSelected ? '' : `Still need: ${parts.join(' and ')}.`;
         html += `<div style="margin-top:1rem;">
-          <button class="btn btn-primary" onclick="submitInitialRoster('${safeMgr}')">Submit for Approval</button>
+          <button class="btn btn-primary"${allSelected ? `` : ` disabled style="opacity:0.45;cursor:not-allowed;"`} onclick="${allSelected ? `submitInitialRoster('${safeMgr}')` : ''}">Submit for Approval</button>
+          <p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">${allSelected ? 'All players selected — ready to submit.' : `Select all 4 batters and 3 pitchers before submitting. ${hint}`}</p>
         </div>`;
       } else if (isPending) {
         html += `<p class="text-muted" style="margin-top:0.75rem;font-size:0.82rem;">You can still modify your roster until the commissioner approves it.</p>`;
-      } else {
-        html += `<p class="text-muted" style="margin-top:0.75rem;font-size:0.82rem;">Select exactly 4 batters and 3 pitchers to submit.</p>`;
       }
     }
 
