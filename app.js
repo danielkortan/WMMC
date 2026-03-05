@@ -693,10 +693,13 @@ function renderChampionBanner() {
   }
 
   const rightHtml = reigningChampion
-    ? `<div class="banner-right">
-        <div class="banner-champ-label">Reigning Champion</div>
-        <div class="banner-champ-name">${reigningChampion}</div>
-        <div class="banner-champ-year">${reigningYear} WMMC Champion</div>
+    ? `<div class="banner-right" style="display:flex;align-items:center;gap:0.75rem;">
+        <div style="font-size:2.5rem;line-height:1;">&#127942;</div>
+        <div>
+          <div class="banner-champ-label">Reigning Champion</div>
+          <div class="banner-champ-name">${reigningChampion}</div>
+          <div class="banner-champ-year">${reigningYear} WMMC Champion</div>
+        </div>
        </div>`
     : '';
 
@@ -7487,10 +7490,13 @@ function renderHallOfFame() {
   if (lastResult) {
     html += `<div class="champion-banner" style="margin-bottom:1rem;">
       <div class="banner-main" style="justify-content:center;">
-        <div class="banner-center">
-          <div class="banner-champ-label">Reigning Champion</div>
-          <div class="banner-champ-name">${lastResult.champion}</div>
-          <div class="banner-champ-year">${lastResult.year} WMMC Champion</div>
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+          <div style="font-size:2.5rem;line-height:1;">&#127942;</div>
+          <div class="banner-center">
+            <div class="banner-champ-label">Reigning Champion</div>
+            <div class="banner-champ-name">${lastResult.champion}</div>
+            <div class="banner-champ-year">${lastResult.year} WMMC Champion</div>
+          </div>
         </div>
       </div>
     </div>`;
