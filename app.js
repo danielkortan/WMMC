@@ -375,7 +375,7 @@ function enterApp(mgr) {
   init();
 }
 
-function handleLogin(email, password) {
+async function handleLogin(email, password) {
   email = email.trim().toLowerCase();
   const errEl = document.getElementById('login-error-msg');
 
@@ -384,29 +384,28 @@ function handleLogin(email, password) {
     return;
   }
 
-  const mgr = findManagerByEmail(email);
-  if (!mgr) {
-    errEl.textContent = 'Email not found. Contact the commissioner.';
-    return;
-  }
+  try {
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await resp.json();
 
-  // Check per-manager password first, fall back to global default
-  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
-  const managerPassword = passwords[email];
-  if (managerPassword) {
-    if (password !== managerPassword) {
-      errEl.textContent = 'Incorrect password.';
+    if (!resp.ok) {
+      errEl.textContent = data.error || 'Incorrect email or password.';
       return;
     }
-  } else if (password !== LOGIN_PASSWORD) {
-    errEl.textContent = 'Incorrect password.';
-    return;
-  }
 
-  errEl.textContent = '';
-  LOGGED_IN_EMAIL = email;
-  localStorage.setItem('wmmc_logged_in_email', email);
-  enterApp(mgr);
+    errEl.textContent = '';
+    LOGGED_IN_EMAIL = email;
+    localStorage.setItem('wmmc_logged_in_email', email);
+    // Use locally cached manager (already synced from server during loadData)
+    const mgr = findManagerByEmail(email) || data.manager;
+    enterApp(mgr);
+  } catch (e) {
+    errEl.textContent = 'Login failed. Please check your connection and try again.';
+  }
 }
 
 function handleGoogleCredential(response) {
@@ -5645,7 +5644,7 @@ function renderPasswordManagement() {
   container.innerHTML = html;
 }
 
-window.setManagerPassword = function(email) {
+window.setManagerPassword = async function(email) {
   const inputId = 'pw-input-' + email.replace(/[^a-z0-9]/g, '-');
   const input = document.getElementById(inputId);
   if (!input) return;
@@ -5653,19 +5652,32 @@ window.setManagerPassword = function(email) {
   if (!newPw) { alert('Please enter a password.'); return; }
   if (newPw.length < 3) { alert('Password must be at least 3 characters.'); return; }
 
-  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
-  passwords[email] = newPw;
-  localStorage.setItem('wmmc_passwords', JSON.stringify(passwords));
-  input.value = '';
-  renderPasswordManagement();
+  try {
+    const resp = await fetch('/api/managers/' + encodeURIComponent(email) + '/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Email': LOGGED_IN_EMAIL || '' },
+      body: JSON.stringify({ password: newPw })
+    });
+    if (!resp.ok) { alert('Failed to update password. Please try again.'); return; }
+    input.value = '';
+    renderPasswordManagement();
+  } catch (e) {
+    alert('Failed to update password. Please check your connection.');
+  }
 };
 
-window.resetManagerPassword = function(email) {
+window.resetManagerPassword = async function(email) {
   if (!confirm('Reset this manager\'s password to the default?')) return;
-  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
-  delete passwords[email];
-  localStorage.setItem('wmmc_passwords', JSON.stringify(passwords));
-  renderPasswordManagement();
+  try {
+    const resp = await fetch('/api/managers/' + encodeURIComponent(email) + '/password', {
+      method: 'DELETE',
+      headers: { 'X-User-Email': LOGGED_IN_EMAIL || '' }
+    });
+    if (!resp.ok) { alert('Failed to reset password. Please try again.'); return; }
+    renderPasswordManagement();
+  } catch (e) {
+    alert('Failed to reset password. Please check your connection.');
+  }
 };
 
 // Commissioner: open inline stat editor for a player
