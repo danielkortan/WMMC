@@ -7602,6 +7602,13 @@ function hofSortedManagers(records, col, asc) {
     }
     const diff = asc ? a[col] - b[col] : b[col] - a[col];
     if (diff !== 0) return diff;
+    // Tiebreaker: for wins column use avgFinish (lower is better), else fall back to wins desc
+    if (col === 'wins') {
+      if (a.avgFinish === null && b.avgFinish === null) return 0;
+      if (a.avgFinish === null) return 1;
+      if (b.avgFinish === null) return -1;
+      return a.avgFinish - b.avgFinish;
+    }
     return b.wins - a.wins;
   });
 }
