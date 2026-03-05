@@ -115,6 +115,78 @@
   font-size: 0.8rem;
 }
 
+/* Banner Layout - Left/Right split with footer */
+.banner-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: relative;
+  z-index: 1;
+}
+
+.banner-left {
+  text-align: left;
+}
+
+.banner-title {
+  font-size: 3rem;
+  font-weight: 900;
+  letter-spacing: 2px;
+  line-height: 1;
+}
+
+.banner-right {
+  text-align: right;
+}
+
+.banner-champ-label {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.banner-champ-name {
+  font-size: 2rem;
+  font-weight: 800;
+  margin: 0.25rem 0;
+}
+
+.banner-champ-year {
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.banner-footer {
+  text-align: center;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  font-size: 0.9rem;
+  opacity: 0.9;
+  position: relative;
+  z-index: 1;
+}
+
+/* Responsive: stack on small screens */
+@media (max-width: 600px) {
+  .banner-main {
+    flex-direction: column;
+    text-align: center;
+    gap: 1rem;
+  }
+  .banner-left, .banner-right {
+    text-align: center;
+  }
+  .banner-title {
+    font-size: 2rem;
+  }
+  .banner-champ-name {
+    font-size: 1.5rem;
+  }
+}
+
 /* Stats Grid */
 .stats-grid {
   display: grid;

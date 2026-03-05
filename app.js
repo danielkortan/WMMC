@@ -648,9 +648,24 @@ function renderChampionBanner() {
     reigningYear = SELECTED_SEASON;
   } else {
     // Look back through historical results for the most recent champion before this season
-    const prevYear = String(parseInt(SELECTED_SEASON) - 1);
     const hist = [...WMMC_HISTORICAL_RESULTS].reverse().find(r => parseInt(r.year) < parseInt(SELECTED_SEASON));
     if (hist) { reigningChampion = hist.champion; reigningYear = hist.year; }
+    // Also check localStorage seasons for prior champions (active seasons that were finalized)
+    if (!reigningChampion) {
+      const seasons = getSeasons();
+      const years = Object.keys(seasons).map(Number).sort((a, b) => b - a);
+      for (const yr of years) {
+        if (String(yr) === String(SELECTED_SEASON)) continue;
+        const priorSd = seasons[yr];
+        if (!priorSd) continue;
+        if (priorSd.status === 'completed' && priorSd.data && priorSd.data.bracket && priorSd.data.bracket.finals && priorSd.data.bracket.finals.winner) {
+          reigningChampion = priorSd.data.bracket.finals.winner;
+          reigningYear = yr;
+          break;
+        }
+        if (priorSd.champion) { reigningChampion = priorSd.champion; reigningYear = yr; break; }
+      }
+    }
   }
 
   // Determine current round label for in-progress seasons
@@ -665,16 +680,16 @@ function renderChampionBanner() {
 
   const rightHtml = reigningChampion
     ? `<div class="banner-right">
-        <div class="banner-champ-label">&#127942; ${reigningYear} Champion</div>
+        <div class="banner-champ-label">Reigning Champion</div>
         <div class="banner-champ-name">${reigningChampion}</div>
+        <div class="banner-champ-year">${reigningYear} WMMC Champion</div>
        </div>`
     : '';
 
   banner.innerHTML = `
     <div class="banner-main">
       <div class="banner-left">
-        <div class="banner-title">WMMC</div>
-        <div class="banner-season">${SELECTED_SEASON}</div>
+        <div class="banner-title">WMMC (${SELECTED_SEASON})</div>
       </div>
       ${rightHtml}
     </div>
@@ -1829,117 +1844,8 @@ function showActiveSeason(seasonData) {
     saveSeason(SELECTED_SEASON, seasonData);
   }
 
-  const banner = document.getElementById('champion-banner');
-  banner.className = 'champion-banner banner-compact';
-
-  // Check if the current season already has a champion (Finals finalized)
-  const seasonFinalized = seasonData.finalized_rounds || [];
-  let currentChampion = null;
-  if (seasonFinalized.includes('Finals')) {
-    const batting = seasonData.weekly_batting || [];
-    const pitching = seasonData.weekly_pitching || [];
-    // Compute finalist scores from finalized bracket
-    // (reuse logic: highest Finals total from the two SF winners)
-    const sfWinners = [];
-    const sfLosers = [];
-    const managers = getManagers();
-    const poolGroups = {};
-    managers.forEach(m => { if (m.pool && m.active !== false) { if (!poolGroups[m.pool]) poolGroups[m.pool] = []; poolGroups[m.pool].push(m.name); }});
-    function _getRoundScore(mgr, round) {
-      let t = 0;
-      batting.filter(b => b.manager === mgr && b.round === round).forEach(b => t += (b.weekly_score || 0));
-      pitching.filter(p => p.manager === mgr && p.round === round).forEach(p => t += (p.weekly_score || 0));
-      return t;
-    }
-    // Determine finalists: the two managers with the highest SF scores (who advanced)
-    const ppMap = {};
-    managers.forEach(m => { ppMap[m.name] = 0; });
-    batting.forEach(b => { if (b.manager && b.round === 'PP1') ppMap[b.manager] = (ppMap[b.manager] || 0) + (b.weekly_score || 0); });
-    batting.forEach(b => { if (b.manager && b.round === 'PP2') ppMap[b.manager] = (ppMap[b.manager] || 0) + (b.weekly_score || 0); });
-    pitching.forEach(p => { if (p.manager && p.round === 'PP1') ppMap[p.manager] = (ppMap[p.manager] || 0) + (p.weekly_score || 0); });
-    pitching.forEach(p => { if (p.manager && p.round === 'PP2') ppMap[p.manager] = (ppMap[p.manager] || 0) + (p.weekly_score || 0); });
-    const allPPWinners = new Set();
-    Object.entries(poolGroups).forEach(([pool, members]) => {
-      let b1 = null, b1s = -Infinity, b2 = null, b2s = -Infinity;
-      members.forEach(n => {
-        const pp1 = batting.filter(b => b.manager === n && b.round === 'PP1').reduce((s, b) => s + (b.weekly_score || 0), 0) +
-                    pitching.filter(p => p.manager === n && p.round === 'PP1').reduce((s, p) => s + (p.weekly_score || 0), 0);
-        const pp2 = batting.filter(b => b.manager === n && b.round === 'PP2').reduce((s, b) => s + (b.weekly_score || 0), 0) +
-                    pitching.filter(p => p.manager === n && p.round === 'PP2').reduce((s, p) => s + (p.weekly_score || 0), 0);
-        if (pp1 > b1s) { b1 = n; b1s = pp1; }
-        if (pp2 > b2s) { b2 = n; b2s = pp2; }
-      });
-      if (b1) allPPWinners.add(b1);
-      if (b2) allPPWinners.add(b2);
-    });
-    const totals = {};
-    managers.forEach(m => {
-      const pp1 = batting.filter(b => b.manager === m.name && b.round === 'PP1').reduce((s, b) => s + (b.weekly_score || 0), 0) +
-                  pitching.filter(p => p.manager === m.name && p.round === 'PP1').reduce((s, p) => s + (p.weekly_score || 0), 0);
-      const pp2 = batting.filter(b => b.manager === m.name && b.round === 'PP2').reduce((s, b) => s + (b.weekly_score || 0), 0) +
-                  pitching.filter(p => p.manager === m.name && p.round === 'PP2').reduce((s, p) => s + (p.weekly_score || 0), 0);
-      totals[m.name] = pp1 + pp2;
-    });
-    const seeded = [...[...allPPWinners].sort((a, b) => totals[b] - totals[a]),
-                    ...managers.filter(m => !allPPWinners.has(m.name)).map(m => m.name).sort((a, b) => totals[b] - totals[a])
-                   ].slice(0, 8);
-    if (seeded.length === 8) {
-      const qfW = [[seeded[0],seeded[7]],[seeded[3],seeded[4]],[seeded[2],seeded[5]],[seeded[1],seeded[6]]]
-        .map(([a, b]) => _getRoundScore(a,'QF') >= _getRoundScore(b,'QF') ? a : b);
-      [[qfW[0],qfW[1]],[qfW[2],qfW[3]]].forEach(([a, b]) => {
-        if (a && b) { sfWinners.push(_getRoundScore(a,'SF') >= _getRoundScore(b,'SF') ? a : b); sfLosers.push(_getRoundScore(a,'SF') >= _getRoundScore(b,'SF') ? b : a); }
-      });
-      if (sfWinners[0] && sfWinners[1]) {
-        currentChampion = _getRoundScore(sfWinners[0],'Finals') >= _getRoundScore(sfWinners[1],'Finals') ? sfWinners[0] : sfWinners[1];
-      }
-    }
-  }
-
-  if (currentChampion) {
-    banner.innerHTML = `
-      <div class="trophy">&#127942;</div>
-      <div class="champion-label">${SELECTED_SEASON} WMMC Champion</div>
-      <div class="champion-name">${currentChampion}</div>
-    `;
-    return;
-  }
-
-  // Check prior year for reigning champion
-  const seasons = getSeasons();
-  const years = Object.keys(seasons).map(Number).sort((a, b) => b - a);
-  let priorChampion = null;
-  let priorYear = null;
-  for (const yr of years) {
-    if (String(yr) === String(SELECTED_SEASON)) continue;
-    const priorSd = seasons[yr];
-    if (!priorSd) continue;
-    // Legacy completed season
-    if (priorSd.status === 'completed' && priorSd.data && priorSd.data.bracket && priorSd.data.bracket.finals && priorSd.data.bracket.finals.winner) {
-      priorChampion = priorSd.data.bracket.finals.winner;
-      priorYear = yr;
-      break;
-    }
-    // Active season that was finalized
-    if (priorSd.finalized_rounds && priorSd.finalized_rounds.includes('Finals')) {
-      // Get champion from that season's data (simplified: highest Finals scorer among SF winners)
-      // For now, check if champion stored in season data
-      if (priorSd.champion) { priorChampion = priorSd.champion; priorYear = yr; break; }
-    }
-  }
-
-  if (priorChampion) {
-    banner.innerHTML = `
-      <div class="champion-label"><span class="trophy">&#127942;</span> Reigning Champion</div>
-      <div class="champion-name">${priorChampion}</div>
-      <div class="champion-details">${priorYear} WMMC Champion &bull; ${SELECTED_SEASON} Season In Progress</div>
-    `;
-  } else {
-    banner.innerHTML = `
-      <div class="champion-label"><span class="trophy">&#9918;</span> ${SELECTED_SEASON} WMMC Season</div>
-      <div class="champion-name">Season Active</div>
-      <div class="champion-details">Upload weekly stats via Commissioner page to track scores.</div>
-    `;
-  }
+  // Render the unified champion banner (same layout as historical seasons)
+  renderChampionBanner();
 
   const grid = document.getElementById('stats-grid');
   const managers = getManagers();
@@ -7030,20 +6936,31 @@ function parseNum(val) {
 
 // Authoritative historical results — add a new entry each year after Finals are finalized.
 const WMMC_HISTORICAL_RESULTS = [
-  { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: null               },
-  { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker'   },
-  { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie' },
-  { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Austin Johnson'   },
-  { year: '2022', champion: 'Dan Kortan',      runnerUp: 'Alex Thalacker',  third: 'Ryan Sullivan'    },
-  { year: '2023', champion: 'Austin Johnson',  runnerUp: 'Dan Kortan',      third: 'Anton Capria'     },
+  { year: '2018', champion: 'Cam McCallum',   runnerUp: 'Alex Thalacker',  third: 'Dan Kortan',
+    standings: { 'Cam McCallum': 1, 'Alex Thalacker': 2, 'Dan Kortan': 3, 'Ryan Sullivan': 4, 'Chris Bentivegna': 5, 'Anton Capria': 6, 'Jamie Rogers': 7, 'Ryan Courville': 8, 'Stephen Farmer': 9, 'Marcus Gillespie': 10, 'Austin Johnson': 11 } },
+  { year: '2019', champion: 'Joey Auclair',    runnerUp: 'Cam McCallum',    third: 'Alex Thalacker',
+    standings: { 'Joey Auclair': 1, 'Cam McCallum': 2, 'Alex Thalacker': 3, 'Chris Bentivegna': 4, 'Dan Kortan': 5, 'Ryan Sullivan': 6, 'Jamie Rogers': 7, 'Anton Capria': 8, 'Austin Johnson': 9, 'Stephen Farmer': 10, 'Ryan Courville': 11, 'Marcus Gillespie': 12 } },
+  { year: '2020', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Marcus Gillespie',
+    standings: { 'Ryan Sullivan': 1, 'Dan Kortan': 2, 'Marcus Gillespie': 3, 'Cam McCallum': 4, 'Ryan Courville': 5, 'Joey Auclair': 6, 'Austin Johnson': 7, 'Edgar Rivas': 8, 'Anton Capria': 9, 'Jamie Rogers': 10, 'Alex Thalacker': 11, 'Chris Bentivegna': 12 } },
+  { year: '2021', champion: 'Ryan Sullivan',   runnerUp: 'Dan Kortan',      third: 'Joey Auclair',
+    standings: { 'Ryan Sullivan': 1, 'Dan Kortan': 2, 'Joey Auclair': 3, 'Austin Johnson': 4, 'Chris Bentivegna': 5, 'Ryan Courville': 6, 'Anton Capria': 7, 'Marcus Gillespie': 8, 'Cam McCallum': 9, 'Jamie Rogers': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
+  { year: '2022', champion: 'Dan Kortan',      runnerUp: 'Alex Thalacker',  third: 'Ryan Sullivan',
+    standings: { 'Dan Kortan': 1, 'Alex Thalacker': 2, 'Ryan Sullivan': 3, 'Austin Johnson': 4, 'Joey Auclair': 5, 'Chris Bentivegna': 6, 'Jamie Rogers': 7, 'Cam McCallum': 8, 'Edgar Rivas': 9, 'Anton Capria': 10, 'Marcus Gillespie': 11, 'Ryan Courville': 12 } },
+  { year: '2023', champion: 'Austin Johnson',  runnerUp: 'Dan Kortan',      third: 'Anton Capria',
+    standings: { 'Austin Johnson': 1, 'Dan Kortan': 2, 'Anton Capria': 3, 'Cam McCallum': 4, 'Ryan Sullivan': 5, 'Marcus Gillespie': 6, 'Alex Thalacker': 7, 'Jamie Rogers': 8, 'Joey Auclair': 9, 'Ryan Courville': 10, 'Chris Bentivegna': 11, 'Edgar Rivas': 12 } },
   { year: '2024', champion: 'Dan Kortan',      runnerUp: 'Ryan Courville',  third: 'Jamie Rogers',
     standings: { 'Dan Kortan': 1, 'Ryan Courville': 2, 'Jamie Rogers': 3, 'Austin Johnson': 4, 'Marcus Gillespie': 5, 'Anton Capria': 6, 'Cam McCallum': 7, 'Chris Bentivegna': 8, 'Joey Auclair': 9, 'Ryan Sullivan': 10, 'Alex Thalacker': 11, 'Edgar Rivas': 12 } },
   { year: '2025', champion: 'Joey Auclair',    runnerUp: 'Anton Capria',    third: 'Ryan Sullivan',
     standings: { 'Joey Auclair': 1, 'Anton Capria': 2, 'Ryan Sullivan': 3, 'Cam McCallum': 4, 'Marcus Gillespie': 5, 'Dan Kortan': 6, 'Jamie Rogers': 7, 'Austin Johnson': 8, 'Ryan Courville': 9, 'Chris Bentivegna': 10, 'Edgar Rivas': 11, 'Alex Thalacker': 12 } },
 ];
 
-// Number of seasons played (2018-2025 = 8 seasons). All 12 managers have played every season.
+// Number of historical seasons (2018-2025 = 8 seasons).
+// Number of historical seasons (2018-2025 = 8 seasons).
+// Stephen Farmer played 2018-2019 (2 seasons), Joey Auclair joined in 2019 (7 seasons),
+// Edgar Rivas joined in 2020 (6 seasons). All other managers played all 8 seasons.
 const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
+// Per-manager season overrides for managers who didn't play every historical season
+const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 2, 'Joey Auclair': 7, 'Edgar Rivas': 6 };
 
 // Compute full 1-12 standings from a live season's data.
 // Returns { champion, runnerUp, third, standings: { 'Name': position } } or null if not enough data.
@@ -7134,7 +7051,8 @@ function buildHofRecords(results) {
   allNames.forEach(name => {
     const positionCounts = {};
     for (let i = 1; i <= 12; i++) positionCounts[i] = 0;
-    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: WMMC_TOTAL_SEASONS_THROUGH_2025, totalFinish: 0, finishCount: 0, positionCounts };
+    const baseSeasonsForManager = WMMC_SEASON_OVERRIDES[name] !== undefined ? WMMC_SEASON_OVERRIDES[name] : WMMC_TOTAL_SEASONS_THROUGH_2025;
+    records[name] = { wins: 0, seconds: 0, thirds: 0, seasons: baseSeasonsForManager, totalFinish: 0, finishCount: 0, positionCounts };
   });
 
   // Count additional seasons beyond the historical period (2026+)
