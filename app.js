@@ -409,7 +409,24 @@ function enterApp(mgr) {
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
+
+  // Restore the tab the user was on before refreshing
+  const savedTab = localStorage.getItem('wmmc_active_tab');
+  if (savedTab) {
+    const targetBtn = document.querySelector(`.nav-btn[data-tab="${savedTab}"]`);
+    const targetSection = document.getElementById(savedTab);
+    if (targetBtn && targetSection) {
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      targetBtn.classList.add('active');
+      targetSection.classList.add('active');
+    }
+  }
+
   init();
+  // Trigger tab-specific renders for tabs that need them
+  if (savedTab === 'trends') renderTrends();
+  if (savedTab === 'hall-of-fame') renderHallOfFame();
 
   // Poll for changes every 45 seconds so logged-in users always see
   // the latest data without needing a page refresh.
@@ -658,6 +675,7 @@ function setupNav() {
       btn.classList.add('active');
       const section = document.getElementById(btn.dataset.tab);
       if (section) section.classList.add('active');
+      localStorage.setItem('wmmc_active_tab', btn.dataset.tab);
       // Always pull fresh data from server before rendering the new tab
       await syncFromServer();
       init();
