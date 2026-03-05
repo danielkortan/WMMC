@@ -671,14 +671,25 @@ function renderChampionBanner() {
     }
   }
 
-  // Determine current round label for in-progress seasons
+  // Determine footer for in-progress or preseason
   let footerHtml = '';
   if (!seasonComplete) {
     const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
-    const roundLabel = period ? period.roundName : null;
-    const roundPart = roundLabel ? ` &nbsp;|&nbsp; ${roundLabel} — In Progress` : '';
-    footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Season In Progress${roundPart}</div>`;
+
+    if (period) {
+      // Season has data — show round name + week number
+      const weekPart = `Week ${period.weekNum} of ${period.totalRoundWeeks}`;
+      footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Season In Progress &nbsp;|&nbsp; ${period.roundName} — ${weekPart}</div>`;
+    } else {
+      // No data yet — preseason
+      const dates = sd ? sd.schedule_dates : null;
+      let week1Part = '';
+      if (dates && dates[0] && dates[0].start) {
+        week1Part = ` &nbsp;|&nbsp; Week 1 starts ${fmtShortDate(dates[0].start)}`;
+      }
+      footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Preseason${week1Part}</div>`;
+    }
   }
 
   const rightHtml = reigningChampion
