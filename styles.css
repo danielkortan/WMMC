@@ -3497,3 +3497,150 @@ body::before {
     grid-template-columns: 1fr;
   }
 }
+
+/* ============================================================ */
+/* Commissioner Sub-tabs                                        */
+/* ============================================================ */
+
+.comm-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1.25rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.comm-tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  padding: 0.65rem 1.2rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.18s, border-color 0.18s;
+}
+
+.comm-tab-btn:hover {
+  color: var(--primary);
+}
+
+.comm-tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--accent);
+}
+
+.comm-tab-content {
+  display: none;
+}
+
+.comm-tab-content.active {
+  display: block;
+}
+
+/* ============================================================ */
+/* Combined Manager Table                                       */
+/* ============================================================ */
+
+.mgr-section-label {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 0 0 0.6rem;
+  color: var(--text);
+}
+
+.mgr-section-label .mgr-count {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.mgr-inactive-section {
+  margin-top: 1.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.mgr-inactive-section .mgr-section-label {
+  color: var(--text-muted);
+}
+
+/* Horizontal scroll wrapper so manager table never causes page overflow */
+.mgr-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mgr-table-wrap .data-table {
+  min-width: 680px;
+}
+
+/* Password cell inside manager table */
+.mgr-pw-cell {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.mgr-pw-input {
+  width: 90px !important;
+  min-width: 0 !important;
+  font-size: 0.75rem !important;
+  padding: 0.18rem 0.35rem !important;
+}
+
+/* Add Manager area */
+.add-mgr-area {
+  margin-top: 0.75rem;
+}
+
+.add-mgr-form {
+  display: none;
+  margin-top: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--bg-body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.add-mgr-form h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+/* Single-line form row — nowrap, scrolls horizontally if needed */
+.add-mgr-fields {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.add-mgr-fields .form-input,
+.add-mgr-fields .form-select {
+  font-size: 0.82rem;
+  padding: 0.28rem 0.5rem;
+}
+
+.add-mgr-fields .checkbox-label {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .comm-tab-btn {
+    padding: 0.55rem 0.8rem;
+    font-size: 0.83rem;
+  }
+}
+

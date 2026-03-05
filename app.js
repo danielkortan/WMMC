@@ -4989,10 +4989,13 @@ function showCommissionerPanel() {
 }
 
 function setupCommTabs() {
-  document.querySelectorAll('.comm-tab-btn').forEach(btn => {
+  const bar = document.querySelector('.comm-tabs');
+  if (!bar || bar._bound) return;
+  bar._bound = true;
+  bar.querySelectorAll('.comm-tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.comm-tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.comm-tab-content').forEach(t => t.classList.remove('active'));
+      bar.querySelectorAll('.comm-tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('#commissioner-panel .comm-tab-content').forEach(t => t.classList.remove('active'));
       btn.classList.add('active');
       const target = document.getElementById(btn.dataset.commTab);
       if (target) target.classList.add('active');
@@ -5710,11 +5713,11 @@ function renderManagersTable() {
     <th>Name</th><th>Email</th><th>Pool</th><th>Commissioner</th><th>Password</th><th>Actions</th>
   </tr></thead>`;
 
-  let html = `<p class="mgr-section-header">Active Managers <span class="mgr-count">(${activeList.length})</span></p>`;
+  let html = `<p class="mgr-section-label">Active Managers <span class="mgr-count">(${activeList.length})</span></p>`;
   if (activeList.length > 0) {
-    html += `<table class="data-table">${tableHead}<tbody>`;
+    html += `<div class="mgr-table-wrap"><table class="data-table">${tableHead}<tbody>`;
     html += activeList.map(m => _mgrNormalRow(m, m._idx)).join('');
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
   } else {
     html += '<p class="text-muted" style="font-size:0.87rem;">No active managers.</p>';
   }
@@ -5725,15 +5728,15 @@ function renderManagersTable() {
     <div class="add-mgr-form" id="add-mgr-form">
       <h4>Add New Manager</h4>
       <div class="add-mgr-fields">
-        <input type="text" id="mgr-name" class="form-input" placeholder="Full Name" style="min-width:130px;">
-        <input type="email" id="mgr-email" class="form-input" placeholder="Email" style="min-width:160px;">
-        <select id="mgr-pool" class="form-select" style="min-width:95px;">
+        <input type="text" id="mgr-name" class="form-input" placeholder="Full Name" style="width:130px;">
+        <input type="email" id="mgr-email" class="form-input" placeholder="Email" style="width:185px;">
+        <select id="mgr-pool" class="form-select" style="width:90px;">
           <option value="">No Pool</option>
           <option value="1">Pool 1</option>
           <option value="2">Pool 2</option>
           <option value="3">Pool 3</option>
         </select>
-        <label class="checkbox-label"><input type="checkbox" id="mgr-commissioner"> Commissioner</label>
+        <label class="checkbox-label"><input type="checkbox" id="mgr-commissioner"> Comm</label>
         <label class="checkbox-label"><input type="checkbox" id="mgr-active" checked> Active</label>
         <button class="btn btn-sm btn-primary" id="save-manager-btn">Save</button>
         <button class="btn btn-sm btn-secondary" id="cancel-edit-btn" onclick="hideAddManagerForm()">Cancel</button>
@@ -5743,10 +5746,10 @@ function renderManagersTable() {
 
   if (inactiveList.length > 0) {
     html += `<div class="mgr-inactive-section">
-      <p class="mgr-section-header">Inactive Managers <span class="mgr-count">(${inactiveList.length})</span></p>
-      <table class="data-table">${tableHead}<tbody>`;
+      <p class="mgr-section-label">Inactive Managers <span class="mgr-count">(${inactiveList.length})</span></p>
+      <div class="mgr-table-wrap"><table class="data-table">${tableHead}<tbody>`;
     html += inactiveList.map(m => _mgrNormalRow(m, m._idx)).join('');
-    html += '</tbody></table></div>';
+    html += '</tbody></table></div></div>';
   }
 
   container.innerHTML = html;

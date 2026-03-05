@@ -5,6 +5,8 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
+// Committed seed file — persists manager list across deploys (no passwords stored here)
+const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'WelcometoHell123';
 
 // Unique token generated every time the server starts. Appended to asset URLs
@@ -77,15 +79,42 @@ app.use(express.static(__dirname, {
 // Database helpers
 // ============================================================
 
+function readManagersSeed() {
+  try {
+    if (fs.existsSync(MANAGERS_SEED_FILE)) {
+      return JSON.parse(fs.readFileSync(MANAGERS_SEED_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Error reading managers_seed.json:', e.message);
+  }
+  return [];
+}
+
+function writeManagersSeed(managers) {
+  try {
+    // Strip passwords before writing to the committed seed file
+    const safe = managers.map(({ password, ...rest }) => rest);
+    fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(safe, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Error writing managers_seed.json:', e.message);
+  }
+}
+
 function readDB() {
   try {
     if (fs.existsSync(DB_FILE)) {
-      return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+      const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+      // If db.json has no managers, seed from the committed managers_seed.json
+      if (!db.managers || db.managers.length === 0) {
+        db.managers = readManagersSeed();
+      }
+      return db;
     }
   } catch (e) {
     console.error('Error reading db.json:', e.message);
   }
-  return { seasons: {}, managers: [], audit_log: [] };
+  // No db.json — build fresh state seeded from managers_seed.json
+  return { seasons: {}, managers: readManagersSeed(), audit_log: [] };
 }
 
 function writeDB(data) {
@@ -244,6 +273,8 @@ app.post('/api/managers', (req, res) => {
   });
   addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
   writeDB(db);
+  // Keep the committed seed file in sync so managers survive the next redeploy
+  writeManagersSeed(db.managers);
   res.json({ ok: true });
 });
 
