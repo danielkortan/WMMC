@@ -214,9 +214,10 @@ app.post('/api/seasons/:year', (req, res) => {
 // GET /api/managers — return managers list
 app.get('/api/managers', (req, res) => {
   const db = readDB();
-  // Strip passwords from response
+  // Strip passwords from response, but indicate if a custom password is set
   const managers = (db.managers || []).map(m => {
     const { password, ...safe } = m;
+    safe.hasCustomPassword = !!password;
     return safe;
   });
   res.json(managers);

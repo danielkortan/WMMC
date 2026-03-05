@@ -5684,11 +5684,10 @@ function renderPasswordManagement() {
   if (!container) return;
 
   const managers = getManagers();
-  const passwords = JSON.parse(localStorage.getItem('wmmc_passwords') || '{}');
 
   let html = '<table class="data-table"><thead><tr><th>Manager</th><th>Email</th><th>Password Status</th><th>Actions</th></tr></thead><tbody>';
   managers.forEach(m => {
-    const hasCustomPw = !!passwords[m.email.toLowerCase()];
+    const hasCustomPw = !!m.hasCustomPassword;
     const statusText = hasCustomPw ? 'Custom password set' : 'Using default';
     const statusClass = hasCustomPw ? 'swap-badge swap-badge-approved' : 'swap-badge swap-badge-pending';
     const safeEmail = m.email.toLowerCase().replace(/'/g, "\\'");
@@ -5727,6 +5726,7 @@ window.setManagerPassword = async function(email) {
     });
     if (!resp.ok) { alert('Failed to update password. Please try again.'); return; }
     input.value = '';
+    await syncFromServer();
     renderPasswordManagement();
   } catch (e) {
     alert('Failed to update password. Please check your connection.');
@@ -5741,6 +5741,7 @@ window.resetManagerPassword = async function(email) {
       headers: { 'X-User-Email': LOGGED_IN_EMAIL || '' }
     });
     if (!resp.ok) { alert('Failed to reset password. Please try again.'); return; }
+    await syncFromServer();
     renderPasswordManagement();
   } catch (e) {
     alert('Failed to reset password. Please check your connection.');
