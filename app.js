@@ -689,7 +689,7 @@ function renderChampionBanner() {
   banner.innerHTML = `
     <div class="banner-main">
       <div class="banner-left">
-        <div class="banner-title">WMMC (${SELECTED_SEASON})</div>
+        <div class="banner-title">WMMC ${SELECTED_SEASON}</div>
       </div>
       ${rightHtml}
     </div>
