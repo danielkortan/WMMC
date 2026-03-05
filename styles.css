@@ -239,22 +239,13 @@ main {
 .champion-banner {
   background: linear-gradient(135deg, var(--primary) 0%, #0d3b6e 50%, var(--primary-light) 100%);
   border-radius: 16px;
-  padding: 2.5rem 2rem;
-  text-align: center;
+  padding: 1.4rem 2rem 0.9rem;
   color: white;
   margin-bottom: 1.5rem;
   box-shadow: var(--shadow-lg);
   position: relative;
   overflow: hidden;
   border-bottom: 4px solid var(--accent);
-}
-
-/* Compact variant for active season */
-.champion-banner.banner-compact {
-  padding: 1rem 1.5rem;
-  border-radius: 10px;
-  margin-bottom: 1rem;
-  border-bottom-width: 3px;
 }
 
 .champion-banner::before {
@@ -265,53 +256,68 @@ main {
   width: 200%;
   height: 200%;
   background: radial-gradient(circle, rgba(196, 30, 58, 0.08) 0%, transparent 60%);
+  pointer-events: none;
 }
 
-.champion-banner .trophy {
-  font-size: 3.5rem;
-  margin-bottom: 0.5rem;
+/* Top row: left title + right champion */
+.banner-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
 }
 
-.banner-compact .trophy {
-  font-size: 1.5rem;
-  margin-bottom: 0;
-  display: inline;
-  vertical-align: middle;
-  margin-right: 0.5rem;
+/* Left: WMMC + year */
+.banner-left {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
 }
 
-.champion-banner .champion-label {
-  font-size: 0.85rem;
+.banner-title {
+  font-size: 2.4rem;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 2px;
   text-transform: uppercase;
-  letter-spacing: 3px;
+}
+
+.banner-season {
+  font-size: 2rem;
+  font-weight: 300;
+  line-height: 1;
+  opacity: 0.9;
+}
+
+/* Right: reigning champion */
+.banner-right {
+  text-align: right;
+}
+
+.banner-champ-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
   color: var(--accent);
   font-weight: 700;
 }
 
-.banner-compact .champion-label {
-  font-size: 0.75rem;
-  letter-spacing: 2px;
-  display: inline;
-}
-
-.champion-banner .champion-name {
-  font-size: 2.25rem;
+.banner-champ-name {
+  font-size: 1.35rem;
   font-weight: 800;
-  margin: 0.5rem 0;
+  line-height: 1.2;
 }
 
-.banner-compact .champion-name {
-  font-size: 1.1rem;
-  margin: 0.15rem 0;
-}
-
-.champion-banner .champion-details {
-  font-size: 1rem;
-  opacity: 0.85;
-}
-
-.banner-compact .champion-details {
-  font-size: 0.8rem;
+/* Footer: centered season/round status */
+.banner-footer {
+  text-align: center;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  opacity: 0.75;
+  margin-top: 0.7rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid rgba(255,255,255,0.18);
 }
 
 /* Stats Grid */
@@ -3252,24 +3258,37 @@ body::before {
   background: var(--bg-alt, #f8f9fa);
   border: 1px solid var(--border);
   border-radius: 6px;
-  margin: 4px 8px 8px;
-  padding: 0.75rem;
+  margin: 2px 4px 6px;
+  padding: 0.4rem 0.5rem;
 }
 
 .mgr-detail-cols {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1rem;
+  gap: 0.5rem;
 }
 
 .mgr-detail-header {
   font-weight: 700;
-  font-size: 0.85rem;
-  margin-bottom: 0.4rem;
+  font-size: 0.78rem;
+  margin-bottom: 0.2rem;
   color: var(--text);
   border-bottom: 1px solid var(--border);
-  padding-bottom: 0.25rem;
+  padding-bottom: 0.15rem;
 }
+
+.mgr-detail-panel .data-table { font-size: 0.75rem; }
+.mgr-detail-panel .data-table thead th {
+  padding: 0.25rem 0.3rem;
+  font-size: 0.7rem;
+  letter-spacing: 0;
+}
+.mgr-detail-panel .data-table tbody td {
+  padding: 0.2rem 0.3rem;
+  font-size: 0.75rem;
+}
+.mgr-detail-panel .data-table thead th:first-child { border-radius: 4px 0 0 0; }
+.mgr-detail-panel .data-table thead th:last-child { border-radius: 0 4px 0 0; }
 
 .mgr-detail-loading {
   padding: 0.5rem;
@@ -3291,6 +3310,24 @@ body::before {
 
 #hall-of-fame-content .data-table thead th[onclick]:hover {
   text-decoration: underline;
+}
+
+/* All-Time Records wide table */
+.hof-records-table {
+  font-size: 0.82rem;
+}
+.hof-records-table th,
+.hof-records-table td {
+  padding: 0.35rem 0.45rem;
+  white-space: nowrap;
+}
+.hof-records-table th:first-child,
+.hof-records-table td:first-child {
+  width: 2rem;
+}
+.hof-records-table th:nth-child(2),
+.hof-records-table td:nth-child(2) {
+  min-width: 7rem;
 }
 
 @media (max-width: 768px) {
