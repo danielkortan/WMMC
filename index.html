@@ -64,7 +64,6 @@
     <!-- Scoreboard (Home) -->
     <section id="dashboard" class="tab-content active">
       <div class="champion-banner" id="champion-banner"></div>
-      <div class="stats-grid" id="stats-grid"></div>
       <div id="scoreboard-content"></div>
       <div id="scoreboard-bracket"></div>
     </section>
@@ -147,6 +146,46 @@
         <div class="card">
           <h2>Commissioner Home</h2>
           <p>Logged in as <strong id="commissioner-name"></strong></p>
+        </div>
+
+        <!-- Banner Background -->
+        <div class="card">
+          <h2>Banner Background</h2>
+          <p class="upload-hint">Upload a custom image to use as the banner background. Drag the preview to reposition, use the slider to resize.</p>
+          <div id="banner-bg-section">
+            <div class="banner-bg-upload-row">
+              <label class="upload-label">Image File</label>
+              <input type="file" id="banner-bg-file" accept="image/*">
+            </div>
+            <div id="banner-bg-editor" style="display:none;">
+              <div class="banner-bg-preview-wrap" id="banner-bg-preview-wrap">
+                <div id="banner-bg-preview" class="banner-bg-preview">
+                  <div class="bbp-content">
+                    <div class="bbp-left">
+                      <div class="bbp-title" id="bbp-title-preview">WMMC</div>
+                    </div>
+                    <div class="bbp-right">
+                      <div class="bbp-champ-label">Reigning Champion</div>
+                      <div class="bbp-champ-name">Champion Name</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="banner-bg-controls">
+                <div class="banner-bg-ctrl-row">
+                  <label>Scale</label>
+                  <input type="range" id="banner-bg-scale" min="50" max="300" value="100" step="5">
+                  <span id="banner-bg-scale-val">100%</span>
+                </div>
+                <p class="upload-hint" style="margin:0.25rem 0 0.5rem;">Drag the preview image to reposition it.</p>
+                <div class="banner-bg-actions">
+                  <button class="btn btn-primary" id="banner-bg-save-btn">Save Background</button>
+                  <button class="btn btn-danger" id="banner-bg-remove-btn">Remove Background</button>
+                </div>
+              </div>
+            </div>
+            <div id="banner-bg-status" style="margin-top:0.5rem;"></div>
+          </div>
         </div>
 
         <!-- Pending Swap Requests (top priority) -->

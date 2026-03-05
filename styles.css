@@ -248,6 +248,33 @@ main {
   border-bottom: 4px solid var(--accent);
 }
 
+/* Custom image background — suppress the default gradient */
+.champion-banner.has-custom-bg {
+  background-color: #001a3e;
+}
+
+/* Dark overlay on top of the image to keep text legible by default */
+.champion-banner.has-custom-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg,
+    rgba(0, 20, 60, 0.45) 0%,
+    rgba(0, 20, 60, 0.25) 50%,
+    rgba(0, 20, 60, 0.45) 100%);
+  z-index: 0;
+  border-radius: inherit;
+}
+
+/* Text backing — applied when image is bright in that region */
+.text-backing {
+  background: rgba(0, 0, 0, 0.55) !important;
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem !important;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
 .champion-banner::before {
   content: '';
   position: absolute;
@@ -3124,6 +3151,122 @@ body::before {
 .upload-week-toggle:hover {
   background: var(--bg-body);
   border-radius: 4px;
+}
+
+/* ============================================================ */
+/* Banner Background Editor (Commissioner) */
+/* ============================================================ */
+
+.banner-bg-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.banner-bg-preview-wrap {
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 0.75rem 0;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.banner-bg-preview-wrap:active {
+  cursor: grabbing;
+}
+
+.banner-bg-preview {
+  background: linear-gradient(135deg, var(--primary) 0%, #0d3b6e 50%, var(--primary-light) 100%);
+  height: 130px;
+  position: relative;
+  overflow: hidden;
+  color: white;
+  border-radius: 10px;
+  background-repeat: no-repeat;
+}
+
+.bbp-content {
+  position: relative;
+  z-index: 2;
+  padding: 1rem 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 100%;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.bbp-left {
+  text-align: left;
+}
+
+.bbp-title {
+  font-size: 2rem;
+  font-weight: 900;
+  letter-spacing: 2px;
+  line-height: 1;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+.bbp-right {
+  text-align: right;
+}
+
+.bbp-champ-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: #e04258;
+  font-weight: 700;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
+.bbp-champ-name {
+  font-size: 1.1rem;
+  font-weight: 800;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+
+.banner-bg-controls {
+  margin-top: 0.5rem;
+}
+
+.banner-bg-ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.banner-bg-ctrl-row label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  min-width: 50px;
+  color: var(--text);
+}
+
+.banner-bg-ctrl-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--primary);
+}
+
+.banner-bg-ctrl-row span {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  min-width: 44px;
+  text-align: right;
+}
+
+.banner-bg-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
 }
 
 /* ---- Active Playoff Bracket ---- */
