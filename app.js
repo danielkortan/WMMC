@@ -829,17 +829,17 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
       const { addDate, dropDate, swapReason } = playerHistory(name, batOrPit);
       let statusHtml;
       if (isActive) {
-        statusHtml = `<span style="color:var(--success);font-size:0.78rem;font-weight:600;">Active</span>`;
-        if (addDate) statusHtml += `<br><span style="font-size:0.75rem;color:#888;">Added ${addDate}</span>`;
+        statusHtml = `<span style="color:var(--success);font-weight:600;">Active</span>`;
+        if (addDate) statusHtml += ` <span style="color:#888;">${addDate}</span>`;
       } else {
-        statusHtml = `<span style="color:#ef4444;font-size:0.78rem;">Not Rostered</span>`;
-        const info = [swapReason, addDate ? 'Added ' + addDate : null, dropDate ? 'Dropped ' + dropDate : null].filter(Boolean).join(' &bull; ');
-        if (info) statusHtml += `<br><span style="font-size:0.75rem;color:#888;">${info}</span>`;
+        statusHtml = `<span style="color:#ef4444;">Dropped</span>`;
+        const info = [dropDate, addDate ? '+' + addDate : null].filter(Boolean).join(' ');
+        if (info) statusHtml += ` <span style="color:#888;">${info}</span>`;
       }
       return `<tr class="${isActive ? '' : 'dropped-player'}">
-        <td style="font-size:0.85rem;">${name}</td>
-        <td class="num" style="font-size:0.85rem;"><strong>${fmt(pts)}</strong></td>
-        <td style="font-size:0.82rem;">${statusHtml}</td>
+        <td>${name}</td>
+        <td class="num"><strong>${fmt(pts)}</strong></td>
+        <td style="white-space:nowrap;">${statusHtml}</td>
       </tr>`;
     }).join('');
   }
