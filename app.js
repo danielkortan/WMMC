@@ -7483,12 +7483,16 @@ function renderHallOfFame() {
 
   let html = '';
 
-  // Trophy banner — most recent champion
+  // Reigning Champion banner — styled like the Scoreboard banner, centred
   if (lastResult) {
     html += `<div class="champion-banner" style="margin-bottom:1rem;">
-      <div class="trophy">&#127942;</div>
-      <div class="champion-label">${lastResult.year} WMMC Champion</div>
-      <div class="champion-name">${lastResult.champion}</div>
+      <div class="banner-main" style="justify-content:center;">
+        <div class="banner-center">
+          <div class="banner-champ-label">Reigning Champion</div>
+          <div class="banner-champ-name">${lastResult.champion}</div>
+          <div class="banner-champ-year">${lastResult.year} WMMC Champion</div>
+        </div>
+      </div>
     </div>`;
   }
 
