@@ -5,7 +5,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
-const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || '123';
+const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'WelcometoHell123';
 
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
