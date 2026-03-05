@@ -9,3 +9,8 @@
 #hall-of-fame-content .data-table thead th[onclick]:hover {
   text-decoration: underline;
 }
+
+/* Centred champion banner on HOF screen */
+.banner-center {
+  text-align: center;
+}
