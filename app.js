@@ -5311,6 +5311,7 @@ function setupSeasonSetupToggle() {
         `Are you sure you want to reset all season data for ${SELECTED_SEASON}?\n\n` +
         'This will clear:\n' +
         '  - All player pools (batters & pitchers)\n' +
+        '  - All initial player submissions\n' +
         '  - All rosters\n' +
         '  - All uploaded weekly stats\n' +
         '  - All swap history\n\n' +
@@ -5331,6 +5332,7 @@ function setupSeasonSetupToggle() {
       sd.team_weekly = [];
       sd.swaps = [];
       sd.upload_log = [];
+      sd.initial_submissions = {};
 
       saveSeason(SELECTED_SEASON, sd);
       if (resetStatus) resetStatus.innerHTML = '<p style="color:var(--success);font-weight:600;">Season data has been reset.</p>';
