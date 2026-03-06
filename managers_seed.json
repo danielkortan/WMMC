@@ -3,66 +3,77 @@
     "name": "Daniel Kortan",
     "email": "daniel.kortan@gmail.com",
     "commissioner": true,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Cam McCallum",
     "email": "cammc15@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Marcus Gillespie",
     "email": "marcusgillespie92@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Ryan Sullivan",
     "email": "rmsullivan323@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Ryan Courville",
     "email": "ryan.courville5@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Chris Bentivegna",
     "email": "cbenti60@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Joey Auclair",
     "email": "jauclair323@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Jamie Rogers",
     "email": "jrogersdgmu@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Anton Capria",
     "email": "anton.t.capria@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Alex Thalacker",
     "email": "athalack23@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   },
   {
     "name": "Austin Johnson",
     "email": "austinjohns106@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "password": "123"
   }
 ]
