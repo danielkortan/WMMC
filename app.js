@@ -5373,7 +5373,11 @@ function renderGSheetsConfig() {
       .slice(-10)
       .reverse();
     if (gsheetsLogs.length > 0) {
-      let logHtml = '<h3 style="margin-bottom:0.5rem;">Sync Log</h3><div class="gsheets-log-list">';
+      let logHtml = `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
+        <h3 style="margin:0;">Sync Log</h3>
+        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('gsheets-log-entries').style.display=document.getElementById('gsheets-log-entries').style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
+      </div>`;
+      logHtml += '<div id="gsheets-log-entries" style="display:none;" class="gsheets-log-list">';
       gsheetsLogs.forEach(l => {
         const typeLabel = l.sync_type === 'daily' ? 'Daily' : 'Manual';
         const typeBadgeStyle = l.sync_type === 'daily'
@@ -7067,8 +7071,13 @@ function renderWeeklyUploadSections() {
     // Upload log for this week
     const weekLogs = uploadLog.filter(l => l.round === s.round && l.week === s.week);
     if (weekLogs.length > 0) {
+      const logId = `upload-log-entries-${i}`;
       html += '<div class="upload-log">';
-      html += '<div class="upload-log-label">Upload History</div>';
+      html += `<div style="display:flex;align-items:center;gap:0.5rem;">
+        <span class="upload-log-label" style="margin:0;">Upload History</span>
+        <button class="btn btn-sm btn-secondary" onclick="var el=document.getElementById('${logId}');el.style.display=el.style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.7rem;padding:0.1rem 0.4rem;">Show</button>
+      </div>`;
+      html += `<div id="${logId}" style="display:none;">`;
       weekLogs.slice().reverse().forEach(l => {
         const typeLabel = l.type === 'batting' ? 'Batting' : 'Pitching';
         const typeBadgeColor = l.type === 'batting' ? 'var(--accent,#6c63ff)' : 'var(--success,#28a745)';
@@ -7078,7 +7087,7 @@ function renderWeeklyUploadSections() {
           <span class="upload-log-detail">${l.rows} records &mdash; ${l.assigned} assigned, ${l.unassigned} unassigned</span>
         </div>`;
       });
-      html += '</div>';
+      html += '</div></div>';
     }
 
     html += `</div></div>`; // close .upload-week-body and .weekly-upload-block
