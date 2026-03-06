@@ -3779,40 +3779,4 @@ body::before {
   min-height: 1.1rem;
 }
 
-/* ============================================================
-   Login screen extras (forgot password)
-   ============================================================ */
-
-.login-hint {
-  color: var(--text-muted, #666);
-  font-size: 0.875rem;
-  margin-bottom: 1rem;
-}
-
-.login-forgot-link {
-  text-align: center;
-  margin-top: 0.75rem;
-}
-
-.btn-link {
-  background: none;
-  border: none;
-  color: var(--primary);
-  font-size: 0.85rem;
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 0;
-}
-
-.btn-link:hover {
-  opacity: 0.75;
-}
-
-.login-success-msg {
-  color: #16a34a;
-  font-size: 0.85rem;
-  font-weight: 500;
-  margin-top: 0.5rem;
-  text-align: center;
-}
 

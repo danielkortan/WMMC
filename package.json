@@ -13,8 +13,7 @@
     "prepare": "git config core.hooksPath .githooks"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "nodemailer": "^8.0.1"
+    "express": "^4.21.0"
   },
   "devDependencies": {
     "eslint": "^8.57.1",
