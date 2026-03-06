@@ -3598,7 +3598,7 @@ function renderRosterData(managerName, isCommissioner) {
   // ---- Roster Tabs ----
   const tabs = ['per-week', 'team-stats', 'swaps'];
   html += `<div class="roster-tabs">
-    <button class="roster-tab${activeTabKey === 'per-week' ? ' active' : ''}" data-rtab="per-week" onclick="switchRosterTab(this, 'per-week')">Per-Week Roster</button>
+    <button class="roster-tab${activeTabKey === 'per-week' ? ' active' : ''}" data-rtab="per-week" onclick="switchRosterTab(this, 'per-week')">Roster</button>
     <button class="roster-tab${activeTabKey === 'team-stats' ? ' active' : ''}" data-rtab="team-stats" onclick="switchRosterTab(this, 'team-stats')">Team Stats</button>
     <button class="roster-tab${activeTabKey === 'swaps' ? ' active' : ''}" data-rtab="swaps" onclick="switchRosterTab(this, 'swaps')">Swaps</button>
   </div>`;
