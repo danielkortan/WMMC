@@ -693,6 +693,8 @@ async function syncGoogleSheets(year) {
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     type: 'gsheets_sync',
+    sync_type: 'daily',
+    success: true,
     batting_imported: totalBatImported,
     pitching_imported: totalPitImported,
     details: results
