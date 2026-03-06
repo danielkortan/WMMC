@@ -19,7 +19,7 @@
         <h1>The Whit Merrifield<br>Memorial Cup</h1>
         <p class="login-tagline">Fantasy Baseball League</p>
       </div>
-      <div class="login-card">
+      <div class="login-card" id="login-card-main">
         <h2>Sign In</h2>
         <div class="login-fields">
           <input type="email" id="login-email" placeholder="Email address" autocomplete="email">
@@ -27,9 +27,35 @@
           <button class="btn btn-accent" id="login-submit-btn">Sign In</button>
         </div>
         <p class="login-error-msg" id="login-error-msg"></p>
+        <div class="login-forgot-link"><button class="btn-link" id="forgot-password-link">Forgot password?</button></div>
         <div class="login-divider"><span>or</span></div>
         <div id="google-signin-container"></div>
         <p id="google-signin-error" class="login-error-msg"></p>
+      </div>
+
+      <!-- Forgot Password Panel (shown when "Forgot password?" is clicked) -->
+      <div class="login-card" id="forgot-password-card" style="display:none;">
+        <h2>Reset Password</h2>
+        <p class="login-hint">Enter your email address and we'll send you a reset link.</p>
+        <div class="login-fields">
+          <input type="email" id="forgot-email" placeholder="Email address" autocomplete="email">
+          <button class="btn btn-accent" id="forgot-submit-btn">Send Reset Link</button>
+        </div>
+        <p class="login-error-msg" id="forgot-error-msg"></p>
+        <p class="login-success-msg" id="forgot-success-msg" style="display:none;"></p>
+        <div class="login-forgot-link"><button class="btn-link" id="back-to-login-link">Back to Sign In</button></div>
+      </div>
+
+      <!-- Reset Password Panel (shown when URL contains ?reset_token=...) -->
+      <div class="login-card" id="reset-password-card" style="display:none;">
+        <h2>Set New Password</h2>
+        <div class="login-fields">
+          <input type="password" id="reset-new-password" placeholder="New password" autocomplete="new-password">
+          <input type="password" id="reset-confirm-password" placeholder="Confirm new password" autocomplete="new-password">
+          <button class="btn btn-accent" id="reset-submit-btn">Set Password</button>
+        </div>
+        <p class="login-error-msg" id="reset-error-msg"></p>
+        <p class="login-success-msg" id="reset-success-msg" style="display:none;"></p>
       </div>
     </div>
   </div>
@@ -43,8 +69,16 @@
           <select id="season-select"></select>
         </div>
         <div class="user-bar" id="user-bar" style="display:none;">
-          <span id="user-display-name"></span>
-          <button class="btn btn-sm btn-header-outline" id="logout-btn">Sign Out</button>
+          <div class="user-dropdown" id="user-dropdown">
+            <button class="btn btn-sm btn-header-outline user-dropdown-trigger" id="user-dropdown-trigger">
+              <span id="user-display-name"></span>
+              <span class="user-dropdown-caret">&#9662;</span>
+            </button>
+            <div class="user-dropdown-menu" id="user-dropdown-menu">
+              <button class="user-dropdown-item" id="change-password-btn">Change Password</button>
+              <button class="user-dropdown-item user-dropdown-item-danger" id="logout-btn">Sign Out</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

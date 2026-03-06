@@ -338,6 +338,26 @@ async function loadData() {
 
   setupLoginHandlers();
   initGoogleSignIn();
+
+  // If URL contains a password reset token, show the reset panel
+  const resetToken = new URLSearchParams(window.location.search).get('reset_token');
+  if (resetToken && !LOGGED_IN_EMAIL) {
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('login-card-main').style.display = 'none';
+    document.getElementById('forgot-password-card').style.display = 'none';
+    const resetCard = document.getElementById('reset-password-card');
+    resetCard.style.display = '';
+    // Validate the token with the server
+    fetch(`/api/password-reset/validate/${encodeURIComponent(resetToken)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data.valid) {
+          document.getElementById('reset-error-msg').textContent = 'This reset link has expired or is invalid. Please request a new one.';
+          document.getElementById('reset-submit-btn').disabled = true;
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 // ============================================================
@@ -389,6 +409,7 @@ function enterApp(mgr) {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('user-bar').style.display = 'flex';
   document.getElementById('user-display-name').textContent = mgr.name;
+  setupUserBar();
 
   // Auto-auth roster page
   ROSTER_EMAIL = LOGGED_IN_EMAIL;
@@ -522,6 +543,205 @@ function setupLoginHandlers() {
   });
 
   document.getElementById('logout-btn').onclick = handleLogout;
+
+  // Forgot password flow
+  document.getElementById('forgot-password-link').onclick = () => {
+    document.getElementById('login-card-main').style.display = 'none';
+    document.getElementById('forgot-password-card').style.display = '';
+    document.getElementById('forgot-email').value = document.getElementById('login-email').value;
+    document.getElementById('forgot-error-msg').textContent = '';
+    document.getElementById('forgot-success-msg').style.display = 'none';
+    document.getElementById('forgot-email').focus();
+  };
+
+  document.getElementById('back-to-login-link').onclick = () => {
+    document.getElementById('forgot-password-card').style.display = 'none';
+    document.getElementById('login-card-main').style.display = '';
+  };
+
+  document.getElementById('forgot-submit-btn').onclick = handleForgotPassword;
+  document.getElementById('forgot-email').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleForgotPassword();
+  });
+
+  // Reset password form (shown when URL has ?reset_token=)
+  const resetSubmitBtn = document.getElementById('reset-submit-btn');
+  if (resetSubmitBtn) {
+    resetSubmitBtn.onclick = handleResetPasswordConfirm;
+    document.getElementById('reset-confirm-password').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleResetPasswordConfirm();
+    });
+  }
+}
+
+async function handleForgotPassword() {
+  const email = document.getElementById('forgot-email').value.trim().toLowerCase();
+  const errEl = document.getElementById('forgot-error-msg');
+  const successEl = document.getElementById('forgot-success-msg');
+  errEl.textContent = '';
+  successEl.style.display = 'none';
+
+  if (!email) {
+    errEl.textContent = 'Please enter your email address.';
+    return;
+  }
+
+  const btn = document.getElementById('forgot-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    await fetch('/api/password-reset/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email })
+    });
+    // Always show success to avoid leaking which emails are registered
+    successEl.textContent = 'If that email is registered, a reset link has been sent. Check your inbox.';
+    successEl.style.display = '';
+    document.getElementById('forgot-email').value = '';
+  } catch (e) {
+    errEl.textContent = 'Something went wrong. Please try again.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Send Reset Link';
+  }
+}
+
+async function handleResetPasswordConfirm() {
+  const token = new URLSearchParams(window.location.search).get('reset_token') || '';
+  const newPassword = document.getElementById('reset-new-password').value;
+  const confirmPassword = document.getElementById('reset-confirm-password').value;
+  const errEl = document.getElementById('reset-error-msg');
+  const successEl = document.getElementById('reset-success-msg');
+  errEl.textContent = '';
+  successEl.style.display = 'none';
+
+  if (newPassword.length < 3) {
+    errEl.textContent = 'Password must be at least 3 characters.';
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    errEl.textContent = 'Passwords do not match.';
+    return;
+  }
+
+  const btn = document.getElementById('reset-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const resp = await fetch('/api/password-reset/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, newPassword })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = data.error || 'Failed to reset password.';
+      return;
+    }
+    successEl.textContent = 'Password updated! Redirecting to sign in…';
+    successEl.style.display = '';
+    setTimeout(() => {
+      window.location.href = window.location.pathname;
+    }, 2000);
+  } catch (e) {
+    errEl.textContent = 'Something went wrong. Please try again.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Set Password';
+  }
+}
+
+function setupUserBar() {
+  const dropdown = document.getElementById('user-dropdown');
+  const trigger = document.getElementById('user-dropdown-trigger');
+
+  trigger.onclick = (e) => {
+    e.stopPropagation();
+    dropdown.classList.toggle('open');
+  };
+
+  document.addEventListener('click', () => {
+    dropdown.classList.remove('open');
+  });
+
+  document.getElementById('change-password-btn').onclick = () => {
+    dropdown.classList.remove('open');
+    openChangePasswordModal();
+  };
+}
+
+function openChangePasswordModal() {
+  const existing = document.getElementById('pw-change-modal');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'pw-change-modal';
+  overlay.className = 'pw-modal-overlay';
+  overlay.innerHTML = `
+    <div class="pw-modal-card" role="dialog" aria-modal="true" aria-label="Change Password">
+      <h3>Change Password</h3>
+      <div class="pw-modal-fields">
+        <input type="password" id="pw-current" placeholder="Current password" autocomplete="current-password">
+        <input type="password" id="pw-new" placeholder="New password (min. 3 characters)" autocomplete="new-password">
+        <input type="password" id="pw-confirm" placeholder="Confirm new password" autocomplete="new-password">
+      </div>
+      <p class="pw-modal-error" id="pw-modal-error"></p>
+      <div class="pw-modal-actions">
+        <button class="btn btn-secondary" id="pw-modal-cancel">Cancel</button>
+        <button class="btn btn-primary" id="pw-modal-save">Save Password</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#pw-modal-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const saveBtn = overlay.querySelector('#pw-modal-save');
+  const doSave = async () => {
+    const currentPassword = overlay.querySelector('#pw-current').value;
+    const newPassword = overlay.querySelector('#pw-new').value;
+    const confirmPassword = overlay.querySelector('#pw-confirm').value;
+    const errEl = overlay.querySelector('#pw-modal-error');
+    errEl.textContent = '';
+
+    if (!currentPassword) { errEl.textContent = 'Please enter your current password.'; return; }
+    if (newPassword.length < 3) { errEl.textContent = 'New password must be at least 3 characters.'; return; }
+    if (newPassword !== confirmPassword) { errEl.textContent = 'New passwords do not match.'; return; }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const resp = await fetch(`/api/managers/${encodeURIComponent(LOGGED_IN_EMAIL)}/change-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Email': LOGGED_IN_EMAIL },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        errEl.textContent = data.error || 'Failed to change password.';
+        return;
+      }
+      overlay.remove();
+      // Show brief confirmation
+      const toast = document.createElement('div');
+      toast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:#16a34a;color:#fff;padding:0.65rem 1.1rem;border-radius:8px;font-size:0.875rem;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.2);';
+      toast.textContent = 'Password updated successfully.';
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    } catch (e) {
+      errEl.textContent = 'Something went wrong. Please try again.';
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Password';
+    }
+  };
+
+  saveBtn.onclick = doSave;
+  overlay.querySelector('#pw-confirm').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSave();
+  });
+  setTimeout(() => overlay.querySelector('#pw-current').focus(), 50);
 }
 
 function initGoogleSignIn() {

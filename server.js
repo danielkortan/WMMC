@@ -1,6 +1,8 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,6 +10,17 @@ const DB_FILE = path.join(__dirname, 'db.json');
 // Committed seed file — persists manager list across deploys (no passwords stored here)
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'WelcometoHell123';
+
+// Email / SMTP config (all via env vars)
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = parseInt(process.env.SMTP_PORT, 10) || 587;
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+const APP_BASE_URL = (process.env.APP_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+const PASSWORD_RESET_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
@@ -310,6 +323,129 @@ app.delete('/api/managers/:email/password', (req, res) => {
   writeDB(db);
   writeManagersSeed(db.managers);
   res.json({ ok: true });
+});
+
+// POST /api/managers/:email/change-password — self-service password change (logged-in manager)
+app.post('/api/managers/:email/change-password', (req, res) => {
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 3) {
+    return res.status(400).json({ error: 'New password must be at least 3 characters' });
+  }
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  const expectedPassword = manager.password || LOGIN_PASSWORD;
+  if (currentPassword !== expectedPassword) {
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+  manager.password = newPassword.trim();
+  addAuditEntry(db, 'manager_password_changed', { email }, email);
+  writeDB(db);
+  writeManagersSeed(db.managers);
+  res.json({ ok: true });
+});
+
+// ============================================================
+// Password Reset (unauthenticated — email-based)
+// ============================================================
+
+function createMailTransport() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+async function sendPasswordResetEmail(toEmail, token) {
+  const resetUrl = `${APP_BASE_URL}/?reset_token=${token}`;
+  const transport = createMailTransport();
+  if (!transport) {
+    // No SMTP configured — log to console so the admin can share the link manually
+    console.log(`[PASSWORD RESET] No SMTP configured. Reset link for ${toEmail}: ${resetUrl}`);
+    return;
+  }
+  await transport.sendMail({
+    from: SMTP_FROM,
+    to: toEmail,
+    subject: 'WMMC — Password Reset',
+    text: `You requested a password reset for your WMMC account.\n\nClick the link below to set a new password (expires in 1 hour):\n\n${resetUrl}\n\nIf you did not request this, you can ignore this email.`,
+    html: `<p>You requested a password reset for your WMMC account.</p>
+<p><a href="${resetUrl}">Reset your password</a></p>
+<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>`,
+  });
+}
+
+// POST /api/password-reset/request — generate a reset token and email it
+app.post('/api/password-reset/request', async (req, res) => {
+  const email = (req.body.email || '').trim().toLowerCase();
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  // Always respond OK to avoid leaking which emails are registered
+  if (!manager) {
+    return res.json({ ok: true });
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  if (!db.password_reset_tokens) db.password_reset_tokens = {};
+  // Clean up any stale tokens for this email before creating a new one
+  for (const [t, v] of Object.entries(db.password_reset_tokens)) {
+    if (v.email === email) delete db.password_reset_tokens[t];
+  }
+  db.password_reset_tokens[token] = { email, expires: Date.now() + PASSWORD_RESET_EXPIRY_MS };
+  addAuditEntry(db, 'password_reset_requested', { email }, email);
+  writeDB(db);
+  try {
+    await sendPasswordResetEmail(email, token);
+  } catch (e) {
+    console.error('Failed to send password reset email:', e.message);
+    // Don't expose the error to the client
+  }
+  res.json({ ok: true });
+});
+
+// POST /api/password-reset/confirm — consume a token and set the new password
+app.post('/api/password-reset/confirm', (req, res) => {
+  const { token, newPassword } = req.body || {};
+  if (!token || !newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 3) {
+    return res.status(400).json({ error: 'New password must be at least 3 characters' });
+  }
+  const db = readDB();
+  const tokens = db.password_reset_tokens || {};
+  const entry = tokens[token];
+  if (!entry || Date.now() > entry.expires) {
+    return res.status(400).json({ error: 'Reset link is invalid or has expired. Please request a new one.' });
+  }
+  const email = entry.email;
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  manager.password = newPassword.trim();
+  delete db.password_reset_tokens[token];
+  addAuditEntry(db, 'password_reset_confirmed', { email }, email);
+  writeDB(db);
+  writeManagersSeed(db.managers);
+  res.json({ ok: true });
+});
+
+// GET /api/password-reset/validate/:token — check if a reset token is still valid
+app.get('/api/password-reset/validate/:token', (req, res) => {
+  const token = req.params.token;
+  const db = readDB();
+  const tokens = db.password_reset_tokens || {};
+  const entry = tokens[token];
+  if (!entry || Date.now() > entry.expires) {
+    return res.status(400).json({ valid: false });
+  }
+  res.json({ valid: true });
 });
 
 // GET /api/audit-log — return recent audit log entries
