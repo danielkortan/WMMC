@@ -9,6 +9,7 @@ const DB_FILE = path.join(__dirname, 'db.json');
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'WelcometoHell123';
 
+
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
 const ASSET_VERSION = Date.now();
@@ -311,6 +312,30 @@ app.delete('/api/managers/:email/password', (req, res) => {
   writeManagersSeed(db.managers);
   res.json({ ok: true });
 });
+
+// POST /api/managers/:email/change-password — self-service password change (logged-in manager)
+app.post('/api/managers/:email/change-password', (req, res) => {
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 3) {
+    return res.status(400).json({ error: 'New password must be at least 3 characters' });
+  }
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  const expectedPassword = manager.password || LOGIN_PASSWORD;
+  if (currentPassword !== expectedPassword) {
+    return res.status(401).json({ error: 'Current password is incorrect' });
+  }
+  manager.password = newPassword.trim();
+  addAuditEntry(db, 'manager_password_changed', { email }, email);
+  writeDB(db);
+  writeManagersSeed(db.managers);
+  res.json({ ok: true });
+});
+
 
 // GET /api/audit-log — return recent audit log entries
 app.get('/api/audit-log', (req, res) => {

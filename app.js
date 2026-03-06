@@ -389,6 +389,7 @@ function enterApp(mgr) {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('user-bar').style.display = 'flex';
   document.getElementById('user-display-name').textContent = mgr.name;
+  setupUserBar();
 
   // Auto-auth roster page
   ROSTER_EMAIL = LOGGED_IN_EMAIL;
@@ -522,6 +523,99 @@ function setupLoginHandlers() {
   });
 
   document.getElementById('logout-btn').onclick = handleLogout;
+}
+
+
+function setupUserBar() {
+  const dropdown = document.getElementById('user-dropdown');
+  const trigger = document.getElementById('user-dropdown-trigger');
+
+  trigger.onclick = (e) => {
+    e.stopPropagation();
+    dropdown.classList.toggle('open');
+  };
+
+  document.addEventListener('click', () => {
+    dropdown.classList.remove('open');
+  });
+
+  document.getElementById('change-password-btn').onclick = () => {
+    dropdown.classList.remove('open');
+    openChangePasswordModal();
+  };
+}
+
+function openChangePasswordModal() {
+  const existing = document.getElementById('pw-change-modal');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'pw-change-modal';
+  overlay.className = 'pw-modal-overlay';
+  overlay.innerHTML = `
+    <div class="pw-modal-card" role="dialog" aria-modal="true" aria-label="Change Password">
+      <h3>Change Password</h3>
+      <div class="pw-modal-fields">
+        <input type="password" id="pw-current" placeholder="Current password" autocomplete="current-password">
+        <input type="password" id="pw-new" placeholder="New password (min. 3 characters)" autocomplete="new-password">
+        <input type="password" id="pw-confirm" placeholder="Confirm new password" autocomplete="new-password">
+      </div>
+      <p class="pw-modal-error" id="pw-modal-error"></p>
+      <div class="pw-modal-actions">
+        <button class="btn btn-secondary" id="pw-modal-cancel">Cancel</button>
+        <button class="btn btn-primary" id="pw-modal-save">Save Password</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#pw-modal-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const saveBtn = overlay.querySelector('#pw-modal-save');
+  const doSave = async () => {
+    const currentPassword = overlay.querySelector('#pw-current').value;
+    const newPassword = overlay.querySelector('#pw-new').value;
+    const confirmPassword = overlay.querySelector('#pw-confirm').value;
+    const errEl = overlay.querySelector('#pw-modal-error');
+    errEl.textContent = '';
+
+    if (!currentPassword) { errEl.textContent = 'Please enter your current password.'; return; }
+    if (newPassword.length < 3) { errEl.textContent = 'New password must be at least 3 characters.'; return; }
+    if (newPassword !== confirmPassword) { errEl.textContent = 'New passwords do not match.'; return; }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const resp = await fetch(`/api/managers/${encodeURIComponent(LOGGED_IN_EMAIL)}/change-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Email': LOGGED_IN_EMAIL },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        errEl.textContent = data.error || 'Failed to change password.';
+        return;
+      }
+      overlay.remove();
+      // Show brief confirmation
+      const toast = document.createElement('div');
+      toast.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:#16a34a;color:#fff;padding:0.65rem 1.1rem;border-radius:8px;font-size:0.875rem;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.2);';
+      toast.textContent = 'Password updated successfully.';
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    } catch (e) {
+      errEl.textContent = 'Something went wrong. Please try again.';
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Password';
+    }
+  };
+
+  saveBtn.onclick = doSave;
+  overlay.querySelector('#pw-confirm').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doSave();
+  });
+  setTimeout(() => overlay.querySelector('#pw-current').focus(), 50);
 }
 
 function initGoogleSignIn() {

@@ -19,7 +19,7 @@
         <h1>The Whit Merrifield<br>Memorial Cup</h1>
         <p class="login-tagline">Fantasy Baseball League</p>
       </div>
-      <div class="login-card">
+      <div class="login-card" id="login-card-main">
         <h2>Sign In</h2>
         <div class="login-fields">
           <input type="email" id="login-email" placeholder="Email address" autocomplete="email">
@@ -31,6 +31,7 @@
         <div id="google-signin-container"></div>
         <p id="google-signin-error" class="login-error-msg"></p>
       </div>
+
     </div>
   </div>
 
@@ -43,8 +44,16 @@
           <select id="season-select"></select>
         </div>
         <div class="user-bar" id="user-bar" style="display:none;">
-          <span id="user-display-name"></span>
-          <button class="btn btn-sm btn-header-outline" id="logout-btn">Sign Out</button>
+          <div class="user-dropdown" id="user-dropdown">
+            <button class="btn btn-sm btn-header-outline user-dropdown-trigger" id="user-dropdown-trigger">
+              <span id="user-display-name"></span>
+              <span class="user-dropdown-caret">&#9662;</span>
+            </button>
+            <div class="user-dropdown-menu" id="user-dropdown-menu">
+              <button class="user-dropdown-item" id="change-password-btn">Change Password</button>
+              <button class="user-dropdown-item user-dropdown-item-danger" id="logout-btn">Sign Out</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

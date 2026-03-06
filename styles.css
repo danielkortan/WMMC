@@ -3644,3 +3644,139 @@ body::before {
   }
 }
 
+/* ============================================================
+   User Dropdown (header — name + caret)
+   ============================================================ */
+
+.user-dropdown {
+  position: relative;
+}
+
+.user-dropdown-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.user-dropdown-caret {
+  font-size: 0.65rem;
+  opacity: 0.75;
+  transition: transform 0.2s;
+}
+
+.user-dropdown.open .user-dropdown-caret {
+  transform: rotate(180deg);
+}
+
+.user-dropdown-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.15);
+  min-width: 160px;
+  z-index: 2000;
+  overflow: hidden;
+}
+
+.user-dropdown.open .user-dropdown-menu {
+  display: block;
+}
+
+.user-dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 0.65rem 1rem;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 0.875rem;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.user-dropdown-item:hover {
+  background: var(--bg);
+}
+
+.user-dropdown-item-danger {
+  color: #dc2626;
+}
+
+.user-dropdown-item-danger:hover {
+  background: #fef2f2;
+}
+
+/* ============================================================
+   Change Password Modal
+   ============================================================ */
+
+.pw-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+
+.pw-modal-card {
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem 1.75rem;
+  max-width: 400px;
+  width: 92%;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+.pw-modal-card h3 {
+  margin: 0 0 1.25rem;
+  font-size: 1.1rem;
+  color: var(--primary);
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.pw-modal-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.pw-modal-fields input {
+  padding: 0.65rem 0.85rem;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  color: var(--text);
+  background: var(--bg);
+  transition: border-color 0.2s;
+}
+
+.pw-modal-fields input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.pw-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  justify-content: flex-end;
+}
+
+.pw-modal-error {
+  color: var(--accent);
+  font-size: 0.82rem;
+  margin-top: 0.5rem;
+  min-height: 1.1rem;
+}
+
+
