@@ -3507,8 +3507,6 @@ body::before {
   gap: 0;
   border-bottom: 2px solid var(--border);
   margin-bottom: 1.25rem;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .comm-tab-btn {
@@ -3516,8 +3514,8 @@ body::before {
   border: none;
   border-bottom: 3px solid transparent;
   margin-bottom: -2px;
-  padding: 0.65rem 1.2rem;
-  font-size: 0.92rem;
+  padding: 0.65rem 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
   color: var(--text-muted);
   cursor: pointer;
