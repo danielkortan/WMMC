@@ -6250,6 +6250,23 @@ window.approveInitialSubmission = function(manager) {
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
   const sub = sd.initial_submissions[manager];
 
+  // Check for players already rostered by another manager
+  const rosteredPlayers = {};
+  for (const [mgrName, mgrRoster] of Object.entries(sd.rosters || {})) {
+    if (mgrName === manager) continue;
+    for (const weekRoster of Object.values(mgrRoster)) {
+      (weekRoster.batters || []).forEach(b => { rosteredPlayers[b] = mgrName; });
+      (weekRoster.pitchers || []).forEach(p => { rosteredPlayers[p] = mgrName; });
+    }
+  }
+  const duplicates = [];
+  (sub.batters || []).forEach(b => { if (rosteredPlayers[b]) duplicates.push(`${b} (rostered by ${rosteredPlayers[b]})`); });
+  (sub.pitchers || []).forEach(p => { if (rosteredPlayers[p]) duplicates.push(`${p} (rostered by ${rosteredPlayers[p]})`); });
+  if (duplicates.length > 0) {
+    alert(`Cannot approve: the following players are already on another roster:\n\n${duplicates.join('\n')}`);
+    return;
+  }
+
   sub.status = 'approved';
 
   // Add all players to Week 1 roster
