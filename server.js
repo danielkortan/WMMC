@@ -92,9 +92,9 @@ function readManagersSeed() {
 
 function writeManagersSeed(managers) {
   try {
-    // Strip passwords before writing to the committed seed file
-    const safe = managers.map(({ password, ...rest }) => rest);
-    fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(safe, null, 2), 'utf8');
+    // Write full manager records including passwords so they survive redeploys.
+    // managers_seed.json is committed to git — keep this repo private.
+    fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(managers, null, 2), 'utf8');
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
   }
@@ -293,6 +293,7 @@ app.post('/api/managers/:email/password', (req, res) => {
   manager.password = password.trim();
   addAuditEntry(db, 'manager_password_set', { email }, req.get('X-User-Email'));
   writeDB(db);
+  writeManagersSeed(db.managers);
   res.json({ ok: true });
 });
 
@@ -307,6 +308,7 @@ app.delete('/api/managers/:email/password', (req, res) => {
   delete manager.password;
   addAuditEntry(db, 'manager_password_reset', { email }, req.get('X-User-Email'));
   writeDB(db);
+  writeManagersSeed(db.managers);
   res.json({ ok: true });
 });
 
