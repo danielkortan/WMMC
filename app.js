@@ -5370,18 +5370,33 @@ function renderGSheetsConfig() {
   if (sd && sd.upload_log) {
     const gsheetsLogs = sd.upload_log
       .filter(l => l.type === 'gsheets_sync')
-      .slice(-5)
+      .slice(-10)
       .reverse();
     if (gsheetsLogs.length > 0) {
-      let logHtml = '<h3 style="margin-bottom:0.5rem;">Recent Syncs</h3><div class="gsheets-log-list">';
+      let logHtml = '<h3 style="margin-bottom:0.5rem;">Sync Log</h3><div class="gsheets-log-list">';
       gsheetsLogs.forEach(l => {
+        const typeLabel = l.sync_type === 'daily' ? 'Daily' : 'Manual';
+        const typeBadgeStyle = l.sync_type === 'daily'
+          ? 'background:var(--accent,#6c63ff);color:#fff;'
+          : 'background:var(--secondary,#555);color:#fff;';
+        const successBadgeStyle = l.success !== false
+          ? 'background:var(--success,#28a745);color:#fff;'
+          : 'background:var(--danger,#dc3545);color:#fff;';
+        const successLabel = l.success !== false ? 'Success' : 'Failed';
+        const detail = l.success !== false
+          ? `${l.batting_imported} batting, ${l.pitching_imported} pitching records imported`
+          : `Error: ${l.error || 'Unknown error'}`;
         logHtml += `<div class="gsheets-log-item">
           <span class="gsheets-log-time">${l.timestamp}</span>
-          <span>${l.batting_imported} bat, ${l.pitching_imported} pit records</span>
+          <span class="swap-badge" style="${typeBadgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${typeLabel}</span>
+          <span class="swap-badge" style="${successBadgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${successLabel}</span>
+          <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
         </div>`;
       });
       logHtml += '</div>';
       logDiv.innerHTML = logHtml;
+    } else {
+      logDiv.innerHTML = '';
     }
   }
 }
@@ -5636,6 +5651,8 @@ window.triggerGSheetsSync = async function() {
     sd.upload_log.push({
       timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
       type: 'gsheets_sync',
+      sync_type: 'manual',
+      success: true,
       batting_imported: totalBat,
       pitching_imported: totalPit,
       details: results
@@ -5668,6 +5685,23 @@ window.triggerGSheetsSync = async function() {
     config2.last_sync = new Date().toISOString();
     config2.last_sync_result = { success: false, error: e.message };
     saveGSheetsConfigLocal(config2);
+
+    // Log the failure
+    const seasons2 = getSeasons();
+    const sd2 = seasons2[SELECTED_SEASON];
+    if (sd2) {
+      if (!sd2.upload_log) sd2.upload_log = [];
+      sd2.upload_log.push({
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        type: 'gsheets_sync',
+        sync_type: 'manual',
+        success: false,
+        error: e.message
+      });
+      saveSeason(SELECTED_SEASON, sd2);
+      renderGSheetsConfig();
+    }
+
     statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error: ${e.message}</div>`;
   }
 };
@@ -7035,11 +7069,13 @@ function renderWeeklyUploadSections() {
     if (weekLogs.length > 0) {
       html += '<div class="upload-log">';
       html += '<div class="upload-log-label">Upload History</div>';
-      weekLogs.forEach(l => {
+      weekLogs.slice().reverse().forEach(l => {
+        const typeLabel = l.type === 'batting' ? 'Batting' : 'Pitching';
+        const typeBadgeColor = l.type === 'batting' ? 'var(--accent,#6c63ff)' : 'var(--success,#28a745)';
         html += `<div class="upload-log-entry">
           <span class="upload-log-time">${l.timestamp}</span>
-          <span class="upload-log-type">${l.type}</span>
-          <span class="upload-log-detail">${l.assigned} assigned, ${l.unassigned} unassigned (${l.rows} total rows)</span>
+          <span class="swap-badge" style="background:${typeBadgeColor};color:#fff;font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${typeLabel}</span>
+          <span class="upload-log-detail">${l.rows} records &mdash; ${l.assigned} assigned, ${l.unassigned} unassigned</span>
         </div>`;
       });
       html += '</div>';
