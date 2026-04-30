@@ -1367,9 +1367,11 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
         const info = [dropDate, addDate ? '+' + addDate : null].filter(Boolean).join(' ');
         if (info) statusHtml += ` <span style="color:#888;">${info}</span>`;
       }
+      const safeName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const safeMgr = managerName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return `<tr class="${isActive ? '' : 'dropped-player'}">
         <td>${name}</td>
-        <td class="num"><strong>${fmt(pts)}</strong></td>
+        <td class="num"><button class="pqv-pts-btn" onclick="showPlayerQuickView('${safeName}','${type}','${safeMgr}')"><strong>${fmt(pts)}</strong></button></td>
         <td style="white-space:nowrap;">${statusHtml}</td>
       </tr>`;
     }).join('');
@@ -1395,6 +1397,119 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
 
   row.style.display = '';
   if (arrow) arrow.innerHTML = '&#9650;';
+};
+
+window.showPlayerQuickView = function(playerName, type, managerName) {
+  const sd = getSeasons()[SELECTED_SEASON];
+  if (!sd) return;
+
+  const dates = getScheduleDates();
+  const isBat = type === 'batting';
+  const arr = isBat ? (sd.weekly_batting || []) : (sd.weekly_pitching || []);
+  const playerKey = isBat ? 'batter' : 'pitcher';
+
+  const records = arr
+    .filter(r => r[playerKey] === playerName && r.manager === managerName)
+    .sort((a, b) => weekIndexFromKey(a.round, a.week) - weekIndexFromKey(b.round, b.week));
+
+  let tableHtml = '';
+  if (records.length === 0) {
+    tableHtml = '<p class="text-muted" style="font-size:0.85rem;margin:0;">No stats recorded.</p>';
+  } else if (isBat) {
+    let totAbs=0, tot1b=0, tot2b=0, tot3b=0, totHr=0, totR=0, totRbi=0, totSb=0, totBb=0, totPts=0;
+    const rows = records.map(r => {
+      const wi = weekIndexFromKey(r.round, r.week);
+      const ds = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+      totAbs += (r.abs || 0); tot1b += (r['1b'] || 0); tot2b += (r['2b'] || 0);
+      tot3b += (r['3b'] || 0); totHr += (r.hr || 0); totR += (r.r || 0);
+      totRbi += (r.rbi || 0); totSb += (r.sb || 0); totBb += (r.bb || 0);
+      totPts += (r.weekly_score || 0);
+      return `<tr>
+        <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
+        <td class="num">${r.abs || 0}</td><td class="num">${r['1b'] || 0}</td>
+        <td class="num">${r['2b'] || 0}</td><td class="num">${r['3b'] || 0}</td>
+        <td class="num">${r.hr || 0}</td><td class="num">${r.r || 0}</td>
+        <td class="num">${r.rbi || 0}</td><td class="num">${r.sb || 0}</td>
+        <td class="num">${r.bb || 0}</td>
+        <td class="num"><strong>${fmt(r.weekly_score || 0)}</strong></td>
+      </tr>`;
+    }).join('');
+    const totRow = records.length > 1 ? `<tr class="pqv-totals">
+        <td><strong>Total</strong></td>${dates ? '<td></td>' : ''}
+        <td class="num"><strong>${totAbs}</strong></td><td class="num"><strong>${tot1b}</strong></td>
+        <td class="num"><strong>${tot2b}</strong></td><td class="num"><strong>${tot3b}</strong></td>
+        <td class="num"><strong>${totHr}</strong></td><td class="num"><strong>${totR}</strong></td>
+        <td class="num"><strong>${totRbi}</strong></td><td class="num"><strong>${totSb}</strong></td>
+        <td class="num"><strong>${totBb}</strong></td>
+        <td class="num"><strong>${fmt(Math.round(totPts * 100) / 100)}</strong></td>
+      </tr>` : '';
+    tableHtml = `<div class="pqv-table-wrap"><table class="data-table compact-table pqv-table">
+      <thead><tr><th>Wk</th>${dates ? '<th>Dates</th>' : ''}
+        <th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th>
+        <th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Pts</th>
+      </tr></thead>
+      <tbody>${rows}${totRow}</tbody>
+    </table></div>`;
+  } else {
+    let totGs=0, totW=0, totQs=0, totCg=0, totCgso=0, totNh=0, totIp=0, totH=0, totEr=0, totBb=0, totK=0, totPts=0;
+    const rows = records.map(r => {
+      const wi = weekIndexFromKey(r.round, r.week);
+      const ds = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+      totGs += (r.gs || 0); totW += (r.w || 0); totQs += (r.qs || 0);
+      totCg += (r.cg || 0); totCgso += (r.cgso || 0); totNh += (r.nh || 0);
+      totIp += (r.ip || 0); totH += (r.h || 0); totEr += (r.er || 0);
+      totBb += (r.bb || 0); totK += (r.k || 0); totPts += (r.weekly_score || 0);
+      return `<tr>
+        <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
+        <td class="num">${r.gs || 0}</td><td class="num">${r.w || 0}</td>
+        <td class="num">${r.qs_highlight ? '&mdash;' : fmtDec(r.qs)}</td>
+        <td class="num">${r.cg || 0}</td><td class="num">${r.cgso || 0}</td>
+        <td class="num">${r.nh || 0}</td><td class="num">${fmtDec(r.ip || 0)}</td>
+        <td class="num">${r.h || 0}</td><td class="num">${r.er || 0}</td>
+        <td class="num">${r.bb || 0}</td><td class="num">${r.k || 0}</td>
+        <td class="num"><strong>${fmt(r.weekly_score || 0)}</strong></td>
+      </tr>`;
+    }).join('');
+    const totRow = records.length > 1 ? `<tr class="pqv-totals">
+        <td><strong>Total</strong></td>${dates ? '<td></td>' : ''}
+        <td class="num"><strong>${totGs}</strong></td><td class="num"><strong>${totW}</strong></td>
+        <td class="num"><strong>${fmtDec(totQs)}</strong></td>
+        <td class="num"><strong>${totCg}</strong></td><td class="num"><strong>${totCgso}</strong></td>
+        <td class="num"><strong>${totNh}</strong></td><td class="num"><strong>${fmtDec(totIp)}</strong></td>
+        <td class="num"><strong>${totH}</strong></td><td class="num"><strong>${totEr}</strong></td>
+        <td class="num"><strong>${totBb}</strong></td><td class="num"><strong>${totK}</strong></td>
+        <td class="num"><strong>${fmt(Math.round(totPts * 100) / 100)}</strong></td>
+      </tr>` : '';
+    tableHtml = `<div class="pqv-table-wrap"><table class="data-table compact-table pqv-table">
+      <thead><tr><th>Wk</th>${dates ? '<th>Dates</th>' : ''}
+        <th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th>
+        <th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Pts</th>
+      </tr></thead>
+      <tbody>${rows}${totRow}</tbody>
+    </table></div>`;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'pqv-overlay';
+  overlay.innerHTML = `
+    <div class="pqv-card" role="dialog" aria-modal="true">
+      <div class="pqv-header">
+        <div>
+          <div class="pqv-title">${playerName}</div>
+          <div class="pqv-subtitle">${managerName} &middot; ${isBat ? 'Batting' : 'Pitching'}</div>
+        </div>
+        <button class="pqv-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="pqv-body">${tableHtml}</div>
+    </div>`;
+
+  overlay.querySelector('.pqv-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); }
+  });
+
+  document.body.appendChild(overlay);
 };
 
 function setupScoreboardTabs() {
@@ -6675,7 +6790,7 @@ window.updateCommRosterWeekView = function(managerName) {
   let batHtml = `<div class="wrs-group-label">BATTERS (${roster.batters.length}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
   if (allBattersThisWeek.size > 0) {
-    batHtml += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
+    batHtml += '<div class="table-wrapper"><table class="data-table compact-table wrs-table comm-roster-table"><thead><tr>';
     batHtml += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th><th></th>';
     batHtml += '</tr></thead><tbody>';
     [...allBattersThisWeek].sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0)).forEach(batter => {
@@ -6730,7 +6845,7 @@ window.updateCommRosterWeekView = function(managerName) {
   let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${roster.pitchers.length}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
   if (allPitchersThisWeek.size > 0) {
-    pitHtml += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
+    pitHtml += '<div class="table-wrapper"><table class="data-table compact-table wrs-table comm-roster-table"><thead><tr>';
     pitHtml += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th><th></th>';
     pitHtml += '</tr></thead><tbody>';
     [...allPitchersThisWeek].sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0)).forEach(pitcher => {
