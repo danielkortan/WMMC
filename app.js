@@ -1614,6 +1614,9 @@ function renderPoolPeriodContent(period) {
   const totalKey = period === 'pp1' ? 'pp1_total' : 'pp2_total';
   const rankKey = period === 'pp1' ? 'pp1_pool_rank' : 'pp2_pool_rank';
   const periodLabel = period === 'pp1' ? 'Pool Play 1' : 'Pool Play 2';
+  const ppLastMgr = poolPlay.length > 0
+    ? [...poolPlay].sort((a, b) => a[totalKey] - b[totalKey])[0].manager
+    : null;
 
   let html = `<h3>${periodLabel} Standings</h3>`;
   html += '<div class="pool-play-grid">';
@@ -1634,7 +1637,7 @@ function renderPoolPeriodContent(period) {
           ${poolEntries.map((p, i) => `
             <tr class="${i === 0 ? 'pool-leader-row' : ''}">
               <td class="rank">${i + 1}</td>
-              <td><strong>${p.manager}</strong></td>
+              <td><strong>${p.manager}</strong>${p.manager === ppLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''}</td>
               <td class="num">${fmt(p[battingKey])}</td>
               <td class="num">${fmt(p[pitchingKey])}</td>
               <td class="num"><strong>${fmt(p[totalKey])}</strong></td>
@@ -1656,6 +1659,7 @@ function renderPPOverallContent(leaders, seeding) {
   if (!DATA || !DATA.scoreboard) return '<p>No pool play data available.</p>';
 
   const poolPlay = [...DATA.scoreboard.pool_play].sort((a, b) => b.pp_total - a.pp_total);
+  const lastPlaceMgr = poolPlay.length > 0 ? poolPlay[poolPlay.length - 1].manager : null;
 
   let html = '<h3>Overall Pool Play Standings</h3>';
   html += '<div class="table-wrapper"><table class="data-table"><thead><tr>';
@@ -1688,7 +1692,7 @@ function renderPPOverallContent(leaders, seeding) {
 
     html += `<tr class="${rowClass}">
       <td class="rank">${i + 1}</td>
-      <td><strong>${p.manager}</strong></td>
+      <td><strong>${p.manager}</strong>${p.manager === lastPlaceMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''}</td>
       <td>${pool}</td>
       <td class="num">${fmt(p.pp1_total)}</td>
       <td class="num">${fmt(p.pp2_total)}</td>
@@ -2786,6 +2790,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     m.total = Math.round((m.batting + m.pitching) * 100) / 100;
     return m;
   }).sort((a, b) => b.total - a.total);
+  const overallLastMgr = overallScores.length > 0 ? overallScores[overallScores.length - 1].manager : null;
 
   // ---- Determine PP1 and PP2 pool winners ----
   const pp1Winners = {}; // poolNum → manager name
@@ -2848,7 +2853,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
         const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_');
         html += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${m.manager.replace(/'/g, "\\'")}')">
           <td class="rank">${i + 1}</td>
-          <td><strong class="${cls}">${m.manager}</strong> <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
+          <td><strong class="${cls}">${m.manager}</strong>${m.manager === overallLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''} <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
           <td class="num">${fmt(m.batting)}</td>
           <td class="num">${fmt(m.pitching)}</td>
           <td class="num"><strong>${fmt(m.total)}</strong></td>
@@ -2876,7 +2881,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_') + '_ov';
       tbl += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${m.manager.replace(/'/g, "\\'")}')">
         <td class="rank">${i + 1}</td>
-        <td><strong class="${cls}">${m.manager}</strong> <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
+        <td><strong class="${cls}">${m.manager}</strong>${m.manager === overallLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''} <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
         <td>${mgrPool[m.manager] || ''}</td>
         <td class="num">${fmt(m.batting)}</td>
         <td class="num">${fmt(m.pitching)}</td>
