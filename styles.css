@@ -3551,6 +3551,15 @@ body::before {
   color: var(--primary);
 }
 
+/* Last-place manager icon */
+.last-place-icon {
+  font-style: normal;
+  font-size: 0.95em;
+  vertical-align: middle;
+  cursor: default;
+  user-select: none;
+}
+
 /* ============================================================
    Commissioner Roster Table — compact (no horizontal scroll)
    ============================================================ */
