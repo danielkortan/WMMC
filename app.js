@@ -5826,12 +5826,10 @@ function _mgrNormalRow(m, idx) {
     <td><strong>${m.name}</strong></td>
     <td style="font-size:0.85rem;">${m.email}</td>
     <td>${m.active !== false ? poolLabel : '<span style="color:var(--text-muted)">—</span>'}</td>
-    <td>${m.commissioner ? '<span class="swap-badge swap-badge-approved" style="font-size:0.72rem;">Yes</span>' : '<span style="color:var(--text-muted);font-size:0.85rem;">No</span>'}</td>
+    <td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary" onclick="inlineEditManager(${idx})">Edit</button></td>
     <td>${_mgrPwCell(m)}</td>
-    <td style="white-space:nowrap;">
-      <button class="btn btn-sm btn-secondary" onclick="inlineEditManager(${idx})">Edit</button>
-      <button class="btn btn-sm btn-danger" onclick="deleteManager(${idx})">Delete</button>
-    </td>
+    <td>${m.commissioner ? '<span class="swap-badge swap-badge-approved" style="font-size:0.72rem;">Yes</span>' : '<span style="color:var(--text-muted);font-size:0.85rem;">No</span>'}</td>
+    <td style="white-space:nowrap;"><button class="btn btn-sm btn-danger" onclick="deleteManager(${idx})">Delete</button></td>
   </tr>`;
 }
 
@@ -5844,7 +5842,7 @@ function renderManagersTable() {
   const inactiveList = managers.map((m, i) => ({...m, _idx: i})).filter(m => m.active === false);
 
   const tableHead = `<thead><tr>
-    <th>Name</th><th>Email</th><th>Pool</th><th>Commissioner</th><th>Password</th><th>Actions</th>
+    <th>Name</th><th>Email</th><th>Pool</th><th></th><th>Password</th><th>Commissioner</th><th></th>
   </tr></thead>`;
 
   let html = `<p class="mgr-section-label">Active Managers <span class="mgr-count">(${activeList.length})</span></p>`;
@@ -5938,13 +5936,8 @@ window.inlineEditManager = function(idx) {
         <option value="3" ${m.pool == 3 ? 'selected' : ''}>Pool 3</option>
       </select>
     </td>
-    <td>
-      <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;white-space:nowrap;">
-        <input type="checkbox" id="inline-mgr-comm-${idx}" ${m.commissioner ? 'checked' : ''}> Comm
-      </label>
-      <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;white-space:nowrap;margin-top:0.2rem;">
-        <input type="checkbox" id="inline-mgr-active-${idx}" ${m.active !== false ? 'checked' : ''}> Active
-      </label>
+    <td style="white-space:nowrap;">
+      <button class="btn btn-sm btn-success" onclick="saveInlineManager(${idx})">Save</button>
     </td>
     <td>
       <div class="mgr-pw-cell">
@@ -5954,8 +5947,15 @@ window.inlineEditManager = function(idx) {
         ${hasCustomPw ? `<button class="btn btn-sm btn-secondary" onclick="resetManagerPassword('${safeEmail}')" style="font-size:0.75rem;padding:0.2rem 0.45rem;">Reset</button>` : ''}
       </div>
     </td>
+    <td>
+      <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;white-space:nowrap;">
+        <input type="checkbox" id="inline-mgr-comm-${idx}" ${m.commissioner ? 'checked' : ''}> Comm
+      </label>
+      <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;white-space:nowrap;margin-top:0.2rem;">
+        <input type="checkbox" id="inline-mgr-active-${idx}" ${m.active !== false ? 'checked' : ''}> Active
+      </label>
+    </td>
     <td style="white-space:nowrap;">
-      <button class="btn btn-sm btn-success" onclick="saveInlineManager(${idx})">Save</button>
       <button class="btn btn-sm btn-secondary" onclick="renderManagersTable()">Cancel</button>
     </td>`;
 };
