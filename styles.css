@@ -3403,6 +3403,7 @@ body::before {
   border-radius: 6px;
   margin: 2px 4px 6px;
   padding: 0.4rem 0.5rem;
+  overflow-x: auto;
 }
 
 .mgr-detail-cols {
@@ -3432,6 +3433,15 @@ body::before {
 }
 .mgr-detail-panel .data-table thead th:first-child { border-radius: 4px 0 0 0; }
 .mgr-detail-panel .data-table thead th:last-child { border-radius: 0 4px 0 0; }
+
+/* Compact date range cell (replaces Status column) */
+.mgr-detail-date {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-align: center;
+  width: 1%;
+}
 
 .mgr-detail-loading {
   padding: 0.5rem;

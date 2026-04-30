@@ -1296,6 +1296,9 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
   const currentRoster = currentWeekKey ? mgrRosters[currentWeekKey] : { batters: [], pitchers: [] };
   const activeBatters = new Set(currentRoster.batters || []);
   const activePitchers = new Set(currentRoster.pitchers || []);
+  // Track the opening-week roster so we can tell original players from mid-season adds
+  const firstWeekKey = sortedWeeks[0] || null;
+  const firstRoster = firstWeekKey ? (mgrRosters[firstWeekKey] || { batters: [], pitchers: [] }) : { batters: [], pitchers: [] };
 
   // Compute total points per player
   function playerPts(name, type) {
@@ -1354,25 +1357,33 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
   function buildPlayerRows(names, type, activeSet) {
     const batOrPit = type === 'batting' ? 'batters' : 'pitchers';
     if (names.size === 0) return '<tr><td colspan="3" class="text-muted" style="font-size:0.82rem;">None</td></tr>';
+    // Convert "Mon DD" string (from fmtShortDate) → "M/DD"
+    const toMD = s => {
+      if (!s) return '';
+      const mo = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
+      const [mon, day] = s.split(' ');
+      const m = mo[mon];
+      return m ? `${m}/${String(parseInt(day)).padStart(2,'0')}` : s;
+    };
     return [...names].sort().map(name => {
       const pts = playerPts(name, type);
       const isActive = activeSet.has(name);
-      const { addDate, dropDate, swapReason } = playerHistory(name, batOrPit);
-      let statusHtml;
-      if (isActive) {
-        statusHtml = `<span style="color:var(--success);font-weight:600;">Active</span>`;
-        if (addDate) statusHtml += ` <span style="color:#888;">${addDate}</span>`;
-      } else {
-        statusHtml = `<span style="color:#ef4444;">Dropped</span>`;
-        const info = [dropDate, addDate ? '+' + addDate : null].filter(Boolean).join(' ');
-        if (info) statusHtml += ` <span style="color:#888;">${info}</span>`;
+      const { addDate, dropDate } = playerHistory(name, batOrPit);
+      const wasOriginal = (firstRoster[batOrPit] || []).includes(name);
+      // Only show a date range when the player was actually swapped in or out
+      let dateCell = '';
+      if (!isActive) {
+        const s = toMD(addDate), e = toMD(dropDate);
+        dateCell = (s && e) ? `${s}–${e}` : (e || s);
+      } else if (!wasOriginal && addDate) {
+        dateCell = `${toMD(addDate)}–`;
       }
       const safeName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       const safeMgr = managerName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return `<tr class="${isActive ? '' : 'dropped-player'}">
         <td>${name}</td>
         <td class="num"><button class="pqv-pts-btn" onclick="showPlayerQuickView('${safeName}','${type}','${safeMgr}')"><strong>${fmt(pts)}</strong></button></td>
-        <td style="white-space:nowrap;">${statusHtml}</td>
+        <td class="mgr-detail-date">${dateCell}</td>
       </tr>`;
     }).join('');
   }
@@ -1383,12 +1394,12 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
       <div class="mgr-detail-cols">
         <div class="mgr-detail-section">
           <div class="mgr-detail-header">Batters</div>
-          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th>Status</th></tr></thead>
+          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th></th></tr></thead>
           <tbody>${buildPlayerRows(allBatters, 'batting', activeBatters)}</tbody></table>
         </div>
         <div class="mgr-detail-section">
           <div class="mgr-detail-header">Pitchers</div>
-          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th>Status</th></tr></thead>
+          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th></th></tr></thead>
           <tbody>${buildPlayerRows(allPitchers, 'pitching', activePitchers)}</tbody></table>
         </div>
       </div>
