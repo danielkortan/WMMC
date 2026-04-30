@@ -4,7 +4,9 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'db.json');
+// DB_PATH env var lets Render point db.json to a persistent disk mount (/var/data/db.json)
+// while local dev keeps it in the project directory.
+const DB_FILE = process.env.DB_PATH || path.join(__dirname, 'db.json');
 // Committed seed file — persists manager identity (name/email/role) across fresh deploys.
 // Passwords are never stored here; they live only in db.json so git pulls can't reset them.
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
@@ -996,8 +998,12 @@ app.use((err, req, res, _next) => {
 // ============================================================
 
 async function main() {
+  // Ensure the directory that holds db.json exists (needed when DB_PATH points to a
+  // Render persistent disk mount like /var/data that may not have been created yet).
+  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+
   // Restore db.json from Upstash before the server accepts any requests.
-  // This is what survives Render's ephemeral filesystem across deploys.
+  // Active when UPSTASH_* env vars are set; no-op otherwise.
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
       console.log('[Upstash] Restoring db...');

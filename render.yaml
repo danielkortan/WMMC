@@ -4,12 +4,14 @@ services:
     runtime: node
     buildCommand: npm install
     startCommand: node server.js
+    disk:
+      name: wmmc-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
       - key: LOGIN_PASSWORD
         sync: false
-      - key: UPSTASH_REDIS_REST_URL
-        sync: false
-      - key: UPSTASH_REDIS_REST_TOKEN
-        sync: false
+      - key: DB_PATH
+        value: /var/data/db.json
