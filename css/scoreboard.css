@@ -656,3 +656,102 @@
 .dropped-player td {
   opacity: 0.65;
 }
+
+/* ============================================================ */
+/* Player Quick-View Popup                                      */
+/* ============================================================ */
+
+.pqv-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.pqv-card {
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.22);
+  max-width: 820px;
+  width: 100%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.pqv-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 1rem 1.25rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.pqv-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.pqv-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.1rem;
+}
+
+.pqv-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0 0.15rem;
+  margin-left: 1rem;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+
+.pqv-close:hover {
+  color: var(--text);
+}
+
+.pqv-body {
+  padding: 0.85rem 1rem 1rem;
+  overflow-y: auto;
+}
+
+.pqv-table-wrap {
+  overflow-x: auto;
+}
+
+.pqv-table {
+  min-width: 100%;
+}
+
+.pqv-totals td {
+  background: var(--bg-alt, #f8f9fa);
+  border-top: 2px solid var(--border) !important;
+}
+
+/* Pts value trigger in the manager detail panel */
+.pqv-pts-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline dotted var(--primary, #002d62);
+  text-underline-offset: 2px;
+}
+
+.pqv-pts-btn:hover strong {
+  color: var(--primary);
+}
