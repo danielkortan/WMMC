@@ -3759,7 +3759,7 @@ function setupMyRoster() {
   if (isCommissioner) {
     // Commissioner: show dropdown to switch between any manager's roster
     managerSelect.style.display = '';
-    managerSelect.innerHTML = managers.map(m => {
+    managerSelect.innerHTML = [...managers].sort((a, b) => a.name.localeCompare(b.name)).map(m => {
       const label = m.name + (m.commissioner ? ' (Commissioner)' : '') + (m.active === false ? ' (Inactive)' : '');
       return `<option value="${m.name}"${m.name === loggedInMgr.name ? ' selected' : ''}>${label}</option>`;
     }).join('');
