@@ -4,12 +4,19 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'db.json');
+// DB_PATH env var lets Render point db.json to a persistent disk mount (/var/data/db.json)
+// while local dev keeps it in the project directory.
+const DB_FILE = process.env.DB_PATH || path.join(__dirname, 'db.json');
 // Committed seed file — persists manager identity (name/email/role) across fresh deploys.
 // Passwords are never stored here; they live only in db.json so git pulls can't reset them.
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'Welcome2Hell';
 
+// Upstash Redis REST — durable backup for db.json across Render ephemeral deploys.
+// Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Render env vars.
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const UPSTASH_KEY = 'wmmc_db';
 
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
@@ -81,6 +88,45 @@ app.use(express.static(__dirname, {
 // Database helpers
 // ============================================================
 
+// ============================================================
+// Upstash Redis helpers — durable db.json persistence
+// ============================================================
+
+async function loadFromUpstash() {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const resp = await fetch(`${UPSTASH_URL}/get/${UPSTASH_KEY}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+    });
+    if (!resp.ok) return null;
+    const { result } = await resp.json();
+    return result ? JSON.parse(result) : null;
+  } catch (e) {
+    console.error('[Upstash] Load failed:', e.message);
+    return null;
+  }
+}
+
+async function saveToUpstash(data) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    const resp = await fetch(`${UPSTASH_URL}/set/${UPSTASH_KEY}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${UPSTASH_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(JSON.stringify(data))
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error('[Upstash] Save error:', resp.status, text.slice(0, 200));
+    }
+  } catch (e) {
+    console.error('[Upstash] Save failed:', e.message);
+  }
+}
+
 function readManagersSeed() {
   try {
     if (fs.existsSync(MANAGERS_SEED_FILE)) {
@@ -121,6 +167,8 @@ function readDB() {
 
 function writeDB(data) {
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
+  // Async backup to Upstash so data survives Render's ephemeral filesystem
+  saveToUpstash(data).catch(e => console.error('[Upstash] Background save failed:', e.message));
 }
 
 // ============================================================
@@ -949,34 +997,59 @@ app.use((err, req, res, _next) => {
 // Start
 // ============================================================
 
-app.listen(PORT, () => {
-  console.log(`WMMC server running at http://localhost:${PORT}`);
-  if (!fs.existsSync(DB_FILE)) {
-    writeDB({ seasons: {}, managers: [], audit_log: [] });
-    console.log('Created empty db.json');
-  }
+async function main() {
+  // Ensure the directory that holds db.json exists (needed when DB_PATH points to a
+  // Render persistent disk mount like /var/data that may not have been created yet).
+  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 
-  // Auto-seed managers from data.json if db.json has none
-  const db = readDB();
-  if (!db.managers || db.managers.length === 0) {
+  // Restore db.json from Upstash before the server accepts any requests.
+  // Active when UPSTASH_* env vars are set; no-op otherwise.
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
-      const data = JSON.parse(fs.readFileSync(path.join(__dirname, 'data.json'), 'utf8'));
-      const emailMap = data.email_map || {};
-      if (Object.keys(emailMap).length > 0) {
-        db.managers = Object.entries(emailMap).map(([email, name]) => ({
-          name,
-          email,
-          commissioner: email === 'daniel.kortan@gmail.com',
-          active: true,
-        }));
-        writeDB(db);
-        console.log(`Seeded ${db.managers.length} managers from data.json`);
+      console.log('[Upstash] Restoring db...');
+      const saved = await loadFromUpstash();
+      if (saved) {
+        fs.writeFileSync(DB_FILE, JSON.stringify(saved, null, 2), 'utf8');
+        console.log('[Upstash] db restored successfully');
+      } else {
+        console.log('[Upstash] No saved db found — starting fresh or using local db.json');
       }
     } catch (e) {
-      console.error('Could not seed managers from data.json:', e.message);
+      console.error('[Upstash] Restore error (continuing with local db.json):', e.message);
     }
   }
 
-  // Start the Google Sheets sync scheduler
-  scheduleGSheetsSync();
-});
+  app.listen(PORT, () => {
+    console.log(`WMMC server running at http://localhost:${PORT}`);
+    if (!fs.existsSync(DB_FILE)) {
+      writeDB({ seasons: {}, managers: [], audit_log: [] });
+      console.log('Created empty db.json');
+    }
+
+    // Auto-seed managers from data.json if db.json has none
+    const db = readDB();
+    if (!db.managers || db.managers.length === 0) {
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(__dirname, 'data.json'), 'utf8'));
+        const emailMap = data.email_map || {};
+        if (Object.keys(emailMap).length > 0) {
+          db.managers = Object.entries(emailMap).map(([email, name]) => ({
+            name,
+            email,
+            commissioner: email === 'daniel.kortan@gmail.com',
+            active: true,
+          }));
+          writeDB(db);
+          console.log(`Seeded ${db.managers.length} managers from data.json`);
+        }
+      } catch (e) {
+        console.error('Could not seed managers from data.json:', e.message);
+      }
+    }
+
+    // Start the Google Sheets sync scheduler
+    scheduleGSheetsSync();
+  });
+}
+
+main().catch(console.error);
