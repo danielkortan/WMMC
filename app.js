@@ -204,6 +204,16 @@ function getCurrentScoringPeriod(seasonData) {
 }
 
 // ============================================================
+// Player display helper — shows "Juan Soto (NYM)" when team data exists
+// ============================================================
+function displayPlayer(name, sd) {
+  if (!name) return '';
+  const team = (sd && sd.batters_team && sd.batters_team[name])
+    || (sd && sd.pitchers_team && sd.pitchers_team[name]);
+  return team ? `${name} (${team})` : name;
+}
+
+// ============================================================
 // Data helpers (localStorage cache + server persistence)
 // ============================================================
 function getSeasons() {
@@ -3961,7 +3971,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.batCumulative[batter] || 0;
         const cumRank = cumRankings.batRanks[batter];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${batter}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter)}</td>`;
+        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter)}</td>`;
         html += batStatCell(s, 'abs', s.abs || 0);
         html += batStatCell(s, '1b', s['1b'] || 0);
         html += batStatCell(s, '2b', s['2b'] || 0);
@@ -4006,7 +4016,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.pitCumulative[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${pitcher}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher)}</td>`;
+        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher)}</td>`;
         html += pitStatCell(s, 'gs', s.gs || 0);
         html += pitStatCell(s, 'w', s.w || 0);
         // QS: highlight yellow if pitcher had 2+ GS (qs_highlight flag)
@@ -4313,7 +4323,7 @@ function buildTeamStatsBreakdown(managerName, seasonData, p2m) {
             <div class="period-player-group-header">BATTERS</div>`;
       sortedBatters.forEach(({ name, pts }) => {
         html += `<div class="period-player-row">
-              <span class="period-player-name">${name}</span>
+              <span class="period-player-name">${displayPlayer(name, seasonData)}</span>
               <span class="period-player-type">BAT</span>
               <span class="period-player-pts">${fmt(pts)}</span>
             </div>`;
@@ -4327,7 +4337,7 @@ function buildTeamStatsBreakdown(managerName, seasonData, p2m) {
             <div class="period-player-group-header">PITCHERS</div>`;
       sortedPitchers.forEach(({ name, pts }) => {
         html += `<div class="period-player-row">
-              <span class="period-player-name">${name}</span>
+              <span class="period-player-name">${displayPlayer(name, seasonData)}</span>
               <span class="period-player-type">PIT</span>
               <span class="period-player-pts">${fmt(pts)}</span>
             </div>`;
@@ -4437,14 +4447,14 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
           <label for="swap-player-out">Player Out (from your roster)</label>
           <select id="swap-player-out" class="form-select">
             <option value="">Select player to swap out...</option>
-            ${roster.batters.sort().map(b => `<option value="${b}" data-type="batter">${b}</option>`).join('')}
+            ${roster.batters.sort().map(b => `<option value="${b}" data-type="batter">${displayPlayer(b, seasonData)}</option>`).join('')}
           </select>
         </div>
         <div class="swap-form-field">
           <label for="swap-player-in">Player In (available)</label>
           <select id="swap-player-in" class="form-select">
             <option value="">Select replacement player...</option>
-            ${availBatters.map(b => `<option value="${b}">${b}</option>`).join('')}
+            ${availBatters.map(b => `<option value="${b}">${displayPlayer(b, seasonData)}</option>`).join('')}
           </select>
         </div>
         <div class="swap-form-field">
@@ -4467,7 +4477,9 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       batters: roster.batters.sort(),
       pitchers: roster.pitchers.sort(),
       availBatters: availBatters,
-      availPitchers: availPitchers
+      availPitchers: availPitchers,
+      battersTeam: seasonData.batters_team || {},
+      pitchersTeam: seasonData.pitchers_team || {}
     })}</script>`;
   }
 
@@ -4484,7 +4496,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
             <span class="swap-badge swap-badge-pending">Pending</span>
           </div>
           <div class="swap-pending-details">
-            <span>${s.player_out} &rarr; ${s.player_in}</span>
+            <span>${displayPlayer(s.player_out, seasonData)} &rarr; ${displayPlayer(s.player_in, seasonData)}</span>
             <span class="swap-detail-reason">${s.reason}</span>
             <span class="swap-detail-date">${s.swap_date || ''}</span>
           </div>
@@ -4558,8 +4570,8 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       const badgeLabel = status.charAt(0).toUpperCase() + status.slice(1);
       const date = s.swap_date || (s.timestamp ? s.timestamp.split(' ')[0] : '');
       html += `<tr>`;
-      html += `<td>${s.player_in || '—'}</td>`;
-      html += `<td>${s.player_out || '—'}</td>`;
+      html += `<td>${s.player_in ? displayPlayer(s.player_in, seasonData) : '—'}</td>`;
+      html += `<td>${s.player_out ? displayPlayer(s.player_out, seasonData) : '—'}</td>`;
       html += `<td>${s.reason || ''}</td>`;
       html += `<td>${date}</td>`;
       html += `<td><span class="swap-badge ${badgeClass}">${badgeLabel}</span></td>`;
@@ -4601,11 +4613,11 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       html += `<div class="swap-badge swap-badge-approved" style="margin-bottom:0.75rem;">Approved by Commissioner</div>`;
       html += `<div class="wrs-group-label">BATTERS (${submittedBatters.length}/4)</div>`;
       html += '<div class="comm-player-list">';
-      submittedBatters.forEach(b => { html += `<div class="comm-player-item"><span>${b}</span></div>`; });
+      submittedBatters.forEach(b => { html += `<div class="comm-player-item"><span>${displayPlayer(b, seasonData)}</span></div>`; });
       html += '</div>';
       html += `<div class="wrs-group-label" style="margin-top:0.5rem;">PITCHERS (${submittedPitchers.length}/3)</div>`;
       html += '<div class="comm-player-list">';
-      submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${p}</span></div>`; });
+      submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span></div>`; });
       html += '</div>';
     } else if (poolReady) {
       // Editable submission form (only when pool is available)
@@ -4621,7 +4633,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
         submittedBatters.forEach(b => {
           const safeB = b.replace(/'/g, "\\'");
           html += `<div class="comm-player-item">
-            <span>${b}</span>
+            <span>${displayPlayer(b, seasonData)}</span>
             <button class="btn btn-sm btn-danger" onclick="removeInitialPlayer('${safeMgr}','batters','${safeB}')">Remove</button>
           </div>`;
         });
@@ -4644,7 +4656,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
         submittedPitchers.forEach(p => {
           const safeP = p.replace(/'/g, "\\'");
           html += `<div class="comm-player-item">
-            <span>${p}</span>
+            <span>${displayPlayer(p, seasonData)}</span>
             <button class="btn btn-sm btn-danger" onclick="removeInitialPlayer('${safeMgr}','pitchers','${safeP}')">Remove</button>
           </div>`;
         });
@@ -4730,21 +4742,23 @@ window.swapTypeToggle = function(type) {
   if (!dataEl) return;
 
   const data = JSON.parse(dataEl.textContent);
+  const teamMap = Object.assign({}, data.battersTeam || {}, data.pitchersTeam || {});
+  const dp = (name) => { const t = teamMap[name]; return t ? `${name} (${t})` : name; };
 
   if (type === 'batter') {
     batterBtn.classList.add('active');
     pitcherBtn.classList.remove('active');
     outSelect.innerHTML = '<option value="">Select player to swap out...</option>'
-      + data.batters.map(b => `<option value="${b}">${b}</option>`).join('');
+      + data.batters.map(b => `<option value="${b}">${dp(b)}</option>`).join('');
     inSelect.innerHTML = '<option value="">Select replacement player...</option>'
-      + data.availBatters.map(b => `<option value="${b}">${b}</option>`).join('');
+      + data.availBatters.map(b => `<option value="${b}">${dp(b)}</option>`).join('');
   } else {
     pitcherBtn.classList.add('active');
     batterBtn.classList.remove('active');
     outSelect.innerHTML = '<option value="">Select player to swap out...</option>'
-      + data.pitchers.map(p => `<option value="${p}">${p}</option>`).join('');
+      + data.pitchers.map(p => `<option value="${p}">${dp(p)}</option>`).join('');
     inSelect.innerHTML = '<option value="">Select replacement player...</option>'
-      + data.availPitchers.map(p => `<option value="${p}">${p}</option>`).join('');
+      + data.availPitchers.map(p => `<option value="${p}">${dp(p)}</option>`).join('');
   }
 };
 
@@ -4967,13 +4981,13 @@ window.editSwapInline = function(swapId) {
       <div class="swap-form-field">
         <label>Player Out</label>
         <select id="edit-out-${swapId}" class="form-select">
-          ${rosterPlayers.sort().map(p => `<option value="${p}" ${p === swap.player_out ? 'selected' : ''}>${p}</option>`).join('')}
+          ${rosterPlayers.sort().map(p => `<option value="${p}" ${p === swap.player_out ? 'selected' : ''}>${displayPlayer(p, sd)}</option>`).join('')}
         </select>
       </div>
       <div class="swap-form-field">
         <label>Player In</label>
         <select id="edit-in-${swapId}" class="form-select">
-          ${availPlayers.map(p => `<option value="${p}" ${p === swap.player_in ? 'selected' : ''}>${p}</option>`).join('')}
+          ${availPlayers.map(p => `<option value="${p}" ${p === swap.player_in ? 'selected' : ''}>${displayPlayer(p, sd)}</option>`).join('')}
         </select>
       </div>
       <div class="swap-form-field">
@@ -5172,8 +5186,8 @@ function renderPendingSwapRequests() {
         <span class="swap-badge swap-badge-pending">Initial Roster Pending</span>
       </div>
       <div class="swap-pending-details" style="flex-direction:column;align-items:flex-start;gap:0.15rem;">
-        <span><strong>Batters:</strong> ${(sub.batters || []).join(', ') || 'None'}</span>
-        <span><strong>Pitchers:</strong> ${(sub.pitchers || []).join(', ') || 'None'}</span>
+        <span><strong>Batters:</strong> ${(sub.batters || []).map(b => displayPlayer(b, sd)).join(', ') || 'None'}</span>
+        <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map(p => displayPlayer(p, sd)).join(', ') || 'None'}</span>
       </div>
       <div id="comm-initial-edit-${idSafe}" style="display:none;"></div>
       <div class="swap-pending-actions">
@@ -5194,7 +5208,7 @@ function renderPendingSwapRequests() {
         <span class="swap-badge swap-badge-pending">Swap Pending</span>
       </div>
       <div class="swap-pending-details">
-        <span>${s.player_out || '?'} &rarr; ${s.player_in || '?'}</span>
+        <span>${displayPlayer(s.player_out || '?', sd)} &rarr; ${displayPlayer(s.player_in || '?', sd)}</span>
         <span class="swap-detail-reason">${s.reason || ''}</span>
         <span class="swap-detail-date">${s.swap_date || ''}</span>
       </div>
@@ -6293,7 +6307,7 @@ function setupPlayerSearchInputs() {
       if (matches.length === 0) { resultsDiv.innerHTML = ''; resultsDiv.style.display = 'none'; return; }
       resultsDiv.style.display = 'block';
       resultsDiv.innerHTML = matches.map(m =>
-        `<div class="player-search-item" onmousedown="selectPlayerSearchResult('${input.id}','${m.replace(/'/g, "\\'")}')">${m}</div>`
+        `<div class="player-search-item" onmousedown="selectPlayerSearchResult('${input.id}','${m.replace(/'/g, "\\'")}')">${displayPlayer(m, sd)}</div>`
       ).join('');
     });
 
@@ -6539,8 +6553,8 @@ window.editInitialSubmissionComm = function(manager) {
   (sub.batters || []).forEach((b, i) => {
     const pool = (sd.batters_pool || []).sort();
     editHtml += `<div style="margin-bottom:0.25rem;">
-      <select class="form-select" style="max-width:220px;display:inline-block;font-size:0.82rem;" id="comm-edit-init-bat-${idSafe}-${i}">
-        ${pool.map(p => `<option value="${p}"${p === b ? ' selected' : ''}>${p}</option>`).join('')}
+      <select class="form-select" style="max-width:280px;display:inline-block;font-size:0.82rem;" id="comm-edit-init-bat-${idSafe}-${i}">
+        ${pool.map(p => `<option value="${p}"${p === b ? ' selected' : ''}>${displayPlayer(p, sd)}</option>`).join('')}
       </select></div>`;
   });
 
@@ -6548,8 +6562,8 @@ window.editInitialSubmissionComm = function(manager) {
   (sub.pitchers || []).forEach((p, i) => {
     const pool = (sd.pitchers_pool || []).sort();
     editHtml += `<div style="margin-bottom:0.25rem;">
-      <select class="form-select" style="max-width:220px;display:inline-block;font-size:0.82rem;" id="comm-edit-init-pit-${idSafe}-${i}">
-        ${pool.map(pl => `<option value="${pl}"${pl === p ? ' selected' : ''}>${pl}</option>`).join('')}
+      <select class="form-select" style="max-width:280px;display:inline-block;font-size:0.82rem;" id="comm-edit-init-pit-${idSafe}-${i}">
+        ${pool.map(pl => `<option value="${pl}"${pl === p ? ' selected' : ''}>${displayPlayer(pl, sd)}</option>`).join('')}
       </select></div>`;
   });
 
@@ -6674,7 +6688,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
       const pDates = getPlayerDates(batter);
       batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      batHtml += `<td>${batter}${onRoster ? commDateTag(batter) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
+      batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
       batHtml += `<td class="num${manual('1b')}">${s['1b'] || 0}</td>`;
       batHtml += `<td class="num${manual('2b')}">${s['2b'] || 0}</td>`;
@@ -6729,7 +6743,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
       const pDates = getPlayerDates(pitcher);
       pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      pitHtml += `<td>${pitcher}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
+      pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
       pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
       pitHtml += `<td class="num${manual('w')}">${s.w || 0}</td>`;
       if (s.qs_highlight) {
@@ -6909,10 +6923,11 @@ function setupPlayerPoolUploads() {
   document.getElementById('upload-batters-pool-btn').onclick = () => {
     const fileInput = document.getElementById('upload-batters-pool');
     if (!fileInput.files[0]) { alert('Select a file first.'); return; }
-    parseCSVFile(fileInput.files[0], (names) => {
+    parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
       sd.batters_pool = names;
+      sd.batters_team = teamMap;
       saveSeason(SELECTED_SEASON, sd);
       const pitCount = (sd.pitchers_pool || []).length;
       let msg = `<p class="success-text">Uploaded ${names.length} batters to the player pool.</p>`;
@@ -6930,10 +6945,11 @@ function setupPlayerPoolUploads() {
   document.getElementById('upload-pitchers-pool-btn').onclick = () => {
     const fileInput = document.getElementById('upload-pitchers-pool');
     if (!fileInput.files[0]) { alert('Select a file first.'); return; }
-    parseCSVFile(fileInput.files[0], (names) => {
+    parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
       sd.pitchers_pool = names;
+      sd.pitchers_team = teamMap;
       saveSeason(SELECTED_SEASON, sd);
       const batCount = (sd.batters_pool || []).length;
       let msg = `<p class="success-text">Uploaded ${names.length} pitchers to the player pool.</p>`;
@@ -6966,7 +6982,7 @@ function renderPlayerPoolDisplay() {
   html += '<div>';
   html += `<h3>Batters Pool (${batters.length})</h3>`;
   if (batters.length > 0) {
-    html += '<div class="pool-list">' + batters.map(n => `<span class="pool-tag">${n}</span>`).join('') + '</div>';
+    html += '<div class="pool-list">' + batters.map(n => `<span class="pool-tag">${displayPlayer(n, sd)}</span>`).join('') + '</div>';
   } else {
     html += '<p class="text-muted">No batters uploaded yet.</p>';
   }
@@ -6975,7 +6991,7 @@ function renderPlayerPoolDisplay() {
   html += '<div>';
   html += `<h3>Pitchers Pool (${pitchers.length})</h3>`;
   if (pitchers.length > 0) {
-    html += '<div class="pool-list">' + pitchers.map(n => `<span class="pool-tag">${n}</span>`).join('') + '</div>';
+    html += '<div class="pool-list">' + pitchers.map(n => `<span class="pool-tag">${displayPlayer(n, sd)}</span>`).join('') + '</div>';
   } else {
     html += '<p class="text-muted">No pitchers uploaded yet.</p>';
   }
@@ -7595,23 +7611,40 @@ function parseCSVFile(file, callback) {
     const nameCol = headers.findIndex(h =>
       h === 'name' || h === 'player' || h === 'player_name' || h === 'playername' || h === 'batter' || h === 'pitcher'
     );
+    const teamCol = headers.findIndex(h =>
+      h === 'team' || h === 'tm' || h === 'team_abbrev' || h === 'abbreviation' || h === 'abbrev'
+    );
 
     if (nameCol === -1) {
       const names = [];
+      const teamMap = {};
       for (let i = 1; i < lines.length; i++) {
         const cols = parseCSVLine(lines[i]);
-        if (cols[0] && cols[0].trim()) names.push(cols[0].trim());
+        if (cols[0] && cols[0].trim()) {
+          const name = cols[0].trim();
+          names.push(name);
+          if (teamCol !== -1 && cols[teamCol] && cols[teamCol].trim()) {
+            teamMap[name] = cols[teamCol].trim().toUpperCase();
+          }
+        }
       }
-      callback(names);
+      callback(names, teamMap);
       return;
     }
 
     const names = [];
+    const teamMap = {};
     for (let i = 1; i < lines.length; i++) {
       const cols = parseCSVLine(lines[i]);
-      if (cols[nameCol] && cols[nameCol].trim()) names.push(cols[nameCol].trim());
+      if (cols[nameCol] && cols[nameCol].trim()) {
+        const name = cols[nameCol].trim();
+        names.push(name);
+        if (teamCol !== -1 && cols[teamCol] && cols[teamCol].trim()) {
+          teamMap[name] = cols[teamCol].trim().toUpperCase();
+        }
+      }
     }
-    callback(names);
+    callback(names, teamMap);
   };
   reader.readAsText(file);
 }
