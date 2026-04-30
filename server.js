@@ -5,9 +5,10 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
-// Committed seed file — persists manager list across deploys (no passwords stored here)
+// Committed seed file — persists manager identity (name/email/role) across fresh deploys.
+// Passwords are never stored here; they live only in db.json so git pulls can't reset them.
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
-const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'WelcometoHell123';
+const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'Welcome2Hell';
 
 
 // Unique token generated every time the server starts. Appended to asset URLs
@@ -93,9 +94,9 @@ function readManagersSeed() {
 
 function writeManagersSeed(managers) {
   try {
-    // Write full manager records including passwords so they survive redeploys.
-    // managers_seed.json is committed to git — keep this repo private.
-    fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(managers, null, 2), 'utf8');
+    // Strip passwords — they belong in db.json only, not in the git-committed seed file.
+    const seedRecords = managers.map(({ password, ...rest }) => rest);
+    fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
   }
