@@ -3049,6 +3049,22 @@ body::before {
   font-weight: 600;
 }
 
+/* ---- Multi-Start warning badge (next to pitcher name when GS >= 2) ---- */
+.multi-start-tag {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  margin-left: 0.3rem;
+  vertical-align: middle;
+}
+
 /* ---- Roster Tabs ---- */
 .roster-tabs {
   display: flex;
