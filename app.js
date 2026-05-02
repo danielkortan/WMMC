@@ -5183,6 +5183,64 @@ window.cancelSwapEdit = function(swapId) {
 // ============================================================
 // Commissioner Page
 // ============================================================
+function renderSubmissionStatusTable() {
+  const container = document.getElementById('submission-status-table');
+  if (!container) return;
+
+  const managers = getManagers().filter(m => m.active);
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const allSubs = (sd && sd.initial_submissions) || {};
+
+  const fmtDt = iso => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+      ' ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  let html = `<table class="data-table" style="width:100%;">
+    <thead>
+      <tr>
+        <th style="text-align:left;">Manager</th>
+        <th style="text-align:center;">Not Submitted</th>
+        <th style="text-align:center;">Submitted</th>
+        <th style="text-align:center;">Approved</th>
+      </tr>
+    </thead>
+    <tbody>`;
+
+  managers.forEach(m => {
+    const sub = allSubs[m.name];
+    const status = sub ? sub.status : 'draft';
+    const notSubmitted = !sub || status === 'draft';
+    const submitted = sub && (status === 'pending' || status === 'approved');
+    const approved = sub && status === 'approved';
+
+    const notSubCell = notSubmitted
+      ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted</td>`
+      : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+
+    const subCell = submitted
+      ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || 'Submitted'}</td>`
+      : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+
+    const appCell = approved
+      ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || 'Approved'}</td>`
+      : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+
+    html += `<tr>
+      <td style="font-weight:500;">${m.name}</td>
+      ${notSubCell}
+      ${subCell}
+      ${appCell}
+    </tr>`;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
 function renderCommissioner() {
   const loginDiv = document.getElementById('commissioner-login');
   const panelDiv = document.getElementById('commissioner-panel');
@@ -5223,6 +5281,7 @@ function showCommissionerPanel() {
   setupCommTabs();
   renderBannerBgSection();
   renderPendingSwapRequests();
+  renderSubmissionStatusTable();
   renderSwapLog();
   renderManagersTable();
   renderPlayerPoolDisplay();
@@ -6523,8 +6582,10 @@ window.submitInitialRoster = function(manager) {
   }
 
   sub.status = 'pending';
+  sub.submitted_at = new Date().toISOString();
   saveSeason(SELECTED_SEASON, sd);
   renderPendingSwapRequests();
+  renderSubmissionStatusTable();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
 };
@@ -6553,6 +6614,7 @@ window.approveInitialSubmission = function(manager) {
   }
 
   sub.status = 'approved';
+  sub.approved_at = new Date().toISOString();
 
   // Add all players to Week 1 roster
   const firstWeek = SEASON_SCHEDULE[0];
@@ -6590,6 +6652,7 @@ window.approveInitialSubmission = function(manager) {
 
   saveSeason(SELECTED_SEASON, sd);
   renderPendingSwapRequests();
+  renderSubmissionStatusTable();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
 };
@@ -6667,6 +6730,7 @@ window.denyInitialSubmission = function(manager) {
   sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
   saveSeason(SELECTED_SEASON, sd);
   renderPendingSwapRequests();
+  renderSubmissionStatusTable();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
 };
