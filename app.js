@@ -5222,11 +5222,11 @@ function renderSubmissionStatusTable() {
       : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
     const subCell = submitted
-      ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || 'Submitted'}</td>`
+      ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}</td>`
       : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
     const appCell = approved
-      ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || 'Approved'}</td>`
+      ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
       : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
     html += `<tr>
