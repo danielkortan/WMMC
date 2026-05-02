@@ -7127,13 +7127,22 @@ function setupPlayerPoolUploads() {
     parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
-      sd.batters_pool = names;
-      sd.batters_team = teamMap;
+      const existing = sd.batters_pool || [];
+      const existingTeam = sd.batters_team || {};
+      const existingSet = new Set(existing);
+      const added = names.filter(n => !existingSet.has(n));
+      sd.batters_pool = [...existing, ...added];
+      // Update team names for all players from the new file
+      Object.assign(existingTeam, teamMap);
+      sd.batters_team = existingTeam;
       saveSeason(SELECTED_SEASON, sd);
       const pitCount = (sd.pitchers_pool || []).length;
-      let msg = `<p class="success-text">Uploaded ${names.length} batters to the player pool.</p>`;
+      const totalBat = sd.batters_pool.length;
+      let msg = added.length > 0
+        ? `<p class="success-text">Added ${added.length} new batter(s) to the pool (${totalBat} total). Team names updated.</p>`
+        : `<p class="success-text">No new batters added (${totalBat} already in pool). Team names updated.</p>`;
       if (pitCount > 0) {
-        msg += `<p class="success-text">Player pool ready (${names.length} batters, ${pitCount} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
+        msg += `<p class="success-text">Player pool ready (${totalBat} batters, ${pitCount} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
       } else {
         msg += `<p class="text-muted" style="font-size:0.85rem;">Upload pitchers to complete the player pool and enable Initial Player Submissions.</p>`;
       }
@@ -7149,13 +7158,22 @@ function setupPlayerPoolUploads() {
     parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
-      sd.pitchers_pool = names;
-      sd.pitchers_team = teamMap;
+      const existing = sd.pitchers_pool || [];
+      const existingTeam = sd.pitchers_team || {};
+      const existingSet = new Set(existing);
+      const added = names.filter(n => !existingSet.has(n));
+      sd.pitchers_pool = [...existing, ...added];
+      // Update team names for all players from the new file
+      Object.assign(existingTeam, teamMap);
+      sd.pitchers_team = existingTeam;
       saveSeason(SELECTED_SEASON, sd);
       const batCount = (sd.batters_pool || []).length;
-      let msg = `<p class="success-text">Uploaded ${names.length} pitchers to the player pool.</p>`;
+      const totalPit = sd.pitchers_pool.length;
+      let msg = added.length > 0
+        ? `<p class="success-text">Added ${added.length} new pitcher(s) to the pool (${totalPit} total). Team names updated.</p>`
+        : `<p class="success-text">No new pitchers added (${totalPit} already in pool). Team names updated.</p>`;
       if (batCount > 0) {
-        msg += `<p class="success-text">Player pool ready (${batCount} batters, ${names.length} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
+        msg += `<p class="success-text">Player pool ready (${batCount} batters, ${totalPit} pitchers). Managers can now begin their Initial Player Submissions.</p>`;
       } else {
         msg += `<p class="text-muted" style="font-size:0.85rem;">Upload batters to complete the player pool and enable Initial Player Submissions.</p>`;
       }
