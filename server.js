@@ -590,6 +590,13 @@ function processBattingRows(rows, sd, scheduleWeek) {
     const batter = findCol(row, ['batter', 'player', 'name']);
     if (!batter) return;
 
+    // Update player→team map from sheet's Team column (handles new players + mid-season trades)
+    const team = findCol(row, ['team', 'Team']);
+    if (team) {
+      if (!sd.batters_team) sd.batters_team = {};
+      sd.batters_team[batter] = team;
+    }
+
     let manager = findManagerForPlayerWeek(sd, batter, 'batting', scheduleWeek.round, scheduleWeek.week);
     if (!manager) manager = findManagerForPlayer(sd, batter, 'batting');
     if (!manager) manager = findCol(row, ['manager', 'owner']);
@@ -649,6 +656,13 @@ function processPitchingRows(rows, sd, scheduleWeek) {
     const pitcher = findCol(row, ['pitcher', 'player', 'name']);
     if (!pitcher) return;
 
+    // Update player→team map from sheet's Team column (handles new players + mid-season trades)
+    const team = findCol(row, ['team', 'Team']);
+    if (team) {
+      if (!sd.pitchers_team) sd.pitchers_team = {};
+      sd.pitchers_team[pitcher] = team;
+    }
+
     let manager = findManagerForPlayerWeek(sd, pitcher, 'pitching', scheduleWeek.round, scheduleWeek.week);
     if (!manager) manager = findManagerForPlayer(sd, pitcher, 'pitching');
     if (!manager) manager = findCol(row, ['manager', 'owner']);
@@ -690,6 +704,7 @@ function processPitchingRows(rows, sd, scheduleWeek) {
       pitcher,
       status: findCol(row, ['status', 'Status']) || null,
       ...stats,
+      qs_highlight: stats.gs >= 2,
       weekly_score: weeklyScore,
       source: 'gsheets'
     });
@@ -725,6 +740,8 @@ async function syncGoogleSheets(year) {
 
   if (!sd.weekly_batting) sd.weekly_batting = [];
   if (!sd.weekly_pitching) sd.weekly_pitching = [];
+  if (!sd.batters_team) sd.batters_team = {};
+  if (!sd.pitchers_team) sd.pitchers_team = {};
 
   const results = [];
   let totalBatImported = 0, totalPitImported = 0;

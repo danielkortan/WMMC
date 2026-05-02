@@ -213,6 +213,12 @@ function displayPlayer(name, sd) {
   return team ? `${name} (${team})` : name;
 }
 
+// Visible badge for pitchers who had 2+ starts in a week — QS can't be auto-calculated,
+// commissioner needs to manually score it in the app.
+function multiStartTag() {
+  return ' <span class="multi-start-tag" title="Multiple starts this week — review and set QS manually">⚠ Multi-Start</span>';
+}
+
 // ============================================================
 // Data helpers (localStorage cache + server persistence)
 // ============================================================
@@ -4147,7 +4153,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.pitCumulative[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher)}</td>`;
+        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher)}${s.qs_highlight ? multiStartTag() : ''}</td>`;
         html += pitStatCell(s, 'gs', s.gs || 0);
         html += pitStatCell(s, 'w', s.w || 0);
         // QS: highlight yellow if pitcher had 2+ GS (qs_highlight flag)
@@ -6874,7 +6880,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
       const pDates = getPlayerDates(pitcher);
       pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
+      pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}${s.qs_highlight ? multiStartTag() : ''}</td>`;
       pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
       pitHtml += `<td class="num${manual('w')}">${s.w || 0}</td>`;
       if (s.qs_highlight) {
