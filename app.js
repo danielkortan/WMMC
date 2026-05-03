@@ -7122,23 +7122,22 @@ window.removeFromRoster = function(manager, type, player, weekKey) {
 
 // ---- Player Pool Upload ----
 
-// Merge an incoming (names, teamMap) CSV parse result into an existing pool array + team map.
+// Merge an incoming rows array ([{name, team}]) into an existing pool array + team map.
 // Handles same-name players on different teams by storing them as "Name (TEAM)" keys.
-// Returns { pool, teamMap, added, renames } where renames is a Map of oldKey -> newKey
-// for any existing entries that had to be disambiguated.
-function mergePlayerPool(existingPool, existingTeamMap, names, teamMap) {
-  // Count how many times each base name appears in the CSV
+// Returns { pool, teamMap, added } where added is a list of newly inserted keys.
+function mergePlayerPool(existingPool, existingTeamMap, rows) {
+  // Count how many times each base name appears in the CSV rows
   const csvNameCounts = {};
-  for (const n of names) csvNameCounts[n] = (csvNameCounts[n] || 0) + 1;
+  for (const { name } of rows) csvNameCounts[name] = (csvNameCounts[name] || 0) + 1;
 
-  // Build list of (storageKey, team) for each CSV row.
-  // When a name appears more than once AND has a team, use "Name (TEAM)" as the key.
+  // Build list of (storageKey, team) per row.
+  // When a name appears more than once AND has a team, use "Name (TEAM)" as the key
+  // so both players survive as distinct entries.
   const csvEntries = [];
   const csvKeySeen = new Set();
-  for (const n of names) {
-    const team = teamMap[n];
-    const key = csvNameCounts[n] > 1 && team ? `${n} (${team})` : n;
-    if (!csvKeySeen.has(key)) { csvKeySeen.add(key); csvEntries.push({ key, team, base: n }); }
+  for (const { name, team } of rows) {
+    const key = csvNameCounts[name] > 1 && team ? `${name} (${team})` : name;
+    if (!csvKeySeen.has(key)) { csvKeySeen.add(key); csvEntries.push({ key, team, base: name }); }
   }
 
   // Identify existing plain-name entries that need to be renamed because a same-name
@@ -7181,11 +7180,11 @@ function setupPlayerPoolUploads() {
   document.getElementById('upload-batters-pool-btn').onclick = () => {
     const fileInput = document.getElementById('upload-batters-pool');
     if (!fileInput.files[0]) { alert('Select a file first.'); return; }
-    parseCSVFile(fileInput.files[0], (names, teamMap) => {
+    parseCSVFile(fileInput.files[0], (names, teamMap, rows) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
       const { pool, teamMap: newTeamMap, added } = mergePlayerPool(
-        sd.batters_pool || [], sd.batters_team || {}, names, teamMap
+        sd.batters_pool || [], sd.batters_team || {}, rows
       );
       sd.batters_pool = pool;
       sd.batters_team = newTeamMap;
@@ -7209,11 +7208,11 @@ function setupPlayerPoolUploads() {
   document.getElementById('upload-pitchers-pool-btn').onclick = () => {
     const fileInput = document.getElementById('upload-pitchers-pool');
     if (!fileInput.files[0]) { alert('Select a file first.'); return; }
-    parseCSVFile(fileInput.files[0], (names, teamMap) => {
+    parseCSVFile(fileInput.files[0], (names, teamMap, rows) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
       const { pool, teamMap: newTeamMap, added } = mergePlayerPool(
-        sd.pitchers_pool || [], sd.pitchers_team || {}, names, teamMap
+        sd.pitchers_pool || [], sd.pitchers_team || {}, rows
       );
       sd.pitchers_pool = pool;
       sd.pitchers_team = newTeamMap;
@@ -7885,36 +7884,22 @@ function parseCSVFile(file, callback) {
       h === 'team' || h === 'tm' || h === 'team_abbrev' || h === 'abbreviation' || h === 'abbrev'
     );
 
-    if (nameCol === -1) {
-      const names = [];
-      const teamMap = {};
-      for (let i = 1; i < lines.length; i++) {
-        const cols = parseCSVLine(lines[i]);
-        if (cols[0] && cols[0].trim()) {
-          const name = cols[0].trim();
-          names.push(name);
-          if (teamCol !== -1 && cols[teamCol] && cols[teamCol].trim()) {
-            teamMap[name] = cols[teamCol].trim().toUpperCase();
-          }
-        }
-      }
-      callback(names, teamMap);
-      return;
-    }
-
     const names = [];
     const teamMap = {};
+    const rows = []; // [{name, team}] preserving duplicates for same-name players
+    const col = nameCol === -1 ? 0 : nameCol;
     for (let i = 1; i < lines.length; i++) {
       const cols = parseCSVLine(lines[i]);
-      if (cols[nameCol] && cols[nameCol].trim()) {
-        const name = cols[nameCol].trim();
+      if (cols[col] && cols[col].trim()) {
+        const name = cols[col].trim();
+        const team = (teamCol !== -1 && cols[teamCol] && cols[teamCol].trim())
+          ? cols[teamCol].trim().toUpperCase() : null;
         names.push(name);
-        if (teamCol !== -1 && cols[teamCol] && cols[teamCol].trim()) {
-          teamMap[name] = cols[teamCol].trim().toUpperCase();
-        }
+        rows.push({ name, team });
+        if (team) teamMap[name] = team; // last team wins for legacy callers
       }
     }
-    callback(names, teamMap);
+    callback(names, teamMap, rows);
   };
   reader.readAsText(file);
 }
