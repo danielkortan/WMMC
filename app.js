@@ -5222,11 +5222,11 @@ function renderSubmissionStatusTable() {
       : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
     const subCell = submitted
-      ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || 'Submitted'}</td>`
+      ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}</td>`
       : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
     const appCell = approved
-      ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || 'Approved'}</td>`
+      ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
       : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
     html += `<tr>
@@ -5269,6 +5269,24 @@ function renderCommissioner() {
   showCommissionerPanel();
 }
 
+function backfillSubmissionTimestamps() {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.initial_submissions) return;
+
+  // Best available proxy: PP1 Week 1 start date (same date used as roster add_date on approval)
+  const pp1Start = sd.schedule_dates && sd.schedule_dates[0] ? sd.schedule_dates[0].start : null;
+  const fallbackIso = pp1Start ? new Date(pp1Start).toISOString() : new Date().toISOString();
+
+  let dirty = false;
+  for (const sub of Object.values(sd.initial_submissions)) {
+    if (!sub || !sub.status || sub.status === 'draft') continue;
+    if (!sub.submitted_at) { sub.submitted_at = fallbackIso; dirty = true; }
+    if (sub.status === 'approved' && !sub.approved_at) { sub.approved_at = fallbackIso; dirty = true; }
+  }
+  if (dirty) saveSeason(SELECTED_SEASON, sd);
+}
+
 function showCommissionerPanel() {
   document.getElementById('commissioner-login').style.display = 'none';
   document.getElementById('commissioner-panel').style.display = 'block';
@@ -5281,6 +5299,7 @@ function showCommissionerPanel() {
   setupCommTabs();
   renderBannerBgSection();
   renderPendingSwapRequests();
+  backfillSubmissionTimestamps();
   renderSubmissionStatusTable();
   renderSwapLog();
   renderManagersTable();
