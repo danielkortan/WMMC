@@ -210,7 +210,8 @@ function displayPlayer(name, sd) {
   if (!name) return '';
   const team = (sd && sd.batters_team && sd.batters_team[name])
     || (sd && sd.pitchers_team && sd.pitchers_team[name]);
-  return team ? `${name} (${team})` : name;
+  if (!team || name.endsWith(`(${team})`)) return name;
+  return `${name} (${team})`;
 }
 
 // Visible badge for pitchers who had 2+ starts in a week — QS can't be auto-calculated,
@@ -7120,6 +7121,62 @@ window.removeFromRoster = function(manager, type, player, weekKey) {
 };
 
 // ---- Player Pool Upload ----
+
+// Merge an incoming (names, teamMap) CSV parse result into an existing pool array + team map.
+// Handles same-name players on different teams by storing them as "Name (TEAM)" keys.
+// Returns { pool, teamMap, added, renames } where renames is a Map of oldKey -> newKey
+// for any existing entries that had to be disambiguated.
+function mergePlayerPool(existingPool, existingTeamMap, names, teamMap) {
+  // Count how many times each base name appears in the CSV
+  const csvNameCounts = {};
+  for (const n of names) csvNameCounts[n] = (csvNameCounts[n] || 0) + 1;
+
+  // Build list of (storageKey, team) for each CSV row.
+  // When a name appears more than once AND has a team, use "Name (TEAM)" as the key.
+  const csvEntries = [];
+  const csvKeySeen = new Set();
+  for (const n of names) {
+    const team = teamMap[n];
+    const key = csvNameCounts[n] > 1 && team ? `${n} (${team})` : n;
+    if (!csvKeySeen.has(key)) { csvKeySeen.add(key); csvEntries.push({ key, team, base: n }); }
+  }
+
+  // Identify existing plain-name entries that need to be renamed because a same-name
+  // conflict is incoming (e.g., existing has "Max Muncy", CSV has "Max Muncy (LAD)" + "Max Muncy (ATH)").
+  const renames = new Map(); // oldKey -> newKey
+  for (const { key, base } of csvEntries) {
+    if (key !== base && existingPool.includes(base)) {
+      const existingTeam = existingTeamMap[base];
+      if (existingTeam && !existingPool.includes(`${base} (${existingTeam})`)) {
+        renames.set(base, `${base} (${existingTeam})`);
+      }
+    }
+  }
+
+  // Build the new pool: deduplicate existing (applying renames), then append new entries.
+  const seen = new Set();
+  const newPool = [];
+  const newTeamMap = Object.assign({}, existingTeamMap);
+  for (const name of existingPool) {
+    const renamed = renames.get(name) || name;
+    if (seen.has(renamed)) continue;
+    seen.add(renamed);
+    newPool.push(renamed);
+    if (renames.has(name)) {
+      newTeamMap[renamed] = newTeamMap[name];
+      delete newTeamMap[name];
+    }
+  }
+
+  const added = [];
+  for (const { key, team } of csvEntries) {
+    if (!seen.has(key)) { seen.add(key); newPool.push(key); added.push(key); }
+    if (team) newTeamMap[key] = team;
+  }
+
+  return { pool: newPool, teamMap: newTeamMap, added, renames };
+}
+
 function setupPlayerPoolUploads() {
   document.getElementById('upload-batters-pool-btn').onclick = () => {
     const fileInput = document.getElementById('upload-batters-pool');
@@ -7127,21 +7184,14 @@ function setupPlayerPoolUploads() {
     parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
-      const existingTeam = sd.batters_team || {};
-      // Deduplicate the existing pool first, then append truly new names
-      const seen = new Set();
-      const existing = (sd.batters_pool || []).filter(n => seen.has(n) ? false : seen.add(n));
-      const added = [];
-      for (const n of names) {
-        if (!seen.has(n)) { seen.add(n); added.push(n); }
-      }
-      sd.batters_pool = [...existing, ...added];
-      // Update team names for all players from the new file
-      Object.assign(existingTeam, teamMap);
-      sd.batters_team = existingTeam;
+      const { pool, teamMap: newTeamMap, added } = mergePlayerPool(
+        sd.batters_pool || [], sd.batters_team || {}, names, teamMap
+      );
+      sd.batters_pool = pool;
+      sd.batters_team = newTeamMap;
       saveSeason(SELECTED_SEASON, sd);
       const pitCount = (sd.pitchers_pool || []).length;
-      const totalBat = sd.batters_pool.length;
+      const totalBat = pool.length;
       let msg = added.length > 0
         ? `<p class="success-text">Added ${added.length} new batter(s) to the pool (${totalBat} total). Team names updated.</p>`
         : `<p class="success-text">No new batters added (${totalBat} already in pool). Team names updated.</p>`;
@@ -7162,21 +7212,14 @@ function setupPlayerPoolUploads() {
     parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
-      const existingTeam = sd.pitchers_team || {};
-      // Deduplicate the existing pool first, then append truly new names
-      const seen = new Set();
-      const existing = (sd.pitchers_pool || []).filter(n => seen.has(n) ? false : seen.add(n));
-      const added = [];
-      for (const n of names) {
-        if (!seen.has(n)) { seen.add(n); added.push(n); }
-      }
-      sd.pitchers_pool = [...existing, ...added];
-      // Update team names for all players from the new file
-      Object.assign(existingTeam, teamMap);
-      sd.pitchers_team = existingTeam;
+      const { pool, teamMap: newTeamMap, added } = mergePlayerPool(
+        sd.pitchers_pool || [], sd.pitchers_team || {}, names, teamMap
+      );
+      sd.pitchers_pool = pool;
+      sd.pitchers_team = newTeamMap;
       saveSeason(SELECTED_SEASON, sd);
       const batCount = (sd.batters_pool || []).length;
-      const totalPit = sd.pitchers_pool.length;
+      const totalPit = pool.length;
       let msg = added.length > 0
         ? `<p class="success-text">Added ${added.length} new pitcher(s) to the pool (${totalPit} total). Team names updated.</p>`
         : `<p class="success-text">No new pitchers added (${totalPit} already in pool). Team names updated.</p>`;
