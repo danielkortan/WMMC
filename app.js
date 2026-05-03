@@ -7146,10 +7146,14 @@ function setupPlayerPoolUploads() {
     parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
-      const existing = sd.batters_pool || [];
       const existingTeam = sd.batters_team || {};
-      const existingSet = new Set(existing);
-      const added = names.filter(n => !existingSet.has(n));
+      // Deduplicate the existing pool first, then append truly new names
+      const seen = new Set();
+      const existing = (sd.batters_pool || []).filter(n => seen.has(n) ? false : seen.add(n));
+      const added = [];
+      for (const n of names) {
+        if (!seen.has(n)) { seen.add(n); added.push(n); }
+      }
       sd.batters_pool = [...existing, ...added];
       // Update team names for all players from the new file
       Object.assign(existingTeam, teamMap);
@@ -7177,10 +7181,14 @@ function setupPlayerPoolUploads() {
     parseCSVFile(fileInput.files[0], (names, teamMap) => {
       const seasons = getSeasons();
       const sd = seasons[SELECTED_SEASON];
-      const existing = sd.pitchers_pool || [];
       const existingTeam = sd.pitchers_team || {};
-      const existingSet = new Set(existing);
-      const added = names.filter(n => !existingSet.has(n));
+      // Deduplicate the existing pool first, then append truly new names
+      const seen = new Set();
+      const existing = (sd.pitchers_pool || []).filter(n => seen.has(n) ? false : seen.add(n));
+      const added = [];
+      for (const n of names) {
+        if (!seen.has(n)) { seen.add(n); added.push(n); }
+      }
       sd.pitchers_pool = [...existing, ...added];
       // Update team names for all players from the new file
       Object.assign(existingTeam, teamMap);
