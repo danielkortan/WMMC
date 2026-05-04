@@ -762,11 +762,18 @@ async function syncGoogleSheets(year, syncType = 'daily') {
     // Try batting tab
     try {
       const batValues = await fetchSheetTab(config.spreadsheet_id, batTab, config.api_key);
-      if (batValues && batValues.length > 1) {
-        const batRows = parseSheetRows(batValues);
-        const batResult = processBattingRows(batRows, sd, sched);
-        totalBatImported += batResult.imported;
-        results.push({ week: weekNum, type: 'batting', imported: batResult.imported, skipped: batResult.skipped });
+      if (batValues !== null) {
+        // Tab exists — full overwrite: remove all non-manual gsheets records for this week
+        sd.weekly_batting = sd.weekly_batting.filter(b =>
+          !(b.round === sched.round && b.week === sched.week &&
+            b.source === 'gsheets' && (!b.manual_fields || b.manual_fields.length === 0))
+        );
+        if (batValues.length > 1) {
+          const batRows = parseSheetRows(batValues);
+          const batResult = processBattingRows(batRows, sd, sched);
+          totalBatImported += batResult.imported;
+          results.push({ week: weekNum, type: 'batting', imported: batResult.imported, skipped: batResult.skipped });
+        }
       }
     } catch (e) {
       results.push({ week: weekNum, type: 'batting', error: e.message });
@@ -775,11 +782,18 @@ async function syncGoogleSheets(year, syncType = 'daily') {
     // Try pitching tab
     try {
       const pitValues = await fetchSheetTab(config.spreadsheet_id, pitTab, config.api_key);
-      if (pitValues && pitValues.length > 1) {
-        const pitRows = parseSheetRows(pitValues);
-        const pitResult = processPitchingRows(pitRows, sd, sched);
-        totalPitImported += pitResult.imported;
-        results.push({ week: weekNum, type: 'pitching', imported: pitResult.imported, skipped: pitResult.skipped });
+      if (pitValues !== null) {
+        // Tab exists — full overwrite: remove all non-manual gsheets records for this week
+        sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+          !(p.round === sched.round && p.week === sched.week &&
+            p.source === 'gsheets' && (!p.manual_fields || p.manual_fields.length === 0))
+        );
+        if (pitValues.length > 1) {
+          const pitRows = parseSheetRows(pitValues);
+          const pitResult = processPitchingRows(pitRows, sd, sched);
+          totalPitImported += pitResult.imported;
+          results.push({ week: weekNum, type: 'pitching', imported: pitResult.imported, skipped: pitResult.skipped });
+        }
       }
     } catch (e) {
       results.push({ week: weekNum, type: 'pitching', error: e.message });
@@ -898,6 +912,44 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
     enabled: config.enabled || false,
     next_sync: getNextSyncTime()
   });
+});
+
+// DELETE /api/seasons/:year/week-data — clear all stats for a given week
+app.delete('/api/seasons/:year/week-data', (req, res) => {
+  const { year } = req.params;
+  const { round, week, type } = req.body;
+
+  if (!round || !week) {
+    return res.status(400).json({ error: 'round and week are required' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  let batRemoved = 0, pitRemoved = 0;
+
+  if (!type || type === 'batting' || type === 'all') {
+    const before = (sd.weekly_batting || []).length;
+    sd.weekly_batting = (sd.weekly_batting || []).filter(b =>
+      !(b.round === round && b.week === week)
+    );
+    batRemoved = before - (sd.weekly_batting || []).length;
+  }
+
+  if (!type || type === 'pitching' || type === 'all') {
+    const before = (sd.weekly_pitching || []).length;
+    sd.weekly_pitching = (sd.weekly_pitching || []).filter(p =>
+      !(p.round === round && p.week === week)
+    );
+    pitRemoved = before - (sd.weekly_pitching || []).length;
+  }
+
+  addAuditEntry(db, 'clear_week_data', { year, round, week, type: type || 'all', batRemoved, pitRemoved }, req.get('X-User-Email'));
+  db.seasons[year] = sd;
+  writeDB(db);
+
+  res.json({ ok: true, batting_removed: batRemoved, pitching_removed: pitRemoved });
 });
 
 // ============================================================

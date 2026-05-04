@@ -7519,6 +7519,14 @@ function renderWeeklyUploadSections() {
       </div>`;
     }
 
+    // Clear week data button (only when data exists)
+    if (hasBatting || hasPitching) {
+      html += `<div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--border,#e0e0e0);">
+        <button class="btn btn-sm btn-danger" onclick="clearWeekData(${i})">Clear All Data for This Week</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes all batting and pitching records for ${s.label}</span>
+      </div>`;
+    }
+
     // Upload log for this week
     const weekLogs = uploadLog.filter(l => l.round === s.round && l.week === s.week);
     if (weekLogs.length > 0) {
@@ -7562,6 +7570,41 @@ window.toggleAllUploadWeeks = function(show) {
     const chevron = document.getElementById(`upload-chevron-${i}`);
     if (body) body.style.display = show ? 'block' : 'none';
     if (chevron) chevron.innerHTML = show ? '&#9660;' : '&#9654;';
+  }
+};
+
+window.clearWeekData = async function(weekIndex) {
+  const s = SEASON_SCHEDULE[weekIndex];
+  if (!s) return;
+  const confirmed = confirm(`Clear ALL batting and pitching data for ${s.label}?\n\nThis will permanently delete all records for this week, whether from manual uploads or Google Sheets sync. This cannot be undone.`);
+  if (!confirmed) return;
+
+  try {
+    const resp = await fetch(`/api/seasons/${SELECTED_SEASON}/week-data`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'X-User-Email': LOGGED_IN_EMAIL || '' },
+      body: JSON.stringify({ round: s.round, week: s.week })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Failed to clear data');
+
+    // Update local state
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (sd) {
+      sd.weekly_batting = (sd.weekly_batting || []).filter(b => !(b.round === s.round && b.week === s.week));
+      sd.weekly_pitching = (sd.weekly_pitching || []).filter(p => !(p.round === s.round && p.week === s.week));
+      seasons[SELECTED_SEASON] = sd;
+      localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+    }
+
+    renderWeeklyUploadSections();
+    const statusEl = document.getElementById(`upload-status-${weekIndex}`);
+    if (statusEl) {
+      statusEl.innerHTML = `<span class="success-text">Cleared ${data.batting_removed} batting and ${data.pitching_removed} pitching records.</span>`;
+    }
+  } catch (e) {
+    alert(`Error clearing week data: ${e.message}`);
   }
 };
 
