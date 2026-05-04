@@ -2923,7 +2923,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     Object.keys(poolGroups).sort().forEach(poolNum => {
       const poolMembers = poolGroups[poolNum];
       const poolScores = scores.filter(s => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
-      html += `<div class="pool-card"><h3>Pool ${poolNum}</h3>
+      const safePoolId = `${section}_pool_${String(poolNum).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
+      html += `<div class="pool-card">
+        <div class="pool-card-header">
+          <h3>Pool ${poolNum}</h3>
+          <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-period="${section}" data-pool-id="${safePoolId}" onclick="togglePool('${safePoolId}')">−</button>
+        </div>
+        <div class="pool-card-body" id="pool-body-${safePoolId}">
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -2941,7 +2947,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <td colspan="5"><div class="mgr-detail-loading">Loading...</div></td>
         </tr>`;
       });
-      html += '</tbody></table></div>';
+      html += '</tbody></table></div></div>';
     });
     html += '</div>';
     return html;
@@ -3024,13 +3030,19 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
 
   // Pool Play 1
   html += `<div class="scoreboard-section">
-    <h3>Pool Play 1</h3>
+    <div class="pool-period-header">
+      <h3>Pool Play 1</h3>
+      <button class="pool-expand-all-btn" id="toggle-all-btn-pp1" data-period="pp1" onclick="toggleAllPools('pp1')">−</button>
+    </div>
     ${renderPoolSection(pp1Scores, 'Pool Play 1', 'pp1')}
   </div>`;
 
   // Pool Play 2
   html += `<div class="scoreboard-section">
-    <h3>Pool Play 2</h3>
+    <div class="pool-period-header">
+      <h3>Pool Play 2</h3>
+      <button class="pool-expand-all-btn" id="toggle-all-btn-pp2" data-period="pp2" onclick="toggleAllPools('pp2')">−</button>
+    </div>
     ${renderPoolSection(pp2Scores, 'Pool Play 2', 'pp2')}
   </div>`;
 
