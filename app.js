@@ -1249,13 +1249,6 @@ function renderScoreboardContent() {
         <button class="sb-tab" data-period="sf">Semifinals</button>
         <button class="sb-tab" data-period="finals">Finals</button>
       </div>
-      <div class="highlight-legend sb-color-legend">
-        <span class="legend-label">Name Colors:</span>
-        <span class="legend-item"><span class="legend-swatch hl-pp1"></span> PP1 Pool Leader</span>
-        <span class="legend-item"><span class="legend-swatch hl-pp2"></span> PP2 Pool Leader</span>
-        <span class="legend-item"><span class="legend-swatch hl-both"></span> PP1 &amp; PP2 Leader</span>
-        <span class="legend-item"><span class="legend-swatch hl-wildcard"></span> Wild Card</span>
-      </div>
       <div class="sb-period" id="sb-pp-overall">${renderPPOverallContent(leaders, seeding)}</div>
       <div class="sb-period" id="sb-pp1" style="display:none">${renderPoolPeriodContent('pp1')}</div>
       <div class="sb-period" id="sb-pp2" style="display:none">${renderPoolPeriodContent('pp2')}</div>
