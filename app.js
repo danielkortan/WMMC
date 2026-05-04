@@ -109,6 +109,194 @@ function fmtDateRangeShort(startStr, endStr) {
   return `${mo[s.getMonth()]} ${s.getDate()} – ${mo[e.getMonth()]} ${e.getDate()}`;
 }
 
+// ---- Submission Period Deadline Helpers ----
+// Each period has a "first game" time stored in sd.period_deadlines[period].
+// The submission edit deadline is 5 minutes before that first game.
+
+const PERIOD_LABELS = {
+  pp1: 'Pool Play 1',
+  pp2: 'Pool Play 2',
+  qf:  'Quarterfinals',
+  sf:  'Semifinals',
+  finals: 'Finals',
+};
+
+// Returns a Date for when a period's submission window opens, or null (= open from season start)
+function getPeriodOpenDate(sd, period) {
+  const dates = sd && sd.schedule_dates;
+  if (!dates) return null;
+  switch (period) {
+    case 'pp1': return null; // open once pool is ready
+    case 'pp2': {
+      // Opens on the final Sunday of PP1 (PP1 Week 5 end date)
+      const idx = SEASON_SCHEDULE.findIndex(s => s.round === 'PP1' && s.week === 'Week 5');
+      return (idx >= 0 && dates[idx]) ? new Date(dates[idx].end + 'T00:00:00') : null;
+    }
+    case 'qf': {
+      // Opens Monday after PP2 ends (PP2 Week 5 end + 1 day)
+      const idx = SEASON_SCHEDULE.findIndex(s => s.round === 'PP2' && s.week === 'Week 5');
+      if (idx < 0 || !dates[idx]) return null;
+      const d = new Date(dates[idx].end + 'T00:00:00');
+      d.setDate(d.getDate() + 1);
+      return d;
+    }
+    case 'sf': {
+      // Opens Monday after QF ends
+      const idx = SEASON_SCHEDULE.findIndex(s => s.round === 'QF' && s.week === 'Week 2');
+      if (idx < 0 || !dates[idx]) return null;
+      const d = new Date(dates[idx].end + 'T00:00:00');
+      d.setDate(d.getDate() + 1);
+      return d;
+    }
+    case 'finals': {
+      // Opens Monday after SF ends
+      const idx = SEASON_SCHEDULE.findIndex(s => s.round === 'SF' && s.week === 'Week 2');
+      if (idx < 0 || !dates[idx]) return null;
+      const d = new Date(dates[idx].end + 'T00:00:00');
+      d.setDate(d.getDate() + 1);
+      return d;
+    }
+    default: return null;
+  }
+}
+
+// Returns a Date for the first MLB game of a period's start date, or null if not configured
+function getPeriodFirstGame(sd, period) {
+  const val = sd && sd.period_deadlines && sd.period_deadlines[period];
+  return val ? new Date(val) : null;
+}
+
+// Returns the submission deadline Date (first game − 5 min) for a period, or null
+function getPeriodDeadline(sd, period) {
+  const fg = getPeriodFirstGame(sd, period);
+  return fg ? new Date(fg.getTime() - 5 * 60 * 1000) : null;
+}
+
+// Returns true if the submission/edit window for a period is currently open (time only, no qualification check)
+function isPeriodTimeOpen(sd, period) {
+  const now = Date.now();
+  const openDate = getPeriodOpenDate(sd, period);
+  if (openDate && now < openDate.getTime()) return false;
+  const deadline = getPeriodDeadline(sd, period);
+  return deadline ? now < deadline.getTime() : false;
+}
+
+// ---- Playoff Qualification Helpers ----
+
+// Returns array of up to 8 QF qualifier names based on PP1+PP2 scores (or null if pools not configured)
+function getQFQualifiers(sd) {
+  const managers = getManagers().filter(m => m.active !== false);
+  const poolGroups = {};
+  managers.forEach(m => {
+    if (m.pool) {
+      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
+      poolGroups[m.pool].push(m.name);
+    }
+  });
+  if (Object.keys(poolGroups).length === 0) return null;
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const mgrScores = {};
+  managers.forEach(m => { mgrScores[m.name] = { pp1: 0, pp2: 0 }; });
+  batting.forEach(b => {
+    if (!mgrScores[b.manager]) return;
+    if (b.round === 'PP1') mgrScores[b.manager].pp1 += (b.weekly_score || 0);
+    if (b.round === 'PP2') mgrScores[b.manager].pp2 += (b.weekly_score || 0);
+  });
+  pitching.forEach(p => {
+    if (!mgrScores[p.manager]) return;
+    if (p.round === 'PP1') mgrScores[p.manager].pp1 += (p.weekly_score || 0);
+    if (p.round === 'PP2') mgrScores[p.manager].pp2 += (p.weekly_score || 0);
+  });
+
+  const pp1Leaders = new Set();
+  const pp2Leaders = new Set();
+  for (const members of Object.values(poolGroups)) {
+    let bestPP1 = null, bPP1 = -Infinity;
+    let bestPP2 = null, bPP2 = -Infinity;
+    members.forEach(n => {
+      const s = mgrScores[n] || { pp1: 0, pp2: 0 };
+      if (s.pp1 > bPP1) { bestPP1 = n; bPP1 = s.pp1; }
+      if (s.pp2 > bPP2) { bestPP2 = n; bPP2 = s.pp2; }
+    });
+    if (bestPP1) pp1Leaders.add(bestPP1);
+    if (bestPP2) pp2Leaders.add(bestPP2);
+  }
+  const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
+  const ppTotals = {};
+  managers.forEach(m => { ppTotals[m.name] = (mgrScores[m.name]?.pp1 || 0) + (mgrScores[m.name]?.pp2 || 0); });
+  const wildcardsNeeded = Math.max(0, 8 - allLeaders.size);
+  const wildcards = managers.map(m => m.name)
+    .filter(n => !allLeaders.has(n))
+    .sort((a, b) => ppTotals[b] - ppTotals[a])
+    .slice(0, wildcardsNeeded);
+  const qualifiers = [...[...allLeaders].sort((a, b) => ppTotals[b] - ppTotals[a]), ...wildcards];
+  return qualifiers.length > 0 ? qualifiers.slice(0, 8) : null;
+}
+
+// Returns array of SF participant names (QF winners), or null if QF not finalized
+function getSFParticipants(sd) {
+  const qf = getQFQualifiers(sd);
+  if (!qf || qf.length < 8) return null;
+  if (!(sd.finalized_rounds || []).includes('QF')) return null;
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  function qfScore(mgr) {
+    let t = 0;
+    batting.filter(b => b.manager === mgr && b.round === 'QF').forEach(b => t += (b.weekly_score || 0));
+    pitching.filter(p => p.manager === mgr && p.round === 'QF').forEach(p => t += (p.weekly_score || 0));
+    return t;
+  }
+  return [
+    [qf[0], qf[7]], [qf[3], qf[4]], [qf[2], qf[5]], [qf[1], qf[6]],
+  ].map(([a, b]) => qfScore(a) >= qfScore(b) ? a : b);
+}
+
+// Returns array of Finals participant names (SF winners), or null if SF not finalized
+function getFinalsParticipants(sd) {
+  const sf = getSFParticipants(sd);
+  if (!sf || sf.length < 4) return null;
+  if (!(sd.finalized_rounds || []).includes('SF')) return null;
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  function sfScore(mgr) {
+    let t = 0;
+    batting.filter(b => b.manager === mgr && b.round === 'SF').forEach(b => t += (b.weekly_score || 0));
+    pitching.filter(p => p.manager === mgr && p.round === 'SF').forEach(p => t += (p.weekly_score || 0));
+    return t;
+  }
+  return [[sf[0], sf[1]], [sf[2], sf[3]]].map(([a, b]) => sfScore(a) >= sfScore(b) ? a : b);
+}
+
+// Returns true if a manager is qualified for a given period (all managers qualify for pp1/pp2)
+function isManagerQualifiedForPeriod(managerName, period, sd) {
+  if (period === 'pp1' || period === 'pp2') return true;
+  if (period === 'qf') { const q = getQFQualifiers(sd); return q ? q.includes(managerName) : false; }
+  if (period === 'sf') { const q = getSFParticipants(sd); return q ? q.includes(managerName) : false; }
+  if (period === 'finals') { const q = getFinalsParticipants(sd); return q ? q.includes(managerName) : false; }
+  return false;
+}
+
+// ---- Period Submission Data Helpers ----
+
+function getPeriodSub(sd, period, manager) {
+  if (period === 'pp1') return sd.initial_submissions && sd.initial_submissions[manager];
+  return sd.period_submissions && sd.period_submissions[period] && sd.period_submissions[period][manager];
+}
+
+function ensurePeriodSub(sd, period, manager) {
+  if (period === 'pp1') {
+    if (!sd.initial_submissions) sd.initial_submissions = {};
+    if (!sd.initial_submissions[manager]) sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
+    return sd.initial_submissions[manager];
+  }
+  if (!sd.period_submissions) sd.period_submissions = {};
+  if (!sd.period_submissions[period]) sd.period_submissions[period] = {};
+  if (!sd.period_submissions[period][manager]) sd.period_submissions[period][manager] = { batters: [], pitchers: [], status: 'draft' };
+  return sd.period_submissions[period][manager];
+}
+
 // Get schedule_dates array for the selected season (or null)
 function getScheduleDates() {
   const seasons = getSeasons();
@@ -4828,8 +5016,11 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     const poolReady = poolBatCount > 0 && poolPitCount > 0;
 
     html += `<div class="card initial-submission-section" style="margin-top:1rem;">
-      <h3>Initial Player Submission</h3>
-      <p class="text-muted" style="margin-bottom:0.75rem;">Submit your initial roster: 4 batters and 3 pitchers</p>`;
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
+        <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">Pool Play 1</span>
+        <h3 style="margin:0;">Player Submission</h3>
+      </div>
+      <p class="text-muted" style="margin-bottom:0.75rem;">Submit your roster for Pool Play 1: 4 batters and 3 pitchers</p>`;
 
     if (!poolReady && !isApproved) {
       html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);margin-bottom:0.75rem;">
@@ -4850,6 +5041,19 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       html += '<div class="comm-player-list">';
       submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span></div>`; });
       html += '</div>';
+
+      // Allow editing if the PP1 deadline hasn't passed
+      if (isPeriodTimeOpen(seasonData, 'pp1')) {
+        const pp1Deadline = getPeriodDeadline(seasonData, 'pp1');
+        const deadlineStr = pp1Deadline ? pp1Deadline.toLocaleString('en-US', {
+          month: 'short', day: 'numeric', year: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true
+        }) : '';
+        html += `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+          <button class="btn btn-secondary" onclick="editApprovedPeriodSubmission('pp1','${safeMgr}')">Edit Submission</button>
+          <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">Editing available until <strong>${deadlineStr}</strong>. Re-editing requires commissioner re-approval.</p>
+        </div>`;
+      }
     } else if (poolReady) {
       // Editable submission form (only when pool is available)
       if (isPending) {
@@ -4957,9 +5161,192 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
     }
 
     html += `</div>`; // .initial-submission-section
+
+    // ---- PP2 / Playoff Period Submission Cards ----
+    const periodOrder = [
+      { period: 'pp2',   label: 'Pool Play 2',   qualCheck: true  },
+      { period: 'qf',    label: 'Quarterfinals',  qualCheck: true  },
+      { period: 'sf',    label: 'Semifinals',      qualCheck: true  },
+      { period: 'finals', label: 'Finals',         qualCheck: true  },
+    ];
+    for (const { period, label } of periodOrder) {
+      const openDate = getPeriodOpenDate(seasonData, period);
+      const deadline = getPeriodDeadline(seasonData, period);
+      const isOpen = isPeriodTimeOpen(seasonData, period);
+      const qualified = isManagerQualifiedForPeriod(managerName, period, seasonData);
+      const hasDeadline = !!deadline;
+
+      // Only show if the window has opened OR will open soon (within PP1 for pp2, etc.)
+      // For non-open windows with no configured deadline, skip entirely
+      const windowHasOpened = !openDate || Date.now() >= openDate.getTime();
+      if (!windowHasOpened && !hasDeadline) continue;
+      if (!windowHasOpened && !qualified) continue;
+
+      html += buildPeriodSubmissionCard(period, label, managerName, isCommissioner, seasonData);
+    }
   }
 
   html += '</div>'; // .player-swaps-section
+  return html;
+}
+
+// Build a submission card for a given period (pp2, qf, sf, finals)
+function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissioner, seasonData) {
+  const safeMgr = managerName.replace(/'/g, "\\'");
+  const sub = getPeriodSub(seasonData, period, managerName);
+  const isApproved = sub && sub.status === 'approved';
+  const isPending = sub && sub.status === 'pending';
+  const batters = sub ? (sub.batters || []) : [];
+  const pitchers = sub ? (sub.pitchers || []) : [];
+
+  const poolBatCount = (seasonData.batters_pool || []).length;
+  const poolPitCount = (seasonData.pitchers_pool || []).length;
+  const poolReady = poolBatCount > 0 && poolPitCount > 0;
+
+  const deadline = getPeriodDeadline(seasonData, period);
+  const isOpen = isPeriodTimeOpen(seasonData, period);
+  const openDate = getPeriodOpenDate(seasonData, period);
+  const qualified = isManagerQualifiedForPeriod(managerName, period, seasonData);
+
+  const fmtDeadline = d => d ? d.toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }) : '';
+
+  let html = `<div class="card initial-submission-section" style="margin-top:1rem;">
+    <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
+      <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">${periodLabel}</span>
+      <h3 style="margin:0;">Player Submission</h3>
+    </div>
+    <p class="text-muted" style="margin-bottom:0.75rem;">Submit your roster for ${periodLabel}: 4 batters and 3 pitchers</p>`;
+
+  if (!qualified && !isApproved) {
+    html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+      <p class="text-muted" style="font-size:0.85rem;margin:0;">You have not qualified for ${periodLabel}.</p>
+    </div>`;
+  } else if (isApproved) {
+    html += `<div class="swap-badge swap-badge-approved" style="margin-bottom:0.75rem;">Approved by Commissioner</div>`;
+    html += `<div class="wrs-group-label">BATTERS (${batters.length}/4)</div>`;
+    html += '<div class="comm-player-list">';
+    batters.forEach(b => { html += `<div class="comm-player-item"><span>${displayPlayer(b, seasonData)}</span></div>`; });
+    html += '</div>';
+    html += `<div class="wrs-group-label" style="margin-top:0.5rem;">PITCHERS (${pitchers.length}/3)</div>`;
+    html += '<div class="comm-player-list">';
+    pitchers.forEach(p => { html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span></div>`; });
+    html += '</div>';
+    if (isOpen) {
+      html += `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+        <button class="btn btn-secondary" onclick="editApprovedPeriodSubmission('${period}','${safeMgr}')">Edit Submission</button>
+        <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">Editing available until <strong>${fmtDeadline(deadline)}</strong>. Re-editing requires commissioner re-approval.</p>
+      </div>`;
+    }
+  } else if (!poolReady) {
+    html += `<p class="text-muted" style="font-size:0.85rem;">Waiting for commissioner to upload player pool.</p>`;
+  } else if (!isOpen) {
+    if (openDate && Date.now() < openDate.getTime()) {
+      const openStr = openDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+        <p class="text-muted" style="font-size:0.85rem;margin:0;">Submission window opens <strong>${openStr}</strong>${deadline ? ` and closes at <strong>${fmtDeadline(deadline)}</strong>` : ''}.</p>
+      </div>`;
+    } else if (deadline && Date.now() >= deadline.getTime()) {
+      html += `<p class="text-muted" style="font-size:0.85rem;">Submission window has closed.</p>`;
+    } else {
+      html += `<p class="text-muted" style="font-size:0.85rem;">Submission deadline not yet configured by commissioner.</p>`;
+    }
+  } else {
+    // Editable form
+    if (isPending) {
+      html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>
+      <p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">You can still modify your roster until the commissioner approves it.</p>`;
+    }
+    if (deadline) {
+      html += `<p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">Submission deadline: <strong>${fmtDeadline(deadline)}</strong></p>`;
+    }
+
+    const batInputId = `period-add-bat-${period}`;
+    const pitInputId = `period-add-pit-${period}`;
+
+    html += `<div class="wrs-group-label">BATTERS (${batters.length}/4)</div>
+    <div id="period-sub-batters-${period}">`;
+    if (batters.length > 0) {
+      html += '<div class="comm-player-list">';
+      batters.forEach(b => {
+        const safeB = b.replace(/'/g, "\\'");
+        html += `<div class="comm-player-item"><span>${displayPlayer(b, seasonData)}</span>
+          <button class="btn btn-sm btn-danger" onclick="removePeriodPlayer('${period}','${safeMgr}','batters','${safeB}')">Remove</button></div>`;
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    if (batters.length < 4) {
+      html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
+        <input type="text" id="${batInputId}" class="form-input player-search-input" placeholder="Type to search batters..." autocomplete="off" data-pool-type="batters" data-week-key="period-${period}" data-manager="${safeMgr}">
+        <div class="player-search-results" id="results-${batInputId}"></div>
+        <button class="btn btn-sm btn-primary" onclick="addPeriodPlayer('${period}','${safeMgr}','batters')">Add</button>
+      </div>`;
+    }
+
+    html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${pitchers.length}/3)</div>
+    <div id="period-sub-pitchers-${period}">`;
+    if (pitchers.length > 0) {
+      html += '<div class="comm-player-list">';
+      pitchers.forEach(p => {
+        const safeP = p.replace(/'/g, "\\'");
+        html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span>
+          <button class="btn btn-sm btn-danger" onclick="removePeriodPlayer('${period}','${safeMgr}','pitchers','${safeP}')">Remove</button></div>`;
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    if (pitchers.length < 3) {
+      html += `<div class="roster-add-row player-search-container" style="margin-top:0.5rem;">
+        <input type="text" id="${pitInputId}" class="form-input player-search-input" placeholder="Type to search pitchers..." autocomplete="off" data-pool-type="pitchers" data-week-key="period-${period}" data-manager="${safeMgr}">
+        <div class="player-search-results" id="results-${pitInputId}"></div>
+        <button class="btn btn-sm btn-primary" onclick="addPeriodPlayer('${period}','${safeMgr}','pitchers')">Add</button>
+      </div>`;
+    }
+
+    if (!isPending) {
+      const allSelected = batters.length === 4 && pitchers.length === 3;
+      const missing = [];
+      if (batters.length < 4) missing.push(`${4 - batters.length} batter${batters.length < 3 ? 's' : ''}`);
+      if (pitchers.length < 3) missing.push(`${3 - pitchers.length} pitcher${pitchers.length < 2 ? 's' : ''}`);
+      html += `<div style="margin-top:1rem;">
+        <button class="btn btn-primary"${allSelected ? '' : ' disabled style="opacity:0.45;cursor:not-allowed;"'}
+          onclick="${allSelected ? `submitPeriodRoster('${period}','${safeMgr}')` : ''}">Submit for Approval</button>
+        <p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">${allSelected ? 'All players selected — ready to submit.' : `Still need: ${missing.join(' and ')}.`}</p>
+      </div>`;
+    }
+  }
+
+  // Commissioner approval section for this period
+  if (isCommissioner) {
+    const allManagers = getManagers().filter(m => m.active !== false);
+    const pendingPeriod = allManagers.filter(m => {
+      const s = getPeriodSub(seasonData, period, m.name);
+      return s && s.status === 'pending';
+    });
+    if (pendingPeriod.length > 0) {
+      html += `<div class="swap-pending-card" style="margin-top:1rem;"><h4>Pending ${periodLabel} Approvals</h4>`;
+      pendingPeriod.forEach(m => {
+        const s = getPeriodSub(seasonData, period, m.name);
+        const safeName = m.name.replace(/'/g, "\\'");
+        html += `<div class="swap-pending-item">
+          <div class="swap-pending-header"><strong>${m.name}</strong><span class="swap-badge swap-badge-pending">Pending</span></div>
+          <div style="padding:0.5rem 0;">
+            <div style="font-size:0.82rem;"><strong>Batters:</strong> ${(s.batters || []).join(', ') || 'None'}</div>
+            <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(s.pitchers || []).join(', ') || 'None'}</div>
+          </div>
+          <div class="swap-pending-actions">
+            <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
+            <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
+          </div>
+        </div>`;
+      });
+      html += '</div>';
+    }
+  }
+
+  html += '</div>';
   return html;
 }
 
@@ -5404,6 +5791,7 @@ function showCommissionerPanel() {
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
   setupASGDateInput();
+  setupPeriodDeadlineInputs();
   renderGSheetsConfig();
 }
 
@@ -5500,35 +5888,63 @@ function renderPendingSwapRequests() {
 
   let html = '';
 
-  // Pending initial roster submissions
+  // Pending roster submissions — PP1 (initial_submissions) + other periods
   const managers = getManagers();
-  const allSubs = sd.initial_submissions || {};
-  const pendingInits = managers.filter(m => {
-    const sub = allSubs[m.name];
-    return sub && sub.status === 'pending';
-  });
-  pendingInits.forEach(m => {
-    const sub = allSubs[m.name];
-    const safeName = m.name.replace(/'/g, "\\'");
-    const idSafe = m.name.replace(/\s+/g, '-');
-    html += `<div class="swap-pending-item" id="comm-init-item-${idSafe}">
-      <div class="swap-pending-header">
-        <strong>${m.name}</strong>
-        <span class="swap-badge swap-badge-pending">Initial Roster Pending</span>
-      </div>
-      <div class="swap-pending-details" style="flex-direction:column;align-items:flex-start;gap:0.15rem;">
-        <span><strong>Batters:</strong> ${(sub.batters || []).map(b => displayPlayer(b, sd)).join(', ') || 'None'}</span>
-        <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map(p => displayPlayer(p, sd)).join(', ') || 'None'}</span>
-      </div>
-      <div id="comm-initial-edit-${idSafe}" style="display:none;"></div>
-      <div class="swap-pending-actions">
-        <button class="btn btn-sm btn-success" onclick="approveInitialSubmission('${safeName}')">Approve</button>
-        <button class="btn btn-sm btn-secondary" onclick="editInitialSubmissionComm('${safeName}')">Edit</button>
-        <button class="btn btn-sm btn-danger" onclick="denyInitialSubmission('${safeName}')">Deny</button>
-        <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${safeName}')">View Roster</button>
-      </div>
-    </div>`;
-  });
+  const allPeriods = [
+    { period: 'pp1',    label: 'Pool Play 1',  approveFn: 'approveInitialSubmission', denyFn: 'denyInitialSubmission', editFn: 'editInitialSubmissionComm', isLegacy: true },
+    { period: 'pp2',    label: 'Pool Play 2',  isLegacy: false },
+    { period: 'qf',     label: 'Quarterfinals', isLegacy: false },
+    { period: 'sf',     label: 'Semifinals',    isLegacy: false },
+    { period: 'finals', label: 'Finals',        isLegacy: false },
+  ];
+
+  for (const { period, label, isLegacy, approveFn, denyFn, editFn } of allPeriods) {
+    managers.filter(m => {
+      const sub = getPeriodSub(sd, period, m.name);
+      return sub && sub.status === 'pending';
+    }).forEach(m => {
+      const sub = getPeriodSub(sd, period, m.name);
+      const safeName = m.name.replace(/'/g, "\\'");
+      const idSafe = m.name.replace(/\s+/g, '-');
+      if (isLegacy) {
+        html += `<div class="swap-pending-item" id="comm-init-item-${idSafe}">
+          <div class="swap-pending-header">
+            <strong>${m.name}</strong>
+            <span class="swap-badge" style="background:var(--primary);color:#fff;">${label}</span>
+            <span class="swap-badge swap-badge-pending">Pending</span>
+          </div>
+          <div class="swap-pending-details" style="flex-direction:column;align-items:flex-start;gap:0.15rem;">
+            <span><strong>Batters:</strong> ${(sub.batters || []).map(b => displayPlayer(b, sd)).join(', ') || 'None'}</span>
+            <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map(p => displayPlayer(p, sd)).join(', ') || 'None'}</span>
+          </div>
+          <div id="comm-initial-edit-${idSafe}" style="display:none;"></div>
+          <div class="swap-pending-actions">
+            <button class="btn btn-sm btn-success" onclick="${approveFn}('${safeName}')">Approve</button>
+            <button class="btn btn-sm btn-secondary" onclick="${editFn}('${safeName}')">Edit</button>
+            <button class="btn btn-sm btn-danger" onclick="${denyFn}('${safeName}')">Deny</button>
+            <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${safeName}')">View Roster</button>
+          </div>
+        </div>`;
+      } else {
+        html += `<div class="swap-pending-item">
+          <div class="swap-pending-header">
+            <strong>${m.name}</strong>
+            <span class="swap-badge" style="background:var(--primary);color:#fff;">${label}</span>
+            <span class="swap-badge swap-badge-pending">Pending</span>
+          </div>
+          <div class="swap-pending-details" style="flex-direction:column;align-items:flex-start;gap:0.15rem;">
+            <span><strong>Batters:</strong> ${(sub.batters || []).map(b => displayPlayer(b, sd)).join(', ') || 'None'}</span>
+            <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map(p => displayPlayer(p, sd)).join(', ') || 'None'}</span>
+          </div>
+          <div class="swap-pending-actions">
+            <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
+            <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
+            <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${safeName}')">View Roster</button>
+          </div>
+        </div>`;
+      }
+    });
+  }
 
   // Pending in-season swaps
   const pendingSwaps = (sd.swaps || []).filter(s => s.status === 'pending');
@@ -5623,7 +6039,8 @@ function setupSeasonSetupToggle() {
         swaps: [],
         upload_log: [],
         team_weekly: [],
-        initial_submissions: {}
+        initial_submissions: {},
+        period_submissions: { pp2: {}, qf: {}, sf: {}, finals: {} },
       };
 
       // Pre-populate rosters map for each manager (empty, but keyed)
@@ -5631,6 +6048,9 @@ function setupSeasonSetupToggle() {
       managers.forEach(m => {
         seasons[newYear].rosters[m.name] = {};
         seasons[newYear].initial_submissions[m.name] = { batters: [], pitchers: [], status: 'draft' };
+        for (const p of ['pp2', 'qf', 'sf', 'finals']) {
+          seasons[newYear].period_submissions[p][m.name] = { batters: [], pitchers: [], status: 'draft' };
+        }
       });
 
       localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
@@ -5719,6 +6139,55 @@ function setupASGDateInput() {
     // Refresh dependent views
     renderWeeklyUploadSections();
   };
+}
+
+// Per-period defaults: earliest MLB game found on each WMMC start date for the 2026 season
+// (ASG = July 14 2026 → PP1 starts May 4, PP2 June 8, QF July 20, SF Aug 3, Finals Aug 17)
+const PERIOD_DEADLINE_DEFAULTS = {
+  pp1:    '2026-05-04T17:40', // May 4  — earliest game 5:40 PM ET (Braves/Mariners)
+  pp2:    '2026-06-08T18:35', // June 8 — estimated; verify against MLB schedule
+  qf:     '2026-07-20T19:05', // July 20 — 7:05 PM ET (Pirates @ Yankees)
+  sf:     '2026-08-03T20:05', // Aug 3  — 8:05 PM ET (Dodgers @ Cubs)
+  finals: '2026-08-17T19:00', // Aug 17 — 7:00 PM ET (ESPN: Tigers @ Pirates)
+};
+
+function setupPeriodDeadlineInputs() {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+
+  const toLocalInputVal = isoStr => {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  };
+
+  const fmtDeadline = isoStr => {
+    if (!isoStr) return '—';
+    const d = new Date(new Date(isoStr).getTime() - 5 * 60 * 1000);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  for (const [period, defaultVal] of Object.entries(PERIOD_DEADLINE_DEFAULTS)) {
+    const inputEl = document.getElementById(`period-deadline-input-${period}`);
+    const btnEl   = document.getElementById(`period-deadline-save-${period}`);
+    const statusEl = document.getElementById(`period-deadline-status-${period}`);
+    if (!inputEl || !btnEl) continue;
+
+    const stored = sd && sd.period_deadlines && sd.period_deadlines[period];
+    inputEl.value = stored ? toLocalInputVal(stored) : defaultVal;
+
+    btnEl.onclick = () => {
+      if (!inputEl.value) { statusEl.innerHTML = '<span style="color:#ef4444;">Please select a date and time.</span>'; return; }
+      const gameTime = new Date(inputEl.value);
+      if (isNaN(gameTime.getTime())) { statusEl.innerHTML = '<span style="color:#ef4444;">Invalid date/time.</span>'; return; }
+      const seasons2 = getSeasons();
+      const sd2 = seasons2[SELECTED_SEASON];
+      if (!sd2.period_deadlines) sd2.period_deadlines = {};
+      sd2.period_deadlines[period] = gameTime.toISOString();
+      saveSeason(SELECTED_SEASON, sd2);
+      statusEl.innerHTML = `<span style="color:#10b981;">Saved! Managers can submit until <strong>${fmtDeadline(gameTime.toISOString())}</strong>.</span>`;
+    };
+  }
 }
 
 function renderScheduleDatesPreview() {
@@ -6651,8 +7120,11 @@ function setupPlayerSearchInputs() {
       // Get already rostered/selected players to exclude from results
       let rostered = [];
       if (weekKey === 'initial') {
-        // For initial submission, exclude players already in this manager's submission
         const sub = sd.initial_submissions && sd.initial_submissions[manager];
+        rostered = sub ? (sub[poolType] || []) : [];
+      } else if (weekKey && weekKey.startsWith('period-')) {
+        const periodKey = weekKey.slice('period-'.length);
+        const sub = getPeriodSub(sd, periodKey, manager);
         rostered = sub ? (sub[poolType] || []) : [];
       } else {
         const roster = sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey];
@@ -6896,6 +7368,180 @@ window.denyInitialSubmission = function(manager) {
   sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
   saveSeason(SELECTED_SEASON, sd);
   renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+// ---- Period Submission Handlers (pp2 / qf / sf / finals) ----
+
+window.addPeriodPlayer = function(period, manager, type) {
+  const inputId = `period-add-${type === 'batters' ? 'bat' : 'pit'}-${period}`;
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const player = input.value.trim();
+  if (!player) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const pool = type === 'batters' ? (sd.batters_pool || []) : (sd.pitchers_pool || []);
+  const match = pool.find(p => p.toLowerCase() === player.toLowerCase());
+  if (!match) { alert('Player not found in pool. Please select from the suggestions.'); return; }
+
+  const sub = ensurePeriodSub(sd, period, manager);
+  const maxCount = type === 'batters' ? 4 : 3;
+  if ((sub[type] || []).length >= maxCount) { alert(`Maximum ${maxCount} ${type} allowed.`); return; }
+  if (!sub[type]) sub[type] = [];
+  if (sub[type].includes(match)) { alert('Player already in your submission.'); return; }
+  sub[type].push(match);
+  saveSeason(SELECTED_SEASON, sd);
+  input.value = '';
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.removePeriodPlayer = function(period, manager, type, player) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = getPeriodSub(sd, period, manager);
+  if (!sub) return;
+  sub[type] = (sub[type] || []).filter(p => p !== player);
+  saveSeason(SELECTED_SEASON, sd);
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.submitPeriodRoster = function(period, manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = getPeriodSub(sd, period, manager);
+  if (!sub) return;
+  if ((sub.batters || []).length !== 4 || (sub.pitchers || []).length !== 3) {
+    alert('You must select exactly 4 batters and 3 pitchers.');
+    return;
+  }
+  sub.status = 'pending';
+  sub.submitted_at = new Date().toISOString();
+  saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.approvePeriodSubmission = function(period, manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = getPeriodSub(sd, period, manager);
+  if (!sub) return;
+
+  // Duplicate-roster check against other managers
+  const rosteredByOther = {};
+  for (const [mgrName, mgrRoster] of Object.entries(sd.rosters || {})) {
+    if (mgrName === manager) continue;
+    for (const wRoster of Object.values(mgrRoster)) {
+      (wRoster.batters || []).forEach(b => { rosteredByOther[b] = mgrName; });
+      (wRoster.pitchers || []).forEach(p => { rosteredByOther[p] = mgrName; });
+    }
+  }
+  const dups = [];
+  (sub.batters || []).forEach(b => { if (rosteredByOther[b]) dups.push(`${b} (${rosteredByOther[b]})`); });
+  (sub.pitchers || []).forEach(p => { if (rosteredByOther[p]) dups.push(`${p} (${rosteredByOther[p]})`); });
+  if (dups.length > 0) {
+    alert(`Cannot approve: these players are already on another roster:\n\n${dups.join('\n')}`);
+    return;
+  }
+
+  sub.status = 'approved';
+  sub.approved_at = new Date().toISOString();
+
+  // Add players to the first week of the corresponding round's roster
+  const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+  const roundKey = periodToRound[period];
+  const firstEntry = roundKey ? SEASON_SCHEDULE.find(s => s.round === roundKey && s.week === 'Week 1') : null;
+  if (firstEntry) {
+    const weekKey = `${firstEntry.round}|${firstEntry.week}`;
+    const weekIdx = SEASON_SCHEDULE.indexOf(firstEntry);
+    const weekStart = sd.schedule_dates && sd.schedule_dates[weekIdx] ? sd.schedule_dates[weekIdx].start : null;
+    if (!sd.rosters) sd.rosters = {};
+    if (!sd.rosters[manager]) sd.rosters[manager] = {};
+    if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+    if (weekStart) {
+      if (!sd.roster_dates) sd.roster_dates = {};
+      if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
+      if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+    }
+    (sub.batters || []).forEach(b => {
+      if (!sd.rosters[manager][weekKey].batters.includes(b)) sd.rosters[manager][weekKey].batters.push(b);
+      if (weekStart) {
+        if (!sd.roster_dates[manager][weekKey][b]) sd.roster_dates[manager][weekKey][b] = {};
+        sd.roster_dates[manager][weekKey][b].add_date = weekStart;
+      }
+    });
+    (sub.pitchers || []).forEach(p => {
+      if (!sd.rosters[manager][weekKey].pitchers.includes(p)) sd.rosters[manager][weekKey].pitchers.push(p);
+      if (weekStart) {
+        if (!sd.roster_dates[manager][weekKey][p]) sd.roster_dates[manager][weekKey][p] = {};
+        sd.roster_dates[manager][weekKey][p].add_date = weekStart;
+      }
+    });
+  }
+
+  saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+window.denyPeriodSubmission = function(period, manager) {
+  const label = PERIOD_LABELS[period] || period;
+  if (!confirm(`Deny ${label} submission for ${manager}? Their selection will be reset to draft.`)) return;
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = ensurePeriodSub(sd, period, manager);
+  Object.assign(sub, { batters: [], pitchers: [], status: 'draft' });
+  delete sub.submitted_at;
+  delete sub.approved_at;
+  saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+// Called when a manager clicks "Edit Submission" on their approved roster (before the deadline)
+window.editApprovedPeriodSubmission = function(period, manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = getPeriodSub(sd, period, manager);
+  if (!sub) return;
+
+  if (!isPeriodTimeOpen(sd, period)) {
+    alert('The submission edit window has closed.');
+    return;
+  }
+
+  const label = PERIOD_LABELS[period] || period;
+  if (!confirm(
+    `Editing your ${label} submission will un-approve your current roster and require commissioner re-approval.\n\n` +
+    'Your current player selections will be preserved so you only need to change the players you want to swap.\n\n' +
+    'Continue?'
+  )) return;
+
+  // Remove the approved players from the period's Week 1 roster
+  const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+  const roundKey = periodToRound[period];
+  const firstEntry = roundKey ? SEASON_SCHEDULE.find(s => s.round === roundKey && s.week === 'Week 1') : null;
+  if (firstEntry && sd.rosters && sd.rosters[manager]) {
+    const weekKey = `${firstEntry.round}|${firstEntry.week}`;
+    if (sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+  }
+
+  sub.status = 'draft';
+  delete sub.approved_at;
+
+  saveSeason(SELECTED_SEASON, sd);
   renderSubmissionStatusTable();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
