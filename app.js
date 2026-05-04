@@ -1323,6 +1323,20 @@ window.togglePool = function(poolId) {
   btn.textContent = isHidden ? 'Hide' : 'Show';
 };
 
+window.togglePoolManagers = function(poolId) {
+  const detailRows = document.querySelectorAll(`.sb-manager-detail-row[data-sb-pool="${poolId}"]`);
+  const anyHidden = [...detailRows].some(row => row.style.display === 'none');
+  detailRows.forEach(row => {
+    const isHidden = row.style.display === 'none';
+    if (anyHidden === isHidden) {
+      const mgrKey = row.id.replace('mgr-detail-', '');
+      window.toggleManagerDetails(mgrKey, row.dataset.manager);
+    }
+  });
+  const btn = document.getElementById('pool-btn-' + poolId);
+  if (btn) btn.textContent = anyHidden ? 'Hide' : 'Show';
+};
+
 window.toggleAllManagerDetails = function(period) {
   const detailRows = document.querySelectorAll(`.sb-manager-detail-row[data-sb-period="${period}"]`);
   const anyHidden = [...detailRows].some(row => row.style.display === 'none');
@@ -1330,8 +1344,7 @@ window.toggleAllManagerDetails = function(period) {
     const isHidden = row.style.display === 'none';
     if (anyHidden === isHidden) {
       const mgrKey = row.id.replace('mgr-detail-', '');
-      const managerName = row.dataset.manager;
-      window.toggleManagerDetails(mgrKey, managerName);
+      window.toggleManagerDetails(mgrKey, row.dataset.manager);
     }
   });
   const btn = document.getElementById('toggle-all-mgr-btn-' + period);
@@ -2926,11 +2939,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       const poolScores = scores.filter(s => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
       const safePoolId = `${section}_pool_${String(poolNum).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
       html += `<div class="pool-card">
-        <div class="pool-card-header">
-          <h3>Pool ${poolNum}</h3>
-          <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-period="${section}" data-pool-id="${safePoolId}" onclick="togglePool('${safePoolId}')">Hide</button>
-        </div>
-        <div class="pool-card-body" id="pool-body-${safePoolId}">
+        <h3>Pool ${poolNum} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -2944,11 +2953,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <td class="num">${fmt(m.pitching)}</td>
           <td class="num"><strong>${fmt(m.total)}</strong></td>
         </tr>
-        <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${m.manager.replace(/"/g, '&quot;')}" data-sb-period="${section}" style="display:none;">
+        <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${m.manager.replace(/"/g, '&quot;')}" data-sb-period="${section}" data-sb-pool="${safePoolId}" style="display:none;">
           <td colspan="5"><div class="mgr-detail-loading">Loading...</div></td>
         </tr>`;
       });
-      html += '</tbody></table></div></div>';
+      html += '</tbody></table></div>';
     });
     html += '</div>';
     return html;
@@ -3031,19 +3040,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
 
   // Pool Play 1
   html += `<div class="scoreboard-section">
-    <div class="pool-period-header">
-      <h3>Pool Play 1</h3>
-      <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp1" onclick="toggleAllManagerDetails('pp1')">Show</button>
-    </div>
+    <h3 class="pool-period-header">Pool Play 1 <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp1" onclick="toggleAllManagerDetails('pp1')">Show</button></h3>
     ${renderPoolSection(pp1Scores, 'Pool Play 1', 'pp1')}
   </div>`;
 
   // Pool Play 2
   html += `<div class="scoreboard-section">
-    <div class="pool-period-header">
-      <h3>Pool Play 2</h3>
-      <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp2" onclick="toggleAllManagerDetails('pp2')">Show</button>
-    </div>
+    <h3 class="pool-period-header">Pool Play 2 <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp2" onclick="toggleAllManagerDetails('pp2')">Show</button></h3>
     ${renderPoolSection(pp2Scores, 'Pool Play 2', 'pp2')}
   </div>`;
 
