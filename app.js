@@ -1314,6 +1314,29 @@ window.togglePoolPlay = function() {
   btn.textContent = hidden ? 'Hide' : 'Show';
 };
 
+window.togglePool = function(poolId) {
+  const body = document.getElementById('pool-body-' + poolId);
+  const btn = document.getElementById('pool-btn-' + poolId);
+  if (!body || !btn) return;
+  const isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? '' : 'none';
+  btn.textContent = isHidden ? '−' : '+';
+};
+
+window.toggleAllPools = function(period) {
+  const buttons = document.querySelectorAll(`.pool-toggle-btn[data-period="${period}"]`);
+  const anyCollapsed = [...buttons].some(btn => btn.textContent.trim() === '+');
+  buttons.forEach(btn => {
+    const poolId = btn.dataset.poolId;
+    const body = document.getElementById('pool-body-' + poolId);
+    if (!body) return;
+    body.style.display = anyCollapsed ? '' : 'none';
+    btn.textContent = anyCollapsed ? '−' : '+';
+  });
+  const mainBtn = document.getElementById('toggle-all-btn-' + period);
+  if (mainBtn) mainBtn.textContent = anyCollapsed ? '−' : '+';
+};
+
 // Toggle the manager player detail pop-down in the scoreboard
 window.toggleManagerDetails = function(mgrKey, managerName) {
   const row = document.getElementById('mgr-detail-' + mgrKey);
@@ -1665,33 +1688,42 @@ function renderPoolPeriodContent(period) {
     ? [...poolPlay].sort((a, b) => a[totalKey] - b[totalKey])[0].manager
     : null;
 
-  let html = `<h3>${periodLabel} Standings</h3>`;
+  let html = `<div class="pool-period-header">
+    <h3>${periodLabel} Standings</h3>
+    <button class="pool-expand-all-btn" id="toggle-all-btn-${period}" data-period="${period}" onclick="toggleAllPools('${period}')">−</button>
+  </div>`;
   html += '<div class="pool-play-grid">';
 
   for (const [poolName, members] of Object.entries(pools)) {
     const poolEntries = poolPlay
       .filter(p => members.includes(p.manager))
       .sort((a, b) => a[rankKey] - b[rankKey]);
+    const safePoolId = `${period}_${poolName.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
 
     html += `<div class="pool-card">
-      <h4>${poolName}</h4>
-      <div class="table-wrapper">
-      <table class="data-table">
-        <thead><tr>
-          <th>Rank</th><th>Manager</th><th>Batting</th><th>Pitching</th><th>Total</th>
-        </tr></thead>
-        <tbody>
-          ${poolEntries.map((p, i) => `
-            <tr class="${i === 0 ? 'pool-leader-row' : ''}">
-              <td class="rank">${i + 1}</td>
-              <td><strong>${p.manager}</strong>${p.manager === ppLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''}</td>
-              <td class="num">${fmt(p[battingKey])}</td>
-              <td class="num">${fmt(p[pitchingKey])}</td>
-              <td class="num"><strong>${fmt(p[totalKey])}</strong></td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
+      <div class="pool-card-header">
+        <h4>${poolName}</h4>
+        <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-period="${period}" data-pool-id="${safePoolId}" onclick="togglePool('${safePoolId}')">−</button>
+      </div>
+      <div class="pool-card-body" id="pool-body-${safePoolId}">
+        <div class="table-wrapper">
+        <table class="data-table">
+          <thead><tr>
+            <th>Rank</th><th>Manager</th><th>Batting</th><th>Pitching</th><th>Total</th>
+          </tr></thead>
+          <tbody>
+            ${poolEntries.map((p, i) => `
+              <tr class="${i === 0 ? 'pool-leader-row' : ''}">
+                <td class="rank">${i + 1}</td>
+                <td><strong>${p.manager}</strong>${p.manager === ppLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''}</td>
+                <td class="num">${fmt(p[battingKey])}</td>
+                <td class="num">${fmt(p[pitchingKey])}</td>
+                <td class="num"><strong>${fmt(p[totalKey])}</strong></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        </div>
       </div>
     </div>`;
   }
