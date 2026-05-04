@@ -9,6 +9,7 @@ let SELECTED_SEASON = null;
 let COMMISSIONER_EMAIL = null;
 let ROSTER_EMAIL = null;
 let LOGGED_IN_EMAIL = null;
+let pendingSwapPollTimer = null;
 let BANNER_BG_CONFIG = null;  // Custom banner background config { imageData, posX, posY, scale }
 
 // Google Sign-In Client ID — set this to enable Google login
@@ -416,6 +417,7 @@ function enterApp(mgr) {
   if (mgr.commissioner) {
     COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
     localStorage.setItem('wmmc_commissioner_logged_in', LOGGED_IN_EMAIL);
+    startPendingSwapPoll();
   }
 
   // Show/hide commissioner nav based on role
@@ -515,7 +517,38 @@ function handleGoogleCredential(response) {
   }
 }
 
+function updatePendingSwapBadge(count) {
+  const badge = document.getElementById('comm-pending-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function startPendingSwapPoll() {
+  if (pendingSwapPollTimer) clearInterval(pendingSwapPollTimer);
+  const poll = () => {
+    if (!SELECTED_SEASON) return;
+    fetch(`/api/pending-count?year=${encodeURIComponent(SELECTED_SEASON)}`)
+      .then(r => r.json())
+      .then(data => updatePendingSwapBadge(data.count || 0))
+      .catch(() => {});
+  };
+  poll();
+  pendingSwapPollTimer = setInterval(poll, 60000);
+}
+
+function stopPendingSwapPoll() {
+  if (pendingSwapPollTimer) clearInterval(pendingSwapPollTimer);
+  pendingSwapPollTimer = null;
+  updatePendingSwapBadge(0);
+}
+
 function handleLogout() {
+  stopPendingSwapPoll();
   LOGGED_IN_EMAIL = null;
   COMMISSIONER_EMAIL = null;
   ROSTER_EMAIL = null;
@@ -4523,6 +4556,7 @@ const SWAP_REASONS = [
   'Drop Swap',
   'Trade Swap',
 ];
+const COMMISSIONER_SWAP_REASONS = [...SWAP_REASONS, 'Commissioner Swap'];
 
 function getSeasonSwaps(seasonData) {
   if (DATA && DATA.swaps) return DATA.swaps; // historical
@@ -5071,6 +5105,7 @@ window.approveSwap = function(swapId) {
 
   renderPendingSwapRequests();
   renderSwapLog();
+  startPendingSwapPoll();
 
   // Find logged-in manager name and re-render
   const mgrs = getManagers();
@@ -5095,6 +5130,7 @@ window.denySwap = function(swapId) {
 
   renderPendingSwapRequests();
   renderSwapLog();
+  startPendingSwapPoll();
 
   const mgrs = getManagers();
   const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
@@ -5377,7 +5413,7 @@ function renderSwapLog() {
     const reason = s.reason || '';
     let reasonCell;
     if (isCommissioner) {
-      const opts = SWAP_REASONS.map(r => `<option value="${r}"${r === reason ? ' selected' : ''}>${r}</option>`).join('');
+      const opts = COMMISSIONER_SWAP_REASONS.map(r => `<option value="${r}"${r === reason ? ' selected' : ''}>${r}</option>`).join('');
       reasonCell = `<select onchange="saveSwapLogReason('${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
     } else {
       reasonCell = reason;

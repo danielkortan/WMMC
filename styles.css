@@ -191,6 +191,19 @@ nav {
   border-bottom-color: var(--field-green);
 }
 
+#comm-pending-badge {
+  display: inline-block;
+  background: #e53935;
+  color: #fff;
+  border-radius: 10px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
 main {
   max-width: 1200px;
   margin: 0 auto;

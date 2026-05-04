@@ -18,6 +18,17 @@ const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const UPSTASH_KEY = 'wmmc_db';
 
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
+
+async function postSlack(text) {
+  if (!SLACK_WEBHOOK_URL) return;
+  await fetch(SLACK_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text })
+  });
+}
+
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
 const ASSET_VERSION = Date.now();
@@ -284,10 +295,34 @@ app.post('/api/seasons/:year', (req, res) => {
   }
   const db = readDB();
   if (!db.seasons) db.seasons = {};
+
+  // Detect newly added pending swaps so we can notify via Slack
+  const existingSwaps = (db.seasons[req.params.year] && db.seasons[req.params.year].swaps) || [];
+  const existingIds = new Set(existingSwaps.map(s => s.id));
+  const incomingSwaps = req.body.swaps || [];
+  const newPending = incomingSwaps.filter(s => s.status === 'pending' && !existingIds.has(s.id));
+
   addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
   db.seasons[req.params.year] = req.body;
   writeDB(db);
   res.json({ ok: true });
+
+  // Fire-and-forget Slack notifications for each new pending swap
+  for (const swap of newPending) {
+    postSlack(
+      `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
+    ).catch(() => {});
+  }
+});
+
+// GET /api/pending-count — number of pending swaps for a given season year
+app.get('/api/pending-count', (req, res) => {
+  const { year } = req.query;
+  if (!year || !isValidYear(year)) return res.json({ count: 0 });
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  const swaps = (sd && sd.swaps) || [];
+  res.json({ count: swaps.filter(s => s.status === 'pending').length });
 });
 
 // GET /api/managers — return managers list
@@ -890,6 +925,9 @@ app.post('/api/google-sheets/sync', async (req, res) => {
     const config = db.google_sheets_config || {};
     const season = req.body.season || config.season || new Date().getFullYear().toString();
     const result = await syncGoogleSheets(season, 'manual');
+    if (result.errors > 0) {
+      postSlack(`*Google Sheets Manual Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import for season ${season}.`).catch(() => {});
+    }
     res.json({ ok: true, result });
   } catch (e) {
     // Log the error
@@ -898,6 +936,7 @@ app.post('/api/google-sheets/sync', async (req, res) => {
     db.google_sheets_config.last_sync = new Date().toISOString();
     db.google_sheets_config.last_sync_result = { success: false, error: e.message };
     writeDB(db);
+    postSlack(`*Google Sheets Manual Sync Failed*\n${e.message}`).catch(() => {});
     res.status(500).json({ error: e.message });
   }
 });
@@ -1012,8 +1051,16 @@ function scheduleGSheetsSync() {
     // Only sync if within the season's date window
     if (isWithinSyncWindow(sd)) {
       syncGoogleSheets(season)
-        .then(result => console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`))
-        .catch(e => console.error(`[GSheets] Sync error: ${e.message}`));
+        .then(result => {
+          console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`);
+          if (result.errors > 0) {
+            postSlack(`*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`).catch(() => {});
+          }
+        })
+        .catch(e => {
+          console.error(`[GSheets] Sync error: ${e.message}`);
+          postSlack(`*Google Sheets Sync Failed*\n${e.message}`).catch(() => {});
+        });
     } else {
       console.log(`[GSheets] Skipping sync — outside season date window for ${season}`);
     }
