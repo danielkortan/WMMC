@@ -5806,6 +5806,7 @@ function showCommissionerPanel() {
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
+  setupAutoFillButton();
   setupASGDateInput();
   setupPeriodDeadlineInputs();
   renderGSheetsConfig();
@@ -6204,6 +6205,148 @@ function setupPeriodDeadlineInputs() {
       statusEl.innerHTML = `<span style="color:#10b981;">Saved! Managers can submit until <strong>${fmtDeadline(gameTime.toISOString())}</strong>.</span>`;
     };
   }
+}
+
+async function autoFillSchedule() {
+  const statusEl = document.getElementById('autofill-schedule-status');
+  const btn = document.getElementById('autofill-schedule-btn');
+  if (!btn || !statusEl) return;
+
+  btn.disabled = true;
+  statusEl.innerHTML = '<span style="color:#888;">Fetching MLB schedule data…</span>';
+
+  const season = SELECTED_SEASON || String(new Date().getFullYear());
+  const results = [];
+  const warnings = [];
+
+  // Helper: convert a datetime-local string to toLocalInputVal format
+  const toLocalInputVal = isoStr => {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  };
+
+  // Helper: fetch JSON from MLB Stats API, returns null on any failure
+  const mlbFetch = async url => {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // Step 1: detect ASG date
+  let asgDate = null;
+  const asgData = await mlbFetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&gameTypes=A&season=${season}`);
+  if (asgData && asgData.dates) {
+    for (const dateEntry of asgData.dates) {
+      if ((dateEntry.games || []).some(g => g.gameType === 'A')) {
+        asgDate = dateEntry.date;
+        break;
+      }
+    }
+  }
+  if (asgDate) {
+    results.push(`All-Star Game: <strong>${asgDate}</strong> (from MLB API)`);
+  } else {
+    const asgInput = document.getElementById('asg-date-input');
+    if (asgInput && asgInput.value) {
+      asgDate = asgInput.value;
+      results.push(`All-Star Game: <strong>${asgDate}</strong> (from current input — API unavailable)`);
+    } else if (season === '2026') {
+      asgDate = '2026-07-14';
+      warnings.push('MLB API unavailable; using 2026 ASG default (July 14). Confirm before saving.');
+      results.push(`All-Star Game: <strong>${asgDate}</strong> (2026 default)`);
+    } else {
+      btn.disabled = false;
+      statusEl.innerHTML = '<span style="color:#ef4444;">Could not determine ASG date from the MLB API. Please enter it manually first.</span>';
+      return;
+    }
+  }
+
+  // Step 2: compute WMMC schedule from ASG date
+  const schedDates = computeScheduleDates(asgDate);
+
+  // period → SEASON_SCHEDULE index of that period's Week 1
+  const periodToIdx = { pp1: 0, pp2: 5, qf: 10, sf: 12, finals: 14 };
+  const periodDeadlines = {};
+
+  // Step 3: fetch earliest game time for each period's first date
+  for (const [period, idx] of Object.entries(periodToIdx)) {
+    const dateStr = schedDates[idx] && schedDates[idx].start;
+    if (!dateStr) { warnings.push(`Could not determine date for ${PERIOD_LABELS[period]}.`); continue; }
+
+    let gameTime = null;
+    const dayData = await mlbFetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${dateStr}&timeZone=America/New_York`);
+    if (dayData && dayData.dates && dayData.dates[0]) {
+      const games = (dayData.dates[0].games || [])
+        .filter(g => g.gameDate)
+        .sort((a, b) => new Date(a.gameDate) - new Date(b.gameDate));
+      if (games.length > 0) {
+        gameTime = games[0].gameDate;
+        const localFmt = new Date(gameTime).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+        results.push(`${PERIOD_LABELS[period]}: <strong>${dateStr}</strong> — earliest game ${localFmt} ET (API)`);
+      }
+    }
+
+    if (!gameTime) {
+      const def = PERIOD_DEADLINE_DEFAULTS[period];
+      if (def) {
+        gameTime = new Date(def).toISOString();
+        warnings.push(`${PERIOD_LABELS[period]}: MLB API unavailable for ${dateStr}; used hardcoded default — verify before saving.`);
+        const localFmt = new Date(gameTime).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+        results.push(`${PERIOD_LABELS[period]}: <strong>${dateStr}</strong> — ${localFmt} ET (default)`);
+      } else {
+        warnings.push(`${PERIOD_LABELS[period]}: no game data found and no default available.`);
+      }
+    }
+
+    if (gameTime) periodDeadlines[period] = gameTime;
+  }
+
+  // Step 4: save everything to season data
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  sd.asg_date = asgDate;
+  sd.schedule_dates = schedDates;
+  if (!sd.period_deadlines) sd.period_deadlines = {};
+  Object.assign(sd.period_deadlines, periodDeadlines);
+  saveSeason(SELECTED_SEASON, sd);
+
+  // Step 5: update UI inputs
+  const asgInputEl = document.getElementById('asg-date-input');
+  if (asgInputEl) asgInputEl.value = asgDate;
+
+  for (const [period, isoStr] of Object.entries(periodDeadlines)) {
+    const inputEl = document.getElementById(`period-deadline-input-${period}`);
+    if (inputEl) inputEl.value = toLocalInputVal(isoStr);
+    const pStatusEl = document.getElementById(`period-deadline-status-${period}`);
+    if (pStatusEl) pStatusEl.innerHTML = '';
+  }
+
+  // Step 6: refresh dependent views
+  const asgStatusEl = document.getElementById('asg-date-status');
+  if (asgStatusEl) asgStatusEl.innerHTML = '<span style="color:#10b981;">Schedule dates saved!</span>';
+  renderScheduleDatesPreview();
+  renderWeeklyUploadSections();
+
+  // Step 7: show summary
+  const resHtml = results.length
+    ? `<ul style="margin:0.4rem 0 0;padding-left:1.25rem;">${results.map(r => `<li>${r}</li>`).join('')}</ul>`
+    : '';
+  const warnHtml = warnings.length
+    ? `<div style="color:#f59e0b;margin-top:0.4rem;">Notes:<ul style="margin:0.2rem 0 0;padding-left:1.25rem;">${warnings.map(w => `<li>${w}</li>`).join('')}</ul></div>`
+    : '';
+  statusEl.innerHTML = `<span style="color:#10b981;font-weight:600;">Auto-fill complete.</span> Review the values below and save any changes.${resHtml}${warnHtml}`;
+  btn.disabled = false;
+}
+
+function setupAutoFillButton() {
+  const btn = document.getElementById('autofill-schedule-btn');
+  if (!btn) return;
+  btn.onclick = () => autoFillSchedule();
 }
 
 function renderScheduleDatesPreview() {
