@@ -1060,10 +1060,22 @@ input[type="file"] {
   letter-spacing: 0.04em;
   color: var(--primary);
   margin: 1rem 0 0.35rem -0.5rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .tl-round-label:first-child {
   margin-top: 0;
+}
+
+.tl-submission-deadline {
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
 }
 
 .tl-item {

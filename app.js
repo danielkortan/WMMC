@@ -2516,7 +2516,20 @@ function renderLeagueSchedule() {
     // Round separator
     if (s.round !== prevRound) {
       const roundLabels = { PP1: 'Pool Play 1', PP2: 'Pool Play 2', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
-      html += `<div class="tl-round-label">${roundLabels[s.round] || s.round}</div>`;
+      const periodKey = { PP1: 'pp1', PP2: 'pp2', QF: 'qf', SF: 'sf', Finals: 'finals' }[s.round];
+      let deadlineHtml = '';
+      if (periodKey && isActive) {
+        const openDate = getPeriodOpenDate(seasonData, periodKey);
+        const deadline = getPeriodDeadline(seasonData, periodKey);
+        const fmtDt = d => d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+        const parts = [];
+        if (openDate) parts.push(`Opens ${fmtDt(openDate)}`);
+        if (deadline) parts.push(`Deadline ${fmtDt(deadline)}`);
+        if (parts.length) {
+          deadlineHtml = `<span class="tl-submission-deadline">${parts.join(' &nbsp;·&nbsp; ')}</span>`;
+        }
+      }
+      html += `<div class="tl-round-label">${roundLabels[s.round] || s.round}${deadlineHtml}</div>`;
       prevRound = s.round;
     }
 
