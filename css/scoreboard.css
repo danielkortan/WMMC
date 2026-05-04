@@ -301,6 +301,7 @@
   padding: 0.5rem 1rem;
 }
 
+.pool-card-header h3,
 .pool-card-header h4 {
   color: white;
   font-size: 0.9rem;
