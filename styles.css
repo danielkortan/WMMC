@@ -1602,6 +1602,18 @@ footer {
   font-size: 0.8rem;
 }
 
+.sb-color-legend {
+  margin: 0.5rem 0;
+  align-items: center;
+}
+
+.legend-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  margin-right: 0.25rem;
+}
+
 .legend-item {
   display: flex;
   align-items: center;
