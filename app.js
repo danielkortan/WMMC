@@ -2924,6 +2924,14 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     </div>
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">`;
 
+  html += `<div class="highlight-legend sb-color-legend">
+    <span class="legend-label">Name Colors:</span>
+    <span class="legend-item"><span class="legend-swatch hl-pp1"></span> PP1 Pool Leader</span>
+    <span class="legend-item"><span class="legend-swatch hl-pp2"></span> PP2 Pool Leader</span>
+    <span class="legend-item"><span class="legend-swatch hl-both"></span> PP1 &amp; PP2 Leader</span>
+    <span class="legend-item"><span class="legend-swatch hl-wildcard"></span> Wild Card</span>
+  </div>`;
+
   // Pool Play Overall (combined PP1 + PP2, single list sorted by total)
   html += `<div class="scoreboard-section">
     <h3>Pool Play Overall</h3>
