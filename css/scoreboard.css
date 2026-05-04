@@ -287,26 +287,13 @@
 .pool-card h3 {
   background: var(--primary);
   color: white;
-  padding: 0.625rem 1rem;
+  padding: 0.5rem 1rem;
   font-size: 0.9rem;
   font-weight: 700;
   margin: 0;
-}
-
-.pool-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: var(--primary);
-  padding: 0.5rem 1rem;
-}
-
-.pool-card-header h3,
-.pool-card-header h4 {
-  color: white;
-  font-size: 0.9rem;
-  font-weight: 700;
-  margin: 0;
 }
 
 .pool-toggle-btn {
@@ -327,24 +314,20 @@
   background: rgba(255, 255, 255, 0.35);
 }
 
-.pool-period-header {
+h3.pool-period-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.75rem;
 }
 
-.pool-period-header h3 {
-  margin: 0;
-}
-
 .pool-expand-all-btn {
-  background: var(--primary);
-  border: 1px solid var(--primary);
-  color: white;
+  background: rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  color: inherit;
   border-radius: 4px;
-  padding: 0.15rem 0.6rem;
-  font-size: 0.8rem;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
@@ -353,7 +336,7 @@
 }
 
 .pool-expand-all-btn:hover {
-  background: var(--primary-dark, #1a56a0);
+  background: rgba(0, 0, 0, 0.2);
 }
 
 /* ============================================================ */
