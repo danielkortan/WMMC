@@ -729,7 +729,7 @@ function pruneSyncHistory(sd) {
 }
 
 // Main sync function — fetches all available weeks from the sheet
-async function syncGoogleSheets(year) {
+async function syncGoogleSheets(year, syncType = 'daily') {
   const db = readDB();
   const config = db.google_sheets_config || {};
   const sd = (db.seasons || {})[year];
@@ -780,12 +780,13 @@ async function syncGoogleSheets(year) {
   }
 
   // Log the sync
+  const errorCount = results.filter(r => r.error).length;
   if (!sd.upload_log) sd.upload_log = [];
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     type: 'gsheets_sync',
-    sync_type: 'daily',
-    success: true,
+    sync_type: syncType,
+    success: errorCount === 0,
     batting_imported: totalBatImported,
     pitching_imported: totalPitImported,
     details: results
@@ -801,11 +802,11 @@ async function syncGoogleSheets(year) {
   // Update sync status
   config.last_sync = new Date().toISOString();
   config.last_sync_result = {
-    success: true,
+    success: errorCount === 0,
     batting_imported: totalBatImported,
     pitching_imported: totalPitImported,
     weeks_with_data: results.filter(r => !r.error && r.imported > 0).length,
-    errors: results.filter(r => r.error).length,
+    errors: errorCount,
     details: results
   };
   db.google_sheets_config = config;
@@ -867,7 +868,7 @@ app.post('/api/google-sheets/sync', async (req, res) => {
     const db = readDB();
     const config = db.google_sheets_config || {};
     const season = req.body.season || config.season || new Date().getFullYear().toString();
-    const result = await syncGoogleSheets(season);
+    const result = await syncGoogleSheets(season, 'manual');
     res.json({ ok: true, result });
   } catch (e) {
     // Log the error
