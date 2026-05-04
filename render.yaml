@@ -15,3 +15,5 @@ services:
         sync: false
       - key: DB_PATH
         value: /var/data/db.json
+      - key: SLACK_WEBHOOK_URL
+        sync: false

@@ -9,6 +9,7 @@ let SELECTED_SEASON = null;
 let COMMISSIONER_EMAIL = null;
 let ROSTER_EMAIL = null;
 let LOGGED_IN_EMAIL = null;
+let pendingSwapPollTimer = null;
 let BANNER_BG_CONFIG = null;  // Custom banner background config { imageData, posX, posY, scale }
 
 // Google Sign-In Client ID — set this to enable Google login
@@ -416,6 +417,7 @@ function enterApp(mgr) {
   if (mgr.commissioner) {
     COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
     localStorage.setItem('wmmc_commissioner_logged_in', LOGGED_IN_EMAIL);
+    startPendingSwapPoll();
   }
 
   // Show/hide commissioner nav based on role
@@ -515,7 +517,38 @@ function handleGoogleCredential(response) {
   }
 }
 
+function updatePendingSwapBadge(count) {
+  const badge = document.getElementById('comm-pending-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function startPendingSwapPoll() {
+  if (pendingSwapPollTimer) clearInterval(pendingSwapPollTimer);
+  const poll = () => {
+    if (!SELECTED_SEASON) return;
+    fetch(`/api/pending-count?year=${encodeURIComponent(SELECTED_SEASON)}`)
+      .then(r => r.json())
+      .then(data => updatePendingSwapBadge(data.count || 0))
+      .catch(() => {});
+  };
+  poll();
+  pendingSwapPollTimer = setInterval(poll, 60000);
+}
+
+function stopPendingSwapPoll() {
+  if (pendingSwapPollTimer) clearInterval(pendingSwapPollTimer);
+  pendingSwapPollTimer = null;
+  updatePendingSwapBadge(0);
+}
+
 function handleLogout() {
+  stopPendingSwapPoll();
   LOGGED_IN_EMAIL = null;
   COMMISSIONER_EMAIL = null;
   ROSTER_EMAIL = null;
@@ -5057,6 +5090,7 @@ window.approveSwap = function(swapId) {
 
   renderPendingSwapRequests();
   renderSwapLog();
+  startPendingSwapPoll();
 
   // Find logged-in manager name and re-render
   const mgrs = getManagers();
@@ -5081,6 +5115,7 @@ window.denySwap = function(swapId) {
 
   renderPendingSwapRequests();
   renderSwapLog();
+  startPendingSwapPoll();
 
   const mgrs = getManagers();
   const mgr = mgrs.find(m => m.email.toLowerCase() === ROSTER_EMAIL.toLowerCase());
