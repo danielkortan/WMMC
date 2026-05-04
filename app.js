@@ -4508,6 +4508,7 @@ const SWAP_REASONS = [
   'Drop Swap',
   'Trade Swap',
 ];
+const COMMISSIONER_SWAP_REASONS = [...SWAP_REASONS, 'Commissioner Swap'];
 
 function getSeasonSwaps(seasonData) {
   if (DATA && DATA.swaps) return DATA.swaps; // historical
@@ -5362,7 +5363,7 @@ function renderSwapLog() {
     const reason = s.reason || '';
     let reasonCell;
     if (isCommissioner) {
-      const opts = SWAP_REASONS.map(r => `<option value="${r}"${r === reason ? ' selected' : ''}>${r}</option>`).join('');
+      const opts = COMMISSIONER_SWAP_REASONS.map(r => `<option value="${r}"${r === reason ? ' selected' : ''}>${r}</option>`).join('');
       reasonCell = `<select onchange="saveSwapLogReason('${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
     } else {
       reasonCell = reason;
