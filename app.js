@@ -109,6 +109,18 @@ function fmtDateRangeShort(startStr, endStr) {
   return `${mo[s.getMonth()]} ${s.getDate()} – ${mo[e.getMonth()]} ${e.getDate()}`;
 }
 
+// Returns the Date at which managers may no longer edit an approved submission
+// (5 minutes before the MLB season's first game). Returns null if not configured.
+function getSubmissionEditDeadline(sd) {
+  if (!sd || !sd.mlb_first_game) return null;
+  return new Date(new Date(sd.mlb_first_game).getTime() - 5 * 60 * 1000);
+}
+
+function isSubmissionEditOpen(sd) {
+  const deadline = getSubmissionEditDeadline(sd);
+  return deadline ? Date.now() < deadline.getTime() : false;
+}
+
 // Get schedule_dates array for the selected season (or null)
 function getScheduleDates() {
   const seasons = getSeasons();
@@ -4850,6 +4862,19 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       html += '<div class="comm-player-list">';
       submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span></div>`; });
       html += '</div>';
+
+      // Allow editing if the MLB season hasn't started yet (within deadline window)
+      const editDeadline = getSubmissionEditDeadline(seasonData);
+      if (editDeadline && Date.now() < editDeadline.getTime()) {
+        const deadlineStr = editDeadline.toLocaleString('en-US', {
+          month: 'short', day: 'numeric', year: 'numeric',
+          hour: 'numeric', minute: '2-digit', hour12: true
+        });
+        html += `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+          <button class="btn btn-secondary" onclick="openManagerSubmissionEdit('${safeMgr}')">Edit Submission</button>
+          <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">Editing available until <strong>${deadlineStr}</strong> (5 min before first MLB game). Re-editing will require commissioner re-approval.</p>
+        </div>`;
+      }
     } else if (poolReady) {
       // Editable submission form (only when pool is available)
       if (isPending) {
@@ -5404,6 +5429,7 @@ function showCommissionerPanel() {
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
   setupASGDateInput();
+  setupMLBFirstGameInput();
   renderGSheetsConfig();
 }
 
@@ -5718,6 +5744,49 @@ function setupASGDateInput() {
     renderScheduleDatesPreview();
     // Refresh dependent views
     renderWeeklyUploadSections();
+  };
+}
+
+function setupMLBFirstGameInput() {
+  const input = document.getElementById('mlb-first-game-input');
+  const btn = document.getElementById('mlb-first-game-save-btn');
+  const status = document.getElementById('mlb-first-game-status');
+  if (!input || !btn) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+
+  if (sd && sd.mlb_first_game) {
+    // Convert stored UTC ISO to the local datetime-local format (YYYY-MM-DDTHH:MM)
+    const d = new Date(sd.mlb_first_game);
+    const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+    input.value = local.toISOString().slice(0, 16);
+  } else {
+    // Pre-fill with the 2026 MLB Opening Day first game: March 25 at 8:05 PM ET
+    // Stored as a suggestion; the commissioner should confirm and save.
+    input.value = '2026-03-25T20:05';
+  }
+
+  btn.onclick = () => {
+    if (!input.value) {
+      status.innerHTML = '<span style="color:#ef4444;">Please select a date and time.</span>';
+      return;
+    }
+    const gameTime = new Date(input.value);
+    if (isNaN(gameTime.getTime())) {
+      status.innerHTML = '<span style="color:#ef4444;">Invalid date/time.</span>';
+      return;
+    }
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    sd.mlb_first_game = gameTime.toISOString();
+    saveSeason(SELECTED_SEASON, sd);
+
+    const deadline = getSubmissionEditDeadline(sd);
+    const deadlineStr = deadline
+      ? deadline.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+      : '—';
+    status.innerHTML = `<span style="color:#10b981;">Saved! Managers can edit their approved submission until <strong>${deadlineStr}</strong>.</span>`;
   };
 }
 
@@ -6896,6 +6965,43 @@ window.denyInitialSubmission = function(manager) {
   sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
   saveSeason(SELECTED_SEASON, sd);
   renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
+  renderRosterData(manager, isComm);
+};
+
+// Called when a manager clicks "Edit Submission" on their approved roster (before the deadline)
+window.openManagerSubmissionEdit = function(manager) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+
+  if (!isSubmissionEditOpen(sd)) {
+    alert('The submission edit window has closed. The MLB season has started.');
+    return;
+  }
+
+  if (!confirm(
+    'Editing your submission will un-approve your current roster and require commissioner re-approval.\n\n' +
+    'Your current player selections will be preserved so you only need to swap the players you want to change.\n\n' +
+    'Continue?'
+  )) return;
+
+  const sub = sd.initial_submissions[manager];
+
+  // Remove the previously approved players from the Week 1 roster so they can be
+  // re-assigned clean on the next commissioner approval.
+  const firstWeek = SEASON_SCHEDULE[0];
+  const weekKey = `${firstWeek.round}|${firstWeek.week}`;
+  if (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) {
+    sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+  }
+
+  // Revert to draft so the editable form is shown; preserve the player selections
+  sub.status = 'draft';
+  delete sub.approved_at;
+
+  saveSeason(SELECTED_SEASON, sd);
   renderSubmissionStatusTable();
   const isComm = getManagers().some(m => m.email.toLowerCase() === (ROSTER_EMAIL || '').toLowerCase() && m.commissioner);
   renderRosterData(manager, isComm);
