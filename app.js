@@ -5346,6 +5346,8 @@ function renderSwapLog() {
     return tb.localeCompare(ta);
   });
 
+  const isCommissioner = !!(COMMISSIONER_EMAIL || (LOGGED_IN_EMAIL && getManagers().some(m => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase() && m.commissioner)));
+
   const statusBadge = s => {
     if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
     if (s.status === 'denied')   return '<span class="swap-badge swap-badge-denied">Denied</span>';
@@ -5358,18 +5360,36 @@ function renderSwapLog() {
     const outTxt = s.player_out || '—';
     const inTxt  = s.player_in  || '—';
     const reason = s.reason || '';
+    let reasonCell;
+    if (isCommissioner) {
+      const opts = SWAP_REASONS.map(r => `<option value="${r}"${r === reason ? ' selected' : ''}>${r}</option>`).join('');
+      reasonCell = `<select onchange="saveSwapLogReason('${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
+    } else {
+      reasonCell = reason;
+    }
     html += `<tr>
       <td>${s.manager || '—'}</td>
       <td>${outTxt}</td>
       <td>${inTxt}</td>
       <td style="white-space:nowrap;font-size:0.82rem;">${date}</td>
       <td>${statusBadge(s)}</td>
-      <td style="font-size:0.82rem;color:var(--text-muted);">${reason}</td>
+      <td style="font-size:0.82rem;color:var(--text-muted);">${reasonCell}</td>
     </tr>`;
   });
   html += '</tbody></table>';
   container.innerHTML = html;
 }
+
+window.saveSwapLogReason = function(swapId, newReason) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.swaps) return;
+  const swap = sd.swaps.find(s => s.id === swapId);
+  if (!swap) return;
+  swap.reason = newReason;
+  saveSeason(SELECTED_SEASON, sd);
+  renderSwapLog();
+};
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
 function renderPendingSwapRequests() {
