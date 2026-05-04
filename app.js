@@ -5677,10 +5677,19 @@ function renderGSheetsConfig() {
     const timeAgo = getTimeAgo(new Date(config.last_sync));
     const result = config.last_sync_result;
     if (result && result.success) {
+      let errDetailsHtml = '';
+      if (result.errors > 0 && result.details) {
+        const errLines = result.details
+          .filter(r => r.error)
+          .map(r => `Week ${r.week} ${r.type}: ${r.error}`)
+          .join('<br>');
+        errDetailsHtml = `<div style="color:var(--danger,#dc3545);font-size:0.82rem;margin-top:0.35rem;">${errLines}</div>`;
+      }
       statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
         <strong>Last sync:</strong> ${timeAgo} &mdash;
         ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
-        (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} errors` : ''})
+        (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} error${result.errors > 1 ? 's' : ''}` : ''})
+        ${errDetailsHtml}
       </div>`;
     } else if (result) {
       statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
@@ -5713,14 +5722,23 @@ function renderGSheetsConfig() {
           ? 'background:var(--success,#28a745);color:#fff;'
           : 'background:var(--danger,#dc3545);color:#fff;';
         const successLabel = l.success !== false ? 'Success' : 'Failed';
-        const detail = l.success !== false
-          ? `${l.batting_imported} batting, ${l.pitching_imported} pitching records imported`
-          : `Error: ${l.error || 'Unknown error'}`;
+        let detail, errBlock = '';
+        if (l.success !== false) {
+          const errResults = (l.details || []).filter(r => r.error);
+          detail = `${l.batting_imported} batting, ${l.pitching_imported} pitching records imported`;
+          if (errResults.length > 0) {
+            detail += ` (${errResults.length} error${errResults.length > 1 ? 's' : ''})`;
+            errBlock = `<div style="color:var(--danger,#dc3545);font-size:0.78rem;margin-top:0.2rem;">${errResults.map(r => `Week ${r.week} ${r.type}: ${r.error}`).join('<br>')}</div>`;
+          }
+        } else {
+          detail = `Error: ${l.error || 'Unknown error'}`;
+        }
         logHtml += `<div class="gsheets-log-item">
           <span class="gsheets-log-time">${l.timestamp}</span>
           <span class="swap-badge" style="${typeBadgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${typeLabel}</span>
           <span class="swap-badge" style="${successBadgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${successLabel}</span>
           <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
+          ${errBlock}
         </div>`;
       });
       logHtml += '</div>';
@@ -5992,12 +6010,14 @@ window.triggerGSheetsSync = async function() {
 
     // Update config with sync status
     config.last_sync = new Date().toISOString();
+    const errorCount = results.filter(r => r.error).length;
     config.last_sync_result = {
       success: true,
       batting_imported: totalBat,
       pitching_imported: totalPit,
       weeks_with_data: results.filter(r => !r.error && r.imported > 0).length,
-      errors: results.filter(r => r.error).length,
+      errors: errorCount,
+      details: results,
     };
     saveGSheetsConfigLocal(config);
 
