@@ -289,14 +289,51 @@
               <div id="asg-date-status"></div>
             </div>
             <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
-            <div class="asg-date-section" style="margin-top:1.25rem;border-top:1px solid var(--border);padding-top:1rem;">
-              <label class="upload-label">MLB Opening Day — First Game Start Time</label>
-              <p class="upload-hint">Set the start time of the very first MLB game of the season. Managers may edit their approved submission up until 5 minutes before this time. For 2026, the first game is <strong>March 25 at 8:05 PM ET</strong> (Yankees vs. Giants).</p>
-              <div class="asg-date-row">
-                <input type="datetime-local" id="mlb-first-game-input">
-                <button class="btn btn-primary" id="mlb-first-game-save-btn">Set Edit Deadline</button>
+            <div style="margin-top:1.25rem;border-top:1px solid var(--border);padding-top:1rem;">
+              <label class="upload-label">Submission Deadlines — First MLB Game Each Period</label>
+              <p class="upload-hint">For each WMMC period, enter the start time of the earliest MLB game on that period's first day. Managers can submit (or edit an approved submission) up to 5 minutes before that game. Pre-filled with 2026 values — confirm against the official MLB schedule before saving.</p>
+              <div style="display:flex;flex-direction:column;gap:0.75rem;margin-top:0.75rem;">
+                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+                  <label class="upload-label" style="margin-bottom:0.25rem;">Pool Play 1 — May 4, 2026 (earliest game: 5:40 PM ET)</label>
+                  <div class="asg-date-row">
+                    <input type="datetime-local" id="period-deadline-input-pp1">
+                    <button class="btn btn-primary" id="period-deadline-save-pp1">Save</button>
+                  </div>
+                  <div id="period-deadline-status-pp1" style="font-size:0.82rem;margin-top:0.25rem;"></div>
+                </div>
+                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+                  <label class="upload-label" style="margin-bottom:0.25rem;">Pool Play 2 — June 8, 2026 (verify earliest game time)</label>
+                  <div class="asg-date-row">
+                    <input type="datetime-local" id="period-deadline-input-pp2">
+                    <button class="btn btn-primary" id="period-deadline-save-pp2">Save</button>
+                  </div>
+                  <div id="period-deadline-status-pp2" style="font-size:0.82rem;margin-top:0.25rem;"></div>
+                </div>
+                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+                  <label class="upload-label" style="margin-bottom:0.25rem;">Quarterfinals — July 20, 2026 (earliest game: 7:05 PM ET)</label>
+                  <div class="asg-date-row">
+                    <input type="datetime-local" id="period-deadline-input-qf">
+                    <button class="btn btn-primary" id="period-deadline-save-qf">Save</button>
+                  </div>
+                  <div id="period-deadline-status-qf" style="font-size:0.82rem;margin-top:0.25rem;"></div>
+                </div>
+                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+                  <label class="upload-label" style="margin-bottom:0.25rem;">Semifinals — August 3, 2026 (earliest game: 8:05 PM ET)</label>
+                  <div class="asg-date-row">
+                    <input type="datetime-local" id="period-deadline-input-sf">
+                    <button class="btn btn-primary" id="period-deadline-save-sf">Save</button>
+                  </div>
+                  <div id="period-deadline-status-sf" style="font-size:0.82rem;margin-top:0.25rem;"></div>
+                </div>
+                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+                  <label class="upload-label" style="margin-bottom:0.25rem;">Finals — August 17, 2026 (earliest game: 7:00 PM ET)</label>
+                  <div class="asg-date-row">
+                    <input type="datetime-local" id="period-deadline-input-finals">
+                    <button class="btn btn-primary" id="period-deadline-save-finals">Save</button>
+                  </div>
+                  <div id="period-deadline-status-finals" style="font-size:0.82rem;margin-top:0.25rem;"></div>
+                </div>
               </div>
-              <div id="mlb-first-game-status"></div>
             </div>
           </div>
 
