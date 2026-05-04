@@ -5798,14 +5798,25 @@ window.saveGSheetsConfig = function() {
 
 async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName)}?key=${encodeURIComponent(apiKey)}`;
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    if (resp.status === 404 || resp.status === 400) return null;
-    const text = await resp.text();
-    throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      if (resp.status === 404 || resp.status === 400) return null;
+      if (resp.status === 429 && attempt < 2) {
+        const waitSec = 65;
+        const statusDiv = document.getElementById('gsheets-status');
+        if (statusDiv) statusDiv.innerHTML = `<p>Rate limit hit — waiting ${waitSec}s before retrying (attempt ${attempt + 2}/3)...</p>`;
+        await new Promise(r => setTimeout(r, waitSec * 1000));
+        if (statusDiv) statusDiv.innerHTML = '<p>Syncing from Google Sheets... this may take a moment.</p>';
+        continue;
+      }
+      const text = await resp.text();
+      if (resp.status === 429) throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');
+      throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await resp.json();
+    return data.values || [];
   }
-  const data = await resp.json();
-  return data.values || [];
 }
 
 function parseSheetRows(values) {

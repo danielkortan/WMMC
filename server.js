@@ -520,14 +520,21 @@ function extractSpreadsheetId(input) {
 async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
   const encodedTab = encodeURIComponent(tabName);
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodedTab}?key=${apiKey}`;
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    if (resp.status === 404 || resp.status === 400) return null; // tab doesn't exist
-    const text = await resp.text();
-    throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      if (resp.status === 404 || resp.status === 400) return null;
+      if (resp.status === 429 && attempt < 2) {
+        await new Promise(r => setTimeout(r, 65000));
+        continue;
+      }
+      const text = await resp.text();
+      if (resp.status === 429) throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');
+      throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await resp.json();
+    return data.values || [];
   }
-  const data = await resp.json();
-  return data.values || [];
 }
 
 // Parse sheet rows (first row = headers) into objects
