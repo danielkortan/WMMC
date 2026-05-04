@@ -178,7 +178,8 @@ function isPeriodTimeOpen(sd, period) {
   const openDate = getPeriodOpenDate(sd, period);
   if (openDate && now < openDate.getTime()) return false;
   const deadline = getPeriodDeadline(sd, period);
-  return deadline ? now < deadline.getTime() : false;
+  // If no deadline is configured, treat the window as open (no restriction yet)
+  return !deadline || now < deadline.getTime();
 }
 
 // ---- Playoff Qualification Helpers ----
@@ -5042,16 +5043,15 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
       submittedPitchers.forEach(p => { html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span></div>`; });
       html += '</div>';
 
-      // Allow editing if the PP1 deadline hasn't passed
+      // Allow editing if the PP1 deadline hasn't passed (or isn't configured yet)
       if (isPeriodTimeOpen(seasonData, 'pp1')) {
         const pp1Deadline = getPeriodDeadline(seasonData, 'pp1');
-        const deadlineStr = pp1Deadline ? pp1Deadline.toLocaleString('en-US', {
-          month: 'short', day: 'numeric', year: 'numeric',
-          hour: 'numeric', minute: '2-digit', hour12: true
-        }) : '';
+        const deadlineNote = pp1Deadline
+          ? `Editing available until <strong>${pp1Deadline.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}</strong>. Re-editing requires commissioner re-approval.`
+          : 'Re-editing will require commissioner re-approval. Set a deadline in Season Setup to lock submissions before the first game.';
         html += `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
           <button class="btn btn-secondary" onclick="editApprovedPeriodSubmission('pp1','${safeMgr}')">Edit Submission</button>
-          <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">Editing available until <strong>${deadlineStr}</strong>. Re-editing requires commissioner re-approval.</p>
+          <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">${deadlineNote}</p>
         </div>`;
       }
     } else if (poolReady) {
@@ -5234,9 +5234,12 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     pitchers.forEach(p => { html += `<div class="comm-player-item"><span>${displayPlayer(p, seasonData)}</span></div>`; });
     html += '</div>';
     if (isOpen) {
+      const editNote = deadline
+        ? `Editing available until <strong>${fmtDeadline(deadline)}</strong>. Re-editing requires commissioner re-approval.`
+        : 'Re-editing will require commissioner re-approval. Set a deadline in Season Setup to lock submissions before the first game.';
       html += `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
         <button class="btn btn-secondary" onclick="editApprovedPeriodSubmission('${period}','${safeMgr}')">Edit Submission</button>
-        <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">Editing available until <strong>${fmtDeadline(deadline)}</strong>. Re-editing requires commissioner re-approval.</p>
+        <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">${editNote}</p>
       </div>`;
     }
   } else if (!poolReady) {
