@@ -742,11 +742,7 @@ function buildScoreboardBlocks(db, year) {
 
   // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
   const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
-  const poolFields = [];
-  sortedPoolEntries.forEach(([poolName, members], idx) => {
-    // Slack fields are 2-column; if Pool 3 is the 3rd field (odd index after 0,1),
-    // insert a blank to push it to the right column (beside Pool 2)
-    if (idx === 2) poolFields.push({ type: 'mrkdwn', text: ' ' });
+  const poolFields = sortedPoolEntries.map(([poolName, members]) => {
     const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
     const lines = members.map((m, i) => {
       const d = dot(m.manager, currentRound);
@@ -755,7 +751,7 @@ function buildScoreboardBlocks(db, year) {
       const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
       return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
     }).join('\n');
-    poolFields.push({ type: 'mrkdwn', text: `*${poolName}*\n${lines}` });
+    return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
   });
 
   // ---- Assemble blocks ----
