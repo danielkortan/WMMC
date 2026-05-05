@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,7 +19,13 @@ const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const UPSTASH_KEY = 'wmmc_db';
 
+// General notifications webhook (roster swaps, sync errors, etc.)
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
+// Scoreboard-specific webhook — can point to a different channel than notifications.
+// Falls back to SLACK_WEBHOOK_URL if not set.
+const SLACK_SCOREBOARD_WEBHOOK_URL = process.env.SLACK_SCOREBOARD_WEBHOOK_URL || SLACK_WEBHOOK_URL;
+// Signing secret from your Slack app — used to verify slash command requests.
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 
 async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
@@ -27,6 +34,16 @@ async function postSlack(text, blocks) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
+  });
+}
+
+async function postScoreboardSlack(db, year) {
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
+  const { blocks, text } = buildScoreboardBlocks(db, year);
+  await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, blocks })
   });
 }
 
@@ -1121,8 +1138,7 @@ app.post('/api/slack/scoreboard', async (req, res) => {
   const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
 
   try {
-    const { blocks, text } = buildScoreboardBlocks(db, year);
-    await postSlack(text, blocks);
+    await postScoreboardSlack(db, year);
     addAuditEntry(db, 'slack_scoreboard_post', { year }, userEmail);
     writeDB(db);
     res.json({ ok: true });
@@ -1130,6 +1146,48 @@ app.post('/api/slack/scoreboard', async (req, res) => {
     console.error('[Slack] Scoreboard post failed:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/slack/command — Slack slash command handler
+// Slack sends application/x-www-form-urlencoded; we need the raw body to verify the signature.
+function captureRawBody(req, res, next) {
+  let data = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => { data += chunk; });
+  req.on('end', () => { req.rawBody = data; next(); });
+}
+
+app.post('/api/slack/command', captureRawBody, (req, res) => {
+  // Verify the request came from Slack
+  if (SLACK_SIGNING_SECRET) {
+    const timestamp = req.headers['x-slack-request-timestamp'];
+    const signature = req.headers['x-slack-signature'];
+    const age = Math.abs(Date.now() / 1000 - parseInt(timestamp || '0', 10));
+    if (!timestamp || !signature || age > 300) {
+      return res.status(403).send('Invalid request');
+    }
+    const hmac = crypto.createHmac('sha256', SLACK_SIGNING_SECRET)
+      .update(`v0:${timestamp}:${req.rawBody}`)
+      .digest('hex');
+    if (`v0=${hmac}` !== signature) return res.status(403).send('Invalid signature');
+  }
+
+  // Parse the URL-encoded body Slack sends
+  const params = new URLSearchParams(req.rawBody || '');
+  const body = Object.fromEntries(params.entries());
+  const text = (body.text || '').trim().toLowerCase();
+
+  const db = readDB();
+  const config = db.google_sheets_config || {};
+  const year = config.season || String(new Date().getFullYear());
+
+  // Support optional year argument: /wmmc 2024
+  const requestedYear = /^\d{4}$/.test(text) ? text : year;
+
+  const { blocks, text: fallback } = buildScoreboardBlocks(db, requestedYear);
+
+  // response_type: in_channel makes the reply visible to everyone in the channel
+  res.json({ response_type: 'in_channel', text: fallback, blocks });
 });
 
 // DELETE /api/seasons/:year/week-data — clear all stats for a given week
@@ -1235,10 +1293,6 @@ function scheduleGSheetsSync() {
           if (result.errors > 0) {
             postSlack(`*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`).catch(() => {});
           }
-          // Post updated scoreboard to Slack after every successful daily sync
-          const db3 = readDB();
-          const { blocks, text } = buildScoreboardBlocks(db3, season);
-          postSlack(text, blocks).catch(() => {});
         })
         .catch(e => {
           console.error(`[GSheets] Sync error: ${e.message}`);
@@ -1266,6 +1320,55 @@ function scheduleGSheetsSync() {
 
   console.log(`[GSheets] Auto-sync enabled. Next sync at ${next.toISOString()} (in ${Math.round(delay / 60000)} minutes)`);
   syncTimer = setTimeout(runAndReschedule, delay);
+}
+
+// ============================================================
+// Daily Scoreboard Post (7:00 AM)
+// ============================================================
+
+let scoreboardTimer = null;
+
+function scheduleScoreboardPost() {
+  if (scoreboardTimer) clearTimeout(scoreboardTimer);
+
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) {
+    console.log('[Scoreboard] No Slack scoreboard webhook configured — auto-post disabled');
+    return;
+  }
+
+  function runAndReschedule() {
+    const now = new Date();
+    console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
+
+    const db = readDB();
+    const config = db.google_sheets_config || {};
+    const season = config.season || now.getFullYear().toString();
+    const sd = (db.seasons || {})[season];
+
+    if (isWithinSyncWindow(sd)) {
+      postScoreboardSlack(db, season)
+        .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
+        .catch(e => console.error('[Scoreboard] Post failed:', e.message));
+    } else {
+      console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);
+    }
+
+    // Schedule next run at 7am tomorrow
+    const next = new Date();
+    next.setDate(next.getDate() + 1);
+    next.setHours(7, 0, 0, 0);
+    scoreboardTimer = setTimeout(runAndReschedule, next - Date.now());
+    console.log(`[Scoreboard] Next post scheduled for ${next.toISOString()}`);
+  }
+
+  const now = new Date();
+  const next = new Date();
+  next.setHours(7, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = next - now;
+
+  console.log(`[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (in ${Math.round(delay / 60000)} minutes)`);
+  scoreboardTimer = setTimeout(runAndReschedule, delay);
 }
 
 // ============================================================
@@ -1356,6 +1459,8 @@ async function main() {
 
     // Start the Google Sheets sync scheduler
     scheduleGSheetsSync();
+    // Start the daily scoreboard post scheduler (7am)
+    scheduleScoreboardPost();
   });
 }
 
