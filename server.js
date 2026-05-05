@@ -740,29 +740,19 @@ function buildScoreboardBlocks(db, year) {
       }).join('\n')
     : '_No scores recorded yet._';
 
-  // ---- Build pool columns (monospace 3-column grid) ----
+  // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
   const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
-  const poolColumns = sortedPoolEntries.map(([poolName, members]) => {
+  const poolFields = sortedPoolEntries.map(([poolName, members]) => {
     const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
-    const lines = [poolName];
-    members.forEach((m, i) => {
-      const trash = m.manager === poolLastMgr ? ' [LP]' : '';
-      lines.push(`${i + 1}. ${m.manager}${trash} — ${fmt(m.total)} pts`);
-    });
-    return lines;
+    const lines = members.map((m, i) => {
+      const d = dot(m.manager, currentRound);
+      const dotStr = d ? `${d} ` : '';
+      const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+      const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+      return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+    }).join('\n');
+    return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
   });
-  // Pad each column to its widest line + 2 spaces of gutter
-  const colWidths = poolColumns.map(col => Math.max(...col.map(l => l.length)) + 2);
-  const maxRows = Math.max(...poolColumns.map(c => c.length));
-  const poolGridLines = [];
-  for (let r = 0; r < maxRows; r++) {
-    let line = '';
-    poolColumns.forEach((col, c) => {
-      line += (col[r] || '').padEnd(colWidths[c]);
-    });
-    poolGridLines.push(line.trimEnd());
-  }
-  const poolGridText = '```\n' + poolGridLines.join('\n') + '\n```';
 
   // ---- Assemble blocks ----
   const blocks = [];
@@ -784,10 +774,10 @@ function buildScoreboardBlocks(db, year) {
   blocks.push({ type: 'divider' });
   blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
 
-  if (currentRound && poolColumns.length > 0) {
+  if (currentRound && poolFields.length > 0) {
     blocks.push({ type: 'divider' });
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F4CA} ${currentRoundLabel} Pool Standings*` } });
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: poolGridText } });
+    blocks.push({ type: 'section', fields: poolFields });
   }
 
   blocks.push({ type: 'divider' });
