@@ -3172,7 +3172,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     const mgrPool = {};
     managers.forEach(m => { if (m.pool) mgrPool[m.name] = m.pool; });
     let tbl = `<table class="data-table compact-table">
-      <thead><tr><th>#</th><th>Manager</th><th>Pool</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead><tbody>`;
+      <thead><tr><th>#</th><th>Manager</th><th>Pool</th><th>B</th><th>P</th><th>Total</th></tr></thead><tbody>`;
     scores.forEach((m, i) => {
       const cls = hlClass(m.manager, 'overall');
       const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_') + '_ov';
