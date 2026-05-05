@@ -20,12 +20,13 @@ const UPSTASH_KEY = 'wmmc_db';
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
 
-async function postSlack(text) {
+async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
+  const body = blocks ? { text, blocks } : { text };
   await fetch(SLACK_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text })
+    body: JSON.stringify(body)
   });
 }
 
@@ -538,6 +539,154 @@ function parseNum(val) {
 }
 
 // ============================================================
+// Slack Scoreboard Builder
+// ============================================================
+
+const ROUND_LABELS = { PP1: 'Pool Play 1', PP2: 'Pool Play 2', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+const ROUND_ORDER = ['PP1', 'PP2', 'QF', 'SF', 'Finals'];
+
+function detectCurrentRound(scheduleDates) {
+  const today = new Date().toISOString().split('T')[0];
+
+  // Find a week whose date range contains today
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    const { start, end } = scheduleDates[i] || {};
+    if (start && end && today >= start && today <= end) return SEASON_SCHEDULE[i].round;
+  }
+
+  // Fall back to the most recently completed round
+  for (let i = SEASON_SCHEDULE.length - 1; i >= 0; i--) {
+    const { end } = scheduleDates[i] || {};
+    if (end && today > end) return SEASON_SCHEDULE[i].round;
+  }
+
+  return null;
+}
+
+function buildScoreboardBlocks(db, year) {
+  const seasonData = (db.seasons || {})[year] || {};
+  const managers = db.managers || [];
+
+  const managerPoolMap = {};
+  managers.forEach(m => { if (m.pool) managerPoolMap[m.name] = m.pool; });
+
+  // Determine current round
+  const scheduleDates = seasonData.schedule_dates || [];
+  let currentRound = detectCurrentRound(scheduleDates);
+
+  // If still no round from dates, use the latest round present in data
+  if (!currentRound) {
+    const roundsWithData = new Set((seasonData.weekly_batting || []).map(b => b.round));
+    for (let i = ROUND_ORDER.length - 1; i >= 0; i--) {
+      if (roundsWithData.has(ROUND_ORDER[i])) { currentRound = ROUND_ORDER[i]; break; }
+    }
+  }
+
+  const currentRoundLabel = ROUND_LABELS[currentRound] || currentRound || 'Season';
+
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+
+  // Overall standings (all rounds)
+  const overallMap = {};
+  batting.forEach(b => {
+    if (!b.manager) return;
+    if (!overallMap[b.manager]) overallMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0 };
+    overallMap[b.manager].batting += (b.weekly_score || 0);
+  });
+  pitching.forEach(p => {
+    if (!p.manager) return;
+    if (!overallMap[p.manager]) overallMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0 };
+    overallMap[p.manager].pitching += (p.weekly_score || 0);
+  });
+  const overall = Object.values(overallMap).map(m => ({
+    ...m,
+    batting: Math.round(m.batting * 100) / 100,
+    pitching: Math.round(m.pitching * 100) / 100,
+    total: Math.round((m.batting + m.pitching) * 100) / 100
+  })).sort((a, b) => b.total - a.total);
+
+  // Current-round pool standings
+  const poolRoundMap = {};
+  if (currentRound) {
+    batting.filter(b => b.round === currentRound).forEach(b => {
+      if (!b.manager) return;
+      if (!poolRoundMap[b.manager]) poolRoundMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0, pool: managerPoolMap[b.manager] };
+      poolRoundMap[b.manager].batting += (b.weekly_score || 0);
+    });
+    pitching.filter(p => p.round === currentRound).forEach(p => {
+      if (!p.manager) return;
+      if (!poolRoundMap[p.manager]) poolRoundMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0, pool: managerPoolMap[p.manager] };
+      poolRoundMap[p.manager].pitching += (p.weekly_score || 0);
+    });
+  }
+  const poolStandings = Object.values(poolRoundMap).map(m => ({
+    ...m,
+    batting: Math.round(m.batting * 100) / 100,
+    pitching: Math.round(m.pitching * 100) / 100,
+    total: Math.round((m.batting + m.pitching) * 100) / 100
+  })).sort((a, b) => b.total - a.total);
+
+  // Group pool standings by pool number
+  const pools = {};
+  poolStandings.forEach(m => {
+    const key = m.pool ? `Pool ${m.pool}` : 'Unassigned';
+    if (!pools[key]) pools[key] = [];
+    pools[key].push(m);
+  });
+
+  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const rankEmoji = ['🥇', '🥈', '🥉'];
+  const rank = i => i < 3 ? rankEmoji[i] : `${i + 1}.`;
+
+  // Build overall standings text
+  const overallText = overall.length
+    ? overall.map((m, i) => {
+        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+        return `${rank(i)} ${nameStr} — ${fmt(m.total)} pts _(Bat: ${fmt(m.batting)} | Pitch: ${fmt(m.pitching)})_`;
+      }).join('\n')
+    : '_No scores recorded yet._';
+
+  // Build pool standings text
+  const poolSectionText = Object.entries(pools)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([poolName, members]) => {
+      const lines = members.map((m, i) => {
+        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+        return `${rank(i)} ${nameStr} — ${fmt(m.total)} pts`;
+      }).join('\n');
+      return `*${poolName}*\n${lines}`;
+    }).join('\n\n');
+
+  const blocks = [];
+
+  blocks.push({ type: 'header', text: { type: 'plain_text', text: `⚾ WMMC Scoreboard — ${year}`, emoji: true } });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `📅 Current Period: *${currentRoundLabel}*` } });
+  blocks.push({ type: 'divider' });
+
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🏆 Overall Standings*\n${overallText}` } });
+
+  if (currentRound && poolSectionText) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*📊 ${currentRoundLabel} Pool Standings*\n\n${poolSectionText}` }
+    });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: '🔗 View full scoreboard: <http://wmmc.live|wmmc.live>' }]
+  });
+
+  return {
+    blocks,
+    text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel} | wmmc.live`
+  };
+}
+
+// ============================================================
 // Google Sheets Sync
 // ============================================================
 
@@ -953,6 +1102,36 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
   });
 });
 
+// POST /api/slack/scoreboard — post the current scoreboard to Slack
+app.post('/api/slack/scoreboard', async (req, res) => {
+  if (!SLACK_WEBHOOK_URL) {
+    return res.status(503).json({ error: 'Slack webhook not configured' });
+  }
+
+  const db = readDB();
+
+  // Require commissioner
+  const userEmail = req.get('X-User-Email') || '';
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!manager || !manager.commissioner) {
+    return res.status(403).json({ error: 'Commissioner access required' });
+  }
+
+  const config = db.google_sheets_config || {};
+  const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
+
+  try {
+    const { blocks, text } = buildScoreboardBlocks(db, year);
+    await postSlack(text, blocks);
+    addAuditEntry(db, 'slack_scoreboard_post', { year }, userEmail);
+    writeDB(db);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[Slack] Scoreboard post failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // DELETE /api/seasons/:year/week-data — clear all stats for a given week
 app.delete('/api/seasons/:year/week-data', (req, res) => {
   const { year } = req.params;
@@ -1056,6 +1235,10 @@ function scheduleGSheetsSync() {
           if (result.errors > 0) {
             postSlack(`*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`).catch(() => {});
           }
+          // Post updated scoreboard to Slack after every successful daily sync
+          const db3 = readDB();
+          const { blocks, text } = buildScoreboardBlocks(db3, season);
+          postSlack(text, blocks).catch(() => {});
         })
         .catch(e => {
           console.error(`[GSheets] Sync error: ${e.message}`);
