@@ -6496,7 +6496,7 @@ function renderGSheetsConfig() {
   }
 }
 
-window.saveGSheetsConfig = function() {
+window.saveGSheetsConfig = async function() {
   const statusDiv = document.getElementById('gsheets-status');
   const urlInput = document.getElementById('gsheets-url');
   const apiKeyInput = document.getElementById('gsheets-api-key');
@@ -6516,6 +6516,29 @@ window.saveGSheetsConfig = function() {
   config.season = SELECTED_SEASON;
 
   saveGSheetsConfigLocal(config);
+
+  // Persist to server so the server-side auto-sync scheduler picks up the config
+  try {
+    const resp = await fetch('/api/google-sheets/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Email': LOGGED_IN_EMAIL || '' },
+      body: JSON.stringify({
+        spreadsheet_url: urlVal || config.spreadsheet_id,
+        api_key: config.api_key,
+        enabled: config.enabled,
+        season: config.season
+      })
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Server error saving config: ${err.error || resp.status}</div>`;
+      return;
+    }
+  } catch (e) {
+    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Could not reach server: ${e.message}</div>`;
+    return;
+  }
+
   statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${config.spreadsheet_id || '(none)'}</div>`;
   apiKeyInput.value = '';
   renderGSheetsConfig();
