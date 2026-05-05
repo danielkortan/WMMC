@@ -730,14 +730,17 @@ function buildScoreboardBlocks(db, year) {
   const dumpster = '\u{1F5D1}️\u{1F4A6}'; // 🗑️💦 last place
 
   // ---- Build overall standings text ----
+  const maxNameLen = overall.length ? Math.max(...overall.map(m => m.manager.length)) : 10;
   const overallText = overall.length
-    ? overall.map((m, i) => {
-        const d = dot(m.manager, 'overall');
-        const nameStr = d !== null ? `*${m.manager}*` : m.manager;
-        const dotStr = d ? `${d} ` : '';
-        const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmt(m.batting)} | P: ${fmt(m.pitching)})_`;
-      }).join('\n')
+    ? '```\n' + overall.map((m, i) => {
+        const rankStr = `${i + 1}.`.padStart(3);
+        const namePad = m.manager.padEnd(maxNameLen);
+        const trash = m.manager === overallLastMgr ? ' [LP]' : '     ';
+        const totalStr = fmt(m.total).padStart(6);
+        const batStr = fmt(m.batting).padStart(6);
+        const pitStr = fmt(m.pitching).padStart(6);
+        return `${rankStr} ${namePad}${trash}  ${totalStr} pts  (B:${batStr} | P:${pitStr})`;
+      }).join('\n') + '\n```'
     : '_No scores recorded yet._';
 
   // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
