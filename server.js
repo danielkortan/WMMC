@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,14 +19,31 @@ const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const UPSTASH_KEY = 'wmmc_db';
 
+// General notifications webhook (roster swaps, sync errors, etc.)
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
+// Scoreboard-specific webhook — can point to a different channel than notifications.
+// Falls back to SLACK_WEBHOOK_URL if not set.
+const SLACK_SCOREBOARD_WEBHOOK_URL = process.env.SLACK_SCOREBOARD_WEBHOOK_URL || SLACK_WEBHOOK_URL;
+// Signing secret from your Slack app — used to verify slash command requests.
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 
-async function postSlack(text) {
+async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
+  const body = blocks ? { text, blocks } : { text };
   await fetch(SLACK_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text })
+    body: JSON.stringify(body)
+  });
+}
+
+async function postScoreboardSlack(db, year) {
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
+  const { blocks, text } = buildScoreboardBlocks(db, year);
+  await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, blocks })
   });
 }
 
@@ -538,6 +556,154 @@ function parseNum(val) {
 }
 
 // ============================================================
+// Slack Scoreboard Builder
+// ============================================================
+
+const ROUND_LABELS = { PP1: 'Pool Play 1', PP2: 'Pool Play 2', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+const ROUND_ORDER = ['PP1', 'PP2', 'QF', 'SF', 'Finals'];
+
+function detectCurrentRound(scheduleDates) {
+  const today = new Date().toISOString().split('T')[0];
+
+  // Find a week whose date range contains today
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    const { start, end } = scheduleDates[i] || {};
+    if (start && end && today >= start && today <= end) return SEASON_SCHEDULE[i].round;
+  }
+
+  // Fall back to the most recently completed round
+  for (let i = SEASON_SCHEDULE.length - 1; i >= 0; i--) {
+    const { end } = scheduleDates[i] || {};
+    if (end && today > end) return SEASON_SCHEDULE[i].round;
+  }
+
+  return null;
+}
+
+function buildScoreboardBlocks(db, year) {
+  const seasonData = (db.seasons || {})[year] || {};
+  const managers = db.managers || [];
+
+  const managerPoolMap = {};
+  managers.forEach(m => { if (m.pool) managerPoolMap[m.name] = m.pool; });
+
+  // Determine current round
+  const scheduleDates = seasonData.schedule_dates || [];
+  let currentRound = detectCurrentRound(scheduleDates);
+
+  // If still no round from dates, use the latest round present in data
+  if (!currentRound) {
+    const roundsWithData = new Set((seasonData.weekly_batting || []).map(b => b.round));
+    for (let i = ROUND_ORDER.length - 1; i >= 0; i--) {
+      if (roundsWithData.has(ROUND_ORDER[i])) { currentRound = ROUND_ORDER[i]; break; }
+    }
+  }
+
+  const currentRoundLabel = ROUND_LABELS[currentRound] || currentRound || 'Season';
+
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+
+  // Overall standings (all rounds)
+  const overallMap = {};
+  batting.forEach(b => {
+    if (!b.manager) return;
+    if (!overallMap[b.manager]) overallMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0 };
+    overallMap[b.manager].batting += (b.weekly_score || 0);
+  });
+  pitching.forEach(p => {
+    if (!p.manager) return;
+    if (!overallMap[p.manager]) overallMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0 };
+    overallMap[p.manager].pitching += (p.weekly_score || 0);
+  });
+  const overall = Object.values(overallMap).map(m => ({
+    ...m,
+    batting: Math.round(m.batting * 100) / 100,
+    pitching: Math.round(m.pitching * 100) / 100,
+    total: Math.round((m.batting + m.pitching) * 100) / 100
+  })).sort((a, b) => b.total - a.total);
+
+  // Current-round pool standings
+  const poolRoundMap = {};
+  if (currentRound) {
+    batting.filter(b => b.round === currentRound).forEach(b => {
+      if (!b.manager) return;
+      if (!poolRoundMap[b.manager]) poolRoundMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0, pool: managerPoolMap[b.manager] };
+      poolRoundMap[b.manager].batting += (b.weekly_score || 0);
+    });
+    pitching.filter(p => p.round === currentRound).forEach(p => {
+      if (!p.manager) return;
+      if (!poolRoundMap[p.manager]) poolRoundMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0, pool: managerPoolMap[p.manager] };
+      poolRoundMap[p.manager].pitching += (p.weekly_score || 0);
+    });
+  }
+  const poolStandings = Object.values(poolRoundMap).map(m => ({
+    ...m,
+    batting: Math.round(m.batting * 100) / 100,
+    pitching: Math.round(m.pitching * 100) / 100,
+    total: Math.round((m.batting + m.pitching) * 100) / 100
+  })).sort((a, b) => b.total - a.total);
+
+  // Group pool standings by pool number
+  const pools = {};
+  poolStandings.forEach(m => {
+    const key = m.pool ? `Pool ${m.pool}` : 'Unassigned';
+    if (!pools[key]) pools[key] = [];
+    pools[key].push(m);
+  });
+
+  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const rankEmoji = ['🥇', '🥈', '🥉'];
+  const rank = i => i < 3 ? rankEmoji[i] : `${i + 1}.`;
+
+  // Build overall standings text
+  const overallText = overall.length
+    ? overall.map((m, i) => {
+        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+        return `${rank(i)} ${nameStr} — ${fmt(m.total)} pts _(Bat: ${fmt(m.batting)} | Pitch: ${fmt(m.pitching)})_`;
+      }).join('\n')
+    : '_No scores recorded yet._';
+
+  // Build pool standings text
+  const poolSectionText = Object.entries(pools)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([poolName, members]) => {
+      const lines = members.map((m, i) => {
+        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+        return `${rank(i)} ${nameStr} — ${fmt(m.total)} pts`;
+      }).join('\n');
+      return `*${poolName}*\n${lines}`;
+    }).join('\n\n');
+
+  const blocks = [];
+
+  blocks.push({ type: 'header', text: { type: 'plain_text', text: `⚾ WMMC Scoreboard — ${year}`, emoji: true } });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `📅 Current Period: *${currentRoundLabel}*` } });
+  blocks.push({ type: 'divider' });
+
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🏆 Overall Standings*\n${overallText}` } });
+
+  if (currentRound && poolSectionText) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*📊 ${currentRoundLabel} Pool Standings*\n\n${poolSectionText}` }
+    });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: '🔗 View full scoreboard: <http://wmmc.live|wmmc.live>' }]
+  });
+
+  return {
+    blocks,
+    text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel} | wmmc.live`
+  };
+}
+
+// ============================================================
 // Google Sheets Sync
 // ============================================================
 
@@ -953,6 +1119,77 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
   });
 });
 
+// POST /api/slack/scoreboard — post the current scoreboard to Slack
+app.post('/api/slack/scoreboard', async (req, res) => {
+  if (!SLACK_WEBHOOK_URL) {
+    return res.status(503).json({ error: 'Slack webhook not configured' });
+  }
+
+  const db = readDB();
+
+  // Require commissioner
+  const userEmail = req.get('X-User-Email') || '';
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!manager || !manager.commissioner) {
+    return res.status(403).json({ error: 'Commissioner access required' });
+  }
+
+  const config = db.google_sheets_config || {};
+  const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
+
+  try {
+    await postScoreboardSlack(db, year);
+    addAuditEntry(db, 'slack_scoreboard_post', { year }, userEmail);
+    writeDB(db);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[Slack] Scoreboard post failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/slack/command — Slack slash command handler
+// Slack sends application/x-www-form-urlencoded; we need the raw body to verify the signature.
+function captureRawBody(req, res, next) {
+  let data = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => { data += chunk; });
+  req.on('end', () => { req.rawBody = data; next(); });
+}
+
+app.post('/api/slack/command', captureRawBody, (req, res) => {
+  // Verify the request came from Slack
+  if (SLACK_SIGNING_SECRET) {
+    const timestamp = req.headers['x-slack-request-timestamp'];
+    const signature = req.headers['x-slack-signature'];
+    const age = Math.abs(Date.now() / 1000 - parseInt(timestamp || '0', 10));
+    if (!timestamp || !signature || age > 300) {
+      return res.status(403).send('Invalid request');
+    }
+    const hmac = crypto.createHmac('sha256', SLACK_SIGNING_SECRET)
+      .update(`v0:${timestamp}:${req.rawBody}`)
+      .digest('hex');
+    if (`v0=${hmac}` !== signature) return res.status(403).send('Invalid signature');
+  }
+
+  // Parse the URL-encoded body Slack sends
+  const params = new URLSearchParams(req.rawBody || '');
+  const body = Object.fromEntries(params.entries());
+  const text = (body.text || '').trim().toLowerCase();
+
+  const db = readDB();
+  const config = db.google_sheets_config || {};
+  const year = config.season || String(new Date().getFullYear());
+
+  // Support optional year argument: /wmmc 2024
+  const requestedYear = /^\d{4}$/.test(text) ? text : year;
+
+  const { blocks, text: fallback } = buildScoreboardBlocks(db, requestedYear);
+
+  // response_type: in_channel makes the reply visible to everyone in the channel
+  res.json({ response_type: 'in_channel', text: fallback, blocks });
+});
+
 // DELETE /api/seasons/:year/week-data — clear all stats for a given week
 app.delete('/api/seasons/:year/week-data', (req, res) => {
   const { year } = req.params;
@@ -1086,6 +1323,55 @@ function scheduleGSheetsSync() {
 }
 
 // ============================================================
+// Daily Scoreboard Post (7:00 AM)
+// ============================================================
+
+let scoreboardTimer = null;
+
+function scheduleScoreboardPost() {
+  if (scoreboardTimer) clearTimeout(scoreboardTimer);
+
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) {
+    console.log('[Scoreboard] No Slack scoreboard webhook configured — auto-post disabled');
+    return;
+  }
+
+  function runAndReschedule() {
+    const now = new Date();
+    console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
+
+    const db = readDB();
+    const config = db.google_sheets_config || {};
+    const season = config.season || now.getFullYear().toString();
+    const sd = (db.seasons || {})[season];
+
+    if (isWithinSyncWindow(sd)) {
+      postScoreboardSlack(db, season)
+        .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
+        .catch(e => console.error('[Scoreboard] Post failed:', e.message));
+    } else {
+      console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);
+    }
+
+    // Schedule next run at 7am tomorrow
+    const next = new Date();
+    next.setDate(next.getDate() + 1);
+    next.setHours(7, 0, 0, 0);
+    scoreboardTimer = setTimeout(runAndReschedule, next - Date.now());
+    console.log(`[Scoreboard] Next post scheduled for ${next.toISOString()}`);
+  }
+
+  const now = new Date();
+  const next = new Date();
+  next.setHours(7, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = next - now;
+
+  console.log(`[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (in ${Math.round(delay / 60000)} minutes)`);
+  scoreboardTimer = setTimeout(runAndReschedule, delay);
+}
+
+// ============================================================
 // Online Users Tracking
 // ============================================================
 const onlineUsers = {};
@@ -1173,6 +1459,8 @@ async function main() {
 
     // Start the Google Sheets sync scheduler
     scheduleGSheetsSync();
+    // Start the daily scoreboard post scheduler (7am)
+    scheduleScoreboardPost();
   });
 }
 
