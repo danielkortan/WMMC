@@ -736,24 +736,27 @@ function buildScoreboardBlocks(db, year) {
         const nameStr = d !== null ? `*${m.manager}*` : m.manager;
         const dotStr = d ? `${d} ` : '';
         const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(Bat: ${fmt(m.batting)} | Pitch: ${fmt(m.pitching)})_`;
+        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmt(m.batting)} | P: ${fmt(m.pitching)})_`;
       }).join('\n')
     : '_No scores recorded yet._';
 
   // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
-  const poolFields = Object.entries(pools)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([poolName, members]) => {
-      const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
-      const lines = members.map((m, i) => {
-        const d = dot(m.manager, currentRound);
-        const dotStr = d ? `${d} ` : '';
-        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-        const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
-        return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
-      }).join('\n');
-      return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
-    });
+  const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
+  const poolFields = [];
+  sortedPoolEntries.forEach(([poolName, members], idx) => {
+    // Slack fields are 2-column; if Pool 3 is the 3rd field (odd index after 0,1),
+    // insert a blank to push it to the right column (beside Pool 2)
+    if (idx === 2) poolFields.push({ type: 'mrkdwn', text: ' ' });
+    const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
+    const lines = members.map((m, i) => {
+      const d = dot(m.manager, currentRound);
+      const dotStr = d ? `${d} ` : '';
+      const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+      const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+      return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+    }).join('\n');
+    poolFields.push({ type: 'mrkdwn', text: `*${poolName}*\n${lines}` });
+  });
 
   // ---- Assemble blocks ----
   const blocks = [];
