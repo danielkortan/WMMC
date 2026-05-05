@@ -723,6 +723,7 @@ function buildScoreboardBlocks(db, year) {
 
   // ---- Formatters ----
   const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const fmtInt = n => Math.round(n).toLocaleString('en-US');
   const rankEmoji = ['\u{1F947}', '\u{1F948}', '\u{1F949}']; // 🥇🥈🥉
   const rank = i => i < 3 ? rankEmoji[i] : `${i + 1}.`;
   const rankPool = i => i === 0 ? '\u{1F947}' : `${i + 1}.`; // 🥇 for pool leader only
@@ -736,7 +737,7 @@ function buildScoreboardBlocks(db, year) {
         const nameStr = d !== null ? `*${m.manager}*` : m.manager;
         const dotStr = d ? `${d} ` : '';
         const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmt(m.batting)} | P: ${fmt(m.pitching)})_`;
+        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
       }).join('\n')
     : '_No scores recorded yet._';
 
