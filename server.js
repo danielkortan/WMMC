@@ -653,8 +653,11 @@ function buildScoreboardBlocks(db, year) {
   });
 
   const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  // Full scoreboard: gold/silver/bronze for top 3
   const rankEmoji = ['🥇', '🥈', '🥉'];
   const rank = i => i < 3 ? rankEmoji[i] : `${i + 1}.`;
+  // Pool standings: only gold medal for the leader, plain numbers below
+  const rankPool = i => i === 0 ? '🥇' : `${i + 1}.`;
 
   // Build overall standings text
   const overallText = overall.length
@@ -664,16 +667,16 @@ function buildScoreboardBlocks(db, year) {
       }).join('\n')
     : '_No scores recorded yet._';
 
-  // Build pool standings text
-  const poolSectionText = Object.entries(pools)
+  // Build pool fields for side-by-side (Slack fields renders in 2 columns)
+  const poolFields = Object.entries(pools)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([poolName, members]) => {
       const lines = members.map((m, i) => {
         const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-        return `${rank(i)} ${nameStr} — ${fmt(m.total)} pts`;
+        return `${rankPool(i)} ${nameStr} — ${fmt(m.total)} pts`;
       }).join('\n');
-      return `*${poolName}*\n${lines}`;
-    }).join('\n\n');
+      return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
+    });
 
   const blocks = [];
 
@@ -683,12 +686,10 @@ function buildScoreboardBlocks(db, year) {
 
   blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🏆 Overall Standings*\n${overallText}` } });
 
-  if (currentRound && poolSectionText) {
+  if (currentRound && poolFields.length > 0) {
     blocks.push({ type: 'divider' });
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*📊 ${currentRoundLabel} Pool Standings*\n\n${poolSectionText}` }
-    });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*📊 ${currentRoundLabel} Pool Standings*` } });
+    blocks.push({ type: 'section', fields: poolFields });
   }
 
   blocks.push({ type: 'divider' });
