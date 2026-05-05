@@ -580,6 +580,28 @@ function detectCurrentRound(scheduleDates) {
   return null;
 }
 
+// Sum batting + pitching weekly_scores for the given rounds
+function computeRoundScores(batting, pitching, rounds) {
+  const roundSet = new Set(rounds);
+  const map = {};
+  batting.filter(b => roundSet.has(b.round)).forEach(b => {
+    if (!b.manager) return;
+    if (!map[b.manager]) map[b.manager] = { batting: 0, pitching: 0 };
+    map[b.manager].batting += (b.weekly_score || 0);
+  });
+  pitching.filter(p => roundSet.has(p.round)).forEach(p => {
+    if (!p.manager) return;
+    if (!map[p.manager]) map[p.manager] = { batting: 0, pitching: 0 };
+    map[p.manager].pitching += (p.weekly_score || 0);
+  });
+  return Object.entries(map).map(([manager, s]) => ({
+    manager,
+    batting: Math.round(s.batting * 100) / 100,
+    pitching: Math.round(s.pitching * 100) / 100,
+    total: Math.round((s.batting + s.pitching) * 100) / 100
+  }));
+}
+
 function buildScoreboardBlocks(db, year) {
   const seasonData = (db.seasons || {})[year] || {};
   const managers = db.managers || [];
@@ -604,7 +626,52 @@ function buildScoreboardBlocks(db, year) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  // Overall standings (all rounds)
+  // ---- PP1 / PP2 pool winners (mirrors app hlClass logic) ----
+  const poolGroups = {};
+  Object.entries(managerPoolMap).forEach(([mgr, poolNum]) => {
+    if (!poolGroups[poolNum]) poolGroups[poolNum] = [];
+    poolGroups[poolNum].push(mgr);
+  });
+
+  const pp1Scores = computeRoundScores(batting, pitching, ['PP1']);
+  const pp2Scores = computeRoundScores(batting, pitching, ['PP2']);
+
+  const pp1WinnerSet = new Set();
+  const pp2WinnerSet = new Set();
+  Object.values(poolGroups).forEach(members => {
+    const best1 = pp1Scores.filter(s => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
+    if (best1 && best1.total > 0) pp1WinnerSet.add(best1.manager);
+    const best2 = pp2Scores.filter(s => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
+    if (best2 && best2.total > 0) pp2WinnerSet.add(best2.manager);
+  });
+
+  const allPPWinners = new Set([...pp1WinnerSet, ...pp2WinnerSet]);
+  const numWildcards = Math.max(0, 8 - allPPWinners.size);
+  const wildcardSet = new Set();
+  const ppOverall = computeRoundScores(batting, pitching, ['PP1', 'PP2']).sort((a, b) => b.total - a.total);
+  let wcCount = 0;
+  for (const m of ppOverall) {
+    if (wcCount >= numWildcards) break;
+    if (!allPPWinners.has(m.manager) && m.total > 0) { wildcardSet.add(m.manager); wcCount++; }
+  }
+
+  // Color dot per manager: 🟢 PP1 leader, 🔵 PP2 leader, 🔷 both, 🟡 wildcard
+  function dot(name, section) {
+    const wonPP1 = pp1WinnerSet.has(name);
+    const wonPP2 = pp2WinnerSet.has(name);
+    if (section === 'overall') {
+      if (wonPP1 && wonPP2) return '🔷';
+      if (wonPP1) return '🟢';
+      if (wonPP2) return '🔵';
+      if (wildcardSet.has(name)) return '🟡';
+      return null;
+    }
+    if (section === 'PP1') return wonPP1 ? '🟢' : null;
+    if (section === 'PP2') return wonPP2 ? '🔵' : null;
+    return null;
+  }
+
+  // ---- Overall standings (all rounds) ----
   const overallMap = {};
   batting.forEach(b => {
     if (!b.manager) return;
@@ -623,7 +690,9 @@ function buildScoreboardBlocks(db, year) {
     total: Math.round((m.batting + m.pitching) * 100) / 100
   })).sort((a, b) => b.total - a.total);
 
-  // Current-round pool standings
+  const overallLastMgr = overall.length > 0 ? overall[overall.length - 1].manager : null;
+
+  // ---- Current-round pool standings ----
   const poolRoundMap = {};
   if (currentRound) {
     batting.filter(b => b.round === currentRound).forEach(b => {
@@ -644,7 +713,7 @@ function buildScoreboardBlocks(db, year) {
     total: Math.round((m.batting + m.pitching) * 100) / 100
   })).sort((a, b) => b.total - a.total);
 
-  // Group pool standings by pool number
+  // Group by pool — already sorted desc so last entry = pool's last place
   const pools = {};
   poolStandings.forEach(m => {
     const key = m.pool ? `Pool ${m.pool}` : 'Unassigned';
@@ -652,50 +721,70 @@ function buildScoreboardBlocks(db, year) {
     pools[key].push(m);
   });
 
+  // ---- Formatters ----
   const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-  // Full scoreboard: gold/silver/bronze for top 3
-  const rankEmoji = ['🥇', '🥈', '🥉'];
+  const rankEmoji = ['\u{1F947}', '\u{1F948}', '\u{1F949}']; // 🥇🥈🥉
   const rank = i => i < 3 ? rankEmoji[i] : `${i + 1}.`;
-  // Pool standings: only gold medal for the leader, plain numbers below
-  const rankPool = i => i === 0 ? '🥇' : `${i + 1}.`;
+  const rankPool = i => i === 0 ? '\u{1F947}' : `${i + 1}.`; // 🥇 for pool leader only
+  const heart = n => Math.floor(n) === 69 ? ' ❤️' : ''; // ❤️ easter egg at 69
+  const dumpster = '\u{1F5D1}️\u{1F4A6}'; // 🗑️💦 last place
 
-  // Build overall standings text
+  // ---- Build overall standings text ----
   const overallText = overall.length
     ? overall.map((m, i) => {
-        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-        return `${rank(i)} ${nameStr} — ${fmt(m.total)} pts _(Bat: ${fmt(m.batting)} | Pitch: ${fmt(m.pitching)})_`;
+        const d = dot(m.manager, 'overall');
+        const nameStr = d !== null ? `*${m.manager}*` : m.manager;
+        const dotStr = d ? `${d} ` : '';
+        const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
+        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(Bat: ${fmt(m.batting)} | Pitch: ${fmt(m.pitching)})_`;
       }).join('\n')
     : '_No scores recorded yet._';
 
-  // Build pool fields for side-by-side (Slack fields renders in 2 columns)
+  // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
   const poolFields = Object.entries(pools)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([poolName, members]) => {
+      const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
       const lines = members.map((m, i) => {
+        const d = dot(m.manager, currentRound);
+        const dotStr = d ? `${d} ` : '';
         const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-        return `${rankPool(i)} ${nameStr} — ${fmt(m.total)} pts`;
+        const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+        return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
       }).join('\n');
       return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
     });
 
+  // ---- Assemble blocks ----
   const blocks = [];
 
   blocks.push({ type: 'header', text: { type: 'plain_text', text: `⚾ WMMC Scoreboard — ${year}`, emoji: true } });
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `📅 Current Period: *${currentRoundLabel}*` } });
-  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `\u{1F4C5} Current Period: *${currentRoundLabel}*` } });
 
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*🏆 Overall Standings*\n${overallText}` } });
+  // Color legend shown during pool play rounds when leaders are determined
+  if (['PP1', 'PP2'].includes(currentRound) && (pp1WinnerSet.size > 0 || pp2WinnerSet.size > 0)) {
+    const parts = [];
+    if (pp1WinnerSet.size > 0) parts.push('\u{1F7E2} PP1 Pool Leader');
+    if (pp2WinnerSet.size > 0) parts.push('\u{1F535} PP2 Pool Leader');
+    if (pp1WinnerSet.size > 0 && pp2WinnerSet.size > 0) parts.push('\u{1F537} Both');
+    if (wildcardSet.size > 0) parts.push('\u{1F7E1} Wild Card');
+    parts.push(`${dumpster} Last Place`);
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: parts.join('  ·  ') }] });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
 
   if (currentRound && poolFields.length > 0) {
     blocks.push({ type: 'divider' });
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*📊 ${currentRoundLabel} Pool Standings*` } });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F4CA} ${currentRoundLabel} Pool Standings*` } });
     blocks.push({ type: 'section', fields: poolFields });
   }
 
   blocks.push({ type: 'divider' });
   blocks.push({
     type: 'context',
-    elements: [{ type: 'mrkdwn', text: '🔗 View full scoreboard: <http://wmmc.live|wmmc.live>' }]
+    elements: [{ type: 'mrkdwn', text: '\u{1F517} View full scoreboard: <http://wmmc.live|wmmc.live>' }]
   });
 
   return {
