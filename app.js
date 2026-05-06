@@ -3837,6 +3837,30 @@ function calculatePitchingScore(stats) {
   return Math.round(score * 100) / 100;
 }
 
+// Back-fill missing add/drop dates in roster_dates from approved swap records.
+// Runs on every commissioner roster render so existing swaps (approved before this
+// feature existed) also get their dates populated automatically.
+function backfillRosterDatesFromSwaps(seasonData) {
+  if (!seasonData || !seasonData.swaps) return false;
+  let changed = false;
+  for (const swap of seasonData.swaps) {
+    if (swap.status !== 'approved' || !swap.week_key || !swap.swap_date || !swap.manager) continue;
+    if (!seasonData.roster_dates) seasonData.roster_dates = {};
+    if (!seasonData.roster_dates[swap.manager]) seasonData.roster_dates[swap.manager] = {};
+    if (!seasonData.roster_dates[swap.manager][swap.week_key]) seasonData.roster_dates[swap.manager][swap.week_key] = {};
+    const wkDates = seasonData.roster_dates[swap.manager][swap.week_key];
+    if (swap.player_out) {
+      if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
+      if (!wkDates[swap.player_out].drop_date) { wkDates[swap.player_out].drop_date = swap.swap_date; changed = true; }
+    }
+    if (swap.player_in) {
+      if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
+      if (!wkDates[swap.player_in].add_date) { wkDates[swap.player_in].add_date = swap.swap_date; changed = true; }
+    }
+  }
+  return changed;
+}
+
 // Repair any weekly data where 'manager' is an MLB team abbreviation instead of a WMMC manager name
 function repairManagerAssignments(seasonData) {
   if (!seasonData || seasonData.status === 'completed') return false;
@@ -5625,6 +5649,25 @@ window.approveSwap = function(swapId) {
 
   swap.status = 'approved';
   swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  // Write add/drop dates to roster_dates so they appear in the date editor
+  const approvalDate = swap.swap_date || new Date().toISOString().split('T')[0];
+  const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
+  if (!sd.roster_dates) sd.roster_dates = {};
+  if (!sd.roster_dates[swap.manager]) sd.roster_dates[swap.manager] = {};
+  rdWeekKeys.forEach(wk => {
+    if (!sd.roster_dates[swap.manager][wk]) sd.roster_dates[swap.manager][wk] = {};
+    const wkDates = sd.roster_dates[swap.manager][wk];
+    if (swap.player_out) {
+      if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
+      if (!wkDates[swap.player_out].drop_date) wkDates[swap.player_out].drop_date = approvalDate;
+    }
+    if (swap.player_in) {
+      if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
+      if (!wkDates[swap.player_in].add_date) wkDates[swap.player_in].add_date = approvalDate;
+    }
+  });
+
   saveSeason(SELECTED_SEASON, sd);
 
   renderPendingSwapRequests();
@@ -7935,6 +7978,7 @@ window.updateCommRosterWeekView = function(managerName) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
   if (!sd.rosters) sd.rosters = {};
+  if (backfillRosterDatesFromSwaps(sd)) saveSeason(SELECTED_SEASON, sd);
   const safeMgr = managerName.replace(/'/g, "\\'");
 
   const [round, week] = weekKey.split('|');
