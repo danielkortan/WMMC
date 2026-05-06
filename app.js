@@ -4285,7 +4285,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (rd && rd.drop_date) {
       tags.push(`Dropped ${fmtShortDate(rd.drop_date)}`);
     } else {
-      const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+      const dropSwap = approvedSwaps.find(s => s.player_out === player && s.week_key === weekKey);
       if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
     }
     if (tags.length === 0) {
@@ -7993,7 +7993,7 @@ window.updateCommRosterWeekView = function(managerName) {
     if (rd) return { add_date: rd.add_date || '', drop_date: rd.drop_date || '' };
     // Fall back to swap records
     const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
-    const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+    const dropSwap = approvedSwaps.find(s => s.player_out === player && s.week_key === weekKey);
     return {
       add_date: (addSwap && addSwap.swap_date) || '',
       drop_date: (dropSwap && dropSwap.swap_date) || ''
