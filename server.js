@@ -898,7 +898,7 @@ app.get('/api/google-sheets/config', (req, res) => {
 // POST /api/google-sheets/config
 app.post('/api/google-sheets/config', (req, res) => {
   const db = readDB();
-  const { spreadsheet_url, api_key, enabled, season } = req.body;
+  const { spreadsheet_url, api_key, enabled, season, sync_time } = req.body;
 
   const spreadsheetId = extractSpreadsheetId(spreadsheet_url);
   if (spreadsheet_url && !spreadsheetId) {
@@ -910,6 +910,7 @@ app.post('/api/google-sheets/config', (req, res) => {
   if (api_key) db.google_sheets_config.api_key = api_key;
   if (typeof enabled === 'boolean') db.google_sheets_config.enabled = enabled;
   if (season) db.google_sheets_config.season = season;
+  if (sync_time) db.google_sheets_config.sync_time = sync_time;
 
   addAuditEntry(db, 'gsheets_config_update', { enabled, season }, req.get('X-User-Email'));
   writeDB(db);
@@ -999,15 +1000,25 @@ app.delete('/api/seasons/:year/week-data', (req, res) => {
 });
 
 // ============================================================
-// Daily Scheduler (5:00 AM)
+// Daily Scheduler
 // ============================================================
 
 let syncTimer = null;
 
+function parseSyncTime(t) {
+  const parts = (t || '05:00').split(':').map(Number);
+  const h = Number.isFinite(parts[0]) && parts[0] >= 0 && parts[0] <= 23 ? parts[0] : 5;
+  const m = Number.isFinite(parts[1]) && parts[1] >= 0 && parts[1] <= 59 ? parts[1] : 0;
+  return [h, m];
+}
+
 function getNextSyncTime() {
+  const db = readDB();
+  const config = db.google_sheets_config || {};
+  const [syncHour, syncMinute] = parseSyncTime(config.sync_time);
   const now = new Date();
   const next = new Date();
-  next.setHours(5, 0, 0, 0);
+  next.setHours(syncHour, syncMinute, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   return next.toISOString();
 }
@@ -1046,6 +1057,8 @@ function scheduleGSheetsSync() {
     return;
   }
 
+  const [syncHour, syncMinute] = parseSyncTime(config.sync_time);
+
   function runAndReschedule() {
     const now = new Date();
     console.log(`[GSheets] Running scheduled sync at ${now.toISOString()}`);
@@ -1053,7 +1066,6 @@ function scheduleGSheetsSync() {
     const db2 = readDB();
     const cfg = db2.google_sheets_config || {};
     const season = cfg.season || now.getFullYear().toString();
-    const sd = (db2.seasons || {})[season];
 
     syncGoogleSheets(season)
       .then(result => {
@@ -1067,19 +1079,20 @@ function scheduleGSheetsSync() {
         postSlack(`*Google Sheets Sync Failed*\n${e.message}`).catch(() => {});
       });
 
-    // Schedule next run at 5am tomorrow
+    // Re-read sync_time in case it was changed since the timer was set
+    const db3 = readDB();
+    const [sh, sm] = parseSyncTime((db3.google_sheets_config || {}).sync_time);
     const next = new Date();
     next.setDate(next.getDate() + 1);
-    next.setHours(5, 0, 0, 0);
+    next.setHours(sh, sm, 0, 0);
     const delay = next - Date.now();
     syncTimer = setTimeout(runAndReschedule, delay);
     console.log(`[GSheets] Next sync scheduled for ${next.toISOString()}`);
   }
 
-  // Calculate delay until next 5am
   const now = new Date();
   const next = new Date();
-  next.setHours(5, 0, 0, 0);
+  next.setHours(syncHour, syncMinute, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   const delay = next - now;
 
