@@ -74,29 +74,33 @@ export function findManagerForPlayerWeek(seasonData, playerName, type, round, we
   return null;
 }
 
-// Repair weekly data where 'manager' is null/unassigned
+// Repair weekly data where 'manager' is null/unassigned.
+// Uses separate typed lookups: batting stats are only assigned from the batters roster,
+// pitching stats only from the pitchers roster. This prevents a pitcher accidentally
+// placed in a manager's batters array from inheriting batting stats (and vice versa).
 export function repairManagerAssignments(seasonData) {
   if (!seasonData || seasonData.status === 'completed') return false;
 
   const rosters = seasonData.rosters || {};
   let repaired = false;
 
-  const playerToManager = {};
+  const batterToManager = {};
+  const pitcherToManager = {};
   for (const [managerName, mgrRoster] of Object.entries(rosters)) {
     if (Array.isArray(mgrRoster.batters) || Array.isArray(mgrRoster.pitchers)) {
-      (mgrRoster.batters || []).forEach(b => { playerToManager[b] = managerName; });
-      (mgrRoster.pitchers || []).forEach(p => { playerToManager[p] = managerName; });
+      (mgrRoster.batters || []).forEach(b => { batterToManager[b] = managerName; });
+      (mgrRoster.pitchers || []).forEach(p => { pitcherToManager[p] = managerName; });
     } else {
       for (const weekRoster of Object.values(mgrRoster)) {
-        (weekRoster.batters || []).forEach(b => { if (!playerToManager[b]) playerToManager[b] = managerName; });
-        (weekRoster.pitchers || []).forEach(p => { if (!playerToManager[p]) playerToManager[p] = managerName; });
+        (weekRoster.batters || []).forEach(b => { if (!batterToManager[b]) batterToManager[b] = managerName; });
+        (weekRoster.pitchers || []).forEach(p => { if (!pitcherToManager[p]) pitcherToManager[p] = managerName; });
       }
     }
   }
 
   (seasonData.weekly_batting || []).forEach(entry => {
     if (!entry.manager) {
-      const correctManager = playerToManager[entry.batter];
+      const correctManager = batterToManager[entry.batter];
       if (correctManager) {
         entry.manager = correctManager;
         repaired = true;
@@ -106,7 +110,7 @@ export function repairManagerAssignments(seasonData) {
 
   (seasonData.weekly_pitching || []).forEach(entry => {
     if (!entry.manager) {
-      const correctManager = playerToManager[entry.pitcher];
+      const correctManager = pitcherToManager[entry.pitcher];
       if (correctManager) {
         entry.manager = correctManager;
         repaired = true;

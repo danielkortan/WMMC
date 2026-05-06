@@ -3844,17 +3844,20 @@ function repairManagerAssignments(seasonData) {
   const rosters = seasonData.rosters || {};
   let repaired = false;
 
-  // Build player-to-manager lookup from rosters (per-week model)
-  const playerToManager = {};
+  // Build SEPARATE typed lookups so batting stats are only repaired from the batters
+  // roster and pitching stats only from the pitchers roster. A pitcher accidentally
+  // placed in a manager's batters array must not cause that manager to inherit batting
+  // stats for the pitcher (and vice versa for two-way players with distinct pool names).
+  const batterToManager = {};
+  const pitcherToManager = {};
   for (const [managerName, mgrRoster] of Object.entries(rosters)) {
-    // Handle both old flat format and new per-week format
     if (Array.isArray(mgrRoster.batters) || Array.isArray(mgrRoster.pitchers)) {
-      (mgrRoster.batters || []).forEach(b => { playerToManager[b] = managerName; });
-      (mgrRoster.pitchers || []).forEach(p => { playerToManager[p] = managerName; });
+      (mgrRoster.batters || []).forEach(b => { batterToManager[b] = managerName; });
+      (mgrRoster.pitchers || []).forEach(p => { pitcherToManager[p] = managerName; });
     } else {
       for (const weekRoster of Object.values(mgrRoster)) {
-        (weekRoster.batters || []).forEach(b => { if (!playerToManager[b]) playerToManager[b] = managerName; });
-        (weekRoster.pitchers || []).forEach(p => { if (!playerToManager[p]) playerToManager[p] = managerName; });
+        (weekRoster.batters || []).forEach(b => { if (!batterToManager[b]) batterToManager[b] = managerName; });
+        (weekRoster.pitchers || []).forEach(p => { if (!pitcherToManager[p]) pitcherToManager[p] = managerName; });
       }
     }
   }
@@ -3863,7 +3866,7 @@ function repairManagerAssignments(seasonData) {
   // Never overwrite a valid stored manager — that would break banked points.
   (seasonData.weekly_batting || []).forEach(entry => {
     if (!entry.manager) {
-      const correctManager = playerToManager[entry.batter];
+      const correctManager = batterToManager[entry.batter];
       if (correctManager) {
         entry.manager = correctManager;
         repaired = true;
@@ -3873,7 +3876,7 @@ function repairManagerAssignments(seasonData) {
 
   (seasonData.weekly_pitching || []).forEach(entry => {
     if (!entry.manager) {
-      const correctManager = playerToManager[entry.pitcher];
+      const correctManager = pitcherToManager[entry.pitcher];
       if (correctManager) {
         entry.manager = correctManager;
         repaired = true;
@@ -4291,20 +4294,21 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
   }
 
-  // Generate a "not rostered" tag that includes the dates the player WAS rostered
-  function notRosteredTag(player) {
+  // Generate a "not rostered" tag that includes the dates the player WAS rostered.
+  // poolType ('batters' or 'pitchers') restricts the search to the correct roster array
+  // so a pitcher accidentally placed in a batter row (or vice versa) is not shown as
+  // having been rostered in the wrong role.
+  function notRosteredTag(player, poolType) {
     if (!isActive || !seasonData.rosters || !seasonData.rosters[managerName]) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
     const mgrRoster = seasonData.rosters[managerName];
-    // Find all weeks this player was rostered
     const rosteredWeekIndices = [];
     SEASON_SCHEDULE.forEach((s, i) => {
       const wk = `${s.round}|${s.week}`;
       const wr = mgrRoster[wk];
-      if (wr && ((wr.batters || []).includes(player) || (wr.pitchers || []).includes(player))) {
-        rosteredWeekIndices.push(i);
-      }
+      const arr = poolType ? (wr && (wr[poolType] || [])) : (wr && ((wr.batters || []).concat(wr.pitchers || [])));
+      if (arr && arr.includes(player)) rosteredWeekIndices.push(i);
     });
     if (rosteredWeekIndices.length === 0 || !scheduleDates) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
@@ -4428,7 +4432,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.batCumulative[batter] || 0;
         const cumRank = cumRankings.batRanks[batter];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter)}</td>`;
+        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
         html += batStatCell(s, 'abs', s.abs || 0);
         html += batStatCell(s, '1b', s['1b'] || 0);
         html += batStatCell(s, '2b', s['2b'] || 0);
@@ -4476,7 +4480,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = cumScores.pitCumulative[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher)}${s.qs_highlight ? multiStartTag() : ''}</td>`;
+        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}${s.qs_highlight ? multiStartTag() : ''}</td>`;
         html += pitStatCell(s, 'gs', s.gs || 0);
         html += pitStatCell(s, 'w', s.w || 0);
         // QS: highlight yellow if pitcher had 2+ GS (qs_highlight flag)
@@ -8136,6 +8140,22 @@ window.addToRoster = function(manager, type, selectId, weekKey) {
 
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
+
+  // Enforce pool membership: a player from the batters pool can only be added as a batter,
+  // and a player from the pitchers pool can only be added as a pitcher. For two-way players
+  // (e.g. Shohei Ohtani), the batter and pitcher versions have distinct names in each pool
+  // and are treated as entirely separate entities.
+  const battersPool = sd.batters_pool || [];
+  const pitchersPool = sd.pitchers_pool || [];
+  if (type === 'batters' && battersPool.length > 0 && !battersPool.includes(player)) {
+    alert(`${player} is not in the batters pool and cannot be added as a batter.`);
+    return;
+  }
+  if (type === 'pitchers' && pitchersPool.length > 0 && !pitchersPool.includes(player)) {
+    alert(`${player} is not in the pitchers pool and cannot be added as a pitcher.`);
+    return;
+  }
+
   if (!sd.rosters) sd.rosters = {};
   if (!sd.rosters[manager]) sd.rosters[manager] = {};
   if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
