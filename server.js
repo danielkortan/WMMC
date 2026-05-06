@@ -945,11 +945,18 @@ app.post('/api/google-sheets/sync', async (req, res) => {
 app.get('/api/google-sheets/sync-status', (req, res) => {
   const db = readDB();
   const config = db.google_sheets_config || {};
+  const season = config.season || new Date().getFullYear().toString();
+  const sd = (db.seasons || {})[season] || {};
+  const recentLogs = (sd.upload_log || [])
+    .filter(l => l.type === 'gsheets_sync')
+    .slice(-10)
+    .reverse();
   res.json({
     last_sync: config.last_sync || null,
     last_sync_result: config.last_sync_result || null,
     enabled: config.enabled || false,
-    next_sync: getNextSyncTime()
+    next_sync: getNextSyncTime(),
+    recent_logs: recentLogs
   });
 });
 

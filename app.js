@@ -6446,25 +6446,14 @@ function renderGSheetsConfig() {
   }
   statusDiv.innerHTML = statusHtml;
 
-  // Fetch server-side auto-sync status (scheduler state + last auto-sync result)
+  // Fetch server-side status: scheduler state, last sync result, and full log
   fetch('/api/google-sheets/sync-status')
     .then(r => r.json())
     .then(s => {
       if (!statusDiv) return;
+
+      // Scheduler status line
       let serverHtml = '';
-      if (s.last_sync) {
-        const ago = getTimeAgo(new Date(s.last_sync));
-        const r = s.last_sync_result;
-        if (r && r.success !== false) {
-          serverHtml += `<div class="gsheets-sync-status gsheets-sync-ok" style="margin-top:0.3rem;">
-            <strong>Auto-sync last ran:</strong> ${ago} &mdash; ${r.batting_imported} batting, ${r.pitching_imported} pitching records
-          </div>`;
-        } else if (r) {
-          serverHtml += `<div class="gsheets-sync-status gsheets-sync-err" style="margin-top:0.3rem;">
-            <strong>Auto-sync last failed:</strong> ${ago} &mdash; ${r.error || 'Unknown error'}
-          </div>`;
-        }
-      }
       const nextDate = s.next_sync ? new Date(s.next_sync) : null;
       if (s.enabled && nextDate) {
         serverHtml += `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
@@ -6476,25 +6465,19 @@ function renderGSheetsConfig() {
         </div>`;
       }
       statusDiv.innerHTML += serverHtml;
-    })
-    .catch(() => {});
 
-  // Show sync log from season's upload_log
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (sd && sd.upload_log) {
-    const gsheetsLogs = sd.upload_log
-      .filter(l => l.type === 'gsheets_sync')
-      .slice(-10)
-      .reverse();
-    if (gsheetsLogs.length > 0) {
+      // Sync log — sourced from server so auto-sync entries appear alongside manual ones
+      if (!logDiv) return;
+      const logs = s.recent_logs || [];
+      if (logs.length === 0) { logDiv.innerHTML = ''; return; }
+
       let logHtml = `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <h3 style="margin:0;">Sync Log</h3>
         <button class="btn btn-sm btn-secondary" onclick="document.getElementById('gsheets-log-entries').style.display=document.getElementById('gsheets-log-entries').style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
       </div>`;
       logHtml += '<div id="gsheets-log-entries" style="display:none;" class="gsheets-log-list">';
-      gsheetsLogs.forEach(l => {
-        const typeLabel = l.sync_type === 'daily' ? 'Daily' : 'Manual';
+      logs.forEach(l => {
+        const typeLabel = l.sync_type === 'daily' ? 'Auto' : 'Manual';
         const typeBadgeStyle = l.sync_type === 'daily'
           ? 'background:var(--accent,#6c63ff);color:#fff;'
           : 'background:var(--secondary,#555);color:#fff;';
@@ -6502,7 +6485,7 @@ function renderGSheetsConfig() {
           ? 'background:var(--success,#28a745);color:#fff;'
           : 'background:var(--danger,#dc3545);color:#fff;';
         const successLabel = l.success !== false ? 'Success' : 'Failed';
-        let detail, errBlock = '';
+        let detail = '', errBlock = '';
         if (l.success !== false) {
           const errResults = (l.details || []).filter(r => r.error);
           detail = `${l.batting_imported} batting, ${l.pitching_imported} pitching records imported`;
@@ -6523,10 +6506,8 @@ function renderGSheetsConfig() {
       });
       logHtml += '</div>';
       logDiv.innerHTML = logHtml;
-    } else {
-      logDiv.innerHTML = '';
-    }
-  }
+    })
+    .catch(() => {});
 }
 
 window.saveGSheetsConfig = async function() {
