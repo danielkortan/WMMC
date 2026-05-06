@@ -4446,10 +4446,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const batStatMap = {};
     allWeekBatting.forEach(b => { batStatMap[b.batter] = b; });
 
-    // Pool filter keeps pitchers (same name in both pools) out of the batter table
-    const weekBattingForTable = battersPool.size > 0
-      ? allWeekBatting.filter(b => battersPool.has(b.batter) || weekRoster.batters.includes(b.batter))
-      : allWeekBatting;
+    // Pool filter: only show batting stats for players in historicalBatters (already pool-validated)
+    const weekBattingForTable = allWeekBatting.filter(b => historicalBatters.has(b.batter));
     const allBattersThisWeek = new Set([
       ...weekRoster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
       ...droppedBatters,
@@ -4499,9 +4497,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const pitStatMap = {};
     allWeekPitching.forEach(p => { pitStatMap[p.pitcher] = p; });
 
-    const weekPitchingForTable = pitchersPool.size > 0
-      ? allWeekPitching.filter(p => pitchersPool.has(p.pitcher) || weekRoster.pitchers.includes(p.pitcher))
-      : allWeekPitching;
+    const weekPitchingForTable = allWeekPitching.filter(p => historicalPitchers.has(p.pitcher));
     const allPitchersThisWeek = new Set([
       ...weekRoster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
       ...droppedPitchers,
@@ -8030,10 +8026,8 @@ window.updateCommRosterWeekView = function(managerName) {
   // ---- Batters Table ----
   const batStatMap = {};
   allWeekBatting.forEach(b => { batStatMap[b.batter] = b; });
-  // Pool filter: exclude batting stat entries for players who are only in the pitchers pool
-  const weekBattingForTable = battersPool.size > 0
-    ? allWeekBatting.filter(b => battersPool.has(b.batter) || roster.batters.includes(b.batter))
-    : allWeekBatting;
+  // Pool filter: only show batting stats for players in historicalBatters (already pool-validated)
+  const weekBattingForTable = allWeekBatting.filter(b => historicalBatters.has(b.batter));
   const allBattersThisWeek = new Set([
     ...roster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
     ...droppedBatters,
@@ -8093,9 +8087,7 @@ window.updateCommRosterWeekView = function(managerName) {
   // ---- Pitchers Table ----
   const pitStatMap = {};
   allWeekPitching.forEach(p => { pitStatMap[p.pitcher] = p; });
-  const weekPitchingForTable = pitchersPool.size > 0
-    ? allWeekPitching.filter(p => pitchersPool.has(p.pitcher) || roster.pitchers.includes(p.pitcher))
-    : allWeekPitching;
+  const weekPitchingForTable = allWeekPitching.filter(p => historicalPitchers.has(p.pitcher));
   const allPitchersThisWeek = new Set([
     ...roster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
     ...droppedPitchers,
