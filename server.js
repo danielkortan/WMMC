@@ -1048,22 +1048,17 @@ function scheduleGSheetsSync() {
     const season = cfg.season || now.getFullYear().toString();
     const sd = (db2.seasons || {})[season];
 
-    // Only sync if within the season's date window
-    if (isWithinSyncWindow(sd)) {
-      syncGoogleSheets(season)
-        .then(result => {
-          console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`);
-          if (result.errors > 0) {
-            postSlack(`*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`).catch(() => {});
-          }
-        })
-        .catch(e => {
-          console.error(`[GSheets] Sync error: ${e.message}`);
-          postSlack(`*Google Sheets Sync Failed*\n${e.message}`).catch(() => {});
-        });
-    } else {
-      console.log(`[GSheets] Skipping sync — outside season date window for ${season}`);
-    }
+    syncGoogleSheets(season)
+      .then(result => {
+        console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`);
+        if (result.errors > 0) {
+          postSlack(`*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`).catch(() => {});
+        }
+      })
+      .catch(e => {
+        console.error(`[GSheets] Sync error: ${e.message}`);
+        postSlack(`*Google Sheets Sync Failed*\n${e.message}`).catch(() => {});
+      });
 
     // Schedule next run at 5am tomorrow
     const next = new Date();

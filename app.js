@@ -6446,6 +6446,39 @@ function renderGSheetsConfig() {
   }
   statusDiv.innerHTML = statusHtml;
 
+  // Fetch server-side auto-sync status (scheduler state + last auto-sync result)
+  fetch('/api/google-sheets/sync-status')
+    .then(r => r.json())
+    .then(s => {
+      if (!statusDiv) return;
+      let serverHtml = '';
+      if (s.last_sync) {
+        const ago = getTimeAgo(new Date(s.last_sync));
+        const r = s.last_sync_result;
+        if (r && r.success !== false) {
+          serverHtml += `<div class="gsheets-sync-status gsheets-sync-ok" style="margin-top:0.3rem;">
+            <strong>Auto-sync last ran:</strong> ${ago} &mdash; ${r.batting_imported} batting, ${r.pitching_imported} pitching records
+          </div>`;
+        } else if (r) {
+          serverHtml += `<div class="gsheets-sync-status gsheets-sync-err" style="margin-top:0.3rem;">
+            <strong>Auto-sync last failed:</strong> ${ago} &mdash; ${r.error || 'Unknown error'}
+          </div>`;
+        }
+      }
+      const nextDate = s.next_sync ? new Date(s.next_sync) : null;
+      if (s.enabled && nextDate) {
+        serverHtml += `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
+          Next auto-sync: ${nextDate.toLocaleString()}
+        </div>`;
+      } else if (!s.enabled) {
+        serverHtml += `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
+          Auto-sync is disabled — check the box above and save to enable it.
+        </div>`;
+      }
+      statusDiv.innerHTML += serverHtml;
+    })
+    .catch(() => {});
+
   // Show sync log from season's upload_log
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -6539,9 +6572,14 @@ window.saveGSheetsConfig = async function() {
     return;
   }
 
-  statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">Configuration saved. Spreadsheet ID: ${config.spreadsheet_id || '(none)'}</div>`;
   apiKeyInput.value = '';
+  urlInput.value = ''; // clear so renderGSheetsConfig shows the stored ID
   renderGSheetsConfig();
+  // Set success message after renderGSheetsConfig so it isn't overwritten
+  statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
+    Configuration saved. Auto-sync is <strong>${config.enabled ? 'enabled' : 'disabled'}</strong>.
+    ${config.spreadsheet_id ? 'Spreadsheet ID: ' + config.spreadsheet_id : ''}
+  </div>`;
 };
 
 // ---- Client-side Google Sheets Sync ----
