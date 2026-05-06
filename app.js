@@ -4285,7 +4285,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (rd && rd.drop_date) {
       tags.push(`Dropped ${fmtShortDate(rd.drop_date)}`);
     } else {
-      const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+      const dropSwap = approvedSwaps.find(s => s.player_out === player && s.week_key === weekKey);
       if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
     }
     if (tags.length === 0) {
@@ -4374,17 +4374,19 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const weekRosterDates = isActive && seasonData.roster_dates && seasonData.roster_dates[managerName]
       ? (seasonData.roster_dates[managerName][weekKey] || {}) : {};
     const historicalBatters = new Set([
-      ...weekRoster.batters,
+      ...weekRoster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
       ...Object.keys(weekRosterDates).filter(p => battersPool.size === 0 || battersPool.has(p)),
       ...approvedSwaps
-        .filter(s => s.player_in && s.week_key === weekKey && (battersPool.size === 0 || battersPool.has(s.player_in)))
+        .filter(s => s.player_in && s.week_key === weekKey && (battersPool.size === 0 || battersPool.has(s.player_in))
+          && (weekRosterDates[s.player_in] || batting.some(b => b.batter === s.player_in && b.round === round && b.week === week)))
         .map(s => s.player_in)
     ]);
     const historicalPitchers = new Set([
-      ...weekRoster.pitchers,
+      ...weekRoster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
       ...Object.keys(weekRosterDates).filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
       ...approvedSwaps
-        .filter(s => s.player_in && s.week_key === weekKey && (pitchersPool.size === 0 || pitchersPool.has(s.player_in)))
+        .filter(s => s.player_in && s.week_key === weekKey && (pitchersPool.size === 0 || pitchersPool.has(s.player_in))
+          && (weekRosterDates[s.player_in] || pitching.some(p => p.pitcher === s.player_in && p.round === round && p.week === week)))
         .map(s => s.player_in)
     ]);
     const droppedBatters = [...historicalBatters].filter(p => !weekRoster.batters.includes(p));
@@ -4448,7 +4450,11 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const weekBattingForTable = battersPool.size > 0
       ? allWeekBatting.filter(b => battersPool.has(b.batter) || weekRoster.batters.includes(b.batter))
       : allWeekBatting;
-    const allBattersThisWeek = new Set([...weekRoster.batters, ...droppedBatters, ...weekBattingForTable.map(b => b.batter)]);
+    const allBattersThisWeek = new Set([
+      ...weekRoster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
+      ...droppedBatters,
+      ...weekBattingForTable.map(b => b.batter)
+    ]);
     if (allBattersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
       html += '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
@@ -4496,7 +4502,11 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const weekPitchingForTable = pitchersPool.size > 0
       ? allWeekPitching.filter(p => pitchersPool.has(p.pitcher) || weekRoster.pitchers.includes(p.pitcher))
       : allWeekPitching;
-    const allPitchersThisWeek = new Set([...weekRoster.pitchers, ...droppedPitchers, ...weekPitchingForTable.map(p => p.pitcher)]);
+    const allPitchersThisWeek = new Set([
+      ...weekRoster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
+      ...droppedPitchers,
+      ...weekPitchingForTable.map(p => p.pitcher)
+    ]);
     if (allPitchersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
       html += '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
@@ -7948,21 +7958,23 @@ window.updateCommRosterWeekView = function(managerName) {
   const pitchersPool = new Set(sd.pitchers_pool || []);
 
   // Build the complete set of batters/pitchers who were on the roster at ANY point this week.
-  // Sources: current roster + roster_dates entries (commissioner add/drop) + approved swaps
-  // (user-submitted swaps). Pool membership is used to distinguish roles for each player name,
-  // which also naturally handles two-way players with distinct names per pool.
+  // Sources: current roster (pool-filtered) + roster_dates (commissioner add/drop) + approved swaps.
+  // Swap-added players are only included if they have actual stats or a roster_dates entry —
+  // this prevents players who were dropped before any games were played from appearing.
   const historicalBatters = new Set([
-    ...roster.batters,
+    ...roster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
     ...Object.keys(rosterDates).filter(p => battersPool.size === 0 || battersPool.has(p)),
     ...approvedSwaps
-      .filter(s => s.player_in && s.week_key === weekKey && (battersPool.size === 0 || battersPool.has(s.player_in)))
+      .filter(s => s.player_in && s.week_key === weekKey && (battersPool.size === 0 || battersPool.has(s.player_in))
+        && (rosterDates[s.player_in] || batting.some(b => b.batter === s.player_in && b.round === round && b.week === week)))
       .map(s => s.player_in)
   ]);
   const historicalPitchers = new Set([
-    ...roster.pitchers,
+    ...roster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
     ...Object.keys(rosterDates).filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
     ...approvedSwaps
-      .filter(s => s.player_in && s.week_key === weekKey && (pitchersPool.size === 0 || pitchersPool.has(s.player_in)))
+      .filter(s => s.player_in && s.week_key === weekKey && (pitchersPool.size === 0 || pitchersPool.has(s.player_in))
+        && (rosterDates[s.player_in] || pitching.some(p => p.pitcher === s.player_in && p.round === round && p.week === week)))
       .map(s => s.player_in)
   ]);
 
@@ -7993,7 +8005,7 @@ window.updateCommRosterWeekView = function(managerName) {
     if (rd) return { add_date: rd.add_date || '', drop_date: rd.drop_date || '' };
     // Fall back to swap records
     const addSwap = approvedSwaps.find(s => s.player_in === player && s.week_key === weekKey);
-    const dropSwap = approvedSwaps.find(s => s.player_out === player && !s.player_in && s.week_key === weekKey);
+    const dropSwap = approvedSwaps.find(s => s.player_out === player && s.week_key === weekKey);
     return {
       add_date: (addSwap && addSwap.swap_date) || '',
       drop_date: (dropSwap && dropSwap.swap_date) || ''
@@ -8022,7 +8034,11 @@ window.updateCommRosterWeekView = function(managerName) {
   const weekBattingForTable = battersPool.size > 0
     ? allWeekBatting.filter(b => battersPool.has(b.batter) || roster.batters.includes(b.batter))
     : allWeekBatting;
-  const allBattersThisWeek = new Set([...roster.batters, ...droppedBatters, ...weekBattingForTable.map(b => b.batter)]);
+  const allBattersThisWeek = new Set([
+    ...roster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
+    ...droppedBatters,
+    ...weekBattingForTable.map(b => b.batter)
+  ]);
   const batTotal = weekBatting.reduce((s, b) => s + (b.weekly_score || 0), 0);
 
   let batHtml = `<div class="wrs-group-label">BATTERS (${roster.batters.length}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
@@ -8080,7 +8096,11 @@ window.updateCommRosterWeekView = function(managerName) {
   const weekPitchingForTable = pitchersPool.size > 0
     ? allWeekPitching.filter(p => pitchersPool.has(p.pitcher) || roster.pitchers.includes(p.pitcher))
     : allWeekPitching;
-  const allPitchersThisWeek = new Set([...roster.pitchers, ...droppedPitchers, ...weekPitchingForTable.map(p => p.pitcher)]);
+  const allPitchersThisWeek = new Set([
+    ...roster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
+    ...droppedPitchers,
+    ...weekPitchingForTable.map(p => p.pitcher)
+  ]);
   const pitTotal = weekPitching.reduce((s, p) => s + (p.weekly_score || 0), 0);
 
   let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${roster.pitchers.length}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
