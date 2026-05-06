@@ -6401,105 +6401,127 @@ function getTimeAgo(date) {
   return `${days}d ago`;
 }
 
-function renderGSheetsConfig() {
+let gsheetsEditMode = false;
+
+function renderGSheetsConfig(savedMsg) {
+  const fieldsDiv = document.getElementById('gsheets-fields');
   const statusDiv = document.getElementById('gsheets-status');
   const logDiv = document.getElementById('gsheets-sync-log');
-  const urlInput = document.getElementById('gsheets-url');
-  const apiKeyInput = document.getElementById('gsheets-api-key');
-  const enabledCheckbox = document.getElementById('gsheets-enabled');
-  if (!statusDiv || !urlInput) return;
+  if (!fieldsDiv) return;
 
   const config = getGSheetsConfig();
+  const hasConfig = !!(config.spreadsheet_id && config.api_key);
+  const editing = gsheetsEditMode || !hasConfig;
+  const syncTime = config.sync_time || '05:00';
+  const maskedKey = config.api_key
+    ? config.api_key.slice(0, 8) + '...' + config.api_key.slice(-4) : '';
+  const lockedStyle = 'background:var(--surface-2,#f0f0f0);color:var(--text-muted,#888);cursor:default;border-color:var(--border,#ddd);';
 
-  if (config.spreadsheet_id && !urlInput.value) {
-    urlInput.value = config.spreadsheet_id;
-  }
-  if (config.api_key && !apiKeyInput.value) {
-    apiKeyInput.placeholder = config.api_key.slice(0, 8) + '...' + config.api_key.slice(-4);
-  }
-  enabledCheckbox.checked = config.enabled || false;
-
-  let statusHtml = '';
-  if (config.last_sync) {
-    const timeAgo = getTimeAgo(new Date(config.last_sync));
-    const result = config.last_sync_result;
-    if (result && result.success) {
-      let errDetailsHtml = '';
-      if (result.errors > 0 && result.details) {
-        const errLines = result.details
-          .filter(r => r.error)
-          .map(r => `Week ${r.week} ${r.type}: ${r.error}`)
-          .join('<br>');
-        errDetailsHtml = `<div style="color:var(--danger,#dc3545);font-size:0.82rem;margin-top:0.35rem;">${errLines}</div>`;
-      }
-      statusHtml += `<div class="gsheets-sync-status gsheets-sync-ok">
-        <strong>Last sync:</strong> ${timeAgo} &mdash;
-        ${result.batting_imported} batting, ${result.pitching_imported} pitching records imported
-        (${result.weeks_with_data} weeks with data${result.errors > 0 ? `, ${result.errors} error${result.errors > 1 ? 's' : ''}` : ''})
-        ${errDetailsHtml}
+  if (editing) {
+    fieldsDiv.innerHTML = `
+      <div class="form-row" style="margin-top:0.75rem;">
+        <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
+        <input type="text" id="gsheets-url" class="form-input"
+          value="${config.spreadsheet_id || ''}"
+          placeholder="https://docs.google.com/spreadsheets/d/...">
+      </div>
+      <div class="form-row">
+        <label class="upload-label">Google API Key</label>
+        <input type="text" id="gsheets-api-key" class="form-input"
+          placeholder="${maskedKey ? maskedKey + ' — leave blank to keep current' : 'AIza...'}">
+        <p class="upload-hint" style="margin-top:0.25rem;">Create at <em>console.cloud.google.com</em> &rarr; APIs &amp; Services &rarr; Credentials. Enable the Google Sheets API.</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;margin-top:0.5rem;">
+        <label class="checkbox-label" style="margin:0;">
+          <input type="checkbox" id="gsheets-enabled" ${config.enabled ? 'checked' : ''}> Enable daily auto-sync
+        </label>
+        <div style="display:flex;align-items:center;gap:0.4rem;">
+          <span style="font-size:0.85rem;white-space:nowrap;">at</span>
+          <input type="time" id="gsheets-sync-time" class="form-input" value="${syncTime}" style="width:9rem;">
+          <span class="upload-hint" style="margin:0;white-space:nowrap;">(server/UTC time)</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap;">
+        <button class="btn btn-primary" onclick="saveGSheetsConfig()">Save</button>
+        ${hasConfig ? '<button class="btn btn-secondary" onclick="cancelGSheetsConfig()">Cancel</button>' : ''}
+        <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
       </div>`;
-    } else if (result) {
-      statusHtml += `<div class="gsheets-sync-status gsheets-sync-err">
-        <strong>Last sync failed:</strong> ${timeAgo} &mdash; ${result.error || 'Unknown error'}
+  } else {
+    fieldsDiv.innerHTML = `
+      <div style="display:grid;gap:0.5rem;margin-top:0.75rem;">
+        <div class="form-row">
+          <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
+          <input type="text" class="form-input" value="${config.spreadsheet_id || ''}" readonly style="${lockedStyle}">
+        </div>
+        <div class="form-row">
+          <label class="upload-label">Google API Key</label>
+          <input type="text" class="form-input" value="${maskedKey}" readonly style="${lockedStyle}">
+        </div>
+        <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;">
+          <label class="checkbox-label" style="margin:0;color:var(--text-muted,#888);">
+            <input type="checkbox" ${config.enabled ? 'checked' : ''} disabled>
+            ${config.enabled ? 'Auto-sync enabled' : 'Auto-sync disabled'} at ${syncTime} UTC
+          </label>
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+          <button class="btn btn-secondary" onclick="editGSheetsConfig()">Edit</button>
+          <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
+        </div>
       </div>`;
-    }
   }
-  statusDiv.innerHTML = statusHtml;
 
-  // Fetch server-side status: scheduler state, last sync result, and full log
+  if (statusDiv) {
+    statusDiv.innerHTML = savedMsg
+      ? `<div class="gsheets-sync-status gsheets-sync-ok">${savedMsg}</div>` : '';
+  }
+
+  // Fetch server status: next scheduled run + full log sourced from server DB
   fetch('/api/google-sheets/sync-status')
     .then(r => r.json())
     .then(s => {
-      if (!statusDiv) return;
-
-      // Scheduler status line
-      let serverHtml = '';
-      const nextDate = s.next_sync ? new Date(s.next_sync) : null;
-      if (s.enabled && nextDate) {
-        serverHtml += `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
-          Next auto-sync: ${nextDate.toLocaleString()}
-        </div>`;
-      } else if (!s.enabled) {
-        serverHtml += `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
-          Auto-sync is disabled — check the box above and save to enable it.
-        </div>`;
+      if (statusDiv) {
+        const nextDate = s.next_sync ? new Date(s.next_sync) : null;
+        let schedHtml = '';
+        if (s.enabled && nextDate) {
+          schedHtml = `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
+            Next auto-sync: ${nextDate.toLocaleString()}
+          </div>`;
+        } else if (!s.enabled) {
+          schedHtml = `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
+            Auto-sync is disabled — click Edit to enable it.
+          </div>`;
+        }
+        statusDiv.innerHTML += schedHtml;
       }
-      statusDiv.innerHTML += serverHtml;
 
-      // Sync log — sourced from server so auto-sync entries appear alongside manual ones
       if (!logDiv) return;
       const logs = s.recent_logs || [];
       if (logs.length === 0) { logDiv.innerHTML = ''; return; }
 
       let logHtml = `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <h3 style="margin:0;">Sync Log</h3>
-        <button class="btn btn-sm btn-secondary" onclick="document.getElementById('gsheets-log-entries').style.display=document.getElementById('gsheets-log-entries').style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
-      </div>`;
-      logHtml += '<div id="gsheets-log-entries" style="display:none;" class="gsheets-log-list">';
+        <button class="btn btn-sm btn-secondary" onclick="const e=document.getElementById('gsheets-log-entries');e.style.display=e.style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
+      </div><div id="gsheets-log-entries" style="display:none;" class="gsheets-log-list">`;
       logs.forEach(l => {
-        const typeLabel = l.sync_type === 'daily' ? 'Auto' : 'Manual';
-        const typeBadgeStyle = l.sync_type === 'daily'
-          ? 'background:var(--accent,#6c63ff);color:#fff;'
-          : 'background:var(--secondary,#555);color:#fff;';
-        const successBadgeStyle = l.success !== false
-          ? 'background:var(--success,#28a745);color:#fff;'
-          : 'background:var(--danger,#dc3545);color:#fff;';
-        const successLabel = l.success !== false ? 'Success' : 'Failed';
+        const autoSync = l.sync_type === 'daily';
+        const ok = l.success !== false;
+        const typeBadge = autoSync ? 'background:var(--accent,#6c63ff);color:#fff;' : 'background:var(--secondary,#555);color:#fff;';
+        const okBadge = ok ? 'background:var(--success,#28a745);color:#fff;' : 'background:var(--danger,#dc3545);color:#fff;';
         let detail = '', errBlock = '';
-        if (l.success !== false) {
-          const errResults = (l.details || []).filter(r => r.error);
+        if (ok) {
+          const errs = (l.details || []).filter(r => r.error);
           detail = `${l.batting_imported} batting, ${l.pitching_imported} pitching records imported`;
-          if (errResults.length > 0) {
-            detail += ` (${errResults.length} error${errResults.length > 1 ? 's' : ''})`;
-            errBlock = `<div style="color:var(--danger,#dc3545);font-size:0.78rem;margin-top:0.2rem;">${errResults.map(r => `Week ${r.week} ${r.type}: ${r.error}`).join('<br>')}</div>`;
+          if (errs.length) {
+            detail += ` (${errs.length} error${errs.length > 1 ? 's' : ''})`;
+            errBlock = `<div style="color:var(--danger,#dc3545);font-size:0.78rem;margin-top:0.2rem;">${errs.map(r => `Week ${r.week} ${r.type}: ${r.error}`).join('<br>')}</div>`;
           }
         } else {
           detail = `Error: ${l.error || 'Unknown error'}`;
         }
         logHtml += `<div class="gsheets-log-item">
           <span class="gsheets-log-time">${l.timestamp}</span>
-          <span class="swap-badge" style="${typeBadgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${typeLabel}</span>
-          <span class="swap-badge" style="${successBadgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${successLabel}</span>
+          <span class="swap-badge" style="${typeBadge}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${autoSync ? 'Auto' : 'Manual'}</span>
+          <span class="swap-badge" style="${okBadge}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${ok ? 'Success' : 'Failed'}</span>
           <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
           ${errBlock}
         </div>`;
@@ -6510,28 +6532,40 @@ function renderGSheetsConfig() {
     .catch(() => {});
 }
 
+window.editGSheetsConfig = function() {
+  gsheetsEditMode = true;
+  renderGSheetsConfig();
+};
+
+window.cancelGSheetsConfig = function() {
+  gsheetsEditMode = false;
+  renderGSheetsConfig();
+};
+
 window.saveGSheetsConfig = async function() {
   const statusDiv = document.getElementById('gsheets-status');
   const urlInput = document.getElementById('gsheets-url');
   const apiKeyInput = document.getElementById('gsheets-api-key');
   const enabledCheckbox = document.getElementById('gsheets-enabled');
+  const syncTimeInput = document.getElementById('gsheets-sync-time');
 
-  const urlVal = urlInput.value.trim();
+  const urlVal = urlInput ? urlInput.value.trim() : '';
   const spreadsheetId = extractSpreadsheetId(urlVal);
   if (urlVal && !spreadsheetId) {
-    statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">Could not extract spreadsheet ID from the provided URL.</div>';
+    if (statusDiv) statusDiv.innerHTML = '<div class="gsheets-sync-status gsheets-sync-err">Could not extract spreadsheet ID from the provided URL.</div>';
     return;
   }
 
   const config = getGSheetsConfig();
   if (spreadsheetId) config.spreadsheet_id = spreadsheetId;
-  if (apiKeyInput.value.trim()) config.api_key = apiKeyInput.value.trim();
-  config.enabled = enabledCheckbox.checked;
+  const newKey = apiKeyInput ? apiKeyInput.value.trim() : '';
+  if (newKey) config.api_key = newKey;
+  config.enabled = enabledCheckbox ? enabledCheckbox.checked : (config.enabled || false);
   config.season = SELECTED_SEASON;
+  config.sync_time = syncTimeInput ? (syncTimeInput.value || '05:00') : (config.sync_time || '05:00');
 
   saveGSheetsConfigLocal(config);
 
-  // Persist to server so the server-side auto-sync scheduler picks up the config
   try {
     const resp = await fetch('/api/google-sheets/config', {
       method: 'POST',
@@ -6540,27 +6574,23 @@ window.saveGSheetsConfig = async function() {
         spreadsheet_url: urlVal || config.spreadsheet_id,
         api_key: config.api_key,
         enabled: config.enabled,
-        season: config.season
+        season: config.season,
+        sync_time: config.sync_time
       })
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Server error saving config: ${err.error || resp.status}</div>`;
+      if (statusDiv) statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Server error: ${err.error || resp.status}</div>`;
       return;
     }
   } catch (e) {
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Could not reach server: ${e.message}</div>`;
+    if (statusDiv) statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Could not reach server: ${e.message}</div>`;
     return;
   }
 
-  apiKeyInput.value = '';
-  urlInput.value = ''; // clear so renderGSheetsConfig shows the stored ID
-  renderGSheetsConfig();
-  // Set success message after renderGSheetsConfig so it isn't overwritten
-  statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
-    Configuration saved. Auto-sync is <strong>${config.enabled ? 'enabled' : 'disabled'}</strong>.
-    ${config.spreadsheet_id ? 'Spreadsheet ID: ' + config.spreadsheet_id : ''}
-  </div>`;
+  gsheetsEditMode = false;
+  const timeLabel = config.enabled ? ` at ${config.sync_time} UTC` : '';
+  renderGSheetsConfig(`Configuration saved. Auto-sync is <strong>${config.enabled ? 'enabled' : 'disabled'}</strong>${timeLabel}.`);
 };
 
 // ---- Client-side Google Sheets Sync ----
