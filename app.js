@@ -8086,7 +8086,8 @@ window.updateCommRosterWeekView = function(managerName) {
       batHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
       batHtml += `<td style="white-space:nowrap;">`;
       batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
-      if (onRoster) batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button>`;
+      if (onRoster) batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button> `;
+      batHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Remove</button>`;
       batHtml += `</td></tr>`;
       // Date editor row
       const dateRowId = `pdate-bat-${batter.replace(/[^a-zA-Z0-9]/g, '_')}`;
@@ -8152,7 +8153,8 @@ window.updateCommRosterWeekView = function(managerName) {
       pitHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
       pitHtml += `<td style="white-space:nowrap;">`;
       pitHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safeP}','${weekKey}')">Edit</button> `;
-      if (onRoster) pitHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button>`;
+      if (onRoster) pitHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button> `;
+      pitHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Remove</button>`;
       pitHtml += `</td></tr>`;
       // Date editor row
       const dateRowId = `pdate-pit-${pitcher.replace(/[^a-zA-Z0-9]/g, '_')}`;
@@ -8316,6 +8318,46 @@ window.removeFromRoster = function(manager, type, player, weekKey) {
     week_key: weekKey,
     status: 'approved',
   });
+
+  saveSeason(SELECTED_SEASON, sd);
+  renderRosterData(manager, true);
+};
+
+// Permanently removes a player from the roster AND erases their stats for the week.
+// Use when a player was erroneously rostered (e.g. pre-season submission later changed)
+// and their attributed stats need to be purged entirely, not just marked as dropped.
+window.hardRemoveFromRoster = function(manager, type, player, weekKey) {
+  if (!confirm(`Remove ${player} and all their stats for this week from ${manager}'s roster?\n\nThis deletes their stats permanently and cannot be undone.`)) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const [round, week] = weekKey.split('|');
+
+  // Remove from roster array
+  if (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey] && sd.rosters[manager][weekKey][type]) {
+    sd.rosters[manager][weekKey][type] = sd.rosters[manager][weekKey][type].filter(p => p !== player);
+  }
+
+  // Remove batting stats attributed to this manager OR unattributed, for this player+week
+  if (sd.weekly_batting) {
+    sd.weekly_batting = sd.weekly_batting.filter(b =>
+      !(b.batter === player && b.round === round && b.week === week &&
+        (b.manager === manager || !b.manager))
+    );
+  }
+
+  // Remove pitching stats attributed to this manager OR unattributed, for this player+week
+  if (sd.weekly_pitching) {
+    sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+      !(p.pitcher === player && p.round === round && p.week === week &&
+        (p.manager === manager || !p.manager))
+    );
+  }
+
+  // Remove roster_dates entry so the player doesn't reappear via the dates path
+  if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
+    delete sd.roster_dates[manager][weekKey][player];
+  }
 
   saveSeason(SELECTED_SEASON, sd);
   renderRosterData(manager, true);
