@@ -4261,6 +4261,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   // Swap log and schedule dates for inline date annotations
   const approvedSwaps = isActive ? (seasonData.swaps || []).filter(s => s.manager === managerName && s.status === 'approved') : [];
   const scheduleDates = getScheduleDates();
+  // First week's start date is the season boundary: swaps recorded before this date are pre-season
+  const seasonStartDate = scheduleDates && scheduleDates[0] ? scheduleDates[0].start : null;
 
   // Pool sets for filtering cross-pool contamination (pitcher in batter table and vice versa)
   const battersPool = isActive ? new Set(seasonData.batters_pool || []) : new Set();
@@ -4375,22 +4377,24 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       ? (seasonData.roster_dates[managerName][weekKey] || {}) : {};
     const historicalBatters = new Set([
       ...weekRoster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
-      ...Object.keys(weekRosterDates).filter(p => battersPool.size === 0 || battersPool.has(p)),
+      ...Object.keys(weekRosterDates).filter(p => (battersPool.size === 0 || battersPool.has(p))
+        && (!seasonStartDate || !weekRosterDates[p].drop_date || weekRosterDates[p].drop_date >= seasonStartDate)),
       ...approvedSwaps
         .filter(s => s.player_in && s.week_key === weekKey && (battersPool.size === 0 || battersPool.has(s.player_in))
+          && (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate)
           && (weekRosterDates[s.player_in] || batting.some(b => b.batter === s.player_in && b.round === round && b.week === week)))
         .map(s => s.player_in)
     ]);
     const historicalPitchers = new Set([
       ...weekRoster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
-      ...Object.keys(weekRosterDates).filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
+      ...Object.keys(weekRosterDates).filter(p => (pitchersPool.size === 0 || pitchersPool.has(p))
+        && (!seasonStartDate || !weekRosterDates[p].drop_date || weekRosterDates[p].drop_date >= seasonStartDate)),
       ...approvedSwaps
         .filter(s => s.player_in && s.week_key === weekKey && (pitchersPool.size === 0 || pitchersPool.has(s.player_in))
+          && (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate)
           && (weekRosterDates[s.player_in] || pitching.some(p => p.pitcher === s.player_in && p.round === round && p.week === week)))
         .map(s => s.player_in)
     ]);
-    const droppedBatters = [...historicalBatters].filter(p => !weekRoster.batters.includes(p));
-    const droppedPitchers = [...historicalPitchers].filter(p => !weekRoster.pitchers.includes(p));
 
     // Extend weekly stats with unattributed entries for historically rostered players.
     // Stats synced after a drop arrive with manager = null and would otherwise be invisible.
@@ -4412,6 +4416,13 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         }
       });
     }
+    // Only show dropped players who actually accumulated stats during the scoring period
+    const droppedBatters = [...historicalBatters].filter(p =>
+      !weekRoster.batters.includes(p) && allWeekBatting.some(b => b.batter === p)
+    );
+    const droppedPitchers = [...historicalPitchers].filter(p =>
+      !weekRoster.pitchers.includes(p) && allWeekPitching.some(pt => pt.pitcher === p)
+    );
 
     // Compute weekly rankings for this week
     const weekRanks = computeWeeklyRankings(isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching }, round, week);
@@ -7944,6 +7955,7 @@ window.updateCommRosterWeekView = function(managerName) {
   const approvedSwaps = (sd.swaps || []).filter(s => s.manager === managerName && s.status === 'approved');
   const scheduleDates = getScheduleDates();
   const weekIdx = SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
+  const seasonStartDate = scheduleDates && scheduleDates[0] ? scheduleDates[0].start : null;
 
   // Roster dates lookup
   const rosterDates = sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]
@@ -7959,24 +7971,24 @@ window.updateCommRosterWeekView = function(managerName) {
   // this prevents players who were dropped before any games were played from appearing.
   const historicalBatters = new Set([
     ...roster.batters.filter(p => battersPool.size === 0 || battersPool.has(p)),
-    ...Object.keys(rosterDates).filter(p => battersPool.size === 0 || battersPool.has(p)),
+    ...Object.keys(rosterDates).filter(p => (battersPool.size === 0 || battersPool.has(p))
+      && (!seasonStartDate || !rosterDates[p].drop_date || rosterDates[p].drop_date >= seasonStartDate)),
     ...approvedSwaps
       .filter(s => s.player_in && s.week_key === weekKey && (battersPool.size === 0 || battersPool.has(s.player_in))
+        && (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate)
         && (rosterDates[s.player_in] || batting.some(b => b.batter === s.player_in && b.round === round && b.week === week)))
       .map(s => s.player_in)
   ]);
   const historicalPitchers = new Set([
     ...roster.pitchers.filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
-    ...Object.keys(rosterDates).filter(p => pitchersPool.size === 0 || pitchersPool.has(p)),
+    ...Object.keys(rosterDates).filter(p => (pitchersPool.size === 0 || pitchersPool.has(p))
+      && (!seasonStartDate || !rosterDates[p].drop_date || rosterDates[p].drop_date >= seasonStartDate)),
     ...approvedSwaps
       .filter(s => s.player_in && s.week_key === weekKey && (pitchersPool.size === 0 || pitchersPool.has(s.player_in))
+        && (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate)
         && (rosterDates[s.player_in] || pitching.some(p => p.pitcher === s.player_in && p.round === round && p.week === week)))
       .map(s => s.player_in)
   ]);
-
-  // Dropped = historical set minus currently rostered (shown as "NOT ROSTERED" rows)
-  const droppedBatters = [...historicalBatters].filter(p => !roster.batters.includes(p));
-  const droppedPitchers = [...historicalPitchers].filter(p => !roster.pitchers.includes(p));
 
   // Extend weekBatting/weekPitching with UNATTRIBUTED stats for historical roster members.
   // Stats synced after a player was dropped arrive with manager = null; without this they
@@ -7995,6 +8007,13 @@ window.updateCommRosterWeekView = function(managerName) {
       allWeekPitching.push(p);
     }
   });
+  // Only show dropped players who actually accumulated stats during the scoring period
+  const droppedBatters = [...historicalBatters].filter(p =>
+    !roster.batters.includes(p) && allWeekBatting.some(b => b.batter === p)
+  );
+  const droppedPitchers = [...historicalPitchers].filter(p =>
+    !roster.pitchers.includes(p) && allWeekPitching.some(pt => pt.pitcher === p)
+  );
 
   function getPlayerDates(player) {
     const rd = rosterDates[player];
