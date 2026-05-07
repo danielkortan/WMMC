@@ -1441,6 +1441,32 @@ function scheduleScoreboardPost() {
     return;
   }
 
+  // Returns the next occurrence of 7am America/New_York as a UTC Date, accounting for DST.
+  function getNext7amEastern() {
+    const TZ = 'America/New_York';
+
+    function calc7amEasternFor(ref) {
+      const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(ref);
+      const [yr, mo, dy] = dateStr.split('-').map(Number);
+      // Use noon UTC to sample the Eastern offset safely (DST transitions happen at 2am)
+      const noonUTC = new Date(Date.UTC(yr, mo - 1, dy, 12, 0, 0));
+      const noonEasternHour = +new Intl.DateTimeFormat('en-US', {
+        timeZone: TZ, hour: '2-digit', hour12: false
+      }).format(noonUTC);
+      const offsetHours = noonEasternHour - 12; // -4 (EDT) or -5 (EST)
+      return new Date(Date.UTC(yr, mo - 1, dy, 7 - offsetHours, 0, 0));
+    }
+
+    const now = new Date();
+    let next = calc7amEasternFor(now);
+    if (next <= now) {
+      const tomorrow = new Date(now);
+      tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+      next = calc7amEasternFor(tomorrow);
+    }
+    return next;
+  }
+
   function runAndReschedule() {
     const now = new Date();
     console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
@@ -1458,21 +1484,16 @@ function scheduleScoreboardPost() {
       console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);
     }
 
-    // Schedule next run at 7am tomorrow
-    const next = new Date();
-    next.setDate(next.getDate() + 1);
-    next.setHours(7, 0, 0, 0);
+    // Schedule next run at 7am Eastern tomorrow
+    const next = getNext7amEastern();
     scoreboardTimer = setTimeout(runAndReschedule, next - Date.now());
-    console.log(`[Scoreboard] Next post scheduled for ${next.toISOString()}`);
+    console.log(`[Scoreboard] Next post scheduled for ${next.toISOString()} (7am Eastern)`);
   }
 
-  const now = new Date();
-  const next = new Date();
-  next.setHours(7, 0, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  const delay = next - now;
+  const next = getNext7amEastern();
+  const delay = next - Date.now();
 
-  console.log(`[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (in ${Math.round(delay / 60000)} minutes)`);
+  console.log(`[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (7am Eastern, in ${Math.round(delay / 60000)} minutes)`);
   scoreboardTimer = setTimeout(runAndReschedule, delay);
 }
 
