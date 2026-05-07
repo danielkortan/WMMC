@@ -99,6 +99,11 @@ function fmtShortDate(dateStr) {
   return `${mo[d.getMonth()]} ${d.getDate()}`;
 }
 
+function fmtSlashDate(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
 function fmtDateRangeShort(startStr, endStr) {
   const s = new Date(startStr + 'T12:00:00');
   const e = new Date(endStr + 'T12:00:00');
@@ -4320,14 +4325,32 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
   }
 
-  // Generate a "not rostered" tag that includes the dates the player WAS rostered.
-  // poolType ('batters' or 'pitchers') restricts the search to the correct roster array
-  // so a pitcher accidentally placed in a batter row (or vice versa) is not shown as
-  // having been rostered in the wrong role.
+  // For a dropped player, show the date range they were rostered (e.g. "5/4–5/6") in the
+  // same grey-box style as the "not rostered" tag.  Falls back to "not rostered" only when
+  // no date information is available at all.
   function notRosteredTag(player, poolType) {
     if (!isActive || !seasonData.rosters || !seasonData.rosters[managerName]) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
+
+    // Prefer specific add/drop dates stored in roster_dates
+    if (seasonData.roster_dates && seasonData.roster_dates[managerName]) {
+      let addDate = null, dropDate = null;
+      for (const weekDates of Object.values(seasonData.roster_dates[managerName])) {
+        const entry = weekDates[player];
+        if (!entry) continue;
+        if (entry.add_date && (!addDate || entry.add_date < addDate)) addDate = entry.add_date;
+        if (entry.drop_date && (!dropDate || entry.drop_date > dropDate)) dropDate = entry.drop_date;
+      }
+      if (addDate || dropDate) {
+        const label = addDate && dropDate
+          ? `${fmtSlashDate(addDate)}–${fmtSlashDate(dropDate)}`
+          : addDate ? `from ${fmtSlashDate(addDate)}` : `thru ${fmtSlashDate(dropDate)}`;
+        return ` <span class="wrs-hist-tag">${label}</span>`;
+      }
+    }
+
+    // Fall back to week-schedule-based date range
     const mgrRoster = seasonData.rosters[managerName];
     const rosteredWeekIndices = [];
     SEASON_SCHEDULE.forEach((s, i) => {
@@ -4339,7 +4362,6 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (rosteredWeekIndices.length === 0 || !scheduleDates) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
-    // Find earliest start and latest end from rostered weeks
     const firstIdx = rosteredWeekIndices[0];
     const lastIdx = rosteredWeekIndices[rosteredWeekIndices.length - 1];
     const startDate = scheduleDates[firstIdx] ? scheduleDates[firstIdx].start : null;
@@ -4347,7 +4369,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (!startDate || !endDate) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
-    return ` <span class="wrs-hist-tag">not rostered</span> <span class="roster-date-tag roster-date-swap">Rostered ${fmtShortDate(startDate)} – ${fmtShortDate(endDate)}</span>`;
+    return ` <span class="wrs-hist-tag">${fmtSlashDate(startDate)}–${fmtSlashDate(endDate)}</span>`;
   }
 
   // Determine which weeks have roster data or uploaded stats for this manager
@@ -5021,6 +5043,8 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
   if (isCommissioner && isActive) {
     const pendingSwaps = mySwaps.filter(s => s.status === 'pending');
     if (pendingSwaps.length > 0) {
+      const _today = new Date().toISOString().split('T')[0];
+      const _tomorrow = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; })();
       html += `<div class="swap-pending-card">
         <h3>Pending Swap Approvals</h3>`;
       pendingSwaps.forEach(s => {
@@ -5033,6 +5057,20 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData, p2m) {
             <span>${displayPlayer(s.player_out, seasonData)} &rarr; ${displayPlayer(s.player_in, seasonData)}</span>
             <span class="swap-detail-reason">${s.reason}</span>
             <span class="swap-detail-date">${s.swap_date || ''}</span>
+          </div>
+          <div class="swap-effective-dates">
+            <span class="swap-effective-label">Swap Effective Date</span>
+            <div class="swap-date-fields">
+              <div class="swap-date-field">
+                <label>Drop Date (${s.player_out})</label>
+                <input type="date" id="swap-drop-date-${s.id}" class="form-input swap-date-input" value="${_today}"
+                  onchange="syncSwapAddDate('swap-drop-date-${s.id}','swap-add-date-${s.id}')">
+              </div>
+              <div class="swap-date-field">
+                <label>Add Date (${s.player_in})</label>
+                <input type="date" id="swap-add-date-${s.id}" class="form-input swap-date-input" value="${_tomorrow}">
+              </div>
+            </div>
           </div>
           <div class="swap-pending-actions" id="swap-actions-${s.id}">
             <button class="btn btn-sm btn-success" onclick="approveSwap('${s.id}')">Approve</button>
@@ -5609,6 +5647,16 @@ window.submitSwapRequest = function(managerName) {
   renderRosterData(managerName, isComm);
 };
 
+// Sync add-date input to one day after drop-date when drop-date changes
+window.syncSwapAddDate = function(dropDateId, addDateId) {
+  const dropEl = document.getElementById(dropDateId);
+  const addEl = document.getElementById(addDateId);
+  if (!dropEl || !addEl || !dropEl.value) return;
+  const d = new Date(dropEl.value + 'T12:00:00');
+  d.setDate(d.getDate() + 1);
+  addEl.value = d.toISOString().split('T')[0];
+};
+
 // Commissioner: approve a swap
 window.approveSwap = function(swapId) {
   const seasons = getSeasons();
@@ -5650,8 +5698,15 @@ window.approveSwap = function(swapId) {
   swap.status = 'approved';
   swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
+  // Read commissioner-set effective dates from the UI (fall back to today / tomorrow)
+  const _fallbackToday = new Date().toISOString().split('T')[0];
+  const _fallbackTomorrow = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; })();
+  const dropDateEl = document.getElementById(`swap-drop-date-${swapId}`) || document.getElementById(`comm-drop-date-${swapId}`);
+  const addDateEl = document.getElementById(`swap-add-date-${swapId}`) || document.getElementById(`comm-add-date-${swapId}`);
+  const effectiveDropDate = (dropDateEl && dropDateEl.value) || _fallbackToday;
+  const effectiveAddDate = (addDateEl && addDateEl.value) || _fallbackTomorrow;
+
   // Write add/drop dates to roster_dates so they appear in the date editor
-  const approvalDate = swap.swap_date || new Date().toISOString().split('T')[0];
   const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
   if (!sd.roster_dates) sd.roster_dates = {};
   if (!sd.roster_dates[swap.manager]) sd.roster_dates[swap.manager] = {};
@@ -5660,11 +5715,11 @@ window.approveSwap = function(swapId) {
     const wkDates = sd.roster_dates[swap.manager][wk];
     if (swap.player_out) {
       if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
-      if (!wkDates[swap.player_out].drop_date) wkDates[swap.player_out].drop_date = approvalDate;
+      wkDates[swap.player_out].drop_date = effectiveDropDate;
     }
     if (swap.player_in) {
       if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
-      if (!wkDates[swap.player_in].add_date) wkDates[swap.player_in].add_date = approvalDate;
+      wkDates[swap.player_in].add_date = effectiveAddDate;
     }
   });
 
@@ -6085,24 +6140,42 @@ function renderPendingSwapRequests() {
 
   // Pending in-season swaps
   const pendingSwaps = (sd.swaps || []).filter(s => s.status === 'pending');
-  pendingSwaps.forEach(s => {
-    html += `<div class="swap-pending-item" id="comm-swap-item-${s.id}">
-      <div class="swap-pending-header">
-        <strong>${s.manager || 'Unknown'}</strong>
-        <span class="swap-badge swap-badge-pending">Swap Pending</span>
-      </div>
-      <div class="swap-pending-details">
-        <span>${displayPlayer(s.player_out || '?', sd)} &rarr; ${displayPlayer(s.player_in || '?', sd)}</span>
-        <span class="swap-detail-reason">${s.reason || ''}</span>
-        <span class="swap-detail-date">${s.swap_date || ''}</span>
-      </div>
-      <div class="swap-pending-actions" id="comm-swap-actions-${s.id}">
-        <button class="btn btn-sm btn-success" onclick="approveSwap('${s.id}')">Approve</button>
-        <button class="btn btn-sm btn-danger" onclick="denySwap('${s.id}')">Deny</button>
-        <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${(s.manager || '').replace(/'/g, "\\'")}')">View Roster</button>
-      </div>
-    </div>`;
-  });
+  if (pendingSwaps.length > 0) {
+    const _today = new Date().toISOString().split('T')[0];
+    const _tomorrow = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; })();
+    pendingSwaps.forEach(s => {
+      html += `<div class="swap-pending-item" id="comm-swap-item-${s.id}">
+        <div class="swap-pending-header">
+          <strong>${s.manager || 'Unknown'}</strong>
+          <span class="swap-badge swap-badge-pending">Swap Pending</span>
+        </div>
+        <div class="swap-pending-details">
+          <span>${displayPlayer(s.player_out || '?', sd)} &rarr; ${displayPlayer(s.player_in || '?', sd)}</span>
+          <span class="swap-detail-reason">${s.reason || ''}</span>
+          <span class="swap-detail-date">${s.swap_date || ''}</span>
+        </div>
+        <div class="swap-effective-dates">
+          <span class="swap-effective-label">Swap Effective Date</span>
+          <div class="swap-date-fields">
+            <div class="swap-date-field">
+              <label>Drop Date (${s.player_out || '?'})</label>
+              <input type="date" id="comm-drop-date-${s.id}" class="form-input swap-date-input" value="${_today}"
+                onchange="syncSwapAddDate('comm-drop-date-${s.id}','comm-add-date-${s.id}')">
+            </div>
+            <div class="swap-date-field">
+              <label>Add Date (${s.player_in || '?'})</label>
+              <input type="date" id="comm-add-date-${s.id}" class="form-input swap-date-input" value="${_tomorrow}">
+            </div>
+          </div>
+        </div>
+        <div class="swap-pending-actions" id="comm-swap-actions-${s.id}">
+          <button class="btn btn-sm btn-success" onclick="approveSwap('${s.id}')">Approve</button>
+          <button class="btn btn-sm btn-danger" onclick="denySwap('${s.id}')">Deny</button>
+          <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${(s.manager || '').replace(/'/g, "\\'")}')">View Roster</button>
+        </div>
+      </div>`;
+    });
+  }
 
   if (!html) {
     container.innerHTML = '<p class="text-muted">No pending requests.</p>';
@@ -8113,8 +8186,11 @@ window.updateCommRosterWeekView = function(managerName) {
       const safeB = batter.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
       const pDates = getPlayerDates(batter);
+      const batDroppedTag = (pDates.add_date || pDates.drop_date)
+        ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
+        : ' <span class="wrs-hist-tag">not rostered</span>';
       batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : ' <span class="wrs-hist-tag">not rostered</span>'}</td>`;
+      batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
       batHtml += `<td class="num${manual('1b')}">${s['1b'] || 0}</td>`;
       batHtml += `<td class="num${manual('2b')}">${s['2b'] || 0}</td>`;
@@ -8174,8 +8250,11 @@ window.updateCommRosterWeekView = function(managerName) {
       const safeP = pitcher.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
       const pDates = getPlayerDates(pitcher);
+      const pitDroppedTag = (pDates.add_date || pDates.drop_date)
+        ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
+        : ' <span class="wrs-hist-tag">not rostered</span>';
       pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : ' <span class="wrs-hist-tag">not rostered</span>'}${s.qs_highlight ? multiStartTag() : ''}</td>`;
+      pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : pitDroppedTag}${s.qs_highlight ? multiStartTag() : ''}</td>`;
       pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
       pitHtml += `<td class="num${manual('w')}">${s.w || 0}</td>`;
       if (s.qs_highlight) {
