@@ -914,10 +914,10 @@ function processBattingRows(rows, sd, scheduleWeek) {
 
     const weeklyScore = calculateBattingScore(stats);
 
-    // Check if a manually-edited record exists for this player/week — don't overwrite it
+    // Don't overwrite manually-edited or drop-locked records
     const existingManual = sd.weekly_batting.find(b =>
       b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
-      b.batter === batter && b.manual_fields && b.manual_fields.length > 0
+      b.batter === batter && ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
     );
     if (existingManual) return;
 
@@ -982,10 +982,10 @@ function processPitchingRows(rows, sd, scheduleWeek) {
 
     const weeklyScore = calculatePitchingScore(stats);
 
-    // Don't overwrite manually-edited records
+    // Don't overwrite manually-edited or drop-locked records
     const existingManual = sd.weekly_pitching.find(p =>
       p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
-      p.pitcher === pitcher && p.manual_fields && p.manual_fields.length > 0
+      p.pitcher === pitcher && ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
     );
     if (existingManual) return;
 

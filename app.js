@@ -7307,7 +7307,9 @@ window.editPlayerStats = function(manager, statType, playerName, weekKey) {
   const isBatting = statType === 'batting';
   const weeklyArr = isBatting ? (sd.weekly_batting || []) : (sd.weekly_pitching || []);
   const nameField = isBatting ? 'batter' : 'pitcher';
-  const existing = weeklyArr.find(r => r[nameField] === playerName && r.manager === manager && r.round === round && r.week === week);
+  // Also check null-manager records (stats that arrived after a player was dropped)
+  let existing = weeklyArr.find(r => r[nameField] === playerName && r.manager === manager && r.round === round && r.week === week);
+  if (!existing) existing = weeklyArr.find(r => r[nameField] === playerName && !r.manager && r.round === round && r.week === week);
 
   // Build the edit dialog
   const dialogId = `stat-edit-dialog`;
@@ -8169,7 +8171,10 @@ window.updateCommRosterWeekView = function(managerName) {
     ...droppedBatters,
     ...weekBattingForTable.map(b => b.batter)
   ]);
-  const batTotal = weekBatting.reduce((s, b) => s + (b.weekly_score || 0), 0);
+  // Include null-manager records for historical players (stats that arrived after a drop)
+  const batTotal = allWeekBatting
+    .filter(b => historicalBatters.has(b.batter))
+    .reduce((s, b) => s + (b.weekly_score || 0), 0);
 
   let batHtml = `<div class="wrs-group-label">BATTERS (${roster.batters.length}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
@@ -8233,7 +8238,10 @@ window.updateCommRosterWeekView = function(managerName) {
     ...droppedPitchers,
     ...weekPitchingForTable.map(p => p.pitcher)
   ]);
-  const pitTotal = weekPitching.reduce((s, p) => s + (p.weekly_score || 0), 0);
+  // Include null-manager records for historical players (stats that arrived after a drop)
+  const pitTotal = allWeekPitching
+    .filter(p => historicalPitchers.has(p.pitcher))
+    .reduce((s, p) => s + (p.weekly_score || 0), 0);
 
   let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${roster.pitchers.length}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
@@ -8426,6 +8434,19 @@ window.removeFromRoster = function(manager, type, player, weekKey) {
   if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
   if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
   sd.roster_dates[manager][weekKey][player].drop_date = new Date().toISOString().split('T')[0];
+
+  // Freeze the player's current stats so future syncs don't accumulate more points
+  const [round, week] = weekKey.split('|');
+  const nameField = type === 'batters' ? 'batter' : 'pitcher';
+  const weeklyArr = type === 'batters' ? sd.weekly_batting : sd.weekly_pitching;
+  if (weeklyArr) {
+    const rec = weeklyArr.find(r => r[nameField] === player && (r.manager === manager || !r.manager) && r.round === round && r.week === week);
+    if (rec) {
+      rec.drop_locked = true;
+      // Ensure the manager is attributed so the score counts toward team totals
+      if (!rec.manager) rec.manager = manager;
+    }
+  }
 
   // Create swap log entry for the drop
   if (!sd.swaps) sd.swaps = [];
