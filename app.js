@@ -2760,8 +2760,12 @@ window.saveLeagueRules = function() {
 // Active Season Display
 // ============================================================
 function showActiveSeason(seasonData) {
+  // Remove players who appear in the Week 1 roster due to a stale initial-submission approval
+  // (manager changed their submission after commissioner had already approved an earlier version).
+  const ghostsFixed = repairGhostInitialRosterPlayers(seasonData);
   // Repair any data where manager was incorrectly set to MLB team abbreviation
-  if (repairManagerAssignments(seasonData)) {
+  const assignmentsFixed = repairManagerAssignments(seasonData);
+  if (ghostsFixed || assignmentsFixed) {
     saveSeason(SELECTED_SEASON, seasonData);
   }
 
@@ -3864,6 +3868,72 @@ function backfillRosterDatesFromSwaps(seasonData) {
     }
   }
   return changed;
+}
+
+// Remove players from the Week 1 roster (and their stats/roster_dates) who appear there due
+// to a stale initial-submission approval but are no longer in the manager's current approved
+// initial_submission.  This catches the case where a manager changed their submission and the
+// commissioner re-approved without the old cleanup path running (e.g. data pre-dating this fix).
+// Players added by the commissioner via a swap record (player_in) are exempt from removal.
+function repairGhostInitialRosterPlayers(seasonData) {
+  if (!seasonData || !seasonData.initial_submissions || !seasonData.rosters) return false;
+  const firstSched = SEASON_SCHEDULE[0];
+  if (!firstSched) return false;
+  const weekKey = `${firstSched.round}|${firstSched.week}`;
+  let repaired = false;
+
+  // Build set of players explicitly added by the commissioner via swaps for Week 1
+  const commAdded = new Set(
+    (seasonData.swaps || [])
+      .filter(s => s.status === 'approved' && s.player_in && s.week_key === weekKey)
+      .map(s => s.player_in)
+  );
+
+  for (const [manager, sub] of Object.entries(seasonData.initial_submissions)) {
+    if (sub.status !== 'approved') continue;
+    const mgrRoster = seasonData.rosters[manager];
+    if (!mgrRoster || !mgrRoster[weekKey]) continue;
+
+    const submittedBatters = new Set(sub.batters || []);
+    const submittedPitchers = new Set(sub.pitchers || []);
+
+    // Ghost = in roster but not in submission AND not commissioner-added via swap
+    const ghostBatters = (mgrRoster[weekKey].batters || []).filter(b => !submittedBatters.has(b) && !commAdded.has(b));
+    const ghostPitchers = (mgrRoster[weekKey].pitchers || []).filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
+
+    if (ghostBatters.length === 0 && ghostPitchers.length === 0) continue;
+
+    [...ghostBatters, ...ghostPitchers].forEach(player => {
+      if (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) {
+        delete seasonData.roster_dates[manager][weekKey][player];
+      }
+      if (seasonData.weekly_batting) {
+        seasonData.weekly_batting = seasonData.weekly_batting.filter(b =>
+          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week && !b.drop_locked)
+        );
+      }
+      if (seasonData.weekly_pitching) {
+        seasonData.weekly_pitching = seasonData.weekly_pitching.filter(p =>
+          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week && !p.drop_locked)
+        );
+      }
+      if (seasonData.daily_batting) {
+        seasonData.daily_batting = seasonData.daily_batting.filter(b =>
+          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
+        );
+      }
+      if (seasonData.daily_pitching) {
+        seasonData.daily_pitching = seasonData.daily_pitching.filter(p =>
+          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
+        );
+      }
+    });
+
+    mgrRoster[weekKey].batters = (mgrRoster[weekKey].batters || []).filter(b => submittedBatters.has(b) || commAdded.has(b));
+    mgrRoster[weekKey].pitchers = (mgrRoster[weekKey].pitchers || []).filter(p => submittedPitchers.has(p) || commAdded.has(p));
+    repaired = true;
+  }
+  return repaired;
 }
 
 // Repair any weekly data where 'manager' is an MLB team abbreviation instead of a WMMC manager name
@@ -7694,6 +7764,44 @@ window.approveInitialSubmission = function(manager) {
     if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
     if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
   }
+
+  // Reconcile: remove any players currently in the Week 1 roster who are not in this
+  // (re-)submission. This handles updated initial submissions where the manager swapped
+  // out players before the commissioner approved — the old approval must not persist.
+  const submittedBatters = new Set(sub.batters || []);
+  const submittedPitchers = new Set(sub.pitchers || []);
+  const prevBatters = (sd.rosters[manager][weekKey].batters || []).filter(b => !submittedBatters.has(b));
+  const prevPitchers = (sd.rosters[manager][weekKey].pitchers || []).filter(p => !submittedPitchers.has(p));
+  [...prevBatters, ...prevPitchers].forEach(player => {
+    // Erase the roster_dates entry so the player doesn't reappear via the historical path
+    if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
+      delete sd.roster_dates[manager][weekKey][player];
+    }
+    // Remove any non-locked weekly stats for this player in Week 1
+    if (sd.weekly_batting) {
+      sd.weekly_batting = sd.weekly_batting.filter(b =>
+        !(b.batter === player && b.round === firstWeek.round && b.week === firstWeek.week && !b.drop_locked)
+      );
+    }
+    if (sd.weekly_pitching) {
+      sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+        !(p.pitcher === player && p.round === firstWeek.round && p.week === firstWeek.week && !p.drop_locked)
+      );
+    }
+    // Remove daily snapshot records for this player in Week 1 (no stats should count pre-roster)
+    if (sd.daily_batting) {
+      sd.daily_batting = sd.daily_batting.filter(b =>
+        !(b.batter === player && b.round === firstWeek.round && b.week === firstWeek.week)
+      );
+    }
+    if (sd.daily_pitching) {
+      sd.daily_pitching = sd.daily_pitching.filter(p =>
+        !(p.pitcher === player && p.round === firstWeek.round && p.week === firstWeek.week)
+      );
+    }
+  });
+  sd.rosters[manager][weekKey].batters = (sd.rosters[manager][weekKey].batters || []).filter(b => submittedBatters.has(b));
+  sd.rosters[manager][weekKey].pitchers = (sd.rosters[manager][weekKey].pitchers || []).filter(p => submittedPitchers.has(p));
 
   (sub.batters || []).forEach(b => {
     if (!sd.rosters[manager][weekKey].batters.includes(b)) {
