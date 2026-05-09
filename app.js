@@ -3890,7 +3890,11 @@ function repairGhostInitialRosterPlayers(seasonData) {
   );
 
   for (const [manager, sub] of Object.entries(seasonData.initial_submissions)) {
-    if (sub.status !== 'approved') continue;
+    // Only clean up when the submission has actual players listed (approved or pending re-sub).
+    // Skip 'draft' / reset submissions where batters+pitchers are empty — we can't tell the
+    // intended final roster yet, so leave the existing Week 1 roster alone.
+    const hasPlayers = (sub.batters || []).length > 0 || (sub.pitchers || []).length > 0;
+    if (!hasPlayers) continue;
     const mgrRoster = seasonData.rosters[manager];
     if (!mgrRoster || !mgrRoster[weekKey]) continue;
 

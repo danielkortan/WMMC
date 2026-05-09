@@ -958,6 +958,66 @@ function findCol(row, names) {
   return null;
 }
 
+// Remove players from the Week 1 roster who are present due to a stale initial-submission
+// approval but are no longer in the manager's current submitted initial_submission.
+// Mirrors the client-side repairGhostInitialRosterPlayers in app.js.
+function repairGhostInitialRosterPlayers(sd) {
+  if (!sd || !sd.initial_submissions || !sd.rosters) return false;
+  const firstSched = SEASON_SCHEDULE[0];
+  if (!firstSched) return false;
+  const weekKey = `${firstSched.round}|${firstSched.week}`;
+  let repaired = false;
+
+  const commAdded = new Set(
+    (sd.swaps || [])
+      .filter(s => s.status === 'approved' && s.player_in && s.week_key === weekKey)
+      .map(s => s.player_in)
+  );
+
+  for (const [manager, sub] of Object.entries(sd.initial_submissions)) {
+    const hasPlayers = (sub.batters || []).length > 0 || (sub.pitchers || []).length > 0;
+    if (!hasPlayers) continue;
+    const mgrRoster = sd.rosters[manager];
+    if (!mgrRoster || !mgrRoster[weekKey]) continue;
+
+    const submittedBatters = new Set(sub.batters || []);
+    const submittedPitchers = new Set(sub.pitchers || []);
+    const ghostBatters = (mgrRoster[weekKey].batters || []).filter(b => !submittedBatters.has(b) && !commAdded.has(b));
+    const ghostPitchers = (mgrRoster[weekKey].pitchers || []).filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
+    if (ghostBatters.length === 0 && ghostPitchers.length === 0) continue;
+
+    [...ghostBatters, ...ghostPitchers].forEach(player => {
+      if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
+        delete sd.roster_dates[manager][weekKey][player];
+      }
+      if (sd.weekly_batting) {
+        sd.weekly_batting = sd.weekly_batting.filter(b =>
+          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week && !b.drop_locked)
+        );
+      }
+      if (sd.weekly_pitching) {
+        sd.weekly_pitching = sd.weekly_pitching.filter(p =>
+          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week && !p.drop_locked)
+        );
+      }
+      if (sd.daily_batting) {
+        sd.daily_batting = sd.daily_batting.filter(b =>
+          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
+        );
+      }
+      if (sd.daily_pitching) {
+        sd.daily_pitching = sd.daily_pitching.filter(p =>
+          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
+        );
+      }
+    });
+    mgrRoster[weekKey].batters = (mgrRoster[weekKey].batters || []).filter(b => submittedBatters.has(b) || commAdded.has(b));
+    mgrRoster[weekKey].pitchers = (mgrRoster[weekKey].pitchers || []).filter(p => submittedPitchers.has(p) || commAdded.has(p));
+    repaired = true;
+  }
+  return repaired;
+}
+
 // Find manager for a player from rosters
 function findManagerForPlayer(sd, playerName, type) {
   if (!sd.rosters || !playerName) return null;
@@ -1206,6 +1266,10 @@ async function syncGoogleSheets(year, syncType = 'daily') {
   if (!sd.player_dates) sd.player_dates = {};
   if (!sd.batters_team) sd.batters_team = {};
   if (!sd.pitchers_team) sd.pitchers_team = {};
+
+  // Remove any ghost players left in the Week 1 roster by a stale initial-submission approval
+  // before attributing this sync's stats so they are never credited to the wrong manager.
+  repairGhostInitialRosterPlayers(sd);
 
   // Capture today's date once so all rows in this sync share the same snapshot date
   const syncDate = new Date().toISOString().split('T')[0];
