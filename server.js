@@ -556,6 +556,111 @@ function parseNum(val) {
 }
 
 // ============================================================
+// Daily Stats Engine
+// ============================================================
+
+// Convert IP from baseball notation to true decimal for arithmetic
+// "6.1" = 6 + 1/3 ≈ 6.333, "7.2" = 7 + 2/3 ≈ 7.667
+function convertIPDecimal(rawIP) {
+  const str = String(rawIP);
+  const dot = str.indexOf('.');
+  if (dot === -1) return parseFloat(rawIP) || 0;
+  const whole = parseInt(str.slice(0, dot)) || 0;
+  const frac = str.slice(dot + 1);
+  if (frac === '1') return Math.round((whole + 1 / 3) * 1000) / 1000;
+  if (frac === '2') return Math.round((whole + 2 / 3) * 1000) / 1000;
+  return parseFloat(rawIP) || 0;
+}
+
+// Daily delta between two batting cumulative snapshots (floor at 0 to guard resets)
+function battingDelta(curr, prev) {
+  const fields = ['1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb', 'abs'];
+  const delta = {};
+  for (const f of fields) delta[f] = Math.max(0, (curr[f] || 0) - (prev[f] || 0));
+  return delta;
+}
+
+// Daily delta between two pitching cumulative snapshots (IP stored in decimal)
+function pitchingDelta(curr, prev) {
+  const intFields = ['gs', 'w', 'qs', 'cg', 'cgso', 'nh', 'h', 'er', 'bb', 'k'];
+  const delta = {};
+  for (const f of intFields) delta[f] = Math.max(0, (curr[f] || 0) - (prev[f] || 0));
+  delta.ip = Math.max(0, Math.round(((curr.ip || 0) - (prev.ip || 0)) * 1000) / 1000);
+  return delta;
+}
+
+// Find the SEASON_SCHEDULE index for a given round+week
+function getScheduleWeekIndex(round, week) {
+  return SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
+}
+
+// Compute effective weekly batting score from daily deltas filtered by player_dates.
+// Returns null when no daily records exist (caller falls back to stored weekly_score).
+function computeEffectiveBattingScore(sd, batter, round, week) {
+  const records = (sd.daily_batting || []).filter(r =>
+    r.batter === batter && r.round === round && r.week === week
+  );
+  if (records.length === 0) return null;
+
+  const weekIdx = getScheduleWeekIndex(round, week);
+  const weekDates = weekIdx >= 0 ? (sd.schedule_dates || [])[weekIdx] : null;
+  const weekKey = `${round}|${week}`;
+  const override = (((sd.player_dates || {})[weekKey] || {}).batter || {})[batter] || {};
+
+  // Explicit null override means "no constraint"; absent key falls through to week dates
+  const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
+  const effectiveEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+
+  const eligible = records.filter(r => {
+    if (effectiveStart && r.date < effectiveStart) return false;
+    if (effectiveEnd && r.date > effectiveEnd) return false;
+    return true;
+  });
+
+  return Math.round(eligible.reduce((sum, r) => sum + calculateBattingScore(r.delta || {}), 0) * 100) / 100;
+}
+
+// Compute effective weekly pitching score from daily deltas filtered by player_dates.
+function computeEffectivePitchingScore(sd, pitcher, round, week) {
+  const records = (sd.daily_pitching || []).filter(r =>
+    r.pitcher === pitcher && r.round === round && r.week === week
+  );
+  if (records.length === 0) return null;
+
+  const weekIdx = getScheduleWeekIndex(round, week);
+  const weekDates = weekIdx >= 0 ? (sd.schedule_dates || [])[weekIdx] : null;
+  const weekKey = `${round}|${week}`;
+  const override = (((sd.player_dates || {})[weekKey] || {}).pitcher || {})[pitcher] || {};
+
+  const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
+  const effectiveEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+
+  const eligible = records.filter(r => {
+    if (effectiveStart && r.date < effectiveStart) return false;
+    if (effectiveEnd && r.date > effectiveEnd) return false;
+    return true;
+  });
+
+  return Math.round(eligible.reduce((sum, r) => sum + calculatePitchingScore(r.delta || {}), 0) * 100) / 100;
+}
+
+// Recompute all weekly_batting/pitching scores from daily data.
+// Called after player_dates changes or manual daily stat edits.
+// Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
+function recomputeAllWeeklyScores(sd) {
+  (sd.weekly_batting || []).forEach(b => {
+    if ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked) return;
+    const score = computeEffectiveBattingScore(sd, b.batter, b.round, b.week);
+    if (score !== null) { b.weekly_score = score; b.total_score = score; }
+  });
+  (sd.weekly_pitching || []).forEach(p => {
+    if ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked) return;
+    const score = computeEffectivePitchingScore(sd, p.pitcher, p.round, p.week);
+    if (score !== null) { p.weekly_score = score; }
+  });
+}
+
+// ============================================================
 // Slack Scoreboard Builder
 // ============================================================
 
@@ -880,9 +985,13 @@ function findManagerForPlayerWeek(sd, playerName, type, round, week) {
   return null;
 }
 
-// Process batting rows from a sheet tab
-function processBattingRows(rows, sd, scheduleWeek) {
+// Process batting rows from a sheet tab.
+// syncDate ('YYYY-MM-DD') is today's date; used to store a daily snapshot and compute the delta
+// from the previous sync so that mid-week add/drops only count rostered days.
+function processBattingRows(rows, sd, scheduleWeek, syncDate) {
   let imported = 0, skipped = 0;
+
+  if (!sd.daily_batting) sd.daily_batting = [];
 
   rows.forEach(row => {
     const batter = findCol(row, ['batter', 'player', 'name']);
@@ -900,7 +1009,8 @@ function processBattingRows(rows, sd, scheduleWeek) {
     if (!manager) manager = findCol(row, ['manager', 'owner']);
     const isUnassigned = !manager;
 
-    const stats = {
+    // Cumulative week-to-date stats from the sheet
+    const cumulative = {
       '1b': parseNum(findCol(row, ['1b', '1B', 'singles']) || 0),
       '2b': parseNum(findCol(row, ['2b', '2B', 'doubles']) || 0),
       '3b': parseNum(findCol(row, ['3b', '3B', 'triples']) || 0),
@@ -912,14 +1022,38 @@ function processBattingRows(rows, sd, scheduleWeek) {
       abs: parseNum(findCol(row, ['ab', 'AB', 'abs', 'atBats']) || 0),
     };
 
-    const weeklyScore = calculateBattingScore(stats);
+    // Don't overwrite a manually-locked daily record for today
+    const lockedDaily = sd.daily_batting.find(r =>
+      r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
+      r.batter === batter && ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+    );
+    if (lockedDaily) return;
 
-    // Don't overwrite manually-edited or drop-locked records
+    // Delta = today's cumulative minus the most-recent previous snapshot for this player/week
+    const prevSnapshot = sd.daily_batting
+      .filter(r => r.batter === batter && r.round === scheduleWeek.round &&
+        r.week === scheduleWeek.week && r.date < syncDate)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+
+    const delta = prevSnapshot ? battingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
+
+    // Replace any existing gsheets snapshot for today
+    sd.daily_batting = sd.daily_batting.filter(r =>
+      !(r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
+        r.batter === batter && r.source === 'gsheets')
+    );
+    sd.daily_batting.push({ date: syncDate, round: scheduleWeek.round, week: scheduleWeek.week, batter, cumulative, delta, source: 'gsheets' });
+
+    // Don't overwrite manually-edited or drop-locked weekly records
     const existingManual = sd.weekly_batting.find(b =>
       b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
       b.batter === batter && ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
     );
-    if (existingManual) return;
+    if (existingManual) { if (isUnassigned) skipped++; else imported++; return; }
+
+    // Effective weekly score = sum of daily deltas for rostered days only
+    const effectiveScore = computeEffectiveBattingScore(sd, batter, scheduleWeek.round, scheduleWeek.week);
+    const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
 
     // Remove any previous non-manual sync record for this player/week
     sd.weekly_batting = sd.weekly_batting.filter(b =>
@@ -933,7 +1067,7 @@ function processBattingRows(rows, sd, scheduleWeek) {
       manager: manager || null,
       batter,
       status: findCol(row, ['status', 'Status']) || null,
-      ...stats,
+      ...cumulative,
       weekly_score: weeklyScore,
       total_score: weeklyScore,
       source: 'gsheets'
@@ -946,9 +1080,13 @@ function processBattingRows(rows, sd, scheduleWeek) {
   return { imported, skipped };
 }
 
-// Process pitching rows from a sheet tab
-function processPitchingRows(rows, sd, scheduleWeek) {
+// Process pitching rows from a sheet tab.
+// syncDate ('YYYY-MM-DD') is today's date for daily snapshot storage.
+// IP is converted to true decimal before storing so delta math stays accurate.
+function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
   let imported = 0, skipped = 0;
+
+  if (!sd.daily_pitching) sd.daily_pitching = [];
 
   rows.forEach(row => {
     const pitcher = findCol(row, ['pitcher', 'player', 'name']);
@@ -966,28 +1104,53 @@ function processPitchingRows(rows, sd, scheduleWeek) {
     if (!manager) manager = findCol(row, ['manager', 'owner']);
     const isUnassigned = !manager;
 
-    const stats = {
+    // Cumulative week-to-date stats; IP converted to decimal for accurate delta subtraction
+    const cumulative = {
       gs: parseNum(findCol(row, ['gs', 'GS']) || 0),
       w: parseNum(findCol(row, ['w', 'W', 'wins']) || 0),
       qs: parseNum(findCol(row, ['qs', 'QS']) || 0),
       cg: parseNum(findCol(row, ['cg', 'CG']) || 0),
       cgso: parseNum(findCol(row, ['cgso', 'CGSO']) || 0),
       nh: parseNum(findCol(row, ['nh', 'NH']) || 0),
-      ip: parseNum(findCol(row, ['ip', 'IP']) || 0),
+      ip: convertIPDecimal(findCol(row, ['ip', 'IP']) || 0),
       h: parseNum(findCol(row, ['h', 'H', 'hits']) || 0),
       er: parseNum(findCol(row, ['er', 'ER']) || 0),
       bb: parseNum(findCol(row, ['bb', 'BB', 'walks']) || 0),
       k: parseNum(findCol(row, ['k', 'K', 'so', 'SO', 'strikeouts']) || 0),
     };
 
-    const weeklyScore = calculatePitchingScore(stats);
+    // Don't overwrite a manually-locked daily record for today
+    const lockedDaily = sd.daily_pitching.find(r =>
+      r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
+      r.pitcher === pitcher && ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+    );
+    if (lockedDaily) return;
 
-    // Don't overwrite manually-edited or drop-locked records
+    // Delta = today's cumulative minus the most-recent previous snapshot
+    const prevSnapshot = sd.daily_pitching
+      .filter(r => r.pitcher === pitcher && r.round === scheduleWeek.round &&
+        r.week === scheduleWeek.week && r.date < syncDate)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+
+    const delta = prevSnapshot ? pitchingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
+
+    // Replace any existing gsheets snapshot for today
+    sd.daily_pitching = sd.daily_pitching.filter(r =>
+      !(r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
+        r.pitcher === pitcher && r.source === 'gsheets')
+    );
+    sd.daily_pitching.push({ date: syncDate, round: scheduleWeek.round, week: scheduleWeek.week, pitcher, cumulative, delta, source: 'gsheets' });
+
+    // Don't overwrite manually-edited or drop-locked weekly records
     const existingManual = sd.weekly_pitching.find(p =>
       p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
       p.pitcher === pitcher && ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
     );
-    if (existingManual) return;
+    if (existingManual) { if (isUnassigned) skipped++; else imported++; return; }
+
+    // Effective weekly score = sum of daily deltas for rostered days only
+    const effectiveScore = computeEffectivePitchingScore(sd, pitcher, scheduleWeek.round, scheduleWeek.week);
+    const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
 
     // Remove previous gsheets sync for this player/week
     sd.weekly_pitching = sd.weekly_pitching.filter(p =>
@@ -1001,8 +1164,8 @@ function processPitchingRows(rows, sd, scheduleWeek) {
       manager: manager || null,
       pitcher,
       status: findCol(row, ['status', 'Status']) || null,
-      ...stats,
-      qs_highlight: stats.gs >= 2,
+      ...cumulative,
+      qs_highlight: cumulative.gs >= 2,
       weekly_score: weeklyScore,
       source: 'gsheets'
     });
@@ -1038,8 +1201,14 @@ async function syncGoogleSheets(year, syncType = 'daily') {
 
   if (!sd.weekly_batting) sd.weekly_batting = [];
   if (!sd.weekly_pitching) sd.weekly_pitching = [];
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+  if (!sd.player_dates) sd.player_dates = {};
   if (!sd.batters_team) sd.batters_team = {};
   if (!sd.pitchers_team) sd.pitchers_team = {};
+
+  // Capture today's date once so all rows in this sync share the same snapshot date
+  const syncDate = new Date().toISOString().split('T')[0];
 
   const results = [];
   let totalBatImported = 0, totalPitImported = 0;
@@ -1054,14 +1223,14 @@ async function syncGoogleSheets(year, syncType = 'daily') {
     try {
       const batValues = await fetchSheetTab(config.spreadsheet_id, batTab, config.api_key);
       if (batValues !== null) {
-        // Tab exists — full overwrite: remove all non-manual gsheets records for this week
+        // Tab exists — full overwrite: remove all non-manual gsheets weekly records for this week
         sd.weekly_batting = sd.weekly_batting.filter(b =>
           !(b.round === sched.round && b.week === sched.week &&
             b.source === 'gsheets' && (!b.manual_fields || b.manual_fields.length === 0))
         );
         if (batValues.length > 1) {
           const batRows = parseSheetRows(batValues);
-          const batResult = processBattingRows(batRows, sd, sched);
+          const batResult = processBattingRows(batRows, sd, sched, syncDate);
           totalBatImported += batResult.imported;
           results.push({ week: weekNum, type: 'batting', imported: batResult.imported, skipped: batResult.skipped });
         }
@@ -1074,14 +1243,14 @@ async function syncGoogleSheets(year, syncType = 'daily') {
     try {
       const pitValues = await fetchSheetTab(config.spreadsheet_id, pitTab, config.api_key);
       if (pitValues !== null) {
-        // Tab exists — full overwrite: remove all non-manual gsheets records for this week
+        // Tab exists — full overwrite: remove all non-manual gsheets weekly records for this week
         sd.weekly_pitching = sd.weekly_pitching.filter(p =>
           !(p.round === sched.round && p.week === sched.week &&
             p.source === 'gsheets' && (!p.manual_fields || p.manual_fields.length === 0))
         );
         if (pitValues.length > 1) {
           const pitRows = parseSheetRows(pitValues);
-          const pitResult = processPitchingRows(pitRows, sd, sched);
+          const pitResult = processPitchingRows(pitRows, sd, sched, syncDate);
           totalPitImported += pitResult.imported;
           results.push({ week: weekNum, type: 'pitching', imported: pitResult.imported, skipped: pitResult.skipped });
         }
@@ -1309,6 +1478,10 @@ app.delete('/api/seasons/:year/week-data', (req, res) => {
       !(b.round === round && b.week === week)
     );
     batRemoved = before - (sd.weekly_batting || []).length;
+    // Clear daily batting snapshots for the same week
+    sd.daily_batting = (sd.daily_batting || []).filter(b =>
+      !(b.round === round && b.week === week)
+    );
   }
 
   if (!type || type === 'pitching' || type === 'all') {
@@ -1317,6 +1490,10 @@ app.delete('/api/seasons/:year/week-data', (req, res) => {
       !(p.round === round && p.week === week)
     );
     pitRemoved = before - (sd.weekly_pitching || []).length;
+    // Clear daily pitching snapshots for the same week
+    sd.daily_pitching = (sd.daily_pitching || []).filter(p =>
+      !(p.round === round && p.week === week)
+    );
   }
 
   addAuditEntry(db, 'clear_week_data', { year, round, week, type: type || 'all', batRemoved, pitRemoved }, req.get('X-User-Email'));
@@ -1324,6 +1501,326 @@ app.delete('/api/seasons/:year/week-data', (req, res) => {
   writeDB(db);
 
   res.json({ ok: true, batting_removed: batRemoved, pitching_removed: pitRemoved });
+});
+
+// ============================================================
+// Player Dates — per-player active date overrides for mid-week add/drops
+// ============================================================
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// GET /api/seasons/:year/player-dates
+app.get('/api/seasons/:year/player-dates', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  res.json(sd.player_dates || {});
+});
+
+// POST /api/seasons/:year/player-dates — set a player's active date range for a specific week
+// Body: { round, week, player, type ('batter'|'pitcher'), start ('YYYY-MM-DD'|null), end ('YYYY-MM-DD'|null) }
+app.post('/api/seasons/:year/player-dates', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const userEmail = req.get('X-User-Email') || '';
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!manager || !manager.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
+
+  const { round, week, player, type, start, end } = req.body;
+  if (!round || !week || !player || !type) return res.status(400).json({ error: 'round, week, player, and type are required' });
+  if (type !== 'batter' && type !== 'pitcher') return res.status(400).json({ error: 'type must be batter or pitcher' });
+  if (start && !DATE_RE.test(start)) return res.status(400).json({ error: 'start must be YYYY-MM-DD' });
+  if (end && !DATE_RE.test(end)) return res.status(400).json({ error: 'end must be YYYY-MM-DD' });
+
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  if (!sd.player_dates) sd.player_dates = {};
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+
+  const weekKey = `${round}|${week}`;
+  if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
+  if (!sd.player_dates[weekKey][type]) sd.player_dates[weekKey][type] = {};
+  sd.player_dates[weekKey][type][player] = { start: start || null, end: end || null };
+
+  // Recompute weekly score for this player using the new date constraint
+  if (type === 'batter') {
+    const score = computeEffectiveBattingScore(sd, player, round, week);
+    if (score !== null) {
+      const entry = (sd.weekly_batting || []).find(b =>
+        b.batter === player && b.round === round && b.week === week &&
+        !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      );
+      if (entry) { entry.weekly_score = score; entry.total_score = score; }
+    }
+  } else {
+    const score = computeEffectivePitchingScore(sd, player, round, week);
+    if (score !== null) {
+      const entry = (sd.weekly_pitching || []).find(p =>
+        p.pitcher === player && p.round === round && p.week === week &&
+        !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      );
+      if (entry) { entry.weekly_score = score; }
+    }
+  }
+
+  addAuditEntry(db, 'player_date_set', { year, round, week, player, type, start: start || null, end: end || null }, userEmail);
+  db.seasons[year] = sd;
+  writeDB(db);
+  res.json({ ok: true, player_dates: sd.player_dates[weekKey] });
+});
+
+// DELETE /api/seasons/:year/player-dates — remove a player's date override (resets to full week)
+// Body: { round, week, player, type }
+app.delete('/api/seasons/:year/player-dates', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const userEmail = req.get('X-User-Email') || '';
+  const db = readDB();
+  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!manager || !manager.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
+
+  const { round, week, player, type } = req.body;
+  if (!round || !week || !player || !type) return res.status(400).json({ error: 'round, week, player, and type are required' });
+
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+
+  const weekKey = `${round}|${week}`;
+  if (sd.player_dates && sd.player_dates[weekKey] && sd.player_dates[weekKey][type]) {
+    delete sd.player_dates[weekKey][type][player];
+  }
+
+  // Recompute score without the override (reverts to full week)
+  if (type === 'batter') {
+    const score = computeEffectiveBattingScore(sd, player, round, week);
+    if (score !== null) {
+      const entry = (sd.weekly_batting || []).find(b =>
+        b.batter === player && b.round === round && b.week === week &&
+        !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      );
+      if (entry) { entry.weekly_score = score; entry.total_score = score; }
+    }
+  } else {
+    const score = computeEffectivePitchingScore(sd, player, round, week);
+    if (score !== null) {
+      const entry = (sd.weekly_pitching || []).find(p =>
+        p.pitcher === player && p.round === round && p.week === week &&
+        !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      );
+      if (entry) { entry.weekly_score = score; }
+    }
+  }
+
+  addAuditEntry(db, 'player_date_delete', { year, round, week, player, type }, userEmail);
+  db.seasons[year] = sd;
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// ============================================================
+// Daily Stats — view and manually override individual day records
+// ============================================================
+
+// GET /api/seasons/:year/daily-stats
+// Query: player (optional), type ('batter'|'pitcher', optional), round (optional), week (optional)
+app.get('/api/seasons/:year/daily-stats', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const { player, type, round, week } = req.query;
+
+  const filterBat = r =>
+    (!player || r.batter === player) && (!round || r.round === round) && (!week || r.week === week);
+  const filterPit = r =>
+    (!player || r.pitcher === player) && (!round || r.round === round) && (!week || r.week === week);
+
+  if (type === 'batter') return res.json((sd.daily_batting || []).filter(filterBat));
+  if (type === 'pitcher') return res.json((sd.daily_pitching || []).filter(filterPit));
+  res.json({
+    batting: (sd.daily_batting || []).filter(filterBat),
+    pitching: (sd.daily_pitching || []).filter(filterPit)
+  });
+});
+
+// POST /api/seasons/:year/daily-stats — commissioner manual daily stat entry
+// Body: { date ('YYYY-MM-DD'), round, week, type ('batter'|'pitcher'), player, delta: { ...stats } }
+app.post('/api/seasons/:year/daily-stats', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const userEmail = req.get('X-User-Email') || '';
+  const db = readDB();
+  const mgr = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!mgr || !mgr.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
+
+  const { date, round, week, type, player, delta } = req.body;
+  if (!date || !round || !week || !type || !player || !delta) {
+    return res.status(400).json({ error: 'date, round, week, type, player, and delta are required' });
+  }
+  if (!DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  if (type !== 'batter' && type !== 'pitcher') return res.status(400).json({ error: 'type must be batter or pitcher' });
+
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
+
+  if (type === 'batter') {
+    const cleanDelta = {
+      '1b': parseNum(delta['1b'] || 0), '2b': parseNum(delta['2b'] || 0),
+      '3b': parseNum(delta['3b'] || 0), hr: parseNum(delta.hr || 0),
+      r: parseNum(delta.r || 0), rbi: parseNum(delta.rbi || 0),
+      sb: parseNum(delta.sb || 0), bb: parseNum(delta.bb || 0),
+      abs: parseNum(delta.abs || 0),
+    };
+    sd.daily_batting = sd.daily_batting.filter(r =>
+      !(r.date === date && r.round === round && r.week === week && r.batter === player)
+    );
+    sd.daily_batting.push({
+      date, round, week, batter: player,
+      cumulative: null, delta: cleanDelta,
+      source: 'manual', manual_fields: Object.keys(delta), drop_locked: true
+    });
+    // Recompute and update weekly record
+    const score = computeEffectiveBattingScore(sd, player, round, week);
+    if (score !== null) {
+      let entry = sd.weekly_batting.find(b => b.batter === player && b.round === round && b.week === week);
+      if (!entry) {
+        let manager = findManagerForPlayerWeek(sd, player, 'batting', round, week);
+        if (!manager) manager = findManagerForPlayer(sd, player, 'batting');
+        entry = { round, week, manager: manager || null, batter: player, source: 'manual', weekly_score: 0, total_score: 0 };
+        sd.weekly_batting.push(entry);
+      }
+      if (!((entry.manual_fields && entry.manual_fields.length > 0) || entry.drop_locked)) {
+        entry.weekly_score = score;
+        entry.total_score = score;
+      }
+    }
+  } else {
+    const cleanDelta = {
+      gs: parseNum(delta.gs || 0), w: parseNum(delta.w || 0), qs: parseNum(delta.qs || 0),
+      cg: parseNum(delta.cg || 0), cgso: parseNum(delta.cgso || 0), nh: parseNum(delta.nh || 0),
+      ip: parseNum(delta.ip || 0), h: parseNum(delta.h || 0), er: parseNum(delta.er || 0),
+      bb: parseNum(delta.bb || 0), k: parseNum(delta.k || 0),
+    };
+    sd.daily_pitching = sd.daily_pitching.filter(r =>
+      !(r.date === date && r.round === round && r.week === week && r.pitcher === player)
+    );
+    sd.daily_pitching.push({
+      date, round, week, pitcher: player,
+      cumulative: null, delta: cleanDelta,
+      source: 'manual', manual_fields: Object.keys(delta), drop_locked: true
+    });
+    const score = computeEffectivePitchingScore(sd, player, round, week);
+    if (score !== null) {
+      let entry = sd.weekly_pitching.find(p => p.pitcher === player && p.round === round && p.week === week);
+      if (!entry) {
+        let manager = findManagerForPlayerWeek(sd, player, 'pitching', round, week);
+        if (!manager) manager = findManagerForPlayer(sd, player, 'pitching');
+        entry = { round, week, manager: manager || null, pitcher: player, source: 'manual', weekly_score: 0 };
+        sd.weekly_pitching.push(entry);
+      }
+      if (!((entry.manual_fields && entry.manual_fields.length > 0) || entry.drop_locked)) {
+        entry.weekly_score = score;
+      }
+    }
+  }
+
+  addAuditEntry(db, 'daily_stat_manual', { year, date, round, week, type, player }, userEmail);
+  db.seasons[year] = sd;
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// DELETE /api/seasons/:year/daily-stats — delete a specific daily stat record (commissioner)
+// Body: { date, round, week, type, player }
+app.delete('/api/seasons/:year/daily-stats', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const userEmail = req.get('X-User-Email') || '';
+  const db = readDB();
+  const mgr = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!mgr || !mgr.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
+
+  const { date, round, week, type, player } = req.body;
+  if (!date || !round || !week || !type || !player) {
+    return res.status(400).json({ error: 'date, round, week, type, and player are required' });
+  }
+
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+
+  if (type === 'batter') {
+    sd.daily_batting = sd.daily_batting.filter(r =>
+      !(r.date === date && r.round === round && r.week === week && r.batter === player)
+    );
+    const score = computeEffectiveBattingScore(sd, player, round, week);
+    if (score !== null) {
+      const entry = (sd.weekly_batting || []).find(b =>
+        b.batter === player && b.round === round && b.week === week &&
+        !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      );
+      if (entry) { entry.weekly_score = score; entry.total_score = score; }
+    }
+  } else {
+    sd.daily_pitching = sd.daily_pitching.filter(r =>
+      !(r.date === date && r.round === round && r.week === week && r.pitcher === player)
+    );
+    const score = computeEffectivePitchingScore(sd, player, round, week);
+    if (score !== null) {
+      const entry = (sd.weekly_pitching || []).find(p =>
+        p.pitcher === player && p.round === round && p.week === week &&
+        !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      );
+      if (entry) { entry.weekly_score = score; }
+    }
+  }
+
+  addAuditEntry(db, 'daily_stat_delete', { year, date, round, week, type, player }, userEmail);
+  db.seasons[year] = sd;
+  writeDB(db);
+  res.json({ ok: true });
+});
+
+// POST /api/seasons/:year/recompute-scores — recompute all weekly scores from daily data (commissioner)
+app.post('/api/seasons/:year/recompute-scores', (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const userEmail = req.get('X-User-Email') || '';
+  const db = readDB();
+  const mgr = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  if (!mgr || !mgr.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
+
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  recomputeAllWeeklyScores(sd);
+
+  addAuditEntry(db, 'recompute_scores', { year }, userEmail);
+  db.seasons[year] = sd;
+  writeDB(db);
+  res.json({ ok: true });
 });
 
 // ============================================================
