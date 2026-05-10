@@ -146,7 +146,10 @@ describe('computeEffectiveBattingScore', () => {
       daily_batting: [
         { date: '2025-04-28', round: 'PP1', week: 'Week 1', batter: 'Player X', delta: { hr: 1 } },
         { date: '2025-04-29', round: 'PP1', week: 'Week 1', batter: 'Player X', delta: { hr: 1 } },
+        // Apr-30 record captures Apr-29 games (sync on Apr-30 = previous day's stats) — included
         { date: '2025-04-30', round: 'PP1', week: 'Week 1', batter: 'Player X', delta: { hr: 2 } },
+        // May-01 record is end+2 days — excluded
+        { date: '2025-05-01', round: 'PP1', week: 'Week 1', batter: 'Player X', delta: { hr: 5 } },
       ],
       player_dates: {
         'PP1|Week 1': {
@@ -156,25 +159,29 @@ describe('computeEffectiveBattingScore', () => {
         },
       },
     };
-    // Only Apr-28 and Apr-29 count: hr=2*10=20
+    // end='2025-04-29' → effectiveEnd='2025-04-30' (captures same-day games via next morning sync)
+    // Apr-28, Apr-29, Apr-30 count: hr=(1+1+2)*10=40; May-01 excluded
     const score = computeEffectiveBattingScore(sd, 'Player X', 'PP1', 'Week 1');
-    assert.equal(score, 20);
+    assert.equal(score, 40);
   });
 
   it('uses schedule_dates as defaults when no player_dates override', () => {
     const sd = {
       daily_batting: [
-        { date: '2025-04-27', round: 'PP1', week: 'Week 1', batter: 'Test Player', delta: { hr: 5 } }, // before week
+        { date: '2025-04-27', round: 'PP1', week: 'Week 1', batter: 'Test Player', delta: { hr: 5 } }, // before week start
         { date: '2025-04-28', round: 'PP1', week: 'Week 1', batter: 'Test Player', delta: { hr: 1 } },
-        { date: '2025-05-04', round: 'PP1', week: 'Week 1', batter: 'Test Player', delta: { hr: 1 } }, // after week
+        // May-04 is end+1 (week ends May-03): the morning sync on May-04 captures May-03 games — included
+        { date: '2025-05-04', round: 'PP1', week: 'Week 1', batter: 'Test Player', delta: { hr: 1 } },
+        // May-05 is end+2: truly after the week — excluded
+        { date: '2025-05-05', round: 'PP1', week: 'Week 1', batter: 'Test Player', delta: { hr: 9 } },
       ],
       schedule_dates: [
         { start: '2025-04-28', end: '2025-05-03' }, // PP1 Week 1
       ],
     };
-    // Only Apr-28 counts (Apr-27 before week start, May-04 after week end)
+    // Apr-28 and May-04 count (both within effectiveEnd=2025-05-04); Apr-27 before start, May-05 excluded
     const score = computeEffectiveBattingScore(sd, 'Test Player', 'PP1', 'Week 1');
-    assert.equal(score, 10); // 1 HR * 10 pts
+    assert.equal(score, 20); // 2 HR * 10 pts
   });
 
   it('does not double-count records from other weeks', () => {

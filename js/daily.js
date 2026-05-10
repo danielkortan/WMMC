@@ -40,6 +40,13 @@ export function getScheduleWeekIndex(round, week) {
   return SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
 }
 
+// Add one calendar day to a YYYY-MM-DD string.
+function addOneDay(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().split('T')[0];
+}
+
 // Compute the effective weekly batting score from daily deltas, respecting player_dates.
 // Returns null when no daily records exist (caller should fall back to stored weekly_score).
 export function computeEffectiveBattingScore(sd, batter, round, week) {
@@ -54,7 +61,11 @@ export function computeEffectiveBattingScore(sd, batter, round, week) {
   const override = (((sd.player_dates || {})[weekKey] || {}).batter || {})[batter] || {};
 
   const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
-  const effectiveEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  // Shift end by +1 day: the daily sync runs in the morning and creates a record dated
+  // today containing yesterday's games. The last day of the scoring week therefore
+  // appears in a record dated end+1, so we must include it.
+  const rawEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
 
   const eligible = records.filter(r => {
     if (effectiveStart && r.date < effectiveStart) return false;
@@ -78,7 +89,8 @@ export function computeEffectivePitchingScore(sd, pitcher, round, week) {
   const override = (((sd.player_dates || {})[weekKey] || {}).pitcher || {})[pitcher] || {};
 
   const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
-  const effectiveEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const rawEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
 
   const eligible = records.filter(r => {
     if (effectiveStart && r.date < effectiveStart) return false;
