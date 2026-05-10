@@ -4458,17 +4458,17 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const batCum = {}, pitCum = {};
     cumBatting.forEach(b => {
       if (b.round !== round || !b.batter) return;
-      if (b.manager === managerName) {
-        batCum[b.batter] = (batCum[b.batter] || 0) + (b.weekly_score || 0);
-      } else if (b.manager === null && wasRosteredThisWeek(b.batter, `${b.round}|${b.week}`, 'bat')) {
+      const weekKey = `${b.round}|${b.week}`;
+      if (!wasRosteredThisWeek(b.batter, weekKey, 'bat')) return;
+      if (b.manager === managerName || b.manager === null) {
         batCum[b.batter] = (batCum[b.batter] || 0) + (b.weekly_score || 0);
       }
     });
     cumPitching.forEach(p => {
       if (p.round !== round || !p.pitcher) return;
-      if (p.manager === managerName) {
-        pitCum[p.pitcher] = (pitCum[p.pitcher] || 0) + (p.weekly_score || 0);
-      } else if (p.manager === null && wasRosteredThisWeek(p.pitcher, `${p.round}|${p.week}`, 'pit')) {
+      const weekKey = `${p.round}|${p.week}`;
+      if (!wasRosteredThisWeek(p.pitcher, weekKey, 'pit')) return;
+      if (p.manager === managerName || p.manager === null) {
         pitCum[p.pitcher] = (pitCum[p.pitcher] || 0) + (p.weekly_score || 0);
       }
     });
