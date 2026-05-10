@@ -616,9 +616,12 @@ function computeEffectiveBattingScore(sd, batter, round, week) {
   const weekKey = `${round}|${week}`;
   const override = (((sd.player_dates || {})[weekKey] || {}).batter || {})[batter] || {};
 
-  // Explicit null override means "no constraint"; absent key falls through to week dates
   const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
-  const effectiveEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  // Shift end by +1 day: the daily sync runs in the morning and creates a record dated
+  // today containing yesterday's games. The last day of the scoring week therefore
+  // appears in a record dated end+1, so we must include it.
+  const rawEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
 
   const eligible = records.filter(r => {
     if (effectiveStart && r.date < effectiveStart) return false;
@@ -642,7 +645,8 @@ function computeEffectivePitchingScore(sd, pitcher, round, week) {
   const override = (((sd.player_dates || {})[weekKey] || {}).pitcher || {})[pitcher] || {};
 
   const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
-  const effectiveEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const rawEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
 
   const eligible = records.filter(r => {
     if (effectiveStart && r.date < effectiveStart) return false;
