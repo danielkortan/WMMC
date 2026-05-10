@@ -1567,6 +1567,16 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
     (weekRoster.batters || []).forEach(b => allBatters.add(b));
     (weekRoster.pitchers || []).forEach(p => allPitchers.add(p));
   });
+  // Also include players who were dropped mid-week (appear in roster_dates but not roster arrays)
+  const sbBatPool = new Set(sd.batters_pool || []);
+  const sbPitPool = new Set(sd.pitchers_pool || []);
+  const mgrRosterDates = (sd.roster_dates || {})[managerName] || {};
+  Object.values(mgrRosterDates).forEach(weekDates => {
+    Object.keys(weekDates).forEach(player => {
+      if (sbBatPool.size === 0 || sbBatPool.has(player)) allBatters.add(player);
+      if (sbPitPool.size === 0 || sbPitPool.has(player)) allPitchers.add(player);
+    });
+  });
 
   // Find current (most recent) roster
   const sortedWeeks = SEASON_SCHEDULE.map(s => `${s.round}|${s.week}`).filter(k => mgrRosters[k]);
@@ -4321,6 +4331,23 @@ function computeAllPlayerCumulativeScores(seasonData) {
   return { batCumulative, pitCumulative };
 }
 
+// Compute cumulative scores for all players within a single scoring period (round),
+// across all managers. Used for period-scoped CUM RANK computation.
+function computePeriodCumulativeScores(seasonData, round) {
+  const batCumulative = {}, pitCumulative = {};
+  (seasonData.weekly_batting || []).forEach(b => {
+    if (b.round !== round || !b.batter) return;
+    batCumulative[b.batter] = (batCumulative[b.batter] || 0) + (b.weekly_score || 0);
+  });
+  (seasonData.weekly_pitching || []).forEach(p => {
+    if (p.round !== round || !p.pitcher) return;
+    pitCumulative[p.pitcher] = (pitCumulative[p.pitcher] || 0) + (p.weekly_score || 0);
+  });
+  for (const k of Object.keys(batCumulative)) batCumulative[k] = Math.round(batCumulative[k] * 100) / 100;
+  for (const k of Object.keys(pitCumulative)) pitCumulative[k] = Math.round(pitCumulative[k] * 100) / 100;
+  return { batCumulative, pitCumulative };
+}
+
 // Compute weekly rankings for all players in a given week
 function computeWeeklyRankings(seasonData, round, week) {
   const batting = seasonData.weekly_batting || [];
@@ -4371,9 +4398,49 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   const batting = isHistorical ? (DATA.batting_weekly || []) : (seasonData.weekly_batting || []);
   const pitching = isHistorical ? (DATA.pitching_weekly || []) : (seasonData.weekly_pitching || []);
 
-  // Compute cumulative scores and rankings
-  const cumScores = computeAllPlayerCumulativeScores(isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching });
-  const cumRankings = computeCumulativeRankings(cumScores.batCumulative, cumScores.pitCumulative);
+  // Per-round cache: CUM PTS = player's total in this round while on this manager's roster.
+  // CUM RANK = league-wide rank within the same period.
+  const roundDataCache = {};
+  function getRoundData(round) {
+    if (roundDataCache[round]) return roundDataCache[round];
+    const sourceData = isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching };
+    // Build the set of all players historically on this manager's roster in this round
+    const histBat = new Set(), histPit = new Set();
+    const mgrRosters = isActive ? ((sourceData.rosters || {})[managerName] || {}) : {};
+    for (const [key, weekRoster] of Object.entries(mgrRosters)) {
+      if (!key.startsWith(round + '|')) continue;
+      (weekRoster.batters || []).forEach(b => histBat.add(b));
+      (weekRoster.pitchers || []).forEach(p => histPit.add(p));
+    }
+    const mgrRosterDates = isActive ? ((sourceData.roster_dates || {})[managerName] || {}) : {};
+    for (const [key, players] of Object.entries(mgrRosterDates)) {
+      if (!key.startsWith(round + '|')) continue;
+      // Players in roster_dates may be batters or pitchers; use pool sets to assign correctly
+      Object.keys(players).forEach(p => {
+        if (battersPool.size === 0 || battersPool.has(p)) histBat.add(p);
+        if (pitchersPool.size === 0 || pitchersPool.has(p)) histPit.add(p);
+      });
+    }
+    // Manager-scoped period cumulative for CUM PTS display
+    const batCum = {}, pitCum = {};
+    batting.forEach(b => {
+      if (b.round !== round || !b.batter) return;
+      if (b.manager !== managerName && !(b.manager === null && histBat.has(b.batter))) return;
+      batCum[b.batter] = (batCum[b.batter] || 0) + (b.weekly_score || 0);
+    });
+    pitching.forEach(p => {
+      if (p.round !== round || !p.pitcher) return;
+      if (p.manager !== managerName && !(p.manager === null && histPit.has(p.pitcher))) return;
+      pitCum[p.pitcher] = (pitCum[p.pitcher] || 0) + (p.weekly_score || 0);
+    });
+    for (const k of Object.keys(batCum)) batCum[k] = Math.round(batCum[k] * 100) / 100;
+    for (const k of Object.keys(pitCum)) pitCum[k] = Math.round(pitCum[k] * 100) / 100;
+    // League-wide period cumulative for CUM RANK
+    const periodScores = computePeriodCumulativeScores(sourceData, round);
+    const periodRankings = computeCumulativeRankings(periodScores.batCumulative, periodScores.pitCumulative);
+    roundDataCache[round] = { batCum, pitCum, periodRankings };
+    return roundDataCache[round];
+  }
 
   // Available players for commissioner add
   let availBatters = [];
@@ -4621,8 +4688,9 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const s = batStatMap[batter] || {};
         const onRoster = weekRoster.batters.includes(batter);
         const wkRank = weekRanks.batRanks[batter];
-        const cumScore = cumScores.batCumulative[batter] || 0;
-        const cumRank = cumRankings.batRanks[batter];
+        const { batCum, periodRankings: pRankings } = getRoundData(round);
+        const cumScore = batCum[batter] || 0;
+        const cumRank = pRankings.batRanks[batter];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
         html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
         html += batStatCell(s, 'abs', s.abs || 0);
@@ -4644,6 +4712,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No batters rostered this week.</p>';
     }
+    html += `<div class="wrs-subtotal">Batting Total <strong>${fmt(Math.round(batTotal * 100) / 100)}</strong> pts</div>`;
 
     // Helper: render a pitching stat cell with manual highlight
     function pitStatCell(s, field, displayVal) {
@@ -4671,8 +4740,9 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const s = pitStatMap[pitcher] || {};
         const onRoster = weekRoster.pitchers.includes(pitcher);
         const wkRank = weekRanks.pitRanks[pitcher];
-        const cumScore = cumScores.pitCumulative[pitcher] || 0;
-        const cumRank = cumRankings.pitRanks[pitcher];
+        const { pitCum, periodRankings: pRankingsPit } = getRoundData(round);
+        const cumScore = pitCum[pitcher] || 0;
+        const cumRank = pRankingsPit.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
         html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}${s.qs_highlight ? multiStartTag() : ''}</td>`;
         html += pitStatCell(s, 'gs', s.gs || 0);
@@ -4702,11 +4772,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No pitchers rostered this week.</p>';
     }
+    html += `<div class="wrs-subtotal">Pitching Total <strong>${fmt(Math.round(pitTotal * 100) / 100)}</strong> pts</div>`;
 
     // Week total footer
     html += `<div class="wrs-week-total">
       <span>Week Total</span>
-      <span><strong>${fmt(weekTotal)}</strong> <span class="wrs-total-detail">(Bat: ${fmt(Math.round(batTotal * 100) / 100)} | Pit: ${fmt(Math.round(pitTotal * 100) / 100)})</span></span>
+      <span><strong>${fmt(weekTotal)}</strong></span>
     </div>`;
 
     html += '</div></div>'; // .wrs-body, .wrs-section
@@ -8235,9 +8306,40 @@ window.updateCommRosterWeekView = function(managerName) {
   const weekBatting = batting.filter(b => b.manager === managerName && b.round === round && b.week === week);
   const weekPitching = pitching.filter(p => p.manager === managerName && p.round === round && p.week === week);
 
-  // Cumulative scores & rankings
-  const cumScores = computeAllPlayerCumulativeScores(sd);
-  const cumRankings = computeCumulativeRankings(cumScores.batCumulative, cumScores.pitCumulative);
+  // CUM PTS: player's total in this round while on this manager's roster.
+  // CUM RANK: league-wide rank within this round.
+  const battersPool = new Set(sd.batters_pool || []);
+  const pitchersPool = new Set(sd.pitchers_pool || []);
+  const histBatComm = new Set(), histPitComm = new Set();
+  const mgrRostersComm = (sd.rosters || {})[managerName] || {};
+  const mgrRosterDatesComm = (sd.roster_dates || {})[managerName] || {};
+  for (const [key, weekRoster] of Object.entries(mgrRostersComm)) {
+    if (!key.startsWith(round + '|')) continue;
+    (weekRoster.batters || []).forEach(b => histBatComm.add(b));
+    (weekRoster.pitchers || []).forEach(p => histPitComm.add(p));
+  }
+  for (const [key, players] of Object.entries(mgrRosterDatesComm)) {
+    if (!key.startsWith(round + '|')) continue;
+    Object.keys(players).forEach(p => {
+      if (battersPool.size === 0 || battersPool.has(p)) histBatComm.add(p);
+      if (pitchersPool.size === 0 || pitchersPool.has(p)) histPitComm.add(p);
+    });
+  }
+  const commBatCum = {}, commPitCum = {};
+  (sd.weekly_batting || []).forEach(b => {
+    if (b.round !== round || !b.batter) return;
+    if (b.manager !== managerName && !(b.manager === null && histBatComm.has(b.batter))) return;
+    commBatCum[b.batter] = (commBatCum[b.batter] || 0) + (b.weekly_score || 0);
+  });
+  (sd.weekly_pitching || []).forEach(p => {
+    if (p.round !== round || !p.pitcher) return;
+    if (p.manager !== managerName && !(p.manager === null && histPitComm.has(p.pitcher))) return;
+    commPitCum[p.pitcher] = (commPitCum[p.pitcher] || 0) + (p.weekly_score || 0);
+  });
+  for (const k of Object.keys(commBatCum)) commBatCum[k] = Math.round(commBatCum[k] * 100) / 100;
+  for (const k of Object.keys(commPitCum)) commPitCum[k] = Math.round(commPitCum[k] * 100) / 100;
+  const periodScoresComm = computePeriodCumulativeScores(sd, round);
+  const cumRankings = computeCumulativeRankings(periodScoresComm.batCumulative, periodScoresComm.pitCumulative);
   const weekRanks = computeWeeklyRankings(sd, round, week);
 
   // Swap log for date tags
@@ -8249,10 +8351,6 @@ window.updateCommRosterWeekView = function(managerName) {
   // Roster dates lookup
   const rosterDates = sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]
     ? sd.roster_dates[managerName][weekKey] : {};
-
-  // Pool sets for filtering — prevent cross-contamination between batter/pitcher tables
-  const battersPool = new Set(sd.batters_pool || []);
-  const pitchersPool = new Set(sd.pitchers_pool || []);
 
   // Build the complete set of batters/pitchers who were on the roster at ANY point this week.
   // Sources: current roster (pool-filtered) + roster_dates (commissioner add/drop) + approved swaps.
@@ -8356,7 +8454,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const s = batStatMap[batter] || {};
       const onRoster = roster.batters.includes(batter);
       const wkRank = weekRanks.batRanks[batter];
-      const cumScore = cumScores.batCumulative[batter] || 0;
+      const cumScore = commBatCum[batter] || 0;
       const cumRank = cumRankings.batRanks[batter];
       const safeB = batter.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
@@ -8397,6 +8495,7 @@ window.updateCommRosterWeekView = function(managerName) {
   } else {
     batHtml += '<p class="text-muted" style="font-size:0.82rem;">No batters rostered this week.</p>';
   }
+  batHtml += `<div class="wrs-subtotal">Batting Total <strong>${fmt(Math.round(batTotal * 100) / 100)}</strong> pts</div>`;
   document.getElementById('comm-roster-batters').innerHTML = batHtml;
 
   // ---- Pitchers Table ----
@@ -8423,7 +8522,7 @@ window.updateCommRosterWeekView = function(managerName) {
       const s = pitStatMap[pitcher] || {};
       const onRoster = roster.pitchers.includes(pitcher);
       const wkRank = weekRanks.pitRanks[pitcher];
-      const cumScore = cumScores.pitCumulative[pitcher] || 0;
+      const cumScore = commPitCum[pitcher] || 0;
       const cumRank = cumRankings.pitRanks[pitcher];
       const safeP = pitcher.replace(/'/g, "\\'");
       const manual = (f) => (s.manual_fields || []).includes(f) ? ' stat-manual' : '';
@@ -8470,6 +8569,7 @@ window.updateCommRosterWeekView = function(managerName) {
   } else {
     pitHtml += '<p class="text-muted" style="font-size:0.82rem;">No pitchers rostered this week.</p>';
   }
+  pitHtml += `<div class="wrs-subtotal">Pitching Total <strong>${fmt(Math.round(pitTotal * 100) / 100)}</strong> pts</div>`;
   document.getElementById('comm-roster-pitchers').innerHTML = pitHtml;
 
   // Week total
@@ -8478,7 +8578,7 @@ window.updateCommRosterWeekView = function(managerName) {
   if (totalContainer) {
     totalContainer.innerHTML = `<div class="wrs-week-total">
       <span>Week Total</span>
-      <span><strong>${fmt(weekTotal)}</strong> <span class="wrs-total-detail">(Bat: ${fmt(Math.round(batTotal * 100) / 100)} | Pit: ${fmt(Math.round(pitTotal * 100) / 100)})</span></span>
+      <span><strong>${fmt(weekTotal)}</strong></span>
     </div>`;
   }
 
