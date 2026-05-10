@@ -819,7 +819,8 @@
   color: var(--text-muted);
   font-weight: 500;
   text-align: right;
-  padding-right: 0.5rem !important;
+  white-space: nowrap;
+  padding-right: 0.4rem !important;
 }
 
 .wrs-subtotal-val {
