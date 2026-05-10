@@ -969,23 +969,68 @@ function findCol(row, names) {
 // computeEffectiveBattingScore / computeEffectivePitchingScore filter daily deltas
 // to only the days a player was actually rostered. Only fills gaps — does not overwrite
 // existing player_dates entries (commissioner manual overrides take precedence).
+// Add one calendar day to a YYYY-MM-DD string.
+function addOneDay(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().split('T')[0];
+}
+
+// Populate player_dates from roster_dates for genuine mid-week ADDS only.
+//
+// Key design decisions:
+//   - Only adds a START cutoff, never an END cutoff.  Dropped players' accumulated
+//     scores are locked by drop_locked on the weekly record; we must not re-filter
+//     their already-banked stats by date.
+//   - Only applies when add_date is strictly AFTER the week's start date (initial
+//     roster players should score the full week).
+//   - Shifts start by +1 day because the daily sync captures cumulative stats
+//     through (sync_date - 1): a record dated "May 10" contains May 9's games.
+//     To count only games on/after add_date, we need records dated > add_date,
+//     i.e. effective_start = add_date + 1.
+//   - Entries created here are marked { auto: true } so they can be refreshed on
+//     subsequent saves without clobbering manual commissioner overrides.
 function syncPlayerDatesFromRosterDates(sd) {
   if (!sd || !sd.roster_dates) return;
   if (!sd.player_dates) sd.player_dates = {};
 
+  // Wipe previously auto-generated entries so stale data (e.g. incorrect end dates
+  // from an earlier version) is cleaned up on every run.
+  for (const weekKey of Object.keys(sd.player_dates)) {
+    for (const type of ['batter', 'pitcher']) {
+      const typeMap = (sd.player_dates[weekKey] || {})[type];
+      if (!typeMap) continue;
+      for (const [player, entry] of Object.entries(typeMap)) {
+        if (entry && entry.auto) delete typeMap[player];
+      }
+    }
+  }
+
   for (const mgrDates of Object.values(sd.roster_dates)) {
     for (const [weekKey, players] of Object.entries(mgrDates)) {
+      // Look up the week start date to distinguish mid-week adds from initial roster.
+      const parts = weekKey.split('|');
+      const round = parts[0];
+      const week = parts.slice(1).join('|');
+      const weekIdx = SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
+      const weekStart = weekIdx >= 0 && sd.schedule_dates && sd.schedule_dates[weekIdx]
+        ? sd.schedule_dates[weekIdx].start : null;
+
       for (const [player, dates] of Object.entries(players)) {
-        if (!dates.add_date && !dates.drop_date) continue;
-        // Apply to both batter and pitcher slots; only the one with daily records will be used.
+        if (!dates.add_date) continue;
+        // Skip players rostered from the very start of the week — no cutoff needed.
+        if (weekStart && dates.add_date <= weekStart) continue;
+
+        // Shift by +1: the sync on add_date records cumulative through (add_date-1).
+        // To capture add_date's own games, include records with date > add_date.
+        const effectiveStart = addOneDay(dates.add_date);
+
         for (const type of ['batter', 'pitcher']) {
           if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
           if (!sd.player_dates[weekKey][type]) sd.player_dates[weekKey][type] = {};
-          if (sd.player_dates[weekKey][type][player]) continue; // manual override present
-          const entry = {};
-          if (dates.add_date) entry.start = dates.add_date;
-          if (dates.drop_date) entry.end = dates.drop_date;
-          sd.player_dates[weekKey][type][player] = entry;
+          const existing = sd.player_dates[weekKey][type][player];
+          if (existing && !existing.auto) continue; // preserve manual commissioner override
+          sd.player_dates[weekKey][type][player] = { start: effectiveStart, auto: true };
         }
       }
     }
