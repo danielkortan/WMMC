@@ -321,7 +321,14 @@ app.post('/api/seasons/:year', (req, res) => {
   const newPending = incomingSwaps.filter(s => s.status === 'pending' && !existingIds.has(s.id));
 
   addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
-  db.seasons[req.params.year] = req.body;
+  const sd = req.body;
+  // Propagate roster add/drop dates into player_dates and recompute scores from daily data
+  // so mid-week swap approvals take effect immediately without waiting for next sync.
+  if ((sd.daily_batting && sd.daily_batting.length) || (sd.daily_pitching && sd.daily_pitching.length)) {
+    syncPlayerDatesFromRosterDates(sd);
+    recomputeAllWeeklyScores(sd);
+  }
+  db.seasons[req.params.year] = sd;
   writeDB(db);
   res.json({ ok: true });
 
@@ -958,6 +965,33 @@ function findCol(row, names) {
   return null;
 }
 
+// Propagate add/drop dates from roster_dates into player_dates so that
+// computeEffectiveBattingScore / computeEffectivePitchingScore filter daily deltas
+// to only the days a player was actually rostered. Only fills gaps — does not overwrite
+// existing player_dates entries (commissioner manual overrides take precedence).
+function syncPlayerDatesFromRosterDates(sd) {
+  if (!sd || !sd.roster_dates) return;
+  if (!sd.player_dates) sd.player_dates = {};
+
+  for (const mgrDates of Object.values(sd.roster_dates)) {
+    for (const [weekKey, players] of Object.entries(mgrDates)) {
+      for (const [player, dates] of Object.entries(players)) {
+        if (!dates.add_date && !dates.drop_date) continue;
+        // Apply to both batter and pitcher slots; only the one with daily records will be used.
+        for (const type of ['batter', 'pitcher']) {
+          if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
+          if (!sd.player_dates[weekKey][type]) sd.player_dates[weekKey][type] = {};
+          if (sd.player_dates[weekKey][type][player]) continue; // manual override present
+          const entry = {};
+          if (dates.add_date) entry.start = dates.add_date;
+          if (dates.drop_date) entry.end = dates.drop_date;
+          sd.player_dates[weekKey][type][player] = entry;
+        }
+      }
+    }
+  }
+}
+
 // Remove players from the Week 1 roster who are present due to a stale initial-submission
 // approval but are no longer in the manager's current submitted initial_submission.
 // Mirrors the client-side repairGhostInitialRosterPlayers in app.js.
@@ -1288,6 +1322,9 @@ async function syncGoogleSheets(year, syncType = 'daily') {
   // Remove any ghost players left in the Week 1 roster by a stale initial-submission approval
   // before attributing this sync's stats so they are never credited to the wrong manager.
   repairGhostInitialRosterPlayers(sd);
+
+  // Populate player_dates from roster_dates so mid-week adds/drops filter daily deltas correctly.
+  syncPlayerDatesFromRosterDates(sd);
 
   // Capture today's date once so all rows in this sync share the same snapshot date
   const syncDate = new Date().toISOString().split('T')[0];
@@ -1897,6 +1934,7 @@ app.post('/api/seasons/:year/recompute-scores', (req, res) => {
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
 
+  syncPlayerDatesFromRosterDates(sd);
   recomputeAllWeeklyScores(sd);
 
   addAuditEntry(db, 'recompute_scores', { year }, userEmail);
