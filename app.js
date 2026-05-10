@@ -4708,11 +4708,14 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
         html += '</tr>';
       });
-      html += '</tbody></table></div>';
+      html += `</tbody><tfoot><tr class="wrs-subtotal-row">
+        <td colspan="10" class="wrs-subtotal-label">Batting Total</td>
+        <td class="num wrs-subtotal-val"><strong>${fmt(Math.round(batTotal * 100) / 100)}</strong></td>
+        <td colspan="3"></td>
+      </tr></tfoot></table></div>`;
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No batters rostered this week.</p>';
     }
-    html += `<div class="wrs-subtotal">Batting Total <strong>${fmt(Math.round(batTotal * 100) / 100)}</strong> pts</div>`;
 
     // Helper: render a pitching stat cell with manual highlight
     function pitStatCell(s, field, displayVal) {
@@ -4768,11 +4771,14 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
         html += '</tr>';
       });
-      html += '</tbody></table></div>';
+      html += `</tbody><tfoot><tr class="wrs-subtotal-row">
+        <td colspan="12" class="wrs-subtotal-label">Pitching Total</td>
+        <td class="num wrs-subtotal-val"><strong>${fmt(Math.round(pitTotal * 100) / 100)}</strong></td>
+        <td colspan="3"></td>
+      </tr></tfoot></table></div>`;
     } else {
       html += '<p class="text-muted" style="font-size:0.85rem;">No pitchers rostered this week.</p>';
     }
-    html += `<div class="wrs-subtotal">Pitching Total <strong>${fmt(Math.round(pitTotal * 100) / 100)}</strong> pts</div>`;
 
     // Week total footer
     html += `<div class="wrs-week-total">
@@ -8491,11 +8497,14 @@ window.updateCommRosterWeekView = function(managerName) {
       batHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeB}','${weekKey}','${dateRowId}')">Save</button>`;
       batHtml += `</div></td></tr>`;
     });
-    batHtml += '</tbody></table></div>';
+    batHtml += `</tbody><tfoot><tr class="wrs-subtotal-row">
+      <td colspan="10" class="wrs-subtotal-label">Batting Total</td>
+      <td class="num wrs-subtotal-val"><strong>${fmt(Math.round(batTotal * 100) / 100)}</strong></td>
+      <td colspan="4"></td>
+    </tr></tfoot></table></div>`;
   } else {
     batHtml += '<p class="text-muted" style="font-size:0.82rem;">No batters rostered this week.</p>';
   }
-  batHtml += `<div class="wrs-subtotal">Batting Total <strong>${fmt(Math.round(batTotal * 100) / 100)}</strong> pts</div>`;
   document.getElementById('comm-roster-batters').innerHTML = batHtml;
 
   // ---- Pitchers Table ----
@@ -8565,11 +8574,14 @@ window.updateCommRosterWeekView = function(managerName) {
       pitHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeP}','${weekKey}','${dateRowId}')">Save</button>`;
       pitHtml += `</div></td></tr>`;
     });
-    pitHtml += '</tbody></table></div>';
+    pitHtml += `</tbody><tfoot><tr class="wrs-subtotal-row">
+      <td colspan="12" class="wrs-subtotal-label">Pitching Total</td>
+      <td class="num wrs-subtotal-val"><strong>${fmt(Math.round(pitTotal * 100) / 100)}</strong></td>
+      <td colspan="4"></td>
+    </tr></tfoot></table></div>`;
   } else {
     pitHtml += '<p class="text-muted" style="font-size:0.82rem;">No pitchers rostered this week.</p>';
   }
-  pitHtml += `<div class="wrs-subtotal">Pitching Total <strong>${fmt(Math.round(pitTotal * 100) / 100)}</strong> pts</div>`;
   document.getElementById('comm-roster-pitchers').innerHTML = pitHtml;
 
   // Week total
