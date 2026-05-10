@@ -322,11 +322,13 @@ app.post('/api/seasons/:year', (req, res) => {
 
   addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
   const sd = req.body;
-  // Propagate roster add/drop dates into player_dates and recompute scores from daily data
-  // so mid-week swap approvals take effect immediately without waiting for next sync.
+  // Propagate roster add dates into player_dates for mid-week adds, then zero out
+  // any pre-add scores for newly rostered players.  We do NOT call recomputeAllWeeklyScores
+  // here because it would zero out dropped players' correctly banked scores when their
+  // stats live in a daily record dated after weekDates.end (see recomputeMidWeekAddScores).
   if ((sd.daily_batting && sd.daily_batting.length) || (sd.daily_pitching && sd.daily_pitching.length)) {
     syncPlayerDatesFromRosterDates(sd);
-    recomputeAllWeeklyScores(sd);
+    recomputeMidWeekAddScores(sd);
   }
   db.seasons[req.params.year] = sd;
   writeDB(db);
@@ -1037,8 +1039,38 @@ function syncPlayerDatesFromRosterDates(sd) {
   }
 }
 
-// Remove players from the Week 1 roster who are present due to a stale initial-submission
-// approval but are no longer in the manager's current submitted initial_submission.
+// Recompute weekly scores ONLY for mid-week additions (player_dates entries with auto:true).
+// Dropped players' banked scores are intentionally left alone — calling recomputeAllWeeklyScores
+// on a save would zero them out when their stats live in a sync record dated after weekDates.end
+// (the morning sync captures the previous day's games, so a player who pitches on the last day
+// of a scoring week has their stats in a record dated end+1, which the end-date filter excludes).
+function recomputeMidWeekAddScores(sd) {
+  const playerDates = sd.player_dates || {};
+  for (const [weekKey, weekTypes] of Object.entries(playerDates)) {
+    const parts = weekKey.split('|');
+    const round = parts[0];
+    const week = parts.slice(1).join('|');
+    for (const [batter, entry] of Object.entries(weekTypes.batter || {})) {
+      if (!entry || !entry.auto) continue;
+      (sd.weekly_batting || []).forEach(b => {
+        if (b.batter !== batter || b.round !== round || b.week !== week) return;
+        if (b.drop_locked || (b.manual_fields && b.manual_fields.length > 0)) return;
+        const score = computeEffectiveBattingScore(sd, batter, round, week);
+        b.weekly_score = score !== null ? score : 0;
+        b.total_score = b.weekly_score;
+      });
+    }
+    for (const [pitcher, entry] of Object.entries(weekTypes.pitcher || {})) {
+      if (!entry || !entry.auto) continue;
+      (sd.weekly_pitching || []).forEach(p => {
+        if (p.pitcher !== pitcher || p.round !== round || p.week !== week) return;
+        if (p.drop_locked || (p.manual_fields && p.manual_fields.length > 0)) return;
+        const score = computeEffectivePitchingScore(sd, pitcher, round, week);
+        p.weekly_score = score !== null ? score : 0;
+      });
+    }
+  }
+}
 // Mirrors the client-side repairGhostInitialRosterPlayers in app.js.
 // Checks both roster.batters AND roster_dates entries (a manual removeFromRoster call removes
 // from the roster array but leaves a roster_dates entry).  Purges all stats including
