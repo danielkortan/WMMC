@@ -3875,6 +3875,10 @@ function backfillRosterDatesFromSwaps(seasonData) {
 // initial_submission.  This catches the case where a manager changed their submission and the
 // commissioner re-approved without the old cleanup path running (e.g. data pre-dating this fix).
 // Players added by the commissioner via a swap record (player_in) are exempt from removal.
+// Ghost players are identified from BOTH roster.batters AND roster_dates entries so that a
+// manual removeFromRoster call (which removes from roster but leaves a roster_dates entry) is
+// also cleaned up.  All stats — including drop_locked records — are purged for ghost players
+// because they were never legitimately on the roster.
 function repairGhostInitialRosterPlayers(seasonData) {
   if (!seasonData || !seasonData.initial_submissions || !seasonData.rosters) return false;
   const firstSched = SEASON_SCHEDULE[0];
@@ -3901,24 +3905,44 @@ function repairGhostInitialRosterPlayers(seasonData) {
     const submittedBatters = new Set(sub.batters || []);
     const submittedPitchers = new Set(sub.pitchers || []);
 
-    // Ghost = in roster but not in submission AND not commissioner-added via swap
-    const ghostBatters = (mgrRoster[weekKey].batters || []).filter(b => !submittedBatters.has(b) && !commAdded.has(b));
-    const ghostPitchers = (mgrRoster[weekKey].pitchers || []).filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
+    // Collect all players associated with this manager's Week 1 from BOTH sources:
+    // the roster array AND roster_dates entries (a manual removeFromRoster call removes
+    // from the roster array but leaves a roster_dates entry with drop_date).
+    const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) || {};
+    const allBattersPool = new Set(seasonData.batters_pool || []);
+    const allPitchersPool = new Set(seasonData.pitchers_pool || []);
+
+    const candidateBatters = new Set([
+      ...(mgrRoster[weekKey].batters || []),
+      ...Object.keys(weekRosterDates).filter(p => allBattersPool.size === 0 || allBattersPool.has(p)),
+    ]);
+    const candidatePitchers = new Set([
+      ...(mgrRoster[weekKey].pitchers || []),
+      ...Object.keys(weekRosterDates).filter(p => allPitchersPool.size > 0 && allPitchersPool.has(p)),
+    ]);
+
+    // Ghost = candidate not in submission AND not commissioner-added via swap
+    const ghostBatters = [...candidateBatters].filter(b => !submittedBatters.has(b) && !commAdded.has(b));
+    const ghostPitchers = [...candidatePitchers].filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
 
     if (ghostBatters.length === 0 && ghostPitchers.length === 0) continue;
 
     [...ghostBatters, ...ghostPitchers].forEach(player => {
+      // Erase roster_dates entry — includes any drop_date set by a manual removeFromRoster call
       if (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) {
         delete seasonData.roster_dates[manager][weekKey][player];
       }
+      // Purge ALL weekly stats for this player in Week 1 — including drop_locked records,
+      // because drop_locked was set by removeFromRoster on a player who was never supposed
+      // to be on the roster (the lock was set in error against a ghost).
       if (seasonData.weekly_batting) {
         seasonData.weekly_batting = seasonData.weekly_batting.filter(b =>
-          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week && !b.drop_locked)
+          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
         );
       }
       if (seasonData.weekly_pitching) {
         seasonData.weekly_pitching = seasonData.weekly_pitching.filter(p =>
-          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week && !p.drop_locked)
+          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
         );
       }
       if (seasonData.daily_batting) {

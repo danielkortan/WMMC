@@ -961,6 +961,9 @@ function findCol(row, names) {
 // Remove players from the Week 1 roster who are present due to a stale initial-submission
 // approval but are no longer in the manager's current submitted initial_submission.
 // Mirrors the client-side repairGhostInitialRosterPlayers in app.js.
+// Checks both roster.batters AND roster_dates entries (a manual removeFromRoster call removes
+// from the roster array but leaves a roster_dates entry).  Purges all stats including
+// drop_locked records — the lock was set against a player who was never legitimately rostered.
 function repairGhostInitialRosterPlayers(sd) {
   if (!sd || !sd.initial_submissions || !sd.rosters) return false;
   const firstSched = SEASON_SCHEDULE[0];
@@ -982,22 +985,37 @@ function repairGhostInitialRosterPlayers(sd) {
 
     const submittedBatters = new Set(sub.batters || []);
     const submittedPitchers = new Set(sub.pitchers || []);
-    const ghostBatters = (mgrRoster[weekKey].batters || []).filter(b => !submittedBatters.has(b) && !commAdded.has(b));
-    const ghostPitchers = (mgrRoster[weekKey].pitchers || []).filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
+
+    const weekRosterDates = (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) || {};
+    const allBattersPool = new Set(sd.batters_pool || []);
+    const allPitchersPool = new Set(sd.pitchers_pool || []);
+
+    const candidateBatters = new Set([
+      ...(mgrRoster[weekKey].batters || []),
+      ...Object.keys(weekRosterDates).filter(p => allBattersPool.size === 0 || allBattersPool.has(p)),
+    ]);
+    const candidatePitchers = new Set([
+      ...(mgrRoster[weekKey].pitchers || []),
+      ...Object.keys(weekRosterDates).filter(p => allPitchersPool.size > 0 && allPitchersPool.has(p)),
+    ]);
+
+    const ghostBatters = [...candidateBatters].filter(b => !submittedBatters.has(b) && !commAdded.has(b));
+    const ghostPitchers = [...candidatePitchers].filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
     if (ghostBatters.length === 0 && ghostPitchers.length === 0) continue;
 
     [...ghostBatters, ...ghostPitchers].forEach(player => {
       if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
         delete sd.roster_dates[manager][weekKey][player];
       }
+      // Purge ALL stats — including drop_locked — because this player was never legitimately rostered
       if (sd.weekly_batting) {
         sd.weekly_batting = sd.weekly_batting.filter(b =>
-          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week && !b.drop_locked)
+          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
         );
       }
       if (sd.weekly_pitching) {
         sd.weekly_pitching = sd.weekly_pitching.filter(p =>
-          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week && !p.drop_locked)
+          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
         );
       }
       if (sd.daily_batting) {
