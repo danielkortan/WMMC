@@ -1588,11 +1588,17 @@ window.toggleManagerDetails = function(mgrKey, managerName) {
   const firstWeekKey = sortedWeeks[0] || null;
   const firstRoster = firstWeekKey ? (mgrRosters[firstWeekKey] || { batters: [], pitchers: [] }) : { batters: [], pitchers: [] };
 
-  // Compute total points per player
+  // Compute total points per player (includes null-manager entries for players rostered that week)
+  const detailRosterLookup = buildRosterLookup(sd);
   function playerPts(name, type) {
     const arr = type === 'batting' ? (sd.weekly_batting || []) : (sd.weekly_pitching || []);
-    const key = type === 'batting' ? 'batter' : 'pitcher';
-    return Math.round(arr.filter(r => r[key] === name && r.manager === managerName)
+    const playerKey = type === 'batting' ? 'batter' : 'pitcher';
+    return Math.round(arr
+      .filter(r => {
+        if (r[playerKey] !== name) return false;
+        const mgr = r.manager || detailRosterLookup[`${name}|${r.round}|${r.week}`];
+        return mgr === managerName;
+      })
       .reduce((s, r) => s + (r.weekly_score || 0), 0) * 100) / 100;
   }
 
@@ -1707,8 +1713,13 @@ window.showPlayerQuickView = function(playerName, type, managerName) {
   const arr = isBat ? (sd.weekly_batting || []) : (sd.weekly_pitching || []);
   const playerKey = isBat ? 'batter' : 'pitcher';
 
+  const pqvRosterLookup = buildRosterLookup(sd);
   const records = arr
-    .filter(r => r[playerKey] === playerName && r.manager === managerName)
+    .filter(r => {
+      if (r[playerKey] !== playerName) return false;
+      const mgr = r.manager || pqvRosterLookup[`${playerName}|${r.round}|${r.week}`];
+      return mgr === managerName;
+    })
     .sort((a, b) => weekIndexFromKey(a.round, a.week) - weekIndexFromKey(b.round, b.week));
 
   let tableHtml = '';
@@ -3059,6 +3070,8 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   });
   const hasPools = Object.keys(poolGroups).length > 0;
 
+  const sbRosterLookup = buildRosterLookup(seasonData);
+
   // Compute per-period scores — include ALL pool-assigned managers at 0
   function periodScores(roundFilter) {
     const mgrMap = {};
@@ -3066,13 +3079,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       if (m.pool && m.active !== false) mgrMap[m.name] = { manager: m.name, batting: 0, pitching: 0, total: 0 };
     });
     batting.filter(b => roundFilter.includes(b.round)).forEach(b => {
-      const mgr = b.manager; // use stored manager — banked points
+      const mgr = b.manager || sbRosterLookup[`${b.batter}|${b.round}|${b.week}`];
       if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].batting += (b.weekly_score || 0);
     });
     pitching.filter(p => roundFilter.includes(p.round)).forEach(p => {
-      const mgr = p.manager;
+      const mgr = p.manager || sbRosterLookup[`${p.pitcher}|${p.round}|${p.week}`];
       if (!mgr) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].pitching += (p.weekly_score || 0);
@@ -3404,12 +3417,15 @@ function renderTrends() {
     }));
   } else {
     teamWeekly = buildTeamWeekly(seasonData);
-    battingData = (seasonData.weekly_batting || []).filter(b => b.manager).map(b => ({
-      player: b.batter, manager: b.manager, round: b.round, week: b.week, weekly_score: b.weekly_score || 0
-    }));
-    pitchingData = (seasonData.weekly_pitching || []).filter(p => p.manager).map(p => ({
-      player: p.pitcher, manager: p.manager, round: p.round, week: p.week, weekly_score: p.weekly_score || 0
-    }));
+    const trendsRosterLookup = buildRosterLookup(seasonData);
+    battingData = (seasonData.weekly_batting || []).map(b => {
+      const mgr = b.manager || trendsRosterLookup[`${b.batter}|${b.round}|${b.week}`];
+      return mgr ? { player: b.batter, manager: mgr, round: b.round, week: b.week, weekly_score: b.weekly_score || 0 } : null;
+    }).filter(Boolean);
+    pitchingData = (seasonData.weekly_pitching || []).map(p => {
+      const mgr = p.manager || trendsRosterLookup[`${p.pitcher}|${p.round}|${p.week}`];
+      return mgr ? { player: p.pitcher, manager: mgr, round: p.round, week: p.week, weekly_score: p.weekly_score || 0 } : null;
+    }).filter(Boolean);
   }
 
   // ---- Pool groups & registered manager names ----
@@ -4099,19 +4115,38 @@ function findManagerForPlayerWeek(seasonData, playerName, type, round, week) {
 }
 
 
+// Build a lookup of "player|round|week" -> managerName from rosters + roster_dates.
+// Used to attribute null-manager stats (players dropped mid-week) to the correct manager.
+function buildRosterLookup(seasonData) {
+  const lookup = {};
+  for (const [mgr, mgrRosters] of Object.entries(seasonData.rosters || {})) {
+    for (const [weekKey, weekRoster] of Object.entries(mgrRosters)) {
+      (weekRoster.batters || []).forEach(p => { if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr; });
+      (weekRoster.pitchers || []).forEach(p => { if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr; });
+    }
+  }
+  for (const [mgr, mgrDates] of Object.entries(seasonData.roster_dates || {})) {
+    for (const [weekKey, players] of Object.entries(mgrDates)) {
+      Object.keys(players).forEach(p => { if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr; });
+    }
+  }
+  return lookup;
+}
+
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(seasonData);
 
   const managerMap = {};
   batting.forEach(b => {
-    const mgr = b.manager; // use stored manager — points are banked at upload time
+    const mgr = b.manager || rosterLookup[`${b.batter}|${b.round}|${b.week}`];
     if (!mgr) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].batting += (b.weekly_score || 0);
   });
   pitching.forEach(p => {
-    const mgr = p.manager;
+    const mgr = p.manager || rosterLookup[`${p.pitcher}|${p.round}|${p.week}`];
     if (!mgr) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].pitching += (p.weekly_score || 0);
@@ -4129,6 +4164,7 @@ function buildTeamWeekly(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
   const managers = getManagers();
+  const rosterLookup = buildRosterLookup(seasonData);
 
   // Build manager-to-pool lookup
   const managerPool = {};
@@ -4138,15 +4174,15 @@ function buildTeamWeekly(seasonData) {
   const map = {};
 
   batting.forEach(b => {
-    const mgr = b.manager; // use stored manager — points are banked at upload/assign time
-    if (!mgr) return;       // skip unassigned players
+    const mgr = b.manager || rosterLookup[`${b.batter}|${b.round}|${b.week}`];
+    if (!mgr) return;
     const k = key(b.round, b.week, mgr);
     if (!map[k]) map[k] = { round: b.round, week: b.week, manager: mgr, pool: managerPool[mgr] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
     map[k].weekly_batting += (b.weekly_score || 0);
   });
 
   pitching.forEach(p => {
-    const mgr = p.manager;
+    const mgr = p.manager || rosterLookup[`${p.pitcher}|${p.round}|${p.week}`];
     if (!mgr) return;
     const k = key(p.round, p.week, mgr);
     if (!map[k]) map[k] = { round: p.round, week: p.week, manager: mgr, pool: managerPool[mgr] || '', weekly_batting: 0, weekly_pitching: 0, weekly_total: 0 };
@@ -5022,15 +5058,24 @@ function buildTeamStatsBreakdown(managerName, seasonData, p2m) {
           pitcherPeriodTotals[e.pitcher] = (pitcherPeriodTotals[e.pitcher] || 0) + (e.weekly_score || 0);
         });
     } else if (isActive) {
+      const bsdRosterLookup = buildRosterLookup(seasonData);
       (seasonData.weekly_batting || [])
-        .filter(e => e.round === period.key && e.manager === managerName)
+        .filter(e => {
+          if (e.round !== period.key) return false;
+          const mgr = e.manager || bsdRosterLookup[`${e.batter}|${e.round}|${e.week}`];
+          return mgr === managerName;
+        })
         .forEach(e => {
           if (!weekTotals[e.week]) weekTotals[e.week] = { batting: 0, pitching: 0 };
           weekTotals[e.week].batting += (e.weekly_score || 0);
           batterPeriodTotals[e.batter] = (batterPeriodTotals[e.batter] || 0) + (e.weekly_score || 0);
         });
       (seasonData.weekly_pitching || [])
-        .filter(e => e.round === period.key && e.manager === managerName)
+        .filter(e => {
+          if (e.round !== period.key) return false;
+          const mgr = e.manager || bsdRosterLookup[`${e.pitcher}|${e.round}|${e.week}`];
+          return mgr === managerName;
+        })
         .forEach(e => {
           if (!weekTotals[e.week]) weekTotals[e.week] = { batting: 0, pitching: 0 };
           weekTotals[e.week].pitching += (e.weekly_score || 0);
