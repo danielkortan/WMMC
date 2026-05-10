@@ -4571,9 +4571,14 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     // Compute weekly rankings for this week
     const weekRanks = computeWeeklyRankings(isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching }, round, week);
 
-    // Compute week totals
-    const batTotal = weekBatting.reduce((s, b) => s + (b.weekly_score || 0), 0);
-    const pitTotal = weekPitching.reduce((s, p) => s + (p.weekly_score || 0), 0);
+    // Compute week totals — use the extended arrays (which include null-manager entries
+    // for historically rostered players dropped mid-week) filtered to valid historical sets.
+    const batTotal = allWeekBatting
+      .filter(b => historicalBatters.has(b.batter))
+      .reduce((s, b) => s + (b.weekly_score || 0), 0);
+    const pitTotal = allWeekPitching
+      .filter(p => historicalPitchers.has(p.pitcher))
+      .reduce((s, p) => s + (p.weekly_score || 0), 0);
     const weekTotal = Math.round((batTotal + pitTotal) * 100) / 100;
 
     const safeId = weekKey.replace(/[^a-zA-Z0-9]/g, '_');
@@ -4738,13 +4743,42 @@ function computeRosterPeriodScores(managerName, seasonData, p2m) {
   batting = seasonData.weekly_batting || [];
   pitching = seasonData.weekly_pitching || [];
 
+  const countedBatting = new Set();
+  const countedPitching = new Set();
   batting.forEach(b => {
     if (b.manager !== managerName) return; // use stored manager — banked points
+    if (!result[b.round]) result[b.round] = { batting: 0, pitching: 0, total: 0 };
+    result[b.round].batting += (b.weekly_score || 0);
+    countedBatting.add(`${b.batter}|${b.round}|${b.week}`);
+  });
+  // Also include null-manager batting stats for players historically on this roster
+  // (stats that arrived after a mid-week drop carry manager = null and must still count).
+  batting.forEach(b => {
+    if (b.manager !== null) return;
+    const key = `${b.batter}|${b.round}|${b.week}`;
+    if (countedBatting.has(key)) return;
+    const weekKey = `${b.round}|${b.week}`;
+    const weekRoster = (seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
+    const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[managerName] && seasonData.roster_dates[managerName][weekKey]) || {};
+    if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
     if (!result[b.round]) result[b.round] = { batting: 0, pitching: 0, total: 0 };
     result[b.round].batting += (b.weekly_score || 0);
   });
   pitching.forEach(p => {
     if (p.manager !== managerName) return;
+    if (!result[p.round]) result[p.round] = { batting: 0, pitching: 0, total: 0 };
+    result[p.round].pitching += (p.weekly_score || 0);
+    countedPitching.add(`${p.pitcher}|${p.round}|${p.week}`);
+  });
+  // Also include null-manager pitching stats for players historically on this roster.
+  pitching.forEach(p => {
+    if (p.manager !== null) return;
+    const key = `${p.pitcher}|${p.round}|${p.week}`;
+    if (countedPitching.has(key)) return;
+    const weekKey = `${p.round}|${p.week}`;
+    const weekRoster = (seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
+    const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[managerName] && seasonData.roster_dates[managerName][weekKey]) || {};
+    if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
     if (!result[p.round]) result[p.round] = { batting: 0, pitching: 0, total: 0 };
     result[p.round].pitching += (p.weekly_score || 0);
   });
