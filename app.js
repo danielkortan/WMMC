@@ -5059,7 +5059,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     const isCurrent = weekKey === latestDataWeek;
 
     // Get roster for this week
-    const weekRoster = isActive ? getWeekRoster(seasonData, managerName, round, week) : { batters: [], pitchers: [] };
+    let weekRoster = isActive ? getWeekRoster(seasonData, managerName, round, week) : { batters: [], pitchers: [] };
 
     // Get stat records for this week
     const weekBatting = batting.filter((b) => b.manager === managerName && b.round === round && b.week === week);
@@ -5071,6 +5071,30 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       isActive && seasonData.roster_dates && seasonData.roster_dates[managerName]
         ? seasonData.roster_dates[managerName][weekKey] || {}
         : {};
+
+    // Filter out players who were dropped (recorded in a previous week's roster_dates) before
+    // this week's start date, so they don't carry over into future weeks.
+    const weekStart = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
+    if (weekStart && isActive && seasonData.roster_dates && seasonData.roster_dates[managerName]) {
+      const allMgrDates = seasonData.roster_dates[managerName];
+      const addedThisWeek = new Set([
+        ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+        ...Object.entries(weekRosterDates).filter(([, d]) => d.add_date).map(([p]) => p),
+      ]);
+      const wasDroppedBefore = (player) => {
+        if (addedThisWeek.has(player)) return false;
+        for (const [wk, players] of Object.entries(allMgrDates)) {
+          if (wk === weekKey) continue;
+          const pd = players[player];
+          if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        }
+        return false;
+      };
+      weekRoster = {
+        batters: weekRoster.batters.filter((p) => !wasDroppedBefore(p)),
+        pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
+      };
+    }
     const historicalBatters = new Set([
       ...weekRoster.batters.filter((p) => battersPool.size === 0 || battersPool.has(p)),
       ...Object.keys(weekRosterDates).filter(
@@ -9038,7 +9062,7 @@ window.updateCommRosterWeekView = function (managerName) {
   const safeMgr = jsStr(managerName);
 
   const [round, week] = weekKey.split('|');
-  const roster =
+  let roster =
     sd.rosters[managerName] && sd.rosters[managerName][weekKey]
       ? sd.rosters[managerName][weekKey]
       : { batters: [], pitchers: [] };
@@ -9093,6 +9117,29 @@ window.updateCommRosterWeekView = function (managerName) {
     sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]
       ? sd.roster_dates[managerName][weekKey]
       : {};
+
+  // Filter out players dropped (in a previous week's roster_dates) before this week's start.
+  const weekStart = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
+  if (weekStart && sd.roster_dates && sd.roster_dates[managerName]) {
+    const allMgrDates = sd.roster_dates[managerName];
+    const addedThisWeek = new Set([
+      ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+      ...Object.entries(rosterDates).filter(([, d]) => d.add_date).map(([p]) => p),
+    ]);
+    const wasDroppedBefore = (player) => {
+      if (addedThisWeek.has(player)) return false;
+      for (const [wk, players] of Object.entries(allMgrDates)) {
+        if (wk === weekKey) continue;
+        const pd = players[player];
+        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+      }
+      return false;
+    };
+    roster = {
+      batters: roster.batters.filter((p) => !wasDroppedBefore(p)),
+      pitchers: roster.pitchers.filter((p) => !wasDroppedBefore(p)),
+    };
+  }
 
   // Build the complete set of batters/pitchers who were on the roster at ANY point this week.
   // Sources: current roster (pool-filtered) + roster_dates (commissioner add/drop) + approved swaps.
@@ -9186,15 +9233,12 @@ window.updateCommRosterWeekView = function (managerName) {
 
   function commDateTag(player) {
     const dates = getPlayerDates(player);
-    const tags = [];
-    if (dates.add_date) tags.push(`Added ${fmtShortDate(dates.add_date)}`);
-    if (dates.drop_date) tags.push(`Dropped ${fmtShortDate(dates.drop_date)}`);
-    if (tags.length === 0) {
-      if (!scheduleDates || !scheduleDates[weekIdx]) return '';
-      const weekDates = scheduleDates[weekIdx];
-      return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
-    }
-    return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
+    const weekDates = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx] : null;
+    const start = dates.add_date || (weekDates ? weekDates.start : null);
+    const end = dates.drop_date || (weekDates ? weekDates.end : null);
+    if (!start || !end) return '';
+    const hasSwap = !!(dates.add_date || dates.drop_date);
+    return ` <span class="roster-date-tag${hasSwap ? ' roster-date-swap' : ''}">${fmtDateRangeShort(start, end)}</span>`;
   }
 
   // ---- Batters Table ----
