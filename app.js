@@ -5107,7 +5107,7 @@ function buildTeamStatsBreakdown(managerName, seasonData, p2m) {
           const weekKey = `${e.round}|${e.week}`;
           const weekRoster = (seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
           const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[managerName] && seasonData.roster_dates[managerName][weekKey]) || {};
-          return weekRoster.batters.includes(e.batter) || !!weekRosterDates[e.batter];
+          return weekRoster.batters.includes(e.batter) || (!!weekRosterDates[e.batter] && !weekRoster.pitchers.includes(e.batter));
         })
         .forEach(e => {
           if (!weekTotals[e.week]) weekTotals[e.week] = { batting: 0, pitching: 0 };
@@ -5121,7 +5121,7 @@ function buildTeamStatsBreakdown(managerName, seasonData, p2m) {
           const weekKey = `${e.round}|${e.week}`;
           const weekRoster = (seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
           const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[managerName] && seasonData.roster_dates[managerName][weekKey]) || {};
-          return weekRoster.pitchers.includes(e.pitcher) || !!weekRosterDates[e.pitcher];
+          return weekRoster.pitchers.includes(e.pitcher) || (!!weekRosterDates[e.pitcher] && !weekRoster.batters.includes(e.pitcher));
         })
         .forEach(e => {
           if (!weekTotals[e.week]) weekTotals[e.week] = { batting: 0, pitching: 0 };
