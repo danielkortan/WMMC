@@ -170,7 +170,7 @@ function readManagersSeed() {
 function writeManagersSeed(managers) {
   try {
     // Strip passwords — they belong in db.json only, not in the git-committed seed file.
-    const seedRecords = managers.map(({ password, ...rest }) => rest);
+    const seedRecords = managers.map(({ password: _password, ...rest }) => rest);
     fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
@@ -271,14 +271,6 @@ app.post('/api/login', (req, res) => {
   writeDB(db);
 
   res.json({ ok: true, manager: { name: manager.name, email: manager.email, commissioner: manager.commissioner || false } });
-});
-
-// ============================================================
-// Login password endpoint (for client to get global password)
-// ============================================================
-
-app.get('/api/login-password', (req, res) => {
-  res.json({ password: LOGIN_PASSWORD });
 });
 
 // ============================================================
