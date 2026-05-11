@@ -2865,15 +2865,26 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     mgrPPScores[ms.manager] = { pp1: 0, pp2: 0, total: ms.total, pool: null };
   });
 
+  const bracketRosterLookup = buildRosterLookup(seasonData);
   batting.forEach(b => {
-    if (!b.manager || !mgrPPScores[b.manager]) return;
-    if (b.round === 'PP1') mgrPPScores[b.manager].pp1 += (b.weekly_score || 0);
-    if (b.round === 'PP2') mgrPPScores[b.manager].pp2 += (b.weekly_score || 0);
+    const mgr = b.manager || bracketRosterLookup[`${b.batter}|${b.round}|${b.week}`];
+    if (!mgr || !mgrPPScores[mgr]) return;
+    const weekKey = `${b.round}|${b.week}`;
+    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || { batters: [], pitchers: [] };
+    const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
+    if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
+    if (b.round === 'PP1') mgrPPScores[mgr].pp1 += (b.weekly_score || 0);
+    if (b.round === 'PP2') mgrPPScores[mgr].pp2 += (b.weekly_score || 0);
   });
   pitching.forEach(p => {
-    if (!p.manager || !mgrPPScores[p.manager]) return;
-    if (p.round === 'PP1') mgrPPScores[p.manager].pp1 += (p.weekly_score || 0);
-    if (p.round === 'PP2') mgrPPScores[p.manager].pp2 += (p.weekly_score || 0);
+    const mgr = p.manager || bracketRosterLookup[`${p.pitcher}|${p.round}|${p.week}`];
+    if (!mgr || !mgrPPScores[mgr]) return;
+    const weekKey = `${p.round}|${p.week}`;
+    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || { batters: [], pitchers: [] };
+    const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
+    if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
+    if (p.round === 'PP1') mgrPPScores[mgr].pp1 += (p.weekly_score || 0);
+    if (p.round === 'PP2') mgrPPScores[mgr].pp2 += (p.weekly_score || 0);
   });
 
   managers.forEach(m => {
@@ -2929,14 +2940,34 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   // Compute round scores for matchups (with batting/pitching breakdown)
   function getRoundScore(manager, round) {
     let total = 0;
-    batting.filter(b => b.manager === manager && b.round === round).forEach(b => total += (b.weekly_score || 0));
-    pitching.filter(p => p.manager === manager && p.round === round).forEach(p => total += (p.weekly_score || 0));
+    batting.filter(b => (b.manager === manager || b.manager === null) && b.round === round).forEach(b => {
+      const weekKey = `${b.round}|${b.week}`;
+      const wr = (seasonData.rosters && seasonData.rosters[manager] && seasonData.rosters[manager][weekKey]) || { batters: [] };
+      const wrd = (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) || {};
+      if (wr.batters.includes(b.batter) || wrd[b.batter]) total += (b.weekly_score || 0);
+    });
+    pitching.filter(p => (p.manager === manager || p.manager === null) && p.round === round).forEach(p => {
+      const weekKey = `${p.round}|${p.week}`;
+      const wr = (seasonData.rosters && seasonData.rosters[manager] && seasonData.rosters[manager][weekKey]) || { pitchers: [] };
+      const wrd = (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) || {};
+      if (wr.pitchers.includes(p.pitcher) || wrd[p.pitcher]) total += (p.weekly_score || 0);
+    });
     return Math.round(total * 100) / 100;
   }
   function getRoundBreakdown(manager, round) {
     let bat = 0, pit = 0;
-    batting.filter(b => b.manager === manager && b.round === round).forEach(b => bat += (b.weekly_score || 0));
-    pitching.filter(p => p.manager === manager && p.round === round).forEach(p => pit += (p.weekly_score || 0));
+    batting.filter(b => (b.manager === manager || b.manager === null) && b.round === round).forEach(b => {
+      const weekKey = `${b.round}|${b.week}`;
+      const wr = (seasonData.rosters && seasonData.rosters[manager] && seasonData.rosters[manager][weekKey]) || { batters: [] };
+      const wrd = (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) || {};
+      if (wr.batters.includes(b.batter) || wrd[b.batter]) bat += (b.weekly_score || 0);
+    });
+    pitching.filter(p => (p.manager === manager || p.manager === null) && p.round === round).forEach(p => {
+      const weekKey = `${p.round}|${p.week}`;
+      const wr = (seasonData.rosters && seasonData.rosters[manager] && seasonData.rosters[manager][weekKey]) || { pitchers: [] };
+      const wrd = (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) || {};
+      if (wr.pitchers.includes(p.pitcher) || wrd[p.pitcher]) pit += (p.weekly_score || 0);
+    });
     bat = Math.round(bat * 100) / 100;
     pit = Math.round(pit * 100) / 100;
     const total = Math.round((bat + pit) * 100) / 100;
@@ -3081,12 +3112,20 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     batting.filter(b => roundFilter.includes(b.round)).forEach(b => {
       const mgr = b.manager || sbRosterLookup[`${b.batter}|${b.round}|${b.week}`];
       if (!mgr) return;
+      const weekKey = `${b.round}|${b.week}`;
+      const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || { batters: [], pitchers: [] };
+      const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
+      if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].batting += (b.weekly_score || 0);
     });
     pitching.filter(p => roundFilter.includes(p.round)).forEach(p => {
       const mgr = p.manager || sbRosterLookup[`${p.pitcher}|${p.round}|${p.week}`];
       if (!mgr) return;
+      const weekKey = `${p.round}|${p.week}`;
+      const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || { batters: [], pitchers: [] };
+      const weekRosterDates = (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
+      if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
       if (!mgrMap[mgr]) mgrMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
       mgrMap[mgr].pitching += (p.weekly_score || 0);
     });
