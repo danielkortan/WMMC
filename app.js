@@ -9287,7 +9287,16 @@ window.advancePlayers = function(weekIndex) {
   // Build a set of players dropped during or before the prior week
   const swaps = sd.swaps || [];
 
-  const managers = getManagers();
+  // Pre-compute cumulative batting totals per player (from all prior uploaded weeks)
+  // so zero-stat records for the new week can carry the correct running total
+  const existingBatTotals = {};
+  (sd.weekly_batting || []).forEach(b => {
+    if (b.batter) {
+      existingBatTotals[b.batter] = (existingBatTotals[b.batter] || 0) + (b.weekly_score || 0);
+    }
+  });
+
+  const managers = getManagers().filter(m => m.active !== false);
   managers.forEach(m => {
     if (!sd.rosters[m.name]) sd.rosters[m.name] = {};
     const priorRoster = sd.rosters[m.name][priorKey];
@@ -9322,7 +9331,7 @@ window.advancePlayers = function(weekIndex) {
               round: currentSched.round, week: currentSched.week,
               manager: m.name, batter,
               abs: 0, '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0,
-              weekly_score: 0, total_score: 0
+              weekly_score: 0, total_score: existingBatTotals[batter] || 0
             });
           }
         });
