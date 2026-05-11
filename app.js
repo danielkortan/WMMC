@@ -8376,17 +8376,13 @@ window.updateCommRosterWeekView = function(managerName) {
   const commBatCum = {}, commPitCum = {};
   (sd.weekly_batting || []).forEach(b => {
     if (b.round !== round || !b.batter) return;
-    if (b.manager === managerName) {
-      commBatCum[b.batter] = (commBatCum[b.batter] || 0) + (b.weekly_score || 0);
-    } else if (b.manager === null && commWasRostered(b.batter, `${b.round}|${b.week}`, 'bat')) {
+    if ((b.manager === managerName || b.manager === null) && commWasRostered(b.batter, `${b.round}|${b.week}`, 'bat')) {
       commBatCum[b.batter] = (commBatCum[b.batter] || 0) + (b.weekly_score || 0);
     }
   });
   (sd.weekly_pitching || []).forEach(p => {
     if (p.round !== round || !p.pitcher) return;
-    if (p.manager === managerName) {
-      commPitCum[p.pitcher] = (commPitCum[p.pitcher] || 0) + (p.weekly_score || 0);
-    } else if (p.manager === null && commWasRostered(p.pitcher, `${p.round}|${p.week}`, 'pit')) {
+    if ((p.manager === managerName || p.manager === null) && commWasRostered(p.pitcher, `${p.round}|${p.week}`, 'pit')) {
       commPitCum[p.pitcher] = (commPitCum[p.pitcher] || 0) + (p.weekly_score || 0);
     }
   });
