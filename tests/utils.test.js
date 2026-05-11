@@ -1,0 +1,122 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO } from '../js/utils.js';
+
+describe('esc', () => {
+  it('escapes the five HTML-sensitive characters', () => {
+    assert.equal(esc('<script>alert("x")</script>'), '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;');
+    assert.equal(esc('a & b\'s "c"'), 'a &amp; b&#39;s &quot;c&quot;');
+  });
+
+  it('returns empty string for null / undefined', () => {
+    assert.equal(esc(null), '');
+    assert.equal(esc(undefined), '');
+  });
+
+  it('passes plain strings through unchanged', () => {
+    assert.equal(esc('Whit Merrifield'), 'Whit Merrifield');
+  });
+});
+
+describe('jsStr', () => {
+  it('escapes backslashes and single quotes for JS string literals', () => {
+    assert.equal(jsStr("O'Neill"), "O\\'Neill");
+    assert.equal(jsStr('back\\slash'), 'back\\\\slash');
+  });
+
+  it('returns empty string for null / undefined', () => {
+    assert.equal(jsStr(null), '');
+    assert.equal(jsStr(undefined), '');
+  });
+});
+
+describe('parseNum', () => {
+  it('parses numeric strings', () => {
+    assert.equal(parseNum('3.14'), 3.14);
+    assert.equal(parseNum('42'), 42);
+  });
+
+  it('returns 0 for non-numeric input', () => {
+    assert.equal(parseNum(''), 0);
+    assert.equal(parseNum('abc'), 0);
+    assert.equal(parseNum(null), 0);
+    assert.equal(parseNum(undefined), 0);
+  });
+
+  it('passes numbers through', () => {
+    assert.equal(parseNum(5), 5);
+    assert.equal(parseNum(-2.5), -2.5);
+  });
+});
+
+describe('fmt', () => {
+  it('returns "-" for blank / null / "None"', () => {
+    assert.equal(fmt(null), '-');
+    assert.equal(fmt(''), '-');
+    assert.equal(fmt('None'), '-');
+  });
+
+  it('formats integers without decimals', () => {
+    assert.equal(fmt(42), '42');
+    assert.equal(fmt(1000), '1,000');
+  });
+
+  it('formats decimals with up to 2 fractional digits', () => {
+    assert.equal(fmt(12.5), '12.5');
+    assert.equal(fmt(12.345), '12.35');
+  });
+
+  it('adds the 69 easter egg', () => {
+    assert.equal(fmt(69), '69 ❤️');
+    assert.equal(fmt(69.5), '69.5 ❤️');
+  });
+
+  it('passes non-numeric strings through', () => {
+    assert.equal(fmt('TBD'), 'TBD');
+  });
+});
+
+describe('fmtDec', () => {
+  it('returns "0" for blank input', () => {
+    assert.equal(fmtDec(''), '0');
+    assert.equal(fmtDec(null), '0');
+  });
+
+  it('formats with up to 2 fractional digits', () => {
+    assert.equal(fmtDec(7), '7');
+    assert.equal(fmtDec(7.123), '7.12');
+  });
+});
+
+describe('getInitials', () => {
+  it('returns the first letter of first + last name', () => {
+    assert.equal(getInitials('Dan Kortan'), 'DK');
+    assert.equal(getInitials('whit merrifield'), 'WM');
+  });
+
+  it('uses first 2 chars of a single-word name', () => {
+    assert.equal(getInitials('Madonna'), 'MA');
+  });
+
+  it('returns "?" for blank input', () => {
+    assert.equal(getInitials(''), '?');
+    assert.equal(getInitials(null), '?');
+  });
+
+  it('handles middle names by skipping them', () => {
+    assert.equal(getInitials('Cal Quantrill Jr'), 'CJ');
+  });
+});
+
+describe('fmtDateISO', () => {
+  it('formats as YYYY-MM-DD with zero padding', () => {
+    // Construct date deterministically in local TZ
+    const d = new Date(2026, 4, 11); // May 11, 2026 — month is 0-indexed
+    assert.equal(fmtDateISO(d), '2026-05-11');
+  });
+
+  it('zero-pads single-digit month and day', () => {
+    const d = new Date(2026, 0, 3);
+    assert.equal(fmtDateISO(d), '2026-01-03');
+  });
+});

@@ -33,7 +33,7 @@ async function postSlack(text, blocks) {
   await fetch(SLACK_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
 }
 
@@ -43,7 +43,7 @@ async function postScoreboardSlack(db, year) {
   await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, blocks })
+    body: JSON.stringify({ text, blocks }),
   });
 }
 
@@ -52,31 +52,47 @@ async function postScoreboardSlack(db, year) {
 const ASSET_VERSION = Date.now();
 
 // Parse JSON bodies up to 50MB (season data can be large)
-app.use(express.json({ limit: '50mb' }));
+// 10mb body limit — generous enough for banner-config base64 images and full
+// season payloads, but bounded so a malicious client can't OOM the process.
+app.use(express.json({ limit: '10mb' }));
 
 // ============================================================
 // Security middleware
 // ============================================================
 
-// Simple rate limiter for POST endpoints
-const rateLimits = {};
+// Simple rate limiter — covers all mutating verbs (POST/PUT/PATCH/DELETE).
+// Read-only GETs are not rate limited so dashboard refreshes don't trip it.
+const rateLimits = new Map();
 const RATE_WINDOW_MS = 60 * 1000; // 1 minute
 const RATE_MAX_REQUESTS = 60;
+const RATE_LIMITED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 function rateLimit(req, res, next) {
-  if (req.method !== 'POST') return next();
+  if (!RATE_LIMITED_METHODS.has(req.method)) return next();
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
-  if (!rateLimits[ip] || now - rateLimits[ip].start > RATE_WINDOW_MS) {
-    rateLimits[ip] = { start: now, count: 1 };
+  const entry = rateLimits.get(ip);
+  if (!entry || now - entry.start > RATE_WINDOW_MS) {
+    rateLimits.set(ip, { start: now, count: 1 });
   } else {
-    rateLimits[ip].count++;
-  }
-  if (rateLimits[ip].count > RATE_MAX_REQUESTS) {
-    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+    entry.count++;
+    if (entry.count > RATE_MAX_REQUESTS) {
+      return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+    }
   }
   next();
 }
+
+// Periodically evict stale entries so the Map can't grow unbounded.
+setInterval(
+  () => {
+    const cutoff = Date.now() - RATE_WINDOW_MS * 2;
+    for (const [ip, entry] of rateLimits) {
+      if (entry.start < cutoff) rateLimits.delete(ip);
+    }
+  },
+  5 * 60 * 1000
+).unref();
 
 app.use(rateLimit);
 
@@ -89,14 +105,53 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
+// Auth middleware
+// ============================================================
+// Authenticated routes look for X-User-Email + X-User-Password headers, set by
+// the client's apiFetch() helper after a successful /api/login. Both are
+// re-verified against db.json on every request — there is no server-side
+// session store, so a stolen token has no value beyond the password it carries.
+
+function loadManagerFromHeaders(req) {
+  const email = (req.get('X-User-Email') || '').toLowerCase();
+  const password = req.get('X-User-Password') || '';
+  if (!email || !password) return null;
+  const db = readDB();
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
+  if (!manager) return null;
+  const expected = manager.password || LOGIN_PASSWORD;
+  if (password !== expected) return null;
+  return manager;
+}
+
+function requireAuth(req, res, next) {
+  const manager = loadManagerFromHeaders(req);
+  if (!manager) return res.status(401).json({ error: 'Authentication required' });
+  if (manager.active === false) {
+    return res.status(403).json({ error: 'Account is inactive' });
+  }
+  req.manager = manager;
+  next();
+}
+
+function requireCommissioner(req, res, next) {
+  const manager = loadManagerFromHeaders(req);
+  if (!manager) return res.status(401).json({ error: 'Authentication required' });
+  if (!manager.commissioner) {
+    return res.status(403).json({ error: 'Commissioner access required' });
+  }
+  req.manager = manager;
+  next();
+}
+
+// ============================================================
 // Static file serving
 // ============================================================
 
 // Serve index.html through a dedicated route so we can inject the dynamic
 // version stamp and set aggressive no-cache headers that cannot be overridden.
 app.get(['/', '/index.html'], (req, res) => {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8')
-    .replace(/\?v=\d+/g, '?v=' + ASSET_VERSION);
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8').replace(/\?v=\d+/g, '?v=' + ASSET_VERSION);
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
@@ -104,14 +159,16 @@ app.get(['/', '/index.html'], (req, res) => {
 });
 
 // Serve remaining static files (js/, css/, data.json, etc.)
-app.use(express.static(__dirname, {
-  index: false, // index.html is handled by the route above
-  setHeaders(res, filePath) {
-    if (/\.(js|css|json)$/i.test(filePath)) {
-      res.set('Cache-Control', 'public, max-age=300, must-revalidate');
-    }
-  }
-}));
+app.use(
+  express.static(__dirname, {
+    index: false, // index.html is handled by the route above
+    setHeaders(res, filePath) {
+      if (/\.(js|css|json)$/i.test(filePath)) {
+        res.set('Cache-Control', 'public, max-age=300, must-revalidate');
+      }
+    },
+  })
+);
 
 // ============================================================
 // Database helpers
@@ -125,7 +182,7 @@ async function loadFromUpstash() {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   try {
     const resp = await fetch(`${UPSTASH_URL}/get/${UPSTASH_KEY}`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
     });
     if (!resp.ok) return null;
     const { result } = await resp.json();
@@ -143,9 +200,9 @@ async function saveToUpstash(data) {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${UPSTASH_TOKEN}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(JSON.stringify(data))
+      body: JSON.stringify(JSON.stringify(data)),
     });
     if (!resp.ok) {
       const text = await resp.text();
@@ -197,7 +254,7 @@ function readDB() {
 function writeDB(data) {
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
   // Async backup to Upstash so data survives Render's ephemeral filesystem
-  saveToUpstash(data).catch(e => console.error('[Upstash] Background save failed:', e.message));
+  saveToUpstash(data).catch((e) => console.error('[Upstash] Background save failed:', e.message));
 }
 
 // ============================================================
@@ -212,7 +269,7 @@ function addAuditEntry(db, action, details, email) {
     timestamp: new Date().toISOString(),
     action,
     details,
-    email: email || 'system'
+    email: email || 'system',
   });
   // Prune to max entries
   if (db.audit_log.length > MAX_AUDIT_ENTRIES) {
@@ -255,7 +312,7 @@ app.post('/api/login', (req, res) => {
 
   const db = readDB();
   const managers = db.managers || [];
-  const manager = managers.find(m => m.email && m.email.toLowerCase() === email.toLowerCase());
+  const manager = managers.find((m) => m.email && m.email.toLowerCase() === email.toLowerCase());
 
   if (!manager) {
     return res.status(401).json({ error: 'Invalid credentials' });
@@ -270,7 +327,10 @@ app.post('/api/login', (req, res) => {
   addAuditEntry(db, 'login', { email: manager.email }, manager.email);
   writeDB(db);
 
-  res.json({ ok: true, manager: { name: manager.name, email: manager.email, commissioner: manager.commissioner || false } });
+  res.json({
+    ok: true,
+    manager: { name: manager.name, email: manager.email, commissioner: manager.commissioner || false },
+  });
 });
 
 // ============================================================
@@ -284,7 +344,7 @@ app.get('/api/seasons', (req, res) => {
 });
 
 // POST /api/seasons — save all seasons (full replace)
-app.post('/api/seasons', (req, res) => {
+app.post('/api/seasons', requireCommissioner, (req, res) => {
   if (!req.body || typeof req.body !== 'object') {
     return res.status(400).json({ error: 'Request body must be an object' });
   }
@@ -296,7 +356,7 @@ app.post('/api/seasons', (req, res) => {
 });
 
 // POST /api/seasons/:year — save a single season
-app.post('/api/seasons/:year', (req, res) => {
+app.post('/api/seasons/:year', requireAuth, (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
   }
@@ -308,9 +368,9 @@ app.post('/api/seasons/:year', (req, res) => {
 
   // Detect newly added pending swaps so we can notify via Slack
   const existingSwaps = (db.seasons[req.params.year] && db.seasons[req.params.year].swaps) || [];
-  const existingIds = new Set(existingSwaps.map(s => s.id));
+  const existingIds = new Set(existingSwaps.map((s) => s.id));
   const incomingSwaps = req.body.swaps || [];
-  const newPending = incomingSwaps.filter(s => s.status === 'pending' && !existingIds.has(s.id));
+  const newPending = incomingSwaps.filter((s) => s.status === 'pending' && !existingIds.has(s.id));
 
   addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
   const sd = req.body;
@@ -341,14 +401,14 @@ app.get('/api/pending-count', (req, res) => {
   const db = readDB();
   const sd = (db.seasons || {})[year];
   const swaps = (sd && sd.swaps) || [];
-  res.json({ count: swaps.filter(s => s.status === 'pending').length });
+  res.json({ count: swaps.filter((s) => s.status === 'pending').length });
 });
 
 // GET /api/managers — return managers list
 app.get('/api/managers', (req, res) => {
   const db = readDB();
   // Strip passwords from response, but indicate if a custom password is set
-  const managers = (db.managers || []).map(m => {
+  const managers = (db.managers || []).map((m) => {
     const { password, ...safe } = m;
     safe.hasCustomPassword = !!password;
     return safe;
@@ -357,7 +417,7 @@ app.get('/api/managers', (req, res) => {
 });
 
 // POST /api/managers — save managers list
-app.post('/api/managers', (req, res) => {
+app.post('/api/managers', requireCommissioner, (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ error: 'Request body must be an array' });
   }
@@ -365,10 +425,10 @@ app.post('/api/managers', (req, res) => {
   // Preserve existing passwords — the client never receives them (stripped in GET),
   // so we must carry them forward from the current db record.
   const existingPasswords = {};
-  (db.managers || []).forEach(m => {
+  (db.managers || []).forEach((m) => {
     if (m.email && m.password) existingPasswords[m.email.toLowerCase()] = m.password;
   });
-  db.managers = req.body.map(m => {
+  db.managers = req.body.map((m) => {
     const emailKey = (m.email || '').toLowerCase();
     if (!m.password && existingPasswords[emailKey]) {
       return { ...m, password: existingPasswords[emailKey] };
@@ -383,14 +443,14 @@ app.post('/api/managers', (req, res) => {
 });
 
 // POST /api/managers/:email/password — set a manager's password
-app.post('/api/managers/:email/password', (req, res) => {
+app.post('/api/managers/:email/password', requireCommissioner, (req, res) => {
   const email = decodeURIComponent(req.params.email).toLowerCase();
   const { password } = req.body || {};
   if (!password || typeof password !== 'string' || password.trim().length < 3) {
     return res.status(400).json({ error: 'Password must be at least 3 characters' });
   }
   const db = readDB();
-  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
   if (!manager) {
     return res.status(404).json({ error: 'Manager not found' });
   }
@@ -402,10 +462,10 @@ app.post('/api/managers/:email/password', (req, res) => {
 });
 
 // DELETE /api/managers/:email/password — reset a manager's password to the global default
-app.delete('/api/managers/:email/password', (req, res) => {
+app.delete('/api/managers/:email/password', requireCommissioner, (req, res) => {
   const email = decodeURIComponent(req.params.email).toLowerCase();
   const db = readDB();
-  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
   if (!manager) {
     return res.status(404).json({ error: 'Manager not found' });
   }
@@ -424,7 +484,7 @@ app.post('/api/managers/:email/change-password', (req, res) => {
     return res.status(400).json({ error: 'New password must be at least 3 characters' });
   }
   const db = readDB();
-  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === email);
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
   if (!manager) {
     return res.status(404).json({ error: 'Manager not found' });
   }
@@ -439,9 +499,8 @@ app.post('/api/managers/:email/change-password', (req, res) => {
   res.json({ ok: true });
 });
 
-
 // GET /api/audit-log — return recent audit log entries
-app.get('/api/audit-log', (req, res) => {
+app.get('/api/audit-log', requireCommissioner, (req, res) => {
   const db = readDB();
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, MAX_AUDIT_ENTRIES);
   const log = (db.audit_log || []).slice(0, limit);
@@ -460,7 +519,7 @@ app.get('/api/banner-config', (req, res) => {
 
 // POST /api/banner-config — save banner background configuration
 // Body: { imageData, posX, posY, scale } or null to clear
-app.post('/api/banner-config', (req, res) => {
+app.post('/api/banner-config', requireCommissioner, (req, res) => {
   const db = readDB();
   const body = req.body;
 
@@ -500,8 +559,8 @@ app.post('/api/banner-config', (req, res) => {
 // ============================================================
 
 const SCORING = {
-  batting: { '1B': 3, '2B': 5, '3B': 8, 'HR': 10, 'R': 2, 'RBI': 2, 'SB': 5, 'BB': 2 },
-  pitching: { 'W': 4, 'QS': 4, 'CG': 2.5, 'CGSO': 2.5, 'NH': 5, 'IP': 2.25, 'H': -0.6, 'ER': -2, 'BB': -0.6, 'K': 2 }
+  batting: { '1B': 3, '2B': 5, '3B': 8, HR: 10, R: 2, RBI: 2, SB: 5, BB: 2 },
+  pitching: { W: 4, QS: 4, CG: 2.5, CGSO: 2.5, NH: 5, IP: 2.25, H: -0.6, ER: -2, BB: -0.6, K: 2 },
 };
 
 const SEASON_SCHEDULE = [
@@ -592,15 +651,13 @@ function pitchingDelta(curr, prev) {
 
 // Find the SEASON_SCHEDULE index for a given round+week
 function getScheduleWeekIndex(round, week) {
-  return SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
+  return SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
 }
 
 // Compute effective weekly batting score from daily deltas filtered by player_dates.
 // Returns null when no daily records exist (caller falls back to stored weekly_score).
 function computeEffectiveBattingScore(sd, batter, round, week) {
-  const records = (sd.daily_batting || []).filter(r =>
-    r.batter === batter && r.round === round && r.week === week
-  );
+  const records = (sd.daily_batting || []).filter((r) => r.batter === batter && r.round === round && r.week === week);
   if (records.length === 0) return null;
 
   const weekIdx = getScheduleWeekIndex(round, week);
@@ -608,14 +665,14 @@ function computeEffectiveBattingScore(sd, batter, round, week) {
   const weekKey = `${round}|${week}`;
   const override = (((sd.player_dates || {})[weekKey] || {}).batter || {})[batter] || {};
 
-  const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
+  const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
   // Shift end by +1 day: the daily sync runs in the morning and creates a record dated
   // today containing yesterday's games. The last day of the scoring week therefore
   // appears in a record dated end+1, so we must include it.
-  const rawEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const rawEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
   const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
 
-  const eligible = records.filter(r => {
+  const eligible = records.filter((r) => {
     if (effectiveStart && r.date < effectiveStart) return false;
     if (effectiveEnd && r.date > effectiveEnd) return false;
     return true;
@@ -626,8 +683,8 @@ function computeEffectiveBattingScore(sd, batter, round, week) {
 
 // Compute effective weekly pitching score from daily deltas filtered by player_dates.
 function computeEffectivePitchingScore(sd, pitcher, round, week) {
-  const records = (sd.daily_pitching || []).filter(r =>
-    r.pitcher === pitcher && r.round === round && r.week === week
+  const records = (sd.daily_pitching || []).filter(
+    (r) => r.pitcher === pitcher && r.round === round && r.week === week
   );
   if (records.length === 0) return null;
 
@@ -636,11 +693,11 @@ function computeEffectivePitchingScore(sd, pitcher, round, week) {
   const weekKey = `${round}|${week}`;
   const override = (((sd.player_dates || {})[weekKey] || {}).pitcher || {})[pitcher] || {};
 
-  const effectiveStart = ('start' in override) ? override.start : (weekDates && weekDates.start) || null;
-  const rawEnd = ('end' in override) ? override.end : (weekDates && weekDates.end) || null;
+  const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
+  const rawEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
   const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
 
-  const eligible = records.filter(r => {
+  const eligible = records.filter((r) => {
     if (effectiveStart && r.date < effectiveStart) return false;
     if (effectiveEnd && r.date > effectiveEnd) return false;
     return true;
@@ -653,15 +710,20 @@ function computeEffectivePitchingScore(sd, pitcher, round, week) {
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
 function recomputeAllWeeklyScores(sd) {
-  (sd.weekly_batting || []).forEach(b => {
+  (sd.weekly_batting || []).forEach((b) => {
     if ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked) return;
     const score = computeEffectiveBattingScore(sd, b.batter, b.round, b.week);
-    if (score !== null) { b.weekly_score = score; b.total_score = score; }
+    if (score !== null) {
+      b.weekly_score = score;
+      b.total_score = score;
+    }
   });
-  (sd.weekly_pitching || []).forEach(p => {
+  (sd.weekly_pitching || []).forEach((p) => {
     if ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked) return;
     const score = computeEffectivePitchingScore(sd, p.pitcher, p.round, p.week);
-    if (score !== null) { p.weekly_score = score; }
+    if (score !== null) {
+      p.weekly_score = score;
+    }
   });
 }
 
@@ -669,7 +731,13 @@ function recomputeAllWeeklyScores(sd) {
 // Slack Scoreboard Builder
 // ============================================================
 
-const ROUND_LABELS = { PP1: 'Pool Play 1', PP2: 'Pool Play 2', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+const ROUND_LABELS = {
+  PP1: 'Pool Play 1',
+  PP2: 'Pool Play 2',
+  QF: 'Quarterfinals',
+  SF: 'Semifinals',
+  Finals: 'Finals',
+};
 const ROUND_ORDER = ['PP1', 'PP2', 'QF', 'SF', 'Finals'];
 
 function detectCurrentRound(scheduleDates) {
@@ -694,21 +762,25 @@ function detectCurrentRound(scheduleDates) {
 function computeRoundScores(batting, pitching, rounds) {
   const roundSet = new Set(rounds);
   const map = {};
-  batting.filter(b => roundSet.has(b.round)).forEach(b => {
-    if (!b.manager) return;
-    if (!map[b.manager]) map[b.manager] = { batting: 0, pitching: 0 };
-    map[b.manager].batting += (b.weekly_score || 0);
-  });
-  pitching.filter(p => roundSet.has(p.round)).forEach(p => {
-    if (!p.manager) return;
-    if (!map[p.manager]) map[p.manager] = { batting: 0, pitching: 0 };
-    map[p.manager].pitching += (p.weekly_score || 0);
-  });
+  batting
+    .filter((b) => roundSet.has(b.round))
+    .forEach((b) => {
+      if (!b.manager) return;
+      if (!map[b.manager]) map[b.manager] = { batting: 0, pitching: 0 };
+      map[b.manager].batting += b.weekly_score || 0;
+    });
+  pitching
+    .filter((p) => roundSet.has(p.round))
+    .forEach((p) => {
+      if (!p.manager) return;
+      if (!map[p.manager]) map[p.manager] = { batting: 0, pitching: 0 };
+      map[p.manager].pitching += p.weekly_score || 0;
+    });
   return Object.entries(map).map(([manager, s]) => ({
     manager,
     batting: Math.round(s.batting * 100) / 100,
     pitching: Math.round(s.pitching * 100) / 100,
-    total: Math.round((s.batting + s.pitching) * 100) / 100
+    total: Math.round((s.batting + s.pitching) * 100) / 100,
   }));
 }
 
@@ -717,7 +789,9 @@ function buildScoreboardBlocks(db, year) {
   const managers = db.managers || [];
 
   const managerPoolMap = {};
-  managers.forEach(m => { if (m.pool) managerPoolMap[m.name] = m.pool; });
+  managers.forEach((m) => {
+    if (m.pool) managerPoolMap[m.name] = m.pool;
+  });
 
   // Determine current round
   const scheduleDates = seasonData.schedule_dates || [];
@@ -725,9 +799,12 @@ function buildScoreboardBlocks(db, year) {
 
   // If still no round from dates, use the latest round present in data
   if (!currentRound) {
-    const roundsWithData = new Set((seasonData.weekly_batting || []).map(b => b.round));
+    const roundsWithData = new Set((seasonData.weekly_batting || []).map((b) => b.round));
     for (let i = ROUND_ORDER.length - 1; i >= 0; i--) {
-      if (roundsWithData.has(ROUND_ORDER[i])) { currentRound = ROUND_ORDER[i]; break; }
+      if (roundsWithData.has(ROUND_ORDER[i])) {
+        currentRound = ROUND_ORDER[i];
+        break;
+      }
     }
   }
 
@@ -748,10 +825,10 @@ function buildScoreboardBlocks(db, year) {
 
   const pp1WinnerSet = new Set();
   const pp2WinnerSet = new Set();
-  Object.values(poolGroups).forEach(members => {
-    const best1 = pp1Scores.filter(s => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
+  Object.values(poolGroups).forEach((members) => {
+    const best1 = pp1Scores.filter((s) => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
     if (best1 && best1.total > 0) pp1WinnerSet.add(best1.manager);
-    const best2 = pp2Scores.filter(s => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
+    const best2 = pp2Scores.filter((s) => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
     if (best2 && best2.total > 0) pp2WinnerSet.add(best2.manager);
   });
 
@@ -762,7 +839,10 @@ function buildScoreboardBlocks(db, year) {
   let wcCount = 0;
   for (const m of ppOverall) {
     if (wcCount >= numWildcards) break;
-    if (!allPPWinners.has(m.manager) && m.total > 0) { wildcardSet.add(m.manager); wcCount++; }
+    if (!allPPWinners.has(m.manager) && m.total > 0) {
+      wildcardSet.add(m.manager);
+      wcCount++;
+    }
   }
 
   // Color dot per manager: 🟢 PP1 leader, 🔵 PP2 leader, 🔷 both, 🟡 wildcard
@@ -783,85 +863,99 @@ function buildScoreboardBlocks(db, year) {
 
   // ---- Overall standings (all rounds) ----
   const overallMap = {};
-  batting.forEach(b => {
+  batting.forEach((b) => {
     if (!b.manager) return;
     if (!overallMap[b.manager]) overallMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0 };
-    overallMap[b.manager].batting += (b.weekly_score || 0);
+    overallMap[b.manager].batting += b.weekly_score || 0;
   });
-  pitching.forEach(p => {
+  pitching.forEach((p) => {
     if (!p.manager) return;
     if (!overallMap[p.manager]) overallMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0 };
-    overallMap[p.manager].pitching += (p.weekly_score || 0);
+    overallMap[p.manager].pitching += p.weekly_score || 0;
   });
-  const overall = Object.values(overallMap).map(m => ({
-    ...m,
-    batting: Math.round(m.batting * 100) / 100,
-    pitching: Math.round(m.pitching * 100) / 100,
-    total: Math.round((m.batting + m.pitching) * 100) / 100
-  })).sort((a, b) => b.total - a.total);
+  const overall = Object.values(overallMap)
+    .map((m) => ({
+      ...m,
+      batting: Math.round(m.batting * 100) / 100,
+      pitching: Math.round(m.pitching * 100) / 100,
+      total: Math.round((m.batting + m.pitching) * 100) / 100,
+    }))
+    .sort((a, b) => b.total - a.total);
 
   const overallLastMgr = overall.length > 0 ? overall[overall.length - 1].manager : null;
 
   // ---- Current-round pool standings ----
   const poolRoundMap = {};
   if (currentRound) {
-    batting.filter(b => b.round === currentRound).forEach(b => {
-      if (!b.manager) return;
-      if (!poolRoundMap[b.manager]) poolRoundMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0, pool: managerPoolMap[b.manager] };
-      poolRoundMap[b.manager].batting += (b.weekly_score || 0);
-    });
-    pitching.filter(p => p.round === currentRound).forEach(p => {
-      if (!p.manager) return;
-      if (!poolRoundMap[p.manager]) poolRoundMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0, pool: managerPoolMap[p.manager] };
-      poolRoundMap[p.manager].pitching += (p.weekly_score || 0);
-    });
+    batting
+      .filter((b) => b.round === currentRound)
+      .forEach((b) => {
+        if (!b.manager) return;
+        if (!poolRoundMap[b.manager])
+          {poolRoundMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0, pool: managerPoolMap[b.manager] };}
+        poolRoundMap[b.manager].batting += b.weekly_score || 0;
+      });
+    pitching
+      .filter((p) => p.round === currentRound)
+      .forEach((p) => {
+        if (!p.manager) return;
+        if (!poolRoundMap[p.manager])
+          {poolRoundMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0, pool: managerPoolMap[p.manager] };}
+        poolRoundMap[p.manager].pitching += p.weekly_score || 0;
+      });
   }
-  const poolStandings = Object.values(poolRoundMap).map(m => ({
-    ...m,
-    batting: Math.round(m.batting * 100) / 100,
-    pitching: Math.round(m.pitching * 100) / 100,
-    total: Math.round((m.batting + m.pitching) * 100) / 100
-  })).sort((a, b) => b.total - a.total);
+  const poolStandings = Object.values(poolRoundMap)
+    .map((m) => ({
+      ...m,
+      batting: Math.round(m.batting * 100) / 100,
+      pitching: Math.round(m.pitching * 100) / 100,
+      total: Math.round((m.batting + m.pitching) * 100) / 100,
+    }))
+    .sort((a, b) => b.total - a.total);
 
   // Group by pool — already sorted desc so last entry = pool's last place
   const pools = {};
-  poolStandings.forEach(m => {
+  poolStandings.forEach((m) => {
     const key = m.pool ? `Pool ${m.pool}` : 'Unassigned';
     if (!pools[key]) pools[key] = [];
     pools[key].push(m);
   });
 
   // ---- Formatters ----
-  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-  const fmtInt = n => Math.round(n).toLocaleString('en-US');
+  const fmt = (n) => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
   const rankEmoji = ['\u{1F947}', '\u{1F948}', '\u{1F949}']; // 🥇🥈🥉
-  const rank = i => i < 3 ? rankEmoji[i] : `${i + 1}.`;
-  const rankPool = i => i === 0 ? '\u{1F947}' : `${i + 1}.`; // 🥇 for pool leader only
-  const heart = n => Math.floor(n) === 69 ? ' ❤️' : ''; // ❤️ easter egg at 69
+  const rank = (i) => (i < 3 ? rankEmoji[i] : `${i + 1}.`);
+  const rankPool = (i) => (i === 0 ? '\u{1F947}' : `${i + 1}.`); // 🥇 for pool leader only
+  const heart = (n) => (Math.floor(n) === 69 ? ' ❤️' : ''); // ❤️ easter egg at 69
   const dumpster = '\u{1F5D1}️\u{1F4A6}'; // 🗑️💦 last place
 
   // ---- Build overall standings text ----
   const overallText = overall.length
-    ? overall.map((m, i) => {
-        const d = dot(m.manager, 'overall');
-        const nameStr = d !== null ? `*${m.manager}*` : m.manager;
-        const dotStr = d ? `${d} ` : '';
-        const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-        return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
-      }).join('\n')
+    ? overall
+        .map((m, i) => {
+          const d = dot(m.manager, 'overall');
+          const nameStr = d !== null ? `*${m.manager}*` : m.manager;
+          const dotStr = d ? `${d} ` : '';
+          const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
+          return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+        })
+        .join('\n')
     : '_No scores recorded yet._';
 
   // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
   const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
   const poolFields = sortedPoolEntries.map(([poolName, members]) => {
     const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
-    const lines = members.map((m, i) => {
-      const d = dot(m.manager, currentRound);
-      const dotStr = d ? `${d} ` : '';
-      const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-      const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
-      return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
-    }).join('\n');
+    const lines = members
+      .map((m, i) => {
+        const d = dot(m.manager, currentRound);
+        const dotStr = d ? `${d} ` : '';
+        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+        const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+        return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+      })
+      .join('\n');
     return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
   });
 
@@ -894,12 +988,12 @@ function buildScoreboardBlocks(db, year) {
   blocks.push({ type: 'divider' });
   blocks.push({
     type: 'context',
-    elements: [{ type: 'mrkdwn', text: '\u{1F517} View full scoreboard: <http://wmmc.live|wmmc.live>' }]
+    elements: [{ type: 'mrkdwn', text: '\u{1F517} View full scoreboard: <http://wmmc.live|wmmc.live>' }],
   });
 
   return {
     blocks,
-    text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel} | wmmc.live`
+    text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel} | wmmc.live`,
   };
 }
 
@@ -926,11 +1020,12 @@ async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
     if (!resp.ok) {
       if (resp.status === 404 || resp.status === 400) return null;
       if (resp.status === 429 && attempt < 2) {
-        await new Promise(r => setTimeout(r, 65000));
+        await new Promise((r) => setTimeout(r, 65000));
         continue;
       }
       const text = await resp.text();
-      if (resp.status === 429) throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');
+      if (resp.status === 429)
+        {throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');}
       throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
     }
     const data = await resp.json();
@@ -941,7 +1036,7 @@ async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
 // Parse sheet rows (first row = headers) into objects
 function parseSheetRows(values) {
   if (!values || values.length < 2) return [];
-  const headers = values[0].map(h => (h || '').trim());
+  const headers = values[0].map((h) => (h || '').trim());
   const rows = [];
   for (let i = 1; i < values.length; i++) {
     const row = {};
@@ -1010,9 +1105,9 @@ function syncPlayerDatesFromRosterDates(sd) {
       const parts = weekKey.split('|');
       const round = parts[0];
       const week = parts.slice(1).join('|');
-      const weekIdx = SEASON_SCHEDULE.findIndex(s => s.round === round && s.week === week);
-      const weekStart = weekIdx >= 0 && sd.schedule_dates && sd.schedule_dates[weekIdx]
-        ? sd.schedule_dates[weekIdx].start : null;
+      const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
+      const weekStart =
+        weekIdx >= 0 && sd.schedule_dates && sd.schedule_dates[weekIdx] ? sd.schedule_dates[weekIdx].start : null;
 
       for (const [player, dates] of Object.entries(players)) {
         if (!dates.add_date) continue;
@@ -1048,7 +1143,7 @@ function recomputeMidWeekAddScores(sd) {
     const week = parts.slice(1).join('|');
     for (const [batter, entry] of Object.entries(weekTypes.batter || {})) {
       if (!entry || !entry.auto) continue;
-      (sd.weekly_batting || []).forEach(b => {
+      (sd.weekly_batting || []).forEach((b) => {
         if (b.batter !== batter || b.round !== round || b.week !== week) return;
         if (b.drop_locked || (b.manual_fields && b.manual_fields.length > 0)) return;
         const score = computeEffectiveBattingScore(sd, batter, round, week);
@@ -1058,7 +1153,7 @@ function recomputeMidWeekAddScores(sd) {
     }
     for (const [pitcher, entry] of Object.entries(weekTypes.pitcher || {})) {
       if (!entry || !entry.auto) continue;
-      (sd.weekly_pitching || []).forEach(p => {
+      (sd.weekly_pitching || []).forEach((p) => {
         if (p.pitcher !== pitcher || p.round !== round || p.week !== week) return;
         if (p.drop_locked || (p.manual_fields && p.manual_fields.length > 0)) return;
         const score = computeEffectivePitchingScore(sd, pitcher, round, week);
@@ -1080,8 +1175,8 @@ function repairGhostInitialRosterPlayers(sd) {
 
   const commAdded = new Set(
     (sd.swaps || [])
-      .filter(s => s.status === 'approved' && s.player_in && s.week_key === weekKey)
-      .map(s => s.player_in)
+      .filter((s) => s.status === 'approved' && s.player_in && s.week_key === weekKey)
+      .map((s) => s.player_in)
   );
 
   for (const [manager, sub] of Object.entries(sd.initial_submissions)) {
@@ -1099,45 +1194,49 @@ function repairGhostInitialRosterPlayers(sd) {
 
     const candidateBatters = new Set([
       ...(mgrRoster[weekKey].batters || []),
-      ...Object.keys(weekRosterDates).filter(p => allBattersPool.size === 0 || allBattersPool.has(p)),
+      ...Object.keys(weekRosterDates).filter((p) => allBattersPool.size === 0 || allBattersPool.has(p)),
     ]);
     const candidatePitchers = new Set([
       ...(mgrRoster[weekKey].pitchers || []),
-      ...Object.keys(weekRosterDates).filter(p => allPitchersPool.size > 0 && allPitchersPool.has(p)),
+      ...Object.keys(weekRosterDates).filter((p) => allPitchersPool.size > 0 && allPitchersPool.has(p)),
     ]);
 
-    const ghostBatters = [...candidateBatters].filter(b => !submittedBatters.has(b) && !commAdded.has(b));
-    const ghostPitchers = [...candidatePitchers].filter(p => !submittedPitchers.has(p) && !commAdded.has(p));
+    const ghostBatters = [...candidateBatters].filter((b) => !submittedBatters.has(b) && !commAdded.has(b));
+    const ghostPitchers = [...candidatePitchers].filter((p) => !submittedPitchers.has(p) && !commAdded.has(p));
     if (ghostBatters.length === 0 && ghostPitchers.length === 0) continue;
 
-    [...ghostBatters, ...ghostPitchers].forEach(player => {
+    [...ghostBatters, ...ghostPitchers].forEach((player) => {
       if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
         delete sd.roster_dates[manager][weekKey][player];
       }
       // Purge ALL stats — including drop_locked — because this player was never legitimately rostered
       if (sd.weekly_batting) {
-        sd.weekly_batting = sd.weekly_batting.filter(b =>
-          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
+        sd.weekly_batting = sd.weekly_batting.filter(
+          (b) => !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
         );
       }
       if (sd.weekly_pitching) {
-        sd.weekly_pitching = sd.weekly_pitching.filter(p =>
-          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
+        sd.weekly_pitching = sd.weekly_pitching.filter(
+          (p) => !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
         );
       }
       if (sd.daily_batting) {
-        sd.daily_batting = sd.daily_batting.filter(b =>
-          !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
+        sd.daily_batting = sd.daily_batting.filter(
+          (b) => !(b.batter === player && b.round === firstSched.round && b.week === firstSched.week)
         );
       }
       if (sd.daily_pitching) {
-        sd.daily_pitching = sd.daily_pitching.filter(p =>
-          !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
+        sd.daily_pitching = sd.daily_pitching.filter(
+          (p) => !(p.pitcher === player && p.round === firstSched.round && p.week === firstSched.week)
         );
       }
     });
-    mgrRoster[weekKey].batters = (mgrRoster[weekKey].batters || []).filter(b => submittedBatters.has(b) || commAdded.has(b));
-    mgrRoster[weekKey].pitchers = (mgrRoster[weekKey].pitchers || []).filter(p => submittedPitchers.has(p) || commAdded.has(p));
+    mgrRoster[weekKey].batters = (mgrRoster[weekKey].batters || []).filter(
+      (b) => submittedBatters.has(b) || commAdded.has(b)
+    );
+    mgrRoster[weekKey].pitchers = (mgrRoster[weekKey].pitchers || []).filter(
+      (p) => submittedPitchers.has(p) || commAdded.has(p)
+    );
     repaired = true;
   }
   return repaired;
@@ -1149,8 +1248,8 @@ function findManagerForPlayer(sd, playerName, type) {
   const lcName = playerName.toLowerCase();
   for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
     for (const roster of Object.values(weekRosters)) {
-      const pool = type === 'batting' ? (roster.batters || []) : (roster.pitchers || []);
-      if (pool.some(p => p.toLowerCase() === lcName)) return manager;
+      const pool = type === 'batting' ? roster.batters || [] : roster.pitchers || [];
+      if (pool.some((p) => p.toLowerCase() === lcName)) return manager;
     }
   }
   return null;
@@ -1164,8 +1263,8 @@ function findManagerForPlayerWeek(sd, playerName, type, round, week) {
   for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
     const roster = weekRosters[weekKey];
     if (!roster) continue;
-    const pool = type === 'batting' ? (roster.batters || []) : (roster.pitchers || []);
-    if (pool.some(p => p.toLowerCase() === lcName)) return manager;
+    const pool = type === 'batting' ? roster.batters || [] : roster.pitchers || [];
+    if (pool.some((p) => p.toLowerCase() === lcName)) return manager;
   }
   return null;
 }
@@ -1174,11 +1273,12 @@ function findManagerForPlayerWeek(sd, playerName, type, round, week) {
 // syncDate ('YYYY-MM-DD') is today's date; used to store a daily snapshot and compute the delta
 // from the previous sync so that mid-week add/drops only count rostered days.
 function processBattingRows(rows, sd, scheduleWeek, syncDate) {
-  let imported = 0, skipped = 0;
+  let imported = 0,
+    skipped = 0;
 
   if (!sd.daily_batting) sd.daily_batting = [];
 
-  rows.forEach(row => {
+  rows.forEach((row) => {
     const batter = findCol(row, ['batter', 'player', 'name']);
     if (!batter) return;
 
@@ -1208,42 +1308,74 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
     };
 
     // Don't overwrite a manually-locked daily record for today
-    const lockedDaily = sd.daily_batting.find(r =>
-      r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
-      r.batter === batter && ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+    const lockedDaily = sd.daily_batting.find(
+      (r) =>
+        r.date === syncDate &&
+        r.round === scheduleWeek.round &&
+        r.week === scheduleWeek.week &&
+        r.batter === batter &&
+        ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
     );
     if (lockedDaily) return;
 
     // Delta = today's cumulative minus the most-recent previous snapshot for this player/week
     const prevSnapshot = sd.daily_batting
-      .filter(r => r.batter === batter && r.round === scheduleWeek.round &&
-        r.week === scheduleWeek.week && r.date < syncDate)
+      .filter(
+        (r) =>
+          r.batter === batter && r.round === scheduleWeek.round && r.week === scheduleWeek.week && r.date < syncDate
+      )
       .sort((a, b) => b.date.localeCompare(a.date))[0];
 
     const delta = prevSnapshot ? battingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
 
     // Replace any existing gsheets snapshot for today
-    sd.daily_batting = sd.daily_batting.filter(r =>
-      !(r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
-        r.batter === batter && r.source === 'gsheets')
+    sd.daily_batting = sd.daily_batting.filter(
+      (r) =>
+        !(
+          r.date === syncDate &&
+          r.round === scheduleWeek.round &&
+          r.week === scheduleWeek.week &&
+          r.batter === batter &&
+          r.source === 'gsheets'
+        )
     );
-    sd.daily_batting.push({ date: syncDate, round: scheduleWeek.round, week: scheduleWeek.week, batter, cumulative, delta, source: 'gsheets' });
+    sd.daily_batting.push({
+      date: syncDate,
+      round: scheduleWeek.round,
+      week: scheduleWeek.week,
+      batter,
+      cumulative,
+      delta,
+      source: 'gsheets',
+    });
 
     // Don't overwrite manually-edited or drop-locked weekly records
-    const existingManual = sd.weekly_batting.find(b =>
-      b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
-      b.batter === batter && ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+    const existingManual = sd.weekly_batting.find(
+      (b) =>
+        b.round === scheduleWeek.round &&
+        b.week === scheduleWeek.week &&
+        b.batter === batter &&
+        ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
     );
-    if (existingManual) { if (isUnassigned) skipped++; else imported++; return; }
+    if (existingManual) {
+      if (isUnassigned) skipped++;
+      else imported++;
+      return;
+    }
 
     // Effective weekly score = sum of daily deltas for rostered days only
     const effectiveScore = computeEffectiveBattingScore(sd, batter, scheduleWeek.round, scheduleWeek.week);
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
 
     // Remove any previous non-manual sync record for this player/week
-    sd.weekly_batting = sd.weekly_batting.filter(b =>
-      !(b.round === scheduleWeek.round && b.week === scheduleWeek.week &&
-        b.batter === batter && b.source === 'gsheets')
+    sd.weekly_batting = sd.weekly_batting.filter(
+      (b) =>
+        !(
+          b.round === scheduleWeek.round &&
+          b.week === scheduleWeek.week &&
+          b.batter === batter &&
+          b.source === 'gsheets'
+        )
     );
 
     sd.weekly_batting.push({
@@ -1255,7 +1387,7 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
       ...cumulative,
       weekly_score: weeklyScore,
       total_score: weeklyScore,
-      source: 'gsheets'
+      source: 'gsheets',
     });
 
     if (isUnassigned) skipped++;
@@ -1269,11 +1401,12 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
 // syncDate ('YYYY-MM-DD') is today's date for daily snapshot storage.
 // IP is converted to true decimal before storing so delta math stays accurate.
 function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
-  let imported = 0, skipped = 0;
+  let imported = 0,
+    skipped = 0;
 
   if (!sd.daily_pitching) sd.daily_pitching = [];
 
-  rows.forEach(row => {
+  rows.forEach((row) => {
     const pitcher = findCol(row, ['pitcher', 'player', 'name']);
     if (!pitcher) return;
 
@@ -1305,42 +1438,74 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
     };
 
     // Don't overwrite a manually-locked daily record for today
-    const lockedDaily = sd.daily_pitching.find(r =>
-      r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
-      r.pitcher === pitcher && ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+    const lockedDaily = sd.daily_pitching.find(
+      (r) =>
+        r.date === syncDate &&
+        r.round === scheduleWeek.round &&
+        r.week === scheduleWeek.week &&
+        r.pitcher === pitcher &&
+        ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
     );
     if (lockedDaily) return;
 
     // Delta = today's cumulative minus the most-recent previous snapshot
     const prevSnapshot = sd.daily_pitching
-      .filter(r => r.pitcher === pitcher && r.round === scheduleWeek.round &&
-        r.week === scheduleWeek.week && r.date < syncDate)
+      .filter(
+        (r) =>
+          r.pitcher === pitcher && r.round === scheduleWeek.round && r.week === scheduleWeek.week && r.date < syncDate
+      )
       .sort((a, b) => b.date.localeCompare(a.date))[0];
 
     const delta = prevSnapshot ? pitchingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
 
     // Replace any existing gsheets snapshot for today
-    sd.daily_pitching = sd.daily_pitching.filter(r =>
-      !(r.date === syncDate && r.round === scheduleWeek.round && r.week === scheduleWeek.week &&
-        r.pitcher === pitcher && r.source === 'gsheets')
+    sd.daily_pitching = sd.daily_pitching.filter(
+      (r) =>
+        !(
+          r.date === syncDate &&
+          r.round === scheduleWeek.round &&
+          r.week === scheduleWeek.week &&
+          r.pitcher === pitcher &&
+          r.source === 'gsheets'
+        )
     );
-    sd.daily_pitching.push({ date: syncDate, round: scheduleWeek.round, week: scheduleWeek.week, pitcher, cumulative, delta, source: 'gsheets' });
+    sd.daily_pitching.push({
+      date: syncDate,
+      round: scheduleWeek.round,
+      week: scheduleWeek.week,
+      pitcher,
+      cumulative,
+      delta,
+      source: 'gsheets',
+    });
 
     // Don't overwrite manually-edited or drop-locked weekly records
-    const existingManual = sd.weekly_pitching.find(p =>
-      p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
-      p.pitcher === pitcher && ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+    const existingManual = sd.weekly_pitching.find(
+      (p) =>
+        p.round === scheduleWeek.round &&
+        p.week === scheduleWeek.week &&
+        p.pitcher === pitcher &&
+        ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
     );
-    if (existingManual) { if (isUnassigned) skipped++; else imported++; return; }
+    if (existingManual) {
+      if (isUnassigned) skipped++;
+      else imported++;
+      return;
+    }
 
     // Effective weekly score = sum of daily deltas for rostered days only
     const effectiveScore = computeEffectivePitchingScore(sd, pitcher, scheduleWeek.round, scheduleWeek.week);
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
 
     // Remove previous gsheets sync for this player/week
-    sd.weekly_pitching = sd.weekly_pitching.filter(p =>
-      !(p.round === scheduleWeek.round && p.week === scheduleWeek.week &&
-        p.pitcher === pitcher && p.source === 'gsheets')
+    sd.weekly_pitching = sd.weekly_pitching.filter(
+      (p) =>
+        !(
+          p.round === scheduleWeek.round &&
+          p.week === scheduleWeek.week &&
+          p.pitcher === pitcher &&
+          p.source === 'gsheets'
+        )
     );
 
     sd.weekly_pitching.push({
@@ -1352,7 +1517,7 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
       ...cumulative,
       qs_highlight: cumulative.gs >= 2,
       weekly_score: weeklyScore,
-      source: 'gsheets'
+      source: 'gsheets',
     });
 
     if (isUnassigned) skipped++;
@@ -1403,7 +1568,8 @@ async function syncGoogleSheets(year, syncType = 'daily') {
   const syncDate = new Date().toISOString().split('T')[0];
 
   const results = [];
-  let totalBatImported = 0, totalPitImported = 0;
+  let totalBatImported = 0,
+    totalPitImported = 0;
 
   for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
     const sched = SEASON_SCHEDULE[i];
@@ -1416,9 +1582,14 @@ async function syncGoogleSheets(year, syncType = 'daily') {
       const batValues = await fetchSheetTab(config.spreadsheet_id, batTab, config.api_key);
       if (batValues !== null) {
         // Tab exists — full overwrite: remove all non-manual gsheets weekly records for this week
-        sd.weekly_batting = sd.weekly_batting.filter(b =>
-          !(b.round === sched.round && b.week === sched.week &&
-            b.source === 'gsheets' && (!b.manual_fields || b.manual_fields.length === 0))
+        sd.weekly_batting = sd.weekly_batting.filter(
+          (b) =>
+            !(
+              b.round === sched.round &&
+              b.week === sched.week &&
+              b.source === 'gsheets' &&
+              (!b.manual_fields || b.manual_fields.length === 0)
+            )
         );
         if (batValues.length > 1) {
           const batRows = parseSheetRows(batValues);
@@ -1436,9 +1607,14 @@ async function syncGoogleSheets(year, syncType = 'daily') {
       const pitValues = await fetchSheetTab(config.spreadsheet_id, pitTab, config.api_key);
       if (pitValues !== null) {
         // Tab exists — full overwrite: remove all non-manual gsheets weekly records for this week
-        sd.weekly_pitching = sd.weekly_pitching.filter(p =>
-          !(p.round === sched.round && p.week === sched.week &&
-            p.source === 'gsheets' && (!p.manual_fields || p.manual_fields.length === 0))
+        sd.weekly_pitching = sd.weekly_pitching.filter(
+          (p) =>
+            !(
+              p.round === sched.round &&
+              p.week === sched.week &&
+              p.source === 'gsheets' &&
+              (!p.manual_fields || p.manual_fields.length === 0)
+            )
         );
         if (pitValues.length > 1) {
           const pitRows = parseSheetRows(pitValues);
@@ -1453,7 +1629,7 @@ async function syncGoogleSheets(year, syncType = 'daily') {
   }
 
   // Log the sync
-  const errorCount = results.filter(r => r.error).length;
+  const errorCount = results.filter((r) => r.error).length;
   if (!sd.upload_log) sd.upload_log = [];
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
@@ -1462,7 +1638,7 @@ async function syncGoogleSheets(year, syncType = 'daily') {
     success: errorCount === 0,
     batting_imported: totalBatImported,
     pitching_imported: totalPitImported,
-    details: results
+    details: results,
   });
 
   // Prune sync history to prevent indefinite growth
@@ -1478,16 +1654,16 @@ async function syncGoogleSheets(year, syncType = 'daily') {
     success: errorCount === 0,
     batting_imported: totalBatImported,
     pitching_imported: totalPitImported,
-    weeks_with_data: results.filter(r => !r.error && r.imported > 0).length,
+    weeks_with_data: results.filter((r) => !r.error && r.imported > 0).length,
     errors: errorCount,
-    details: results
+    details: results,
   };
   db.google_sheets_config = config;
 
   addAuditEntry(db, 'gsheets_sync', {
     year,
     batting_imported: totalBatImported,
-    pitching_imported: totalPitImported
+    pitching_imported: totalPitImported,
   });
 
   writeDB(db);
@@ -1513,7 +1689,7 @@ app.get('/api/google-sheets/config', (req, res) => {
 });
 
 // POST /api/google-sheets/config
-app.post('/api/google-sheets/config', (req, res) => {
+app.post('/api/google-sheets/config', requireCommissioner, (req, res) => {
   const db = readDB();
   const { spreadsheet_url, api_key, enabled, season, sync_time } = req.body;
 
@@ -1537,14 +1713,16 @@ app.post('/api/google-sheets/config', (req, res) => {
 });
 
 // POST /api/google-sheets/sync — manual trigger
-app.post('/api/google-sheets/sync', async (req, res) => {
+app.post('/api/google-sheets/sync', requireCommissioner, async (req, res) => {
   try {
     const db = readDB();
     const config = db.google_sheets_config || {};
     const season = req.body.season || config.season || new Date().getFullYear().toString();
     const result = await syncGoogleSheets(season, 'manual');
     if (result.errors > 0) {
-      postSlack(`*Google Sheets Manual Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import for season ${season}.`).catch(() => {});
+      postSlack(
+        `*Google Sheets Manual Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import for season ${season}.`
+      ).catch(() => {});
     }
     res.json({ ok: true, result });
   } catch (e) {
@@ -1566,7 +1744,7 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
   const season = config.season || new Date().getFullYear().toString();
   const sd = (db.seasons || {})[season] || {};
   const recentLogs = (sd.upload_log || [])
-    .filter(l => l.type === 'gsheets_sync')
+    .filter((l) => l.type === 'gsheets_sync')
     .slice(-10)
     .reverse();
   res.json({
@@ -1574,12 +1752,12 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
     last_sync_result: config.last_sync_result || null,
     enabled: config.enabled || false,
     next_sync: getNextSyncTime(),
-    recent_logs: recentLogs
+    recent_logs: recentLogs,
   });
 });
 
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
-app.post('/api/slack/scoreboard', async (req, res) => {
+app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   if (!SLACK_WEBHOOK_URL) {
     return res.status(503).json({ error: 'Slack webhook not configured' });
   }
@@ -1588,7 +1766,7 @@ app.post('/api/slack/scoreboard', async (req, res) => {
 
   // Require commissioner
   const userEmail = req.get('X-User-Email') || '';
-  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
   if (!manager || !manager.commissioner) {
     return res.status(403).json({ error: 'Commissioner access required' });
   }
@@ -1612,8 +1790,13 @@ app.post('/api/slack/scoreboard', async (req, res) => {
 function captureRawBody(req, res, next) {
   let data = '';
   req.setEncoding('utf8');
-  req.on('data', chunk => { data += chunk; });
-  req.on('end', () => { req.rawBody = data; next(); });
+  req.on('data', (chunk) => {
+    data += chunk;
+  });
+  req.on('end', () => {
+    req.rawBody = data;
+    next();
+  });
 }
 
 app.post('/api/slack/command', captureRawBody, (req, res) => {
@@ -1625,7 +1808,8 @@ app.post('/api/slack/command', captureRawBody, (req, res) => {
     if (!timestamp || !signature || age > 300) {
       return res.status(403).send('Invalid request');
     }
-    const hmac = crypto.createHmac('sha256', SLACK_SIGNING_SECRET)
+    const hmac = crypto
+      .createHmac('sha256', SLACK_SIGNING_SECRET)
       .update(`v0:${timestamp}:${req.rawBody}`)
       .digest('hex');
     if (`v0=${hmac}` !== signature) return res.status(403).send('Invalid signature');
@@ -1650,7 +1834,7 @@ app.post('/api/slack/command', captureRawBody, (req, res) => {
 });
 
 // DELETE /api/seasons/:year/week-data — clear all stats for a given week
-app.delete('/api/seasons/:year/week-data', (req, res) => {
+app.delete('/api/seasons/:year/week-data', requireCommissioner, (req, res) => {
   const { year } = req.params;
   const { round, week, type } = req.body;
 
@@ -1662,33 +1846,31 @@ app.delete('/api/seasons/:year/week-data', (req, res) => {
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
 
-  let batRemoved = 0, pitRemoved = 0;
+  let batRemoved = 0,
+    pitRemoved = 0;
 
   if (!type || type === 'batting' || type === 'all') {
     const before = (sd.weekly_batting || []).length;
-    sd.weekly_batting = (sd.weekly_batting || []).filter(b =>
-      !(b.round === round && b.week === week)
-    );
+    sd.weekly_batting = (sd.weekly_batting || []).filter((b) => !(b.round === round && b.week === week));
     batRemoved = before - (sd.weekly_batting || []).length;
     // Clear daily batting snapshots for the same week
-    sd.daily_batting = (sd.daily_batting || []).filter(b =>
-      !(b.round === round && b.week === week)
-    );
+    sd.daily_batting = (sd.daily_batting || []).filter((b) => !(b.round === round && b.week === week));
   }
 
   if (!type || type === 'pitching' || type === 'all') {
     const before = (sd.weekly_pitching || []).length;
-    sd.weekly_pitching = (sd.weekly_pitching || []).filter(p =>
-      !(p.round === round && p.week === week)
-    );
+    sd.weekly_pitching = (sd.weekly_pitching || []).filter((p) => !(p.round === round && p.week === week));
     pitRemoved = before - (sd.weekly_pitching || []).length;
     // Clear daily pitching snapshots for the same week
-    sd.daily_pitching = (sd.daily_pitching || []).filter(p =>
-      !(p.round === round && p.week === week)
-    );
+    sd.daily_pitching = (sd.daily_pitching || []).filter((p) => !(p.round === round && p.week === week));
   }
 
-  addAuditEntry(db, 'clear_week_data', { year, round, week, type: type || 'all', batRemoved, pitRemoved }, req.get('X-User-Email'));
+  addAuditEntry(
+    db,
+    'clear_week_data',
+    { year, round, week, type: type || 'all', batRemoved, pitRemoved },
+    req.get('X-User-Email')
+  );
   db.seasons[year] = sd;
   writeDB(db);
 
@@ -1713,17 +1895,18 @@ app.get('/api/seasons/:year/player-dates', (req, res) => {
 
 // POST /api/seasons/:year/player-dates — set a player's active date range for a specific week
 // Body: { round, week, player, type ('batter'|'pitcher'), start ('YYYY-MM-DD'|null), end ('YYYY-MM-DD'|null) }
-app.post('/api/seasons/:year/player-dates', (req, res) => {
+app.post('/api/seasons/:year/player-dates', requireCommissioner, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
   const userEmail = req.get('X-User-Email') || '';
   const db = readDB();
-  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
   if (!manager || !manager.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const { round, week, player, type, start, end } = req.body;
-  if (!round || !week || !player || !type) return res.status(400).json({ error: 'round, week, player, and type are required' });
+  if (!round || !week || !player || !type)
+    {return res.status(400).json({ error: 'round, week, player, and type are required' });}
   if (type !== 'batter' && type !== 'pitcher') return res.status(400).json({ error: 'type must be batter or pitcher' });
   if (start && !DATE_RE.test(start)) return res.status(400).json({ error: 'start must be YYYY-MM-DD' });
   if (end && !DATE_RE.test(end)) return res.status(400).json({ error: 'end must be YYYY-MM-DD' });
@@ -1744,24 +1927,40 @@ app.post('/api/seasons/:year/player-dates', (req, res) => {
   if (type === 'batter') {
     const score = computeEffectiveBattingScore(sd, player, round, week);
     if (score !== null) {
-      const entry = (sd.weekly_batting || []).find(b =>
-        b.batter === player && b.round === round && b.week === week &&
-        !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      const entry = (sd.weekly_batting || []).find(
+        (b) =>
+          b.batter === player &&
+          b.round === round &&
+          b.week === week &&
+          !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
       );
-      if (entry) { entry.weekly_score = score; entry.total_score = score; }
+      if (entry) {
+        entry.weekly_score = score;
+        entry.total_score = score;
+      }
     }
   } else {
     const score = computeEffectivePitchingScore(sd, player, round, week);
     if (score !== null) {
-      const entry = (sd.weekly_pitching || []).find(p =>
-        p.pitcher === player && p.round === round && p.week === week &&
-        !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      const entry = (sd.weekly_pitching || []).find(
+        (p) =>
+          p.pitcher === player &&
+          p.round === round &&
+          p.week === week &&
+          !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
       );
-      if (entry) { entry.weekly_score = score; }
+      if (entry) {
+        entry.weekly_score = score;
+      }
     }
   }
 
-  addAuditEntry(db, 'player_date_set', { year, round, week, player, type, start: start || null, end: end || null }, userEmail);
+  addAuditEntry(
+    db,
+    'player_date_set',
+    { year, round, week, player, type, start: start || null, end: end || null },
+    userEmail
+  );
   db.seasons[year] = sd;
   writeDB(db);
   res.json({ ok: true, player_dates: sd.player_dates[weekKey] });
@@ -1769,17 +1968,18 @@ app.post('/api/seasons/:year/player-dates', (req, res) => {
 
 // DELETE /api/seasons/:year/player-dates — remove a player's date override (resets to full week)
 // Body: { round, week, player, type }
-app.delete('/api/seasons/:year/player-dates', (req, res) => {
+app.delete('/api/seasons/:year/player-dates', requireCommissioner, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
   const userEmail = req.get('X-User-Email') || '';
   const db = readDB();
-  const manager = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
   if (!manager || !manager.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const { round, week, player, type } = req.body;
-  if (!round || !week || !player || !type) return res.status(400).json({ error: 'round, week, player, and type are required' });
+  if (!round || !week || !player || !type)
+    {return res.status(400).json({ error: 'round, week, player, and type are required' });}
 
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
@@ -1796,20 +1996,31 @@ app.delete('/api/seasons/:year/player-dates', (req, res) => {
   if (type === 'batter') {
     const score = computeEffectiveBattingScore(sd, player, round, week);
     if (score !== null) {
-      const entry = (sd.weekly_batting || []).find(b =>
-        b.batter === player && b.round === round && b.week === week &&
-        !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      const entry = (sd.weekly_batting || []).find(
+        (b) =>
+          b.batter === player &&
+          b.round === round &&
+          b.week === week &&
+          !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
       );
-      if (entry) { entry.weekly_score = score; entry.total_score = score; }
+      if (entry) {
+        entry.weekly_score = score;
+        entry.total_score = score;
+      }
     }
   } else {
     const score = computeEffectivePitchingScore(sd, player, round, week);
     if (score !== null) {
-      const entry = (sd.weekly_pitching || []).find(p =>
-        p.pitcher === player && p.round === round && p.week === week &&
-        !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      const entry = (sd.weekly_pitching || []).find(
+        (p) =>
+          p.pitcher === player &&
+          p.round === round &&
+          p.week === week &&
+          !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
       );
-      if (entry) { entry.weekly_score = score; }
+      if (entry) {
+        entry.weekly_score = score;
+      }
     }
   }
 
@@ -1834,28 +2045,28 @@ app.get('/api/seasons/:year/daily-stats', (req, res) => {
 
   const { player, type, round, week } = req.query;
 
-  const filterBat = r =>
+  const filterBat = (r) =>
     (!player || r.batter === player) && (!round || r.round === round) && (!week || r.week === week);
-  const filterPit = r =>
+  const filterPit = (r) =>
     (!player || r.pitcher === player) && (!round || r.round === round) && (!week || r.week === week);
 
   if (type === 'batter') return res.json((sd.daily_batting || []).filter(filterBat));
   if (type === 'pitcher') return res.json((sd.daily_pitching || []).filter(filterPit));
   res.json({
     batting: (sd.daily_batting || []).filter(filterBat),
-    pitching: (sd.daily_pitching || []).filter(filterPit)
+    pitching: (sd.daily_pitching || []).filter(filterPit),
   });
 });
 
 // POST /api/seasons/:year/daily-stats — commissioner manual daily stat entry
 // Body: { date ('YYYY-MM-DD'), round, week, type ('batter'|'pitcher'), player, delta: { ...stats } }
-app.post('/api/seasons/:year/daily-stats', (req, res) => {
+app.post('/api/seasons/:year/daily-stats', requireCommissioner, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
   const userEmail = req.get('X-User-Email') || '';
   const db = readDB();
-  const mgr = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  const mgr = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
   if (!mgr || !mgr.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const { date, round, week, type, player, delta } = req.body;
@@ -1875,28 +2086,46 @@ app.post('/api/seasons/:year/daily-stats', (req, res) => {
 
   if (type === 'batter') {
     const cleanDelta = {
-      '1b': parseNum(delta['1b'] || 0), '2b': parseNum(delta['2b'] || 0),
-      '3b': parseNum(delta['3b'] || 0), hr: parseNum(delta.hr || 0),
-      r: parseNum(delta.r || 0), rbi: parseNum(delta.rbi || 0),
-      sb: parseNum(delta.sb || 0), bb: parseNum(delta.bb || 0),
+      '1b': parseNum(delta['1b'] || 0),
+      '2b': parseNum(delta['2b'] || 0),
+      '3b': parseNum(delta['3b'] || 0),
+      hr: parseNum(delta.hr || 0),
+      r: parseNum(delta.r || 0),
+      rbi: parseNum(delta.rbi || 0),
+      sb: parseNum(delta.sb || 0),
+      bb: parseNum(delta.bb || 0),
       abs: parseNum(delta.abs || 0),
     };
-    sd.daily_batting = sd.daily_batting.filter(r =>
-      !(r.date === date && r.round === round && r.week === week && r.batter === player)
+    sd.daily_batting = sd.daily_batting.filter(
+      (r) => !(r.date === date && r.round === round && r.week === week && r.batter === player)
     );
     sd.daily_batting.push({
-      date, round, week, batter: player,
-      cumulative: null, delta: cleanDelta,
-      source: 'manual', manual_fields: Object.keys(delta), drop_locked: true
+      date,
+      round,
+      week,
+      batter: player,
+      cumulative: null,
+      delta: cleanDelta,
+      source: 'manual',
+      manual_fields: Object.keys(delta),
+      drop_locked: true,
     });
     // Recompute and update weekly record
     const score = computeEffectiveBattingScore(sd, player, round, week);
     if (score !== null) {
-      let entry = sd.weekly_batting.find(b => b.batter === player && b.round === round && b.week === week);
+      let entry = sd.weekly_batting.find((b) => b.batter === player && b.round === round && b.week === week);
       if (!entry) {
         let manager = findManagerForPlayerWeek(sd, player, 'batting', round, week);
         if (!manager) manager = findManagerForPlayer(sd, player, 'batting');
-        entry = { round, week, manager: manager || null, batter: player, source: 'manual', weekly_score: 0, total_score: 0 };
+        entry = {
+          round,
+          week,
+          manager: manager || null,
+          batter: player,
+          source: 'manual',
+          weekly_score: 0,
+          total_score: 0,
+        };
         sd.weekly_batting.push(entry);
       }
       if (!((entry.manual_fields && entry.manual_fields.length > 0) || entry.drop_locked)) {
@@ -1906,22 +2135,35 @@ app.post('/api/seasons/:year/daily-stats', (req, res) => {
     }
   } else {
     const cleanDelta = {
-      gs: parseNum(delta.gs || 0), w: parseNum(delta.w || 0), qs: parseNum(delta.qs || 0),
-      cg: parseNum(delta.cg || 0), cgso: parseNum(delta.cgso || 0), nh: parseNum(delta.nh || 0),
-      ip: parseNum(delta.ip || 0), h: parseNum(delta.h || 0), er: parseNum(delta.er || 0),
-      bb: parseNum(delta.bb || 0), k: parseNum(delta.k || 0),
+      gs: parseNum(delta.gs || 0),
+      w: parseNum(delta.w || 0),
+      qs: parseNum(delta.qs || 0),
+      cg: parseNum(delta.cg || 0),
+      cgso: parseNum(delta.cgso || 0),
+      nh: parseNum(delta.nh || 0),
+      ip: parseNum(delta.ip || 0),
+      h: parseNum(delta.h || 0),
+      er: parseNum(delta.er || 0),
+      bb: parseNum(delta.bb || 0),
+      k: parseNum(delta.k || 0),
     };
-    sd.daily_pitching = sd.daily_pitching.filter(r =>
-      !(r.date === date && r.round === round && r.week === week && r.pitcher === player)
+    sd.daily_pitching = sd.daily_pitching.filter(
+      (r) => !(r.date === date && r.round === round && r.week === week && r.pitcher === player)
     );
     sd.daily_pitching.push({
-      date, round, week, pitcher: player,
-      cumulative: null, delta: cleanDelta,
-      source: 'manual', manual_fields: Object.keys(delta), drop_locked: true
+      date,
+      round,
+      week,
+      pitcher: player,
+      cumulative: null,
+      delta: cleanDelta,
+      source: 'manual',
+      manual_fields: Object.keys(delta),
+      drop_locked: true,
     });
     const score = computeEffectivePitchingScore(sd, player, round, week);
     if (score !== null) {
-      let entry = sd.weekly_pitching.find(p => p.pitcher === player && p.round === round && p.week === week);
+      let entry = sd.weekly_pitching.find((p) => p.pitcher === player && p.round === round && p.week === week);
       if (!entry) {
         let manager = findManagerForPlayerWeek(sd, player, 'pitching', round, week);
         if (!manager) manager = findManagerForPlayer(sd, player, 'pitching');
@@ -1942,13 +2184,13 @@ app.post('/api/seasons/:year/daily-stats', (req, res) => {
 
 // DELETE /api/seasons/:year/daily-stats — delete a specific daily stat record (commissioner)
 // Body: { date, round, week, type, player }
-app.delete('/api/seasons/:year/daily-stats', (req, res) => {
+app.delete('/api/seasons/:year/daily-stats', requireCommissioner, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
   const userEmail = req.get('X-User-Email') || '';
   const db = readDB();
-  const mgr = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  const mgr = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
   if (!mgr || !mgr.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const { date, round, week, type, player } = req.body;
@@ -1963,28 +2205,39 @@ app.delete('/api/seasons/:year/daily-stats', (req, res) => {
   if (!sd.daily_pitching) sd.daily_pitching = [];
 
   if (type === 'batter') {
-    sd.daily_batting = sd.daily_batting.filter(r =>
-      !(r.date === date && r.round === round && r.week === week && r.batter === player)
+    sd.daily_batting = sd.daily_batting.filter(
+      (r) => !(r.date === date && r.round === round && r.week === week && r.batter === player)
     );
     const score = computeEffectiveBattingScore(sd, player, round, week);
     if (score !== null) {
-      const entry = (sd.weekly_batting || []).find(b =>
-        b.batter === player && b.round === round && b.week === week &&
-        !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      const entry = (sd.weekly_batting || []).find(
+        (b) =>
+          b.batter === player &&
+          b.round === round &&
+          b.week === week &&
+          !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
       );
-      if (entry) { entry.weekly_score = score; entry.total_score = score; }
+      if (entry) {
+        entry.weekly_score = score;
+        entry.total_score = score;
+      }
     }
   } else {
-    sd.daily_pitching = sd.daily_pitching.filter(r =>
-      !(r.date === date && r.round === round && r.week === week && r.pitcher === player)
+    sd.daily_pitching = sd.daily_pitching.filter(
+      (r) => !(r.date === date && r.round === round && r.week === week && r.pitcher === player)
     );
     const score = computeEffectivePitchingScore(sd, player, round, week);
     if (score !== null) {
-      const entry = (sd.weekly_pitching || []).find(p =>
-        p.pitcher === player && p.round === round && p.week === week &&
-        !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      const entry = (sd.weekly_pitching || []).find(
+        (p) =>
+          p.pitcher === player &&
+          p.round === round &&
+          p.week === week &&
+          !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
       );
-      if (entry) { entry.weekly_score = score; }
+      if (entry) {
+        entry.weekly_score = score;
+      }
     }
   }
 
@@ -1995,13 +2248,13 @@ app.delete('/api/seasons/:year/daily-stats', (req, res) => {
 });
 
 // POST /api/seasons/:year/recompute-scores — recompute all weekly scores from daily data (commissioner)
-app.post('/api/seasons/:year/recompute-scores', (req, res) => {
+app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
   const userEmail = req.get('X-User-Email') || '';
   const db = readDB();
-  const mgr = (db.managers || []).find(m => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
+  const mgr = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
   if (!mgr || !mgr.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const sd = (db.seasons || {})[year];
@@ -2085,13 +2338,17 @@ function scheduleGSheetsSync() {
     const season = cfg.season || now.getFullYear().toString();
 
     syncGoogleSheets(season)
-      .then(result => {
-        console.log(`[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`);
+      .then((result) => {
+        console.log(
+          `[GSheets] Sync complete: ${result.batting_imported} batting, ${result.pitching_imported} pitching records`
+        );
         if (result.errors > 0) {
-          postSlack(`*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`).catch(() => {});
+          postSlack(
+            `*Google Sheets Sync — ${result.errors} error(s)*\n${result.errors} week(s) failed to import during the daily sync for season ${season}.`
+          ).catch(() => {});
         }
       })
-      .catch(e => {
+      .catch((e) => {
         console.error(`[GSheets] Sync error: ${e.message}`);
         postSlack(`*Google Sheets Sync Failed*\n${e.message}`).catch(() => {});
       });
@@ -2113,7 +2370,9 @@ function scheduleGSheetsSync() {
   if (next <= now) next.setDate(next.getDate() + 1);
   const delay = next - now;
 
-  console.log(`[GSheets] Auto-sync enabled. Next sync at ${next.toISOString()} (in ${Math.round(delay / 60000)} minutes)`);
+  console.log(
+    `[GSheets] Auto-sync enabled. Next sync at ${next.toISOString()} (in ${Math.round(delay / 60000)} minutes)`
+  );
   syncTimer = setTimeout(runAndReschedule, delay);
 }
 
@@ -2141,7 +2400,9 @@ function scheduleScoreboardPost() {
       // Use noon UTC to sample the Eastern offset safely (DST transitions happen at 2am)
       const noonUTC = new Date(Date.UTC(yr, mo - 1, dy, 12, 0, 0));
       const noonEasternHour = +new Intl.DateTimeFormat('en-US', {
-        timeZone: TZ, hour: '2-digit', hour12: false
+        timeZone: TZ,
+        hour: '2-digit',
+        hour12: false,
       }).format(noonUTC);
       const offsetHours = noonEasternHour - 12; // -4 (EDT) or -5 (EST)
       return new Date(Date.UTC(yr, mo - 1, dy, 7 - offsetHours, 0, 0));
@@ -2169,7 +2430,7 @@ function scheduleScoreboardPost() {
     if (isWithinSyncWindow(sd)) {
       postScoreboardSlack(db, season)
         .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
-        .catch(e => console.error('[Scoreboard] Post failed:', e.message));
+        .catch((e) => console.error('[Scoreboard] Post failed:', e.message));
     } else {
       console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);
     }
@@ -2183,7 +2444,9 @@ function scheduleScoreboardPost() {
   const next = getNext7amEastern();
   const delay = next - Date.now();
 
-  console.log(`[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (7am Eastern, in ${Math.round(delay / 60000)} minutes)`);
+  console.log(
+    `[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (7am Eastern, in ${Math.round(delay / 60000)} minutes)`
+  );
   scoreboardTimer = setTimeout(runAndReschedule, delay);
 }
 

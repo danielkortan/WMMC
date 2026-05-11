@@ -1,392 +1,498 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-  <meta http-equiv="Pragma" content="no-cache">
-  <meta http-equiv="Expires" content="0">
-  <title>The Whit Merrifield Memorial Cup</title>
-  <link rel="stylesheet" href="styles.css?v=20260504">
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-</head>
-<body>
-  <!-- Login Screen -->
-  <div id="login-screen">
-    <div class="login-screen-inner">
-      <div class="login-brand">
-        <div class="login-baseball">&#9918;</div>
-        <h1>The Whit Merrifield<br>Memorial Cup</h1>
-        <p class="login-tagline">Fantasy Baseball League</p>
-      </div>
-      <div class="login-card" id="login-card-main">
-        <h2>Sign In</h2>
-        <div class="login-fields">
-          <input type="email" id="login-email" placeholder="Email address" autocomplete="email">
-          <input type="password" id="login-password" placeholder="Password" autocomplete="current-password">
-          <button class="btn btn-accent" id="login-submit-btn">Sign In</button>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>The Whit Merrifield Memorial Cup</title>
+    <link rel="stylesheet" href="styles.css?v=20260504" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+  </head>
+  <body>
+    <!-- Login Screen -->
+    <div id="login-screen">
+      <div class="login-screen-inner">
+        <div class="login-brand">
+          <div class="login-baseball">&#9918;</div>
+          <h1>The Whit Merrifield<br />Memorial Cup</h1>
+          <p class="login-tagline">Fantasy Baseball League</p>
         </div>
-        <p class="login-error-msg" id="login-error-msg"></p>
-        <div class="login-divider"><span>or</span></div>
-        <div id="google-signin-container"></div>
-        <p id="google-signin-error" class="login-error-msg"></p>
+        <div class="login-card" id="login-card-main">
+          <h2>Sign In</h2>
+          <div class="login-fields">
+            <input type="email" id="login-email" placeholder="Email address" autocomplete="email" />
+            <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
+            <button class="btn btn-accent" id="login-submit-btn">Sign In</button>
+          </div>
+          <p class="login-error-msg" id="login-error-msg"></p>
+          <div class="login-divider"><span>or</span></div>
+          <div id="google-signin-container"></div>
+          <p id="google-signin-error" class="login-error-msg"></p>
+        </div>
       </div>
-
     </div>
-  </div>
 
-  <header>
-    <div class="header-content">
-      <div class="header-top">
-        <h1><span class="header-ball">&#9918;</span> The Whit Merrifield Memorial Cup</h1>
-        <div id="online-users-bar" class="online-users-bar"></div>
-        <div class="season-selector">
-          <select id="season-select"></select>
-        </div>
-        <div class="user-bar" id="user-bar" style="display:none;">
-          <div class="user-dropdown" id="user-dropdown">
-            <button class="btn btn-sm btn-header-outline user-dropdown-trigger" id="user-dropdown-trigger">
-              <span id="user-display-name"></span>
-              <span class="user-dropdown-caret">&#9662;</span>
-            </button>
-            <div class="user-dropdown-menu" id="user-dropdown-menu">
-              <button class="user-dropdown-item" id="change-password-btn">Change Password</button>
-              <button class="user-dropdown-item user-dropdown-item-danger" id="logout-btn">Sign Out</button>
+    <header>
+      <div class="header-content">
+        <div class="header-top">
+          <h1><span class="header-ball">&#9918;</span> The Whit Merrifield Memorial Cup</h1>
+          <div id="online-users-bar" class="online-users-bar"></div>
+          <div class="season-selector">
+            <select id="season-select"></select>
+          </div>
+          <div class="user-bar" id="user-bar" style="display: none">
+            <div class="user-dropdown" id="user-dropdown">
+              <button class="btn btn-sm btn-header-outline user-dropdown-trigger" id="user-dropdown-trigger">
+                <span id="user-display-name"></span>
+                <span class="user-dropdown-caret">&#9662;</span>
+              </button>
+              <div class="user-dropdown-menu" id="user-dropdown-menu">
+                <button class="user-dropdown-item" id="change-password-btn">Change Password</button>
+                <button class="user-dropdown-item user-dropdown-item-danger" id="logout-btn">Sign Out</button>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  </header>
+    </header>
 
-  <nav id="main-nav">
-    <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
-    <button class="nav-btn" data-tab="my-roster">My Roster</button>
-    <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
-    <button class="nav-btn" data-tab="trends">Trends</button>
-    <button class="nav-btn" data-tab="league-info">League Info</button>
-    <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
-    <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">Commissioner<span id="comm-pending-badge" style="display:none;"></span></button>
-  </nav>
+    <nav id="main-nav">
+      <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
+      <button class="nav-btn" data-tab="my-roster">My Roster</button>
+      <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
+      <button class="nav-btn" data-tab="trends">Trends</button>
+      <button class="nav-btn" data-tab="league-info">League Info</button>
+      <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
+      <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">
+        Commissioner<span id="comm-pending-badge" style="display: none"></span>
+      </button>
+    </nav>
 
-  <main id="app">
-    <!-- Scoreboard (Home) -->
-    <section id="dashboard" class="tab-content active">
-      <div class="champion-banner" id="champion-banner"></div>
-      <div id="scoreboard-content"></div>
-      <div id="scoreboard-bracket"></div>
-    </section>
+    <main id="app">
+      <!-- Scoreboard (Home) -->
+      <section id="dashboard" class="tab-content active">
+        <div class="champion-banner" id="champion-banner"></div>
+        <div id="scoreboard-content"></div>
+        <div id="scoreboard-bracket"></div>
+      </section>
 
-    <!-- Weekly Scores -->
-    <section id="weekly" class="tab-content">
-      <div class="card">
-        <h2>Weekly Team Scoring</h2>
-        <div class="filters">
-          <select id="weekly-round-filter">
-            <option value="all">All Rounds</option>
-          </select>
-          <select id="weekly-week-filter">
-            <option value="all">All Weeks</option>
-          </select>
-          <select id="weekly-manager-filter">
-            <option value="all">All Managers</option>
-          </select>
-        </div>
-        <div class="table-wrapper"><table id="weekly-table" class="data-table"></table></div>
-      </div>
-    </section>
-
-    <!-- Player Stats (hidden - used internally for data) -->
-    <section id="players" class="tab-content" style="display:none !important;">
-      <div class="card">
-        <div class="player-type-toggle">
-          <button class="type-btn active" data-type="batting">Batting</button>
-          <button class="type-btn" data-type="pitching">Pitching</button>
-        </div>
-        <div class="filters">
-          <select id="player-round-filter">
-            <option value="all">All Rounds</option>
-          </select>
-          <select id="player-week-filter">
-            <option value="all">All Weeks</option>
-          </select>
-          <select id="player-manager-filter">
-            <option value="all">All Managers</option>
-          </select>
-        </div>
-        <table id="players-table" class="data-table"></table>
-      </div>
-    </section>
-
-    <!-- Trends / Analytics -->
-    <section id="trends" class="tab-content">
-      <div id="trends-content"></div>
-    </section>
-
-    <!-- League Info (Schedule + Scoring + Constitution) -->
-    <section id="league-info" class="tab-content">
-      <div id="league-schedule-content"></div>
-      <div id="league-scoring-content"></div>
-      <div id="league-rules-content"></div>
-    </section>
-
-    <!-- Hall of Fame -->
-    <section id="hall-of-fame" class="tab-content">
-      <div id="hall-of-fame-content"></div>
-    </section>
-
-    <!-- Rosters -->
-    <section id="my-roster" class="tab-content">
-      <div id="roster-manager-bar" class="card" style="display:none;">
-        <div class="roster-manager-bar-inner">
-          <h2 id="roster-title">Roster</h2>
-          <select id="roster-manager-select" class="form-select" style="display:none;max-width:260px;"></select>
-        </div>
-      </div>
-      <div id="roster-panel">
-        <div id="roster-content"></div>
-      </div>
-    </section>
-
-    <!-- Commissioner Home -->
-    <section id="commissioner" class="tab-content">
-      <div id="commissioner-login" class="card" style="display:none;"></div>
-      <div id="commissioner-panel" style="display:none;">
+      <!-- Weekly Scores -->
+      <section id="weekly" class="tab-content">
         <div class="card">
-          <h2>Commissioner Home</h2>
-          <p>Logged in as <strong id="commissioner-name"></strong></p>
-        </div>
-
-        <!-- Commissioner Sub-tabs -->
-        <div class="comm-tabs">
-          <button class="comm-tab-btn active" data-comm-tab="comm-tab-swaps">Swaps</button>
-          <button class="comm-tab-btn" data-comm-tab="comm-tab-stats-data">Stats Data</button>
-          <button class="comm-tab-btn" data-comm-tab="comm-tab-managers">Managers</button>
-          <button class="comm-tab-btn" data-comm-tab="comm-tab-season-setup">Season Setup</button>
-        </div>
-
-        <!-- TAB: Swaps -->
-        <div id="comm-tab-swaps" class="comm-tab-content active">
-          <div class="card">
-            <h2>Pending Swap Requests</h2>
-            <div id="pending-swaps-list"></div>
+          <h2>Weekly Team Scoring</h2>
+          <div class="filters">
+            <select id="weekly-round-filter">
+              <option value="all">All Rounds</option>
+            </select>
+            <select id="weekly-week-filter">
+              <option value="all">All Weeks</option>
+            </select>
+            <select id="weekly-manager-filter">
+              <option value="all">All Managers</option>
+            </select>
           </div>
-          <div class="card">
-            <h2>Swap Log</h2>
-            <div id="swap-log-list"></div>
+          <div class="table-wrapper"><table id="weekly-table" class="data-table"></table></div>
+        </div>
+      </section>
+
+      <!-- Player Stats (hidden - used internally for data) -->
+      <section id="players" class="tab-content" style="display: none !important">
+        <div class="card">
+          <div class="player-type-toggle">
+            <button class="type-btn active" data-type="batting">Batting</button>
+            <button class="type-btn" data-type="pitching">Pitching</button>
+          </div>
+          <div class="filters">
+            <select id="player-round-filter">
+              <option value="all">All Rounds</option>
+            </select>
+            <select id="player-week-filter">
+              <option value="all">All Weeks</option>
+            </select>
+            <select id="player-manager-filter">
+              <option value="all">All Managers</option>
+            </select>
+          </div>
+          <table id="players-table" class="data-table"></table>
+        </div>
+      </section>
+
+      <!-- Trends / Analytics -->
+      <section id="trends" class="tab-content">
+        <div id="trends-content"></div>
+      </section>
+
+      <!-- League Info (Schedule + Scoring + Constitution) -->
+      <section id="league-info" class="tab-content">
+        <div id="league-schedule-content"></div>
+        <div id="league-scoring-content"></div>
+        <div id="league-rules-content"></div>
+      </section>
+
+      <!-- Hall of Fame -->
+      <section id="hall-of-fame" class="tab-content">
+        <div id="hall-of-fame-content"></div>
+      </section>
+
+      <!-- Rosters -->
+      <section id="my-roster" class="tab-content">
+        <div id="roster-manager-bar" class="card" style="display: none">
+          <div class="roster-manager-bar-inner">
+            <h2 id="roster-title">Roster</h2>
+            <select id="roster-manager-select" class="form-select" style="display: none; max-width: 260px"></select>
           </div>
         </div>
+        <div id="roster-panel">
+          <div id="roster-content"></div>
+        </div>
+      </section>
 
-        <!-- TAB: Stats Data -->
-        <div id="comm-tab-stats-data" class="comm-tab-content">
-          <!-- Google Sheets Auto-Sync -->
+      <!-- Commissioner Home -->
+      <section id="commissioner" class="tab-content">
+        <div id="commissioner-login" class="card" style="display: none"></div>
+        <div id="commissioner-panel" style="display: none">
           <div class="card">
-            <h2>Google Sheets Auto-Sync</h2>
-            <p class="upload-hint">Link a Google Sheet to automatically pull weekly stats on a daily schedule. The sheet must have tabs named like "Week 1 Batting", "Week 1 Pitching", etc. Manual uploads above will still work and take priority over synced data.</p>
-            <div id="gsheets-config-form">
-              <div style="margin-top:0.75rem;">
-                <a href="https://docs.google.com/spreadsheets/d/1BBtSrkFKURugJiVB6PPd3MSf5CD7QZNtuzq_V3-JMxE/edit?usp=sharing" target="_blank" rel="noopener noreferrer">WMMC Scoring Data Sheet</a>
-              </div>
-              <div id="gsheets-fields"></div>
-              <div id="gsheets-status" style="margin-top:0.75rem;"></div>
+            <h2>Commissioner Home</h2>
+            <p>Logged in as <strong id="commissioner-name"></strong></p>
+          </div>
+
+          <!-- Commissioner Sub-tabs -->
+          <div class="comm-tabs">
+            <button class="comm-tab-btn active" data-comm-tab="comm-tab-swaps">Swaps</button>
+            <button class="comm-tab-btn" data-comm-tab="comm-tab-stats-data">Stats Data</button>
+            <button class="comm-tab-btn" data-comm-tab="comm-tab-managers">Managers</button>
+            <button class="comm-tab-btn" data-comm-tab="comm-tab-season-setup">Season Setup</button>
+          </div>
+
+          <!-- TAB: Swaps -->
+          <div id="comm-tab-swaps" class="comm-tab-content active">
+            <div class="card">
+              <h2>Pending Swap Requests</h2>
+              <div id="pending-swaps-list"></div>
             </div>
-            <div id="gsheets-sync-log" style="margin-top:1rem;"></div>
-          </div>
-          <!-- Weekly Stat Uploads -->
-          <div class="card">
-            <h2>Weekly Stat Uploads</h2>
-            <div id="weekly-upload-sections"></div>
-          </div>
-        </div>
-
-        <!-- TAB: Managers -->
-        <div id="comm-tab-managers" class="comm-tab-content">
-          <div class="card">
-            <h2>Managers</h2>
-            <div id="managers-combined-view"></div>
-            <!-- Hidden legacy elements kept for any residual references -->
-            <table id="managers-table" style="display:none;"></table>
-            <div id="password-mgmt-table" style="display:none;"></div>
-          </div>
-        </div>
-
-        <!-- TAB: Season Setup -->
-        <div id="comm-tab-season-setup" class="comm-tab-content">
-          <!-- Manager Submission Status -->
-          <div class="card">
-            <h2>Manager Submission Status</h2>
-            <p class="upload-hint">Tracks whether each active manager has submitted their initial player list for the current season.</p>
-            <div id="submission-status-table"></div>
+            <div class="card">
+              <h2>Swap Log</h2>
+              <div id="swap-log-list"></div>
+            </div>
           </div>
 
-          <!-- Banner Background -->
-          <div class="card">
-            <h2>Banner Background</h2>
-            <p class="upload-hint">Upload a custom image to use as the banner background. Drag the preview to reposition, use the slider to resize.</p>
-            <div id="banner-bg-section">
-              <div class="banner-bg-upload-row">
-                <label class="upload-label">Image File</label>
-                <input type="file" id="banner-bg-file" accept="image/*">
+          <!-- TAB: Stats Data -->
+          <div id="comm-tab-stats-data" class="comm-tab-content">
+            <!-- Google Sheets Auto-Sync -->
+            <div class="card">
+              <h2>Google Sheets Auto-Sync</h2>
+              <p class="upload-hint">
+                Link a Google Sheet to automatically pull weekly stats on a daily schedule. The sheet must have tabs
+                named like "Week 1 Batting", "Week 1 Pitching", etc. Manual uploads above will still work and take
+                priority over synced data.
+              </p>
+              <div id="gsheets-config-form">
+                <div style="margin-top: 0.75rem">
+                  <a
+                    href="https://docs.google.com/spreadsheets/d/1BBtSrkFKURugJiVB6PPd3MSf5CD7QZNtuzq_V3-JMxE/edit?usp=sharing"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >WMMC Scoring Data Sheet</a
+                  >
+                </div>
+                <div id="gsheets-fields"></div>
+                <div id="gsheets-status" style="margin-top: 0.75rem"></div>
               </div>
-              <div id="banner-bg-editor" style="display:none;">
-                <div class="banner-bg-preview-wrap" id="banner-bg-preview-wrap">
-                  <div id="banner-bg-preview" class="banner-bg-preview">
-                    <div class="bbp-content">
-                      <div class="bbp-left">
-                        <div class="bbp-title" id="bbp-title-preview">WMMC</div>
-                      </div>
-                      <div class="bbp-right">
-                        <div class="bbp-champ-label">Reigning Champion</div>
-                        <div class="bbp-champ-name">Champion Name</div>
+              <div id="gsheets-sync-log" style="margin-top: 1rem"></div>
+            </div>
+            <!-- Weekly Stat Uploads -->
+            <div class="card">
+              <h2>Weekly Stat Uploads</h2>
+              <div id="weekly-upload-sections"></div>
+            </div>
+          </div>
+
+          <!-- TAB: Managers -->
+          <div id="comm-tab-managers" class="comm-tab-content">
+            <div class="card">
+              <h2>Managers</h2>
+              <div id="managers-combined-view"></div>
+              <!-- Hidden legacy elements kept for any residual references -->
+              <table id="managers-table" style="display: none"></table>
+              <div id="password-mgmt-table" style="display: none"></div>
+            </div>
+          </div>
+
+          <!-- TAB: Season Setup -->
+          <div id="comm-tab-season-setup" class="comm-tab-content">
+            <!-- Manager Submission Status -->
+            <div class="card">
+              <h2>Manager Submission Status</h2>
+              <p class="upload-hint">
+                Tracks whether each active manager has submitted their initial player list for the current season.
+              </p>
+              <div id="submission-status-table"></div>
+            </div>
+
+            <!-- Banner Background -->
+            <div class="card">
+              <h2>Banner Background</h2>
+              <p class="upload-hint">
+                Upload a custom image to use as the banner background. Drag the preview to reposition, use the slider to
+                resize.
+              </p>
+              <div id="banner-bg-section">
+                <div class="banner-bg-upload-row">
+                  <label class="upload-label">Image File</label>
+                  <input type="file" id="banner-bg-file" accept="image/*" />
+                </div>
+                <div id="banner-bg-editor" style="display: none">
+                  <div class="banner-bg-preview-wrap" id="banner-bg-preview-wrap">
+                    <div id="banner-bg-preview" class="banner-bg-preview">
+                      <div class="bbp-content">
+                        <div class="bbp-left">
+                          <div class="bbp-title" id="bbp-title-preview">WMMC</div>
+                        </div>
+                        <div class="bbp-right">
+                          <div class="bbp-champ-label">Reigning Champion</div>
+                          <div class="bbp-champ-name">Champion Name</div>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-                <div class="banner-bg-controls">
-                  <div class="banner-bg-ctrl-row">
-                    <label>Scale</label>
-                    <input type="range" id="banner-bg-scale" min="50" max="300" value="100" step="5">
-                    <span id="banner-bg-scale-val">100%</span>
+                  <div class="banner-bg-controls">
+                    <div class="banner-bg-ctrl-row">
+                      <label>Scale</label>
+                      <input type="range" id="banner-bg-scale" min="50" max="300" value="100" step="5" />
+                      <span id="banner-bg-scale-val">100%</span>
+                    </div>
+                    <p class="upload-hint" style="margin: 0.25rem 0 0.5rem">Drag the preview image to reposition it.</p>
+                    <div class="banner-bg-actions">
+                      <button class="btn btn-primary" id="banner-bg-save-btn">Save Background</button>
+                      <button class="btn btn-danger" id="banner-bg-remove-btn">Remove Background</button>
+                    </div>
                   </div>
-                  <p class="upload-hint" style="margin:0.25rem 0 0.5rem;">Drag the preview image to reposition it.</p>
-                  <div class="banner-bg-actions">
-                    <button class="btn btn-primary" id="banner-bg-save-btn">Save Background</button>
-                    <button class="btn btn-danger" id="banner-bg-remove-btn">Remove Background</button>
+                </div>
+                <div id="banner-bg-status" style="margin-top: 0.5rem"></div>
+              </div>
+            </div>
+
+            <!-- Season Schedule -->
+            <div class="card">
+              <h2>Season Schedule</h2>
+              <div
+                style="
+                  margin-bottom: 1.25rem;
+                  padding: 0.75rem 1rem;
+                  background: var(--bg);
+                  border: 1px solid var(--border);
+                  border-radius: 8px;
+                "
+              >
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap">
+                  <button class="btn btn-primary" id="autofill-schedule-btn">
+                    &#x21BB;&nbsp; Auto-Fill from MLB Schedule
+                  </button>
+                  <p class="upload-hint" style="margin: 0; flex: 1; min-width: 200px">
+                    Fetches the All-Star Game date and earliest first-pitch times for each WMMC period from the MLB
+                    schedule. Review and adjust below before saving.
+                  </p>
+                </div>
+                <div id="autofill-schedule-status" style="margin-top: 0.6rem; font-size: 0.84rem"></div>
+              </div>
+              <div class="asg-date-section">
+                <label class="upload-label">Date of All-Star Game</label>
+                <p class="upload-hint">
+                  Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the
+                  prior Monday as Week 1 start.
+                </p>
+                <div class="asg-date-row">
+                  <input type="date" id="asg-date-input" />
+                  <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
+                </div>
+                <div id="asg-date-status"></div>
+              </div>
+              <div id="schedule-dates-preview" style="margin-top: 1rem"></div>
+              <div style="margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: 1rem">
+                <label class="upload-label">Submission Deadlines — First MLB Game Each Period</label>
+                <p class="upload-hint">
+                  For each WMMC period, the earliest MLB game start time on that period's opening day. Managers can
+                  submit (or edit an approved submission) up to 5 minutes before that game. Use "Auto-Fill from MLB
+                  Schedule" above to populate these automatically.
+                </p>
+                <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.75rem">
+                  <div
+                    class="asg-date-section"
+                    style="
+                      margin: 0;
+                      padding: 0.5rem 0.75rem;
+                      background: var(--bg);
+                      border-radius: 6px;
+                      border: 1px solid var(--border);
+                    "
+                  >
+                    <label class="upload-label" style="margin-bottom: 0.25rem"
+                      >Pool Play 1 — Week 1 start (earliest game start time)</label
+                    >
+                    <div class="asg-date-row">
+                      <input type="datetime-local" id="period-deadline-input-pp1" />
+                      <button class="btn btn-primary" id="period-deadline-save-pp1">Save</button>
+                    </div>
+                    <div id="period-deadline-status-pp1" style="font-size: 0.82rem; margin-top: 0.25rem"></div>
+                  </div>
+                  <div
+                    class="asg-date-section"
+                    style="
+                      margin: 0;
+                      padding: 0.5rem 0.75rem;
+                      background: var(--bg);
+                      border-radius: 6px;
+                      border: 1px solid var(--border);
+                    "
+                  >
+                    <label class="upload-label" style="margin-bottom: 0.25rem"
+                      >Pool Play 2 — Week 6 start (earliest game start time)</label
+                    >
+                    <div class="asg-date-row">
+                      <input type="datetime-local" id="period-deadline-input-pp2" />
+                      <button class="btn btn-primary" id="period-deadline-save-pp2">Save</button>
+                    </div>
+                    <div id="period-deadline-status-pp2" style="font-size: 0.82rem; margin-top: 0.25rem"></div>
+                  </div>
+                  <div
+                    class="asg-date-section"
+                    style="
+                      margin: 0;
+                      padding: 0.5rem 0.75rem;
+                      background: var(--bg);
+                      border-radius: 6px;
+                      border: 1px solid var(--border);
+                    "
+                  >
+                    <label class="upload-label" style="margin-bottom: 0.25rem"
+                      >Quarterfinals — QF Week 1 start (earliest game start time)</label
+                    >
+                    <div class="asg-date-row">
+                      <input type="datetime-local" id="period-deadline-input-qf" />
+                      <button class="btn btn-primary" id="period-deadline-save-qf">Save</button>
+                    </div>
+                    <div id="period-deadline-status-qf" style="font-size: 0.82rem; margin-top: 0.25rem"></div>
+                  </div>
+                  <div
+                    class="asg-date-section"
+                    style="
+                      margin: 0;
+                      padding: 0.5rem 0.75rem;
+                      background: var(--bg);
+                      border-radius: 6px;
+                      border: 1px solid var(--border);
+                    "
+                  >
+                    <label class="upload-label" style="margin-bottom: 0.25rem"
+                      >Semifinals — SF Week 1 start (earliest game start time)</label
+                    >
+                    <div class="asg-date-row">
+                      <input type="datetime-local" id="period-deadline-input-sf" />
+                      <button class="btn btn-primary" id="period-deadline-save-sf">Save</button>
+                    </div>
+                    <div id="period-deadline-status-sf" style="font-size: 0.82rem; margin-top: 0.25rem"></div>
+                  </div>
+                  <div
+                    class="asg-date-section"
+                    style="
+                      margin: 0;
+                      padding: 0.5rem 0.75rem;
+                      background: var(--bg);
+                      border-radius: 6px;
+                      border: 1px solid var(--border);
+                    "
+                  >
+                    <label class="upload-label" style="margin-bottom: 0.25rem"
+                      >Finals — Finals Week 1 start (earliest game start time)</label
+                    >
+                    <div class="asg-date-row">
+                      <input type="datetime-local" id="period-deadline-input-finals" />
+                      <button class="btn btn-primary" id="period-deadline-save-finals">Save</button>
+                    </div>
+                    <div id="period-deadline-status-finals" style="font-size: 0.82rem; margin-top: 0.25rem"></div>
                   </div>
                 </div>
               </div>
-              <div id="banner-bg-status" style="margin-top:0.5rem;"></div>
             </div>
-          </div>
 
-          <!-- Season Schedule -->
-          <div class="card">
-            <h2>Season Schedule</h2>
-            <div style="margin-bottom:1.25rem;padding:0.75rem 1rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
-              <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
-                <button class="btn btn-primary" id="autofill-schedule-btn">&#x21BB;&nbsp; Auto-Fill from MLB Schedule</button>
-                <p class="upload-hint" style="margin:0;flex:1;min-width:200px;">Fetches the All-Star Game date and earliest first-pitch times for each WMMC period from the MLB schedule. Review and adjust below before saving.</p>
+            <!-- Initial Player Pool (collapsible) -->
+            <div class="card">
+              <div class="roster-header" style="cursor: pointer" id="season-setup-toggle">
+                <h2 id="season-setup-title" style="margin-bottom: 0; border-bottom: none; padding-bottom: 0">
+                  Initial Player Pool
+                </h2>
+                <span class="btn btn-sm btn-secondary" id="season-setup-toggle-btn">Show</span>
               </div>
-              <div id="autofill-schedule-status" style="margin-top:0.6rem;font-size:0.84rem;"></div>
-            </div>
-            <div class="asg-date-section">
-              <label class="upload-label">Date of All-Star Game</label>
-              <p class="upload-hint">Select the All-Star Game date (usually a Tuesday). The schedule will calculate 11 weeks back from the prior Monday as Week 1 start.</p>
-              <div class="asg-date-row">
-                <input type="date" id="asg-date-input">
-                <button class="btn btn-primary" id="asg-date-save-btn">Set Schedule Dates</button>
-              </div>
-              <div id="asg-date-status"></div>
-            </div>
-            <div id="schedule-dates-preview" style="margin-top:1rem;"></div>
-            <div style="margin-top:1.25rem;border-top:1px solid var(--border);padding-top:1rem;">
-              <label class="upload-label">Submission Deadlines — First MLB Game Each Period</label>
-              <p class="upload-hint">For each WMMC period, the earliest MLB game start time on that period's opening day. Managers can submit (or edit an approved submission) up to 5 minutes before that game. Use "Auto-Fill from MLB Schedule" above to populate these automatically.</p>
-              <div style="display:flex;flex-direction:column;gap:0.75rem;margin-top:0.75rem;">
-                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
-                  <label class="upload-label" style="margin-bottom:0.25rem;">Pool Play 1 — Week 1 start (earliest game start time)</label>
-                  <div class="asg-date-row">
-                    <input type="datetime-local" id="period-deadline-input-pp1">
-                    <button class="btn btn-primary" id="period-deadline-save-pp1">Save</button>
+              <div id="season-setup-body" style="display: none; margin-top: 1rem">
+                <div class="upload-section">
+                  <h3>Upload Initial Player Pool (Names Only)</h3>
+                  <p class="upload-hint">
+                    Upload CSV files with player names. Batter file should have a column named "Name" or "Player".
+                    Pitcher file should have a column named "Name" or "Player".
+                  </p>
+                  <div class="two-col" style="margin-top: 0.75rem">
+                    <div>
+                      <label class="upload-label">Batters CSV</label>
+                      <input type="file" id="upload-batters-pool" accept=".csv" />
+                      <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
+                    </div>
+                    <div>
+                      <label class="upload-label">Pitchers CSV</label>
+                      <input type="file" id="upload-pitchers-pool" accept=".csv" />
+                      <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
+                    </div>
                   </div>
-                  <div id="period-deadline-status-pp1" style="font-size:0.82rem;margin-top:0.25rem;"></div>
-                </div>
-                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
-                  <label class="upload-label" style="margin-bottom:0.25rem;">Pool Play 2 — Week 6 start (earliest game start time)</label>
-                  <div class="asg-date-row">
-                    <input type="datetime-local" id="period-deadline-input-pp2">
-                    <button class="btn btn-primary" id="period-deadline-save-pp2">Save</button>
-                  </div>
-                  <div id="period-deadline-status-pp2" style="font-size:0.82rem;margin-top:0.25rem;"></div>
-                </div>
-                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
-                  <label class="upload-label" style="margin-bottom:0.25rem;">Quarterfinals — QF Week 1 start (earliest game start time)</label>
-                  <div class="asg-date-row">
-                    <input type="datetime-local" id="period-deadline-input-qf">
-                    <button class="btn btn-primary" id="period-deadline-save-qf">Save</button>
-                  </div>
-                  <div id="period-deadline-status-qf" style="font-size:0.82rem;margin-top:0.25rem;"></div>
-                </div>
-                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
-                  <label class="upload-label" style="margin-bottom:0.25rem;">Semifinals — SF Week 1 start (earliest game start time)</label>
-                  <div class="asg-date-row">
-                    <input type="datetime-local" id="period-deadline-input-sf">
-                    <button class="btn btn-primary" id="period-deadline-save-sf">Save</button>
-                  </div>
-                  <div id="period-deadline-status-sf" style="font-size:0.82rem;margin-top:0.25rem;"></div>
-                </div>
-                <div class="asg-date-section" style="margin:0;padding:0.5rem 0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
-                  <label class="upload-label" style="margin-bottom:0.25rem;">Finals — Finals Week 1 start (earliest game start time)</label>
-                  <div class="asg-date-row">
-                    <input type="datetime-local" id="period-deadline-input-finals">
-                    <button class="btn btn-primary" id="period-deadline-save-finals">Save</button>
-                  </div>
-                  <div id="period-deadline-status-finals" style="font-size:0.82rem;margin-top:0.25rem;"></div>
+                  <div id="player-pool-status"></div>
+                  <div id="player-pool-display" style="margin-top: 1rem"></div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <!-- Initial Player Pool (collapsible) -->
-          <div class="card">
-            <div class="roster-header" style="cursor:pointer;" id="season-setup-toggle">
-              <h2 id="season-setup-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Initial Player Pool</h2>
-              <span class="btn btn-sm btn-secondary" id="season-setup-toggle-btn">Show</span>
-            </div>
-            <div id="season-setup-body" style="display:none;margin-top:1rem;">
-              <div class="upload-section">
-                <h3>Upload Initial Player Pool (Names Only)</h3>
-                <p class="upload-hint">Upload CSV files with player names. Batter file should have a column named "Name" or "Player". Pitcher file should have a column named "Name" or "Player".</p>
-                <div class="two-col" style="margin-top:0.75rem;">
-                  <div>
-                    <label class="upload-label">Batters CSV</label>
-                    <input type="file" id="upload-batters-pool" accept=".csv">
-                    <button class="btn btn-primary" id="upload-batters-pool-btn">Upload Batters</button>
-                  </div>
-                  <div>
-                    <label class="upload-label">Pitchers CSV</label>
-                    <input type="file" id="upload-pitchers-pool" accept=".csv">
-                    <button class="btn btn-primary" id="upload-pitchers-pool-btn">Upload Pitchers</button>
-                  </div>
-                </div>
-                <div id="player-pool-status"></div>
-                <div id="player-pool-display" style="margin-top:1rem;"></div>
+            <!-- Season Management -->
+            <div class="card">
+              <h2>Season Management</h2>
+
+              <!-- Create New Season -->
+              <div class="reset-season-section">
+                <h3>Create New Season</h3>
+                <p class="upload-hint">
+                  Create a fresh season for the next year. Managers, pool assignments, and credentials carry forward.
+                  Player pools, rosters, stats, and swap history start clean.
+                </p>
+                <button class="btn btn-primary" id="create-new-season-btn">Create New Season</button>
+                <div id="create-new-season-status" style="margin-top: 0.5rem"></div>
               </div>
 
-            </div>
-          </div>
-
-          <!-- Season Management -->
-          <div class="card">
-            <h2>Season Management</h2>
-
-            <!-- Create New Season -->
-            <div class="reset-season-section">
-              <h3>Create New Season</h3>
-              <p class="upload-hint">Create a fresh season for the next year. Managers, pool assignments, and credentials carry forward. Player pools, rosters, stats, and swap history start clean.</p>
-              <button class="btn btn-primary" id="create-new-season-btn">Create New Season</button>
-              <div id="create-new-season-status" style="margin-top:0.5rem;"></div>
-            </div>
-
-            <!-- Reset Season -->
-            <div class="reset-season-section" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border);">
-              <h3>Reset Season</h3>
-              <p class="upload-hint">Clear all player pools, rosters, uploaded stats, and swap history for the current season. Manager names, emails, pool assignments, and credentials will not be affected.</p>
-              <button class="btn btn-danger" id="reset-season-btn">Reset Season Data</button>
-              <div id="reset-season-status" style="margin-top:0.5rem;"></div>
+              <!-- Reset Season -->
+              <div
+                class="reset-season-section"
+                style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border)"
+              >
+                <h3>Reset Season</h3>
+                <p class="upload-hint">
+                  Clear all player pools, rosters, uploaded stats, and swap history for the current season. Manager
+                  names, emails, pool assignments, and credentials will not be affected.
+                </p>
+                <button class="btn btn-danger" id="reset-season-btn">Reset Season Data</button>
+                <div id="reset-season-status" style="margin-top: 0.5rem"></div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </section>
-  </main>
+      </section>
+    </main>
 
-  <footer>
-    <p>The Whit Merrifield Memorial Cup &copy; <span id="footer-year"></span></p>
-    <p id="footer-version"></p>
-  </footer>
+    <footer>
+      <p>The Whit Merrifield Memorial Cup &copy; <span id="footer-year"></span></p>
+      <p id="footer-version"></p>
+    </footer>
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=20260509b"></script>
-</body>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <!-- Module entry runs first (defer is implicit for type=module) and attaches
+         shared helpers to window. app.js then consumes them as bare globals. -->
+    <script type="module" src="js/index.js?v=20260511"></script>
+    <script src="app.js?v=20260511" defer></script>
+  </body>
 </html>

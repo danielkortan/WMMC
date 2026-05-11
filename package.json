@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "lint": "eslint server.js app.js",
-    "lint:fix": "eslint server.js app.js --fix",
+    "lint": "eslint server.js app.js js/",
+    "lint:fix": "eslint server.js app.js js/ --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test 'tests/*.test.js'",
