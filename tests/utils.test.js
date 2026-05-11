@@ -1,126 +1,122 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { fmt, fmtDec, fmtDateISO, fmtDateRangeShort, weekIndexFromKey, getInitials, parseNum } from '../js/utils.js';
+import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO } from '../js/utils.js';
 
-describe('fmt', () => {
-  it('formats whole numbers with locale', () => {
-    const result = fmt(1234);
-    assert.ok(result.includes('1') && result.includes('234'));
+describe('esc', () => {
+  it('escapes the five HTML-sensitive characters', () => {
+    assert.equal(esc('<script>alert("x")</script>'), '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;');
+    assert.equal(esc('a & b\'s "c"'), 'a &amp; b&#39;s &quot;c&quot;');
   });
 
-  it('formats decimals', () => {
-    const result = fmt(45.5);
-    assert.ok(result.includes('45'));
+  it('returns empty string for null / undefined', () => {
+    assert.equal(esc(null), '');
+    assert.equal(esc(undefined), '');
   });
 
-  it('returns dash for null', () => {
-    assert.equal(fmt(null), '-');
-  });
-
-  it('returns dash for empty string', () => {
-    assert.equal(fmt(''), '-');
-  });
-
-  it('returns dash for "None"', () => {
-    assert.equal(fmt('None'), '-');
-  });
-
-  it('returns non-numeric strings as-is', () => {
-    assert.equal(fmt('hello'), 'hello');
+  it('passes plain strings through unchanged', () => {
+    assert.equal(esc('Whit Merrifield'), 'Whit Merrifield');
   });
 });
 
-describe('fmtDec', () => {
-  it('formats decimals', () => {
-    const result = fmtDec(3.14);
-    assert.ok(result.includes('3'));
+describe('jsStr', () => {
+  it('escapes backslashes and single quotes for JS string literals', () => {
+    assert.equal(jsStr("O'Neill"), "O\\'Neill");
+    assert.equal(jsStr('back\\slash'), 'back\\\\slash');
   });
 
-  it('returns "0" for null', () => {
-    assert.equal(fmtDec(null), '0');
-  });
-
-  it('returns "0" for empty string', () => {
-    assert.equal(fmtDec(''), '0');
-  });
-});
-
-describe('fmtDateISO', () => {
-  it('formats date as YYYY-MM-DD', () => {
-    const d = new Date(2025, 5, 15); // June 15, 2025
-    assert.equal(fmtDateISO(d), '2025-06-15');
-  });
-
-  it('pads single-digit months and days', () => {
-    const d = new Date(2025, 0, 5); // Jan 5, 2025
-    assert.equal(fmtDateISO(d), '2025-01-05');
-  });
-});
-
-describe('fmtDateRangeShort', () => {
-  it('formats same-month range', () => {
-    const result = fmtDateRangeShort('2025-06-09', '2025-06-15');
-    assert.equal(result, 'Jun 9 – 15');
-  });
-
-  it('formats cross-month range', () => {
-    const result = fmtDateRangeShort('2025-06-30', '2025-07-06');
-    assert.equal(result, 'Jun 30 – Jul 6');
-  });
-});
-
-describe('weekIndexFromKey', () => {
-  it('finds PP1 Week 1 at index 0', () => {
-    assert.equal(weekIndexFromKey('PP1', 'Week 1'), 0);
-  });
-
-  it('finds PP2 Week 1 at index 5', () => {
-    assert.equal(weekIndexFromKey('PP2', 'Week 1'), 5);
-  });
-
-  it('finds QF Week 1 at index 10', () => {
-    assert.equal(weekIndexFromKey('QF', 'Week 1'), 10);
-  });
-
-  it('finds Finals Week 2 at index 15', () => {
-    assert.equal(weekIndexFromKey('Finals', 'Week 2'), 15);
-  });
-
-  it('returns -1 for invalid round/week', () => {
-    assert.equal(weekIndexFromKey('Invalid', 'Week 1'), -1);
-  });
-});
-
-describe('getInitials', () => {
-  it('extracts initials from full name', () => {
-    assert.equal(getInitials('John Smith'), 'JS');
-  });
-
-  it('handles single name', () => {
-    assert.equal(getInitials('John'), 'JO');
-  });
-
-  it('handles three-part name (first + last)', () => {
-    assert.equal(getInitials('John Middle Smith'), 'JS');
-  });
-
-  it('returns ? for empty name', () => {
-    assert.equal(getInitials(''), '?');
-  });
-
-  it('returns ? for null', () => {
-    assert.equal(getInitials(null), '?');
+  it('returns empty string for null / undefined', () => {
+    assert.equal(jsStr(null), '');
+    assert.equal(jsStr(undefined), '');
   });
 });
 
 describe('parseNum', () => {
-  it('parses valid numbers', () => {
-    assert.equal(parseNum('42'), 42);
+  it('parses numeric strings', () => {
     assert.equal(parseNum('3.14'), 3.14);
+    assert.equal(parseNum('42'), 42);
   });
 
-  it('returns 0 for non-numbers', () => {
+  it('returns 0 for non-numeric input', () => {
+    assert.equal(parseNum(''), 0);
     assert.equal(parseNum('abc'), 0);
+    assert.equal(parseNum(null), 0);
     assert.equal(parseNum(undefined), 0);
+  });
+
+  it('passes numbers through', () => {
+    assert.equal(parseNum(5), 5);
+    assert.equal(parseNum(-2.5), -2.5);
+  });
+});
+
+describe('fmt', () => {
+  it('returns "-" for blank / null / "None"', () => {
+    assert.equal(fmt(null), '-');
+    assert.equal(fmt(''), '-');
+    assert.equal(fmt('None'), '-');
+  });
+
+  it('formats integers without decimals', () => {
+    assert.equal(fmt(42), '42');
+    assert.equal(fmt(1000), '1,000');
+  });
+
+  it('formats decimals with up to 2 fractional digits', () => {
+    assert.equal(fmt(12.5), '12.5');
+    assert.equal(fmt(12.345), '12.35');
+  });
+
+  it('adds the 69 easter egg', () => {
+    assert.equal(fmt(69), '69 ❤️');
+    assert.equal(fmt(69.5), '69.5 ❤️');
+  });
+
+  it('passes non-numeric strings through', () => {
+    assert.equal(fmt('TBD'), 'TBD');
+  });
+});
+
+describe('fmtDec', () => {
+  it('returns "0" for blank input', () => {
+    assert.equal(fmtDec(''), '0');
+    assert.equal(fmtDec(null), '0');
+  });
+
+  it('formats with up to 2 fractional digits', () => {
+    assert.equal(fmtDec(7), '7');
+    assert.equal(fmtDec(7.123), '7.12');
+  });
+});
+
+describe('getInitials', () => {
+  it('returns the first letter of first + last name', () => {
+    assert.equal(getInitials('Dan Kortan'), 'DK');
+    assert.equal(getInitials('whit merrifield'), 'WM');
+  });
+
+  it('uses first 2 chars of a single-word name', () => {
+    assert.equal(getInitials('Madonna'), 'MA');
+  });
+
+  it('returns "?" for blank input', () => {
+    assert.equal(getInitials(''), '?');
+    assert.equal(getInitials(null), '?');
+  });
+
+  it('handles middle names by skipping them', () => {
+    assert.equal(getInitials('Cal Quantrill Jr'), 'CJ');
+  });
+});
+
+describe('fmtDateISO', () => {
+  it('formats as YYYY-MM-DD with zero padding', () => {
+    // Construct date deterministically in local TZ
+    const d = new Date(2026, 4, 11); // May 11, 2026 — month is 0-indexed
+    assert.equal(fmtDateISO(d), '2026-05-11');
+  });
+
+  it('zero-pads single-digit month and day', () => {
+    const d = new Date(2026, 0, 3);
+    assert.equal(fmtDateISO(d), '2026-01-03');
   });
 });

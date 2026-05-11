@@ -1,14 +1,30 @@
 // ============================================================
-// Module index — re-exports all modules for easy importing
+// WMMC — Frontend module entry point
 // ============================================================
-// These modules extract the core logic from the monolithic app.js
-// into testable, reusable units. The original app.js still serves
-// as the main entry point for the browser, but these modules can
-// be imported independently for testing and future refactoring.
+// Imports every public helper and attaches it to `window` so the (currently
+// classic-script) app.js can resolve bare references like `fmt(x)` via the
+// global scope chain. This is the bridge during the gradual migration of
+// app.js into ES modules — once a function is exported here AND deleted
+// from app.js, the live app will use the module version.
 
-export { default as state, SCORING, SEASON_SCHEDULE, GOOGLE_CLIENT_ID } from './state.js';
-export { getSeasons, saveSeason, getManagers, saveManagers, fetchSeasons, fetchManagers, sendHeartbeat, fetchOnlineUsers, fetchVersion, fetchLoginPassword, getGSheetsConfig, saveGSheetsConfigToServer, triggerGSheetsSyncAPI, getGSheetsSyncStatus } from './api.js';
-export { convertIP, calculateBattingScore, calculatePitchingScore, computeManagerScores, buildTeamWeekly, countUploadedWeeks } from './scoring.js';
-export { fmt, fmtDec, formatDate, parseNum, getPool, resetSelect, computeScheduleDates, fmtDateISO, fmtShortDate, fmtDateRangeShort, getScheduleDates, weekDateLabel, weekIndexFromKey, getCurrentScoringPeriod, getInitials } from './utils.js';
-export { parseCSVFile, parseCSVFileWithStats, parseCSVLine, findColumn, parseNum as csvParseNum } from './csv.js';
-export { migrateRostersToWeekly, getWeekRoster, getAllRosteredPlayers, buildPlayerToManagerMap, findManagerForPlayerWeek, repairManagerAssignments } from './roster.js';
+import { SCORING, SEASON_SCHEDULE, convertIP, calculateBattingScore, calculatePitchingScore } from './scoring.js';
+import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO } from './utils.js';
+import { parseCSVLine, findColumn } from './csv.js';
+
+// Expose helpers globally for app.js (classic script) to consume.
+Object.assign(window, {
+  SCORING,
+  SEASON_SCHEDULE,
+  convertIP,
+  calculateBattingScore,
+  calculatePitchingScore,
+  esc,
+  jsStr,
+  parseNum,
+  fmt,
+  fmtDec,
+  getInitials,
+  fmtDateISO,
+  parseCSVLine,
+  findColumn,
+});
