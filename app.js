@@ -4728,15 +4728,28 @@ function renderRosterData(managerName, isCommissioner) {
   let html = '';
 
   // ---- Scoring Summary Cards ----
+  // Order: Pool Play Total, Pool Play 1, Pool Play 2, then any playoff rounds with data.
   html += '<div class="roster-score-grid">';
-  const periods = [
+
+  const pp1 = periodScores['PP1'] || { batting: 0, pitching: 0, total: 0 };
+  const pp2 = periodScores['PP2'] || { batting: 0, pitching: 0, total: 0 };
+  const ppTotalBat = Math.round((pp1.batting + pp2.batting) * 100) / 100;
+  const ppTotalPit = Math.round((pp1.pitching + pp2.pitching) * 100) / 100;
+  const ppTotal = Math.round((ppTotalBat + ppTotalPit) * 100) / 100;
+  const hasPPData = ppTotal > 0 || periodScores['PP1'] || periodScores['PP2'];
+
+  if (hasPPData) {
+    html += `<div class="roster-score-card roster-score-total">
+      <div class="roster-score-label">Pool Play Total</div>
+      <div class="roster-score-value">${fmt(ppTotal)}</div>
+      <div class="roster-score-detail">Bat: ${fmt(ppTotalBat)} | Pit: ${fmt(ppTotalPit)}</div>
+    </div>`;
+  }
+
+  [
     { key: 'PP1', label: 'Pool Play 1' },
     { key: 'PP2', label: 'Pool Play 2' },
-    { key: 'QF', label: 'Quarterfinals' },
-    { key: 'SF', label: 'Semifinals' },
-    { key: 'Finals', label: 'Finals' },
-  ];
-  periods.forEach((p) => {
+  ].forEach((p) => {
     const s = periodScores[p.key];
     if (s) {
       html += `<div class="roster-score-card">
@@ -4746,14 +4759,22 @@ function renderRosterData(managerName, isCommissioner) {
       </div>`;
     }
   });
-  const totalBat = Object.values(periodScores).reduce((s, p) => s + p.batting, 0);
-  const totalPit = Object.values(periodScores).reduce((s, p) => s + p.pitching, 0);
-  const totalAll = Math.round((totalBat + totalPit) * 100) / 100;
-  html += `<div class="roster-score-card roster-score-total">
-    <div class="roster-score-label">Season Total</div>
-    <div class="roster-score-value">${fmt(totalAll)}</div>
-    <div class="roster-score-detail">Bat: ${fmt(Math.round(totalBat * 100) / 100)} | Pit: ${fmt(Math.round(totalPit * 100) / 100)}</div>
-  </div>`;
+
+  [
+    { key: 'QF', label: 'Quarterfinals' },
+    { key: 'SF', label: 'Semifinals' },
+    { key: 'Finals', label: 'Finals' },
+  ].forEach((p) => {
+    const s = periodScores[p.key];
+    if (s) {
+      html += `<div class="roster-score-card">
+        <div class="roster-score-label">${p.label}</div>
+        <div class="roster-score-value">${fmt(s.total)}</div>
+        <div class="roster-score-detail">Bat: ${fmt(s.batting)} | Pit: ${fmt(s.pitching)}</div>
+      </div>`;
+    }
+  });
+
   html += '</div>';
 
   // Preserve the active tab when re-rendering
@@ -5346,11 +5367,14 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
 }
 
 // Compute per-scoring-period totals for a manager
+// Compute per-period batting/pitching/total for a manager's score boxes.
+// Uses the same filtering logic as buildTeamStatsBreakdown so the numbers
+// always agree with what the Team Stats tab shows.
 function computeRosterPeriodScores(managerName, seasonData) {
   const result = {};
 
   if (DATA && DATA.team_weekly) {
-    // Historical season - use pre-computed team_weekly
+    // Historical season — use pre-computed team_weekly
     const entries = DATA.team_weekly.filter((t) => t.manager === managerName);
     const roundMap = {};
     entries.forEach((t) => {
@@ -5369,53 +5393,63 @@ function computeRosterPeriodScores(managerName, seasonData) {
 
   if (!seasonData || seasonData.status === 'completed') return result;
 
-  const batting = seasonData.weekly_batting || [];
-  const pitching = seasonData.weekly_pitching || [];
+  // Active season — mirror buildTeamStatsBreakdown's filtering exactly so
+  // the score-box totals match what the Team Stats tab displays.
+  BREAKDOWN_PERIODS.forEach((period) => {
+    let batTotal = 0;
+    let pitTotal = 0;
 
-  const countedBatting = new Set();
-  const countedPitching = new Set();
-  batting.forEach((b) => {
-    if (b.manager !== managerName && b.manager !== null) return;
-    const weekKey = `${b.round}|${b.week}`;
-    const weekRoster = (seasonData.rosters &&
-      seasonData.rosters[managerName] &&
-      seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
-    const weekRosterDates =
-      (seasonData.roster_dates &&
-        seasonData.roster_dates[managerName] &&
-        seasonData.roster_dates[managerName][weekKey]) ||
-      {};
-    if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
-    const key = `${esc(b.batter)}|${b.round}|${b.week}`;
-    if (countedBatting.has(key)) return;
-    if (!result[b.round]) result[b.round] = { batting: 0, pitching: 0, total: 0 };
-    result[b.round].batting += b.weekly_score || 0;
-    countedBatting.add(key);
-  });
-  pitching.forEach((p) => {
-    if (p.manager !== managerName && p.manager !== null) return;
-    const weekKey = `${p.round}|${p.week}`;
-    const weekRoster = (seasonData.rosters &&
-      seasonData.rosters[managerName] &&
-      seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
-    const weekRosterDates =
-      (seasonData.roster_dates &&
-        seasonData.roster_dates[managerName] &&
-        seasonData.roster_dates[managerName][weekKey]) ||
-      {};
-    if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
-    const key = `${esc(p.pitcher)}|${p.round}|${p.week}`;
-    if (countedPitching.has(key)) return;
-    if (!result[p.round]) result[p.round] = { batting: 0, pitching: 0, total: 0 };
-    result[p.round].pitching += p.weekly_score || 0;
-    countedPitching.add(key);
+    (seasonData.weekly_batting || []).forEach((b) => {
+      if (b.round !== period.key) return;
+      if (b.manager !== managerName && b.manager !== null) return;
+      const weekKey = `${b.round}|${b.week}`;
+      const weekRoster =
+        (seasonData.rosters &&
+          seasonData.rosters[managerName] &&
+          seasonData.rosters[managerName][weekKey]) ||
+        { batters: [], pitchers: [] };
+      const weekRosterDates =
+        (seasonData.roster_dates &&
+          seasonData.roster_dates[managerName] &&
+          seasonData.roster_dates[managerName][weekKey]) ||
+        {};
+      const onRoster =
+        weekRoster.batters.includes(b.batter) ||
+        (!!weekRosterDates[b.batter] && !weekRoster.pitchers.includes(b.batter));
+      if (!onRoster) return;
+      batTotal += b.weekly_score || 0;
+    });
+
+    (seasonData.weekly_pitching || []).forEach((p) => {
+      if (p.round !== period.key) return;
+      if (p.manager !== managerName && p.manager !== null) return;
+      const weekKey = `${p.round}|${p.week}`;
+      const weekRoster =
+        (seasonData.rosters &&
+          seasonData.rosters[managerName] &&
+          seasonData.rosters[managerName][weekKey]) ||
+        { batters: [], pitchers: [] };
+      const weekRosterDates =
+        (seasonData.roster_dates &&
+          seasonData.roster_dates[managerName] &&
+          seasonData.roster_dates[managerName][weekKey]) ||
+        {};
+      const onRoster =
+        weekRoster.pitchers.includes(p.pitcher) ||
+        (!!weekRosterDates[p.pitcher] && !weekRoster.batters.includes(p.pitcher));
+      if (!onRoster) return;
+      pitTotal += p.weekly_score || 0;
+    });
+
+    if (batTotal !== 0 || pitTotal !== 0) {
+      result[period.key] = {
+        batting: Math.round(batTotal * 100) / 100,
+        pitching: Math.round(pitTotal * 100) / 100,
+        total: Math.round((batTotal + pitTotal) * 100) / 100,
+      };
+    }
   });
 
-  for (const data of Object.values(result)) {
-    data.batting = Math.round(data.batting * 100) / 100;
-    data.pitching = Math.round(data.pitching * 100) / 100;
-    data.total = Math.round((data.batting + data.pitching) * 100) / 100;
-  }
   return result;
 }
 
@@ -6728,6 +6762,7 @@ function showCommissionerPanel() {
   renderSwapLog();
   renderManagersTable();
   renderPlayerPoolDisplay();
+  renderTwoStartWorklist();
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
@@ -6817,6 +6852,121 @@ window.saveSwapLogReason = function (swapId, newReason) {
   swap.reason = newReason;
   saveSeason(SELECTED_SEASON, sd);
   renderSwapLog();
+};
+
+// ---- Two-Start Pitcher Worklist (Commissioner Tab: Stats Data) ----
+// Lists every weekly_pitching record flagged as a multi-start (GS >= 2 or
+// qs_highlight) whose QS has not yet been entered. Commissioner sets QS
+// in-line; on save the row's weekly score is recomputed and the row is
+// removed from the worklist.
+function renderTwoStartWorklist() {
+  const container = document.getElementById('two-start-worklist');
+  if (!container) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const pitching = (sd && sd.weekly_pitching) || [];
+
+  const pending = pitching.filter((p) => {
+    const gs = parseFloat(p.gs) || 0;
+    const isMulti = p.qs_highlight === true || gs >= 2;
+    return isMulti && (p.qs == null);
+  });
+
+  if (pending.length === 0) {
+    container.innerHTML = '<p class="text-muted">No two-start pitchers awaiting QS entry.</p>';
+    return;
+  }
+
+  // Sort by schedule order (most recent week first), then manager, then pitcher
+  pending.sort((a, b) => {
+    const ai = weekIndexFromKey(a.round, a.week);
+    const bi = weekIndexFromKey(b.round, b.week);
+    if (ai !== bi) return bi - ai;
+    const am = a.manager || '';
+    const bm = b.manager || '';
+    if (am !== bm) return am.localeCompare(bm);
+    return (a.pitcher || '').localeCompare(b.pitcher || '');
+  });
+
+  let html =
+    '<div class="table-wrapper"><table class="data-table compact-table two-start-worklist-table"><thead><tr>' +
+    '<th>Week</th><th>Manager</th><th>Pitcher</th><th class="num">GS</th><th class="num">IP</th>' +
+    '<th class="num">ER</th><th class="num">QS</th><th></th>' +
+    '</tr></thead><tbody>';
+
+  pending.forEach((p) => {
+    const round = esc(p.round || '');
+    const week = esc(p.week || '');
+    const weekKey = `${p.round || ''}|${p.week || ''}`;
+    const safeMgr = jsStr(p.manager || '');
+    const safePit = jsStr(p.pitcher || '');
+    const safeKey = jsStr(weekKey);
+    const inputId = `tsw-qs-${(p.manager || 'none').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.pitcher || '').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.round || '').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.week || '').replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const gs = parseFloat(p.gs) || 0;
+    html += `<tr>
+      <td style="white-space:nowrap;">${round} ${week}</td>
+      <td>${esc(p.manager || '—')}</td>
+      <td>${esc(p.pitcher || '')}${multiStartTag()}</td>
+      <td class="num">${gs}</td>
+      <td class="num">${fmtDec(p.ip || 0)}</td>
+      <td class="num">${p.er || 0}</td>
+      <td class="num"><input type="number" id="${inputId}" class="two-start-qs-input" min="0" max="${gs}" step="1" value="" placeholder="0"></td>
+      <td><button class="btn btn-sm btn-primary" onclick="saveTwoStartQS('${safeMgr}','${safePit}','${safeKey}','${inputId}')">Save</button></td>
+    </tr>`;
+  });
+
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+// Save the QS value entered in the worklist for a multi-start pitcher.
+// Sets qs on the matching weekly_pitching record, marks 'qs' as a manual
+// field (so future uploads won't overwrite it), clears the qs_highlight
+// flag, recalculates weekly_score, and re-renders the worklist.
+window.saveTwoStartQS = function (manager, pitcher, weekKey, inputId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const raw = input.value;
+  if (raw === '' || raw == null) {
+    alert('Enter a QS value before saving.');
+    return;
+  }
+  const qsVal = parseNum(raw);
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.weekly_pitching) return;
+
+  const [round, week] = weekKey.split('|');
+  const mgrKey = manager || null;
+  const rec = sd.weekly_pitching.find(
+    (p) =>
+      p.pitcher === pitcher &&
+      (p.manager || null) === mgrKey &&
+      p.round === round &&
+      p.week === week
+  );
+  if (!rec) {
+    alert('Could not find pitcher record to update.');
+    return;
+  }
+
+  const gs = parseFloat(rec.gs) || 0;
+  if (qsVal < 0 || qsVal > gs) {
+    alert(`QS must be between 0 and ${gs} (number of starts).`);
+    return;
+  }
+
+  rec.qs = qsVal;
+  rec.qs_highlight = false;
+  const manualFields = new Set(rec.manual_fields || []);
+  manualFields.add('qs');
+  rec.manual_fields = [...manualFields];
+  rec.weekly_score = calculatePitchingScore(rec);
+
+  saveSeason(SELECTED_SEASON, sd);
+  renderTwoStartWorklist();
 };
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
