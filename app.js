@@ -6728,6 +6728,7 @@ function showCommissionerPanel() {
   renderSwapLog();
   renderManagersTable();
   renderPlayerPoolDisplay();
+  renderTwoStartWorklist();
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
@@ -6817,6 +6818,121 @@ window.saveSwapLogReason = function (swapId, newReason) {
   swap.reason = newReason;
   saveSeason(SELECTED_SEASON, sd);
   renderSwapLog();
+};
+
+// ---- Two-Start Pitcher Worklist (Commissioner Tab: Stats Data) ----
+// Lists every weekly_pitching record flagged as a multi-start (GS >= 2 or
+// qs_highlight) whose QS has not yet been entered. Commissioner sets QS
+// in-line; on save the row's weekly score is recomputed and the row is
+// removed from the worklist.
+function renderTwoStartWorklist() {
+  const container = document.getElementById('two-start-worklist');
+  if (!container) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const pitching = (sd && sd.weekly_pitching) || [];
+
+  const pending = pitching.filter((p) => {
+    const gs = parseFloat(p.gs) || 0;
+    const isMulti = p.qs_highlight === true || gs >= 2;
+    return isMulti && (p.qs == null);
+  });
+
+  if (pending.length === 0) {
+    container.innerHTML = '<p class="text-muted">No two-start pitchers awaiting QS entry.</p>';
+    return;
+  }
+
+  // Sort by schedule order (most recent week first), then manager, then pitcher
+  pending.sort((a, b) => {
+    const ai = weekIndexFromKey(a.round, a.week);
+    const bi = weekIndexFromKey(b.round, b.week);
+    if (ai !== bi) return bi - ai;
+    const am = a.manager || '';
+    const bm = b.manager || '';
+    if (am !== bm) return am.localeCompare(bm);
+    return (a.pitcher || '').localeCompare(b.pitcher || '');
+  });
+
+  let html =
+    '<div class="table-wrapper"><table class="data-table compact-table two-start-worklist-table"><thead><tr>' +
+    '<th>Week</th><th>Manager</th><th>Pitcher</th><th class="num">GS</th><th class="num">IP</th>' +
+    '<th class="num">ER</th><th class="num">QS</th><th></th>' +
+    '</tr></thead><tbody>';
+
+  pending.forEach((p) => {
+    const round = esc(p.round || '');
+    const week = esc(p.week || '');
+    const weekKey = `${p.round || ''}|${p.week || ''}`;
+    const safeMgr = jsStr(p.manager || '');
+    const safePit = jsStr(p.pitcher || '');
+    const safeKey = jsStr(weekKey);
+    const inputId = `tsw-qs-${(p.manager || 'none').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.pitcher || '').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.round || '').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.week || '').replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const gs = parseFloat(p.gs) || 0;
+    html += `<tr>
+      <td style="white-space:nowrap;">${round} ${week}</td>
+      <td>${esc(p.manager || '—')}</td>
+      <td>${esc(p.pitcher || '')}${multiStartTag()}</td>
+      <td class="num">${gs}</td>
+      <td class="num">${fmtDec(p.ip || 0)}</td>
+      <td class="num">${p.er || 0}</td>
+      <td class="num"><input type="number" id="${inputId}" class="two-start-qs-input" min="0" max="${gs}" step="1" value="" placeholder="0"></td>
+      <td><button class="btn btn-sm btn-primary" onclick="saveTwoStartQS('${safeMgr}','${safePit}','${safeKey}','${inputId}')">Save</button></td>
+    </tr>`;
+  });
+
+  html += '</tbody></table></div>';
+  container.innerHTML = html;
+}
+
+// Save the QS value entered in the worklist for a multi-start pitcher.
+// Sets qs on the matching weekly_pitching record, marks 'qs' as a manual
+// field (so future uploads won't overwrite it), clears the qs_highlight
+// flag, recalculates weekly_score, and re-renders the worklist.
+window.saveTwoStartQS = function (manager, pitcher, weekKey, inputId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const raw = input.value;
+  if (raw === '' || raw == null) {
+    alert('Enter a QS value before saving.');
+    return;
+  }
+  const qsVal = parseNum(raw);
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || !sd.weekly_pitching) return;
+
+  const [round, week] = weekKey.split('|');
+  const mgrKey = manager || null;
+  const rec = sd.weekly_pitching.find(
+    (p) =>
+      p.pitcher === pitcher &&
+      (p.manager || null) === mgrKey &&
+      p.round === round &&
+      p.week === week
+  );
+  if (!rec) {
+    alert('Could not find pitcher record to update.');
+    return;
+  }
+
+  const gs = parseFloat(rec.gs) || 0;
+  if (qsVal < 0 || qsVal > gs) {
+    alert(`QS must be between 0 and ${gs} (number of starts).`);
+    return;
+  }
+
+  rec.qs = qsVal;
+  rec.qs_highlight = false;
+  const manualFields = new Set(rec.manual_fields || []);
+  manualFields.add('qs');
+  rec.manual_fields = [...manualFields];
+  rec.weekly_score = calculatePitchingScore(rec);
+
+  saveSeason(SELECTED_SEASON, sd);
+  renderTwoStartWorklist();
 };
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
