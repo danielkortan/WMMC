@@ -6870,7 +6870,12 @@ function renderTwoStartWorklist() {
   const pending = pitching.filter((p) => {
     const gs = parseFloat(p.gs) || 0;
     const isMulti = p.qs_highlight === true || gs >= 2;
-    return isMulti && (p.qs == null);
+    // Server-side sync stores qs: 0 (not null) for multi-start pitchers, so
+    // we can't rely on qs == null. Use the manual_fields stamp instead — once
+    // the commissioner enters QS it gets added there, which is the reliable
+    // "resolved" signal regardless of how the record was created.
+    const qsResolved = (p.manual_fields || []).includes('qs');
+    return isMulti && !qsResolved;
   });
 
   if (pending.length === 0) {
