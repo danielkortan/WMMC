@@ -6875,7 +6875,7 @@ function renderTwoStartWorklist() {
     // the commissioner enters QS it gets added there, which is the reliable
     // "resolved" signal regardless of how the record was created.
     const qsResolved = (p.manual_fields || []).includes('qs');
-    return isMulti && !qsResolved;
+    return isMulti && !qsResolved && !!p.manager;
   });
 
   if (pending.length === 0) {
