@@ -1679,6 +1679,11 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
 
   // Compute total points per player (includes null-manager entries for players rostered that week)
   const detailRosterLookup = buildRosterLookup(sd);
+  const detailScheduleDates = getScheduleDates();
+  const detailWeekKeyToStart = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (detailScheduleDates && detailScheduleDates[i]) detailWeekKeyToStart[`${s.round}|${s.week}`] = detailScheduleDates[i].start;
+  });
   function playerPts(name, type) {
     const arr = type === 'batting' ? sd.weekly_batting || [] : sd.weekly_pitching || [];
     const playerKey = type === 'batting' ? 'batter' : 'pitcher';
@@ -1687,6 +1692,8 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
         arr
           .filter((r) => {
             if (r[playerKey] !== name) return false;
+            const weekKey = `${r.round}|${r.week}`;
+            if (playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, name, weekKey)) return false;
             const mgr = r.manager || detailRosterLookup[`${name}|${r.round}|${r.week}`];
             return mgr === managerName;
           })
