@@ -1665,12 +1665,33 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
     });
   });
 
+  // Precompute weekKey → start date (needed for carry-over and active-roster filtering).
+  const detailScheduleDates = getScheduleDates();
+  const detailWeekKeyToStart = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (detailScheduleDates && detailScheduleDates[i]) detailWeekKeyToStart[`${s.round}|${s.week}`] = detailScheduleDates[i].start;
+  });
+
   // Find current (most recent) roster
   const sortedWeeks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`).filter((k) => mgrRosters[k]);
   const currentWeekKey = sortedWeeks[sortedWeeks.length - 1] || null;
   const currentRoster = currentWeekKey ? mgrRosters[currentWeekKey] : { batters: [], pitchers: [] };
-  const activeBatters = new Set(currentRoster.batters || []);
-  const activePitchers = new Set(currentRoster.pitchers || []);
+  // Exclude carry-over players (dropped before the current week) and players dropped during
+  // the current week (drop_date present in current week's roster_dates).
+  const currentWeekRosterDates = currentWeekKey ? (mgrRosterDates[currentWeekKey] || {}) : {};
+  const sbDroppedThisWeek = new Set(
+    Object.entries(currentWeekRosterDates).filter(([, d]) => d.drop_date).map(([p]) => p)
+  );
+  const activeBatters = new Set(
+    (currentRoster.batters || []).filter(
+      (p) => !sbDroppedThisWeek.has(p) && !playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, p, currentWeekKey)
+    )
+  );
+  const activePitchers = new Set(
+    (currentRoster.pitchers || []).filter(
+      (p) => !sbDroppedThisWeek.has(p) && !playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, p, currentWeekKey)
+    )
+  );
   // Track the opening-week roster so we can tell original players from mid-season adds
   const firstWeekKey = sortedWeeks[0] || null;
   const firstRoster = firstWeekKey
@@ -1679,11 +1700,6 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
 
   // Compute total points per player (includes null-manager entries for players rostered that week)
   const detailRosterLookup = buildRosterLookup(sd);
-  const detailScheduleDates = getScheduleDates();
-  const detailWeekKeyToStart = {};
-  SEASON_SCHEDULE.forEach((s, i) => {
-    if (detailScheduleDates && detailScheduleDates[i]) detailWeekKeyToStart[`${s.round}|${s.week}`] = detailScheduleDates[i].start;
-  });
   function playerPts(name, type) {
     const arr = type === 'batting' ? sd.weekly_batting || [] : sd.weekly_pitching || [];
     const playerKey = type === 'batting' ? 'batter' : 'pitcher';
@@ -5143,6 +5159,14 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
       };
     }
+    // Players dropped during this week (drop_date present in current weekRosterDates) are treated
+    // as historical/greyed-out, the same as players dropped in a previous week.
+    const droppedThisWeek = new Set(
+      Object.entries(weekRosterDates)
+        .filter(([, d]) => d.drop_date)
+        .map(([p]) => p)
+    );
+
     const historicalBatters = new Set([
       ...weekRoster.batters.filter((p) => battersPool.size === 0 || battersPool.has(p)),
       ...Object.keys(weekRosterDates).filter(
@@ -5212,12 +5236,14 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         }
       });
     }
-    // Only show dropped players who actually accumulated stats during the scoring period
+    // Only show dropped players who actually accumulated stats during the scoring period.
+    // Includes both players dropped in a previous week and players dropped during this week.
     const droppedBatters = [...historicalBatters].filter(
-      (p) => !weekRoster.batters.includes(p) && allWeekBatting.some((b) => b.batter === p)
+      (p) => (!weekRoster.batters.includes(p) || droppedThisWeek.has(p)) && allWeekBatting.some((b) => b.batter === p)
     );
     const droppedPitchers = [...historicalPitchers].filter(
-      (p) => !weekRoster.pitchers.includes(p) && allWeekPitching.some((pt) => pt.pitcher === p)
+      (p) =>
+        (!weekRoster.pitchers.includes(p) || droppedThisWeek.has(p)) && allWeekPitching.some((pt) => pt.pitcher === p)
     );
 
     // Compute weekly rankings for this week
@@ -5256,7 +5282,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     }
 
     // ---- Batters for this week ----
-    html += `<div class="wrs-group-label">BATTERS (${weekRoster.batters.length}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
+    const activeBatCount = weekRoster.batters.filter((p) => !droppedThisWeek.has(p)).length;
+    html += `<div class="wrs-group-label">BATTERS (${activeBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
     // Build batter stat lookup for this week
     const batStatMap = {};
@@ -5267,7 +5294,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     // Pool filter: only show batting stats for players in historicalBatters (already pool-validated)
     const weekBattingForTable = allWeekBatting.filter((b) => historicalBatters.has(b.batter));
     const allBattersThisWeek = new Set([
-      ...weekRoster.batters.filter((p) => battersPool.size === 0 || battersPool.has(p)),
+      ...weekRoster.batters.filter((p) => (battersPool.size === 0 || battersPool.has(p)) && !droppedThisWeek.has(p)),
       ...droppedBatters,
       ...weekBattingForTable.map((b) => b.batter),
     ]);
@@ -5280,7 +5307,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         .sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0))
         .forEach((batter) => {
           const s = batStatMap[batter] || {};
-          const onRoster = weekRoster.batters.includes(batter);
+          const onRoster = weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
           const wkRank = weekRanks.batRanks[batter];
           const { batCum, periodRankings: pRankings } = getRoundData(round);
           const cumScore = batCum[batter] || 0;
@@ -5319,7 +5346,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     }
 
     // ---- Pitchers for this week ----
-    html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${weekRoster.pitchers.length}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
+    const activePitCount = weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p)).length;
+    html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${activePitCount}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
     const pitStatMap = {};
     allWeekPitching.forEach((p) => {
@@ -5328,7 +5356,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
 
     const weekPitchingForTable = allWeekPitching.filter((p) => historicalPitchers.has(p.pitcher));
     const allPitchersThisWeek = new Set([
-      ...weekRoster.pitchers.filter((p) => pitchersPool.size === 0 || pitchersPool.has(p)),
+      ...weekRoster.pitchers.filter((p) => (pitchersPool.size === 0 || pitchersPool.has(p)) && !droppedThisWeek.has(p)),
       ...droppedPitchers,
       ...weekPitchingForTable.map((p) => p.pitcher),
     ]);
@@ -5341,7 +5369,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         .sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0))
         .forEach((pitcher) => {
           const s = pitStatMap[pitcher] || {};
-          const onRoster = weekRoster.pitchers.includes(pitcher);
+          const onRoster = weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
           const wkRank = weekRanks.pitRanks[pitcher];
           const { pitCum, periodRankings: pRankingsPit } = getRoundData(round);
           const cumScore = pitCum[pitcher] || 0;
@@ -9268,12 +9296,21 @@ window.updateCommRosterWeekView = function (managerName) {
       allWeekPitching.push(p);
     }
   });
-  // Only show dropped players who actually accumulated stats during the scoring period
+  // Players dropped during this week (drop_date in current rosterDates) are treated as historical.
+  const commDroppedThisWeek = new Set(
+    Object.entries(rosterDates)
+      .filter(([, d]) => d.drop_date)
+      .map(([p]) => p)
+  );
+
+  // Only show dropped players who actually accumulated stats during the scoring period.
+  // Includes both players dropped in a previous week and players dropped during this week.
   const droppedBatters = [...historicalBatters].filter(
-    (p) => !roster.batters.includes(p) && allWeekBatting.some((b) => b.batter === p)
+    (p) => (!roster.batters.includes(p) || commDroppedThisWeek.has(p)) && allWeekBatting.some((b) => b.batter === p)
   );
   const droppedPitchers = [...historicalPitchers].filter(
-    (p) => !roster.pitchers.includes(p) && allWeekPitching.some((pt) => pt.pitcher === p)
+    (p) =>
+      (!roster.pitchers.includes(p) || commDroppedThisWeek.has(p)) && allWeekPitching.some((pt) => pt.pitcher === p)
   );
 
   function getPlayerDates(player) {
@@ -9306,7 +9343,7 @@ window.updateCommRosterWeekView = function (managerName) {
   // Pool filter: only show batting stats for players in historicalBatters (already pool-validated)
   const weekBattingForTable = allWeekBatting.filter((b) => historicalBatters.has(b.batter));
   const allBattersThisWeek = new Set([
-    ...roster.batters.filter((p) => battersPool.size === 0 || battersPool.has(p)),
+    ...roster.batters.filter((p) => (battersPool.size === 0 || battersPool.has(p)) && !commDroppedThisWeek.has(p)),
     ...droppedBatters,
     ...weekBattingForTable.map((b) => b.batter),
   ]);
@@ -9315,7 +9352,8 @@ window.updateCommRosterWeekView = function (managerName) {
     .filter((b) => historicalBatters.has(b.batter))
     .reduce((s, b) => s + (b.weekly_score || 0), 0);
 
-  let batHtml = `<div class="wrs-group-label">BATTERS (${roster.batters.length}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
+  const commActiveBatCount = roster.batters.filter((p) => !commDroppedThisWeek.has(p)).length;
+  let batHtml = `<div class="wrs-group-label">BATTERS (${commActiveBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
   if (allBattersThisWeek.size > 0) {
     batHtml +=
@@ -9327,7 +9365,7 @@ window.updateCommRosterWeekView = function (managerName) {
       .sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0))
       .forEach((batter) => {
         const s = batStatMap[batter] || {};
-        const onRoster = roster.batters.includes(batter);
+        const onRoster = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
         const wkRank = weekRanks.batRanks[batter];
         const cumScore = commBatCum[batter] || 0;
         const cumRank = cumRankings.batRanks[batter];
@@ -9386,7 +9424,7 @@ window.updateCommRosterWeekView = function (managerName) {
   });
   const weekPitchingForTable = allWeekPitching.filter((p) => historicalPitchers.has(p.pitcher));
   const allPitchersThisWeek = new Set([
-    ...roster.pitchers.filter((p) => pitchersPool.size === 0 || pitchersPool.has(p)),
+    ...roster.pitchers.filter((p) => (pitchersPool.size === 0 || pitchersPool.has(p)) && !commDroppedThisWeek.has(p)),
     ...droppedPitchers,
     ...weekPitchingForTable.map((p) => p.pitcher),
   ]);
@@ -9395,7 +9433,8 @@ window.updateCommRosterWeekView = function (managerName) {
     .filter((p) => historicalPitchers.has(p.pitcher))
     .reduce((s, p) => s + (p.weekly_score || 0), 0);
 
-  let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${roster.pitchers.length}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
+  const commActivePitCount = roster.pitchers.filter((p) => !commDroppedThisWeek.has(p)).length;
+  let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${commActivePitCount}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
   if (allPitchersThisWeek.size > 0) {
     pitHtml +=
@@ -9407,7 +9446,7 @@ window.updateCommRosterWeekView = function (managerName) {
       .sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0))
       .forEach((pitcher) => {
         const s = pitStatMap[pitcher] || {};
-        const onRoster = roster.pitchers.includes(pitcher);
+        const onRoster = roster.pitchers.includes(pitcher) && !commDroppedThisWeek.has(pitcher);
         const wkRank = weekRanks.pitRanks[pitcher];
         const cumScore = commPitCum[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
