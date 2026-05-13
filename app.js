@@ -4540,16 +4540,40 @@ function buildRosterLookup(seasonData) {
   return lookup;
 }
 
+// Returns true if `player` was dropped from `mgr`'s roster (via a roster_dates entry in a
+// previous week) before `weekKey` starts, and was not re-added during `weekKey`.
+// Used to prevent carry-over players from accumulating points in subsequent weeks.
+function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKey) {
+  const wkStart = weekKeyToStart[weekKey];
+  if (!wkStart) return false;
+  const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[mgr]) || {};
+  const addedThisWeek = !!(mgrDates[weekKey] && mgrDates[weekKey][player] && mgrDates[weekKey][player].add_date);
+  if (addedThisWeek) return false;
+  for (const [wk, players] of Object.entries(mgrDates)) {
+    if (wk === weekKey) continue;
+    const pd = players[player];
+    if (pd && pd.drop_date && pd.drop_date < wkStart) return true;
+  }
+  return false;
+}
+
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
   const rosterLookup = buildRosterLookup(seasonData);
+
+  const scheduleDates = getScheduleDates();
+  const weekKeyToStart = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (scheduleDates && scheduleDates[i]) weekKeyToStart[`${s.round}|${s.week}`] = scheduleDates[i].start;
+  });
 
   const managerMap = {};
   batting.forEach((b) => {
     const mgr = b.manager || rosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
     if (!mgr) return;
     const weekKey = `${b.round}|${b.week}`;
+    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, b.batter, weekKey)) return;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
       batters: [],
       pitchers: [],
@@ -4564,6 +4588,7 @@ function computeManagerScores(seasonData) {
     const mgr = p.manager || rosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
     if (!mgr) return;
     const weekKey = `${p.round}|${p.week}`;
+    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, p.pitcher, weekKey)) return;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
       batters: [],
       pitchers: [],
@@ -4589,6 +4614,12 @@ function buildTeamWeekly(seasonData) {
   const managers = getManagers();
   const rosterLookup = buildRosterLookup(seasonData);
 
+  const scheduleDates = getScheduleDates();
+  const weekKeyToStart = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (scheduleDates && scheduleDates[i]) weekKeyToStart[`${s.round}|${s.week}`] = scheduleDates[i].start;
+  });
+
   // Build manager-to-pool lookup
   const managerPool = {};
   managers.forEach((m) => {
@@ -4602,6 +4633,7 @@ function buildTeamWeekly(seasonData) {
     const mgr = b.manager || rosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
     if (!mgr) return;
     const weekKey = `${b.round}|${b.week}`;
+    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, b.batter, weekKey)) return;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
       batters: [],
       pitchers: [],
@@ -4627,6 +4659,7 @@ function buildTeamWeekly(seasonData) {
     const mgr = p.manager || rosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
     if (!mgr) return;
     const weekKey = `${p.round}|${p.week}`;
+    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, p.pitcher, weekKey)) return;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
       batters: [],
       pitchers: [],
@@ -4885,7 +4918,15 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     // whose stats arrived post-drop count correctly while excluding other managers' unattributed stats.
     const mgrRosters = isActive ? (seasonData.rosters || {})[managerName] || {} : {};
     const mgrRosterDates = isActive ? (seasonData.roster_dates || {})[managerName] || {} : {};
+
+    // Precompute weekKey → start date to efficiently filter carry-over players.
+    const weekKeyToStart = {};
+    SEASON_SCHEDULE.forEach((s, i) => {
+      if (scheduleDates && scheduleDates[i]) weekKeyToStart[`${s.round}|${s.week}`] = scheduleDates[i].start;
+    });
+
     function wasRosteredThisWeek(player, weekKey, type) {
+      if (isActive && playerDroppedBeforeWeek(seasonData, weekKeyToStart, managerName, player, weekKey)) return false;
       const wkRoster = mgrRosters[weekKey] || { batters: [], pitchers: [] };
       const arr = type === 'bat' ? wkRoster.batters : wkRoster.pitchers;
       if (arr.includes(player)) return true;
@@ -9078,7 +9119,16 @@ window.updateCommRosterWeekView = function (managerName) {
   const pitchersPool = new Set(sd.pitchers_pool || []);
   const commMgrRosters = (sd.rosters || {})[managerName] || {};
   const commMgrRosterDates = (sd.roster_dates || {})[managerName] || {};
+
+  // Precompute weekKey → start date for dropped-player filtering in cumulative calculation.
+  const commScheduleDates = getScheduleDates();
+  const commWeekKeyToStart = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (commScheduleDates && commScheduleDates[i]) commWeekKeyToStart[`${s.round}|${s.week}`] = commScheduleDates[i].start;
+  });
+
   function commWasRostered(player, wkKey, type) {
+    if (playerDroppedBeforeWeek(sd, commWeekKeyToStart, managerName, player, wkKey)) return false;
     const wkRoster = commMgrRosters[wkKey] || { batters: [], pitchers: [] };
     if ((type === 'bat' ? wkRoster.batters : wkRoster.pitchers).includes(player)) return true;
     return !!(commMgrRosterDates[wkKey] || {})[player];
