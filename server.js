@@ -2377,17 +2377,21 @@ function renamePlayerInSeason(sd, oldName, newName) {
 // Fetch the MLB player catalog for a season: id + name + current team.
 // Cached per-season for the lifetime of the process — the catalog is large (~2k players)
 // and stable enough within a session that re-fetching on every audit call is wasteful.
+//
+// hydrate=currentTeam is required because the bare endpoint inconsistently returns team
+// info on the player record (some players have only currentTeam.id without name/abbrev).
 const _mlbCatalogCache = new Map();
 async function fetchMLBPlayerCatalog(season) {
   const key = String(season);
   if (_mlbCatalogCache.has(key)) return _mlbCatalogCache.get(key);
-  const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}`);
+  const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}&hydrate=currentTeam`);
   const catalog = (data.people || [])
     .filter((p) => p && p.id && p.fullName)
     .map((p) => ({
       id: p.id,
       fullName: p.fullName,
-      team: p.currentTeam?.abbreviation || p.currentTeam?.name || null,
+      team: p.currentTeam?.abbreviation || p.currentTeam?.teamCode || p.currentTeam?.name || null,
+      teamId: p.currentTeam?.id || null,
       position: p.primaryPosition?.abbreviation || null,
     }));
   _mlbCatalogCache.set(key, catalog);
@@ -2646,12 +2650,25 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
           // No normalized match — fall back to fuzzy.
           const candidates = topCatalogCandidates(wmmcName, catalog, 5);
           const best = candidates[0];
-          rosteredReview.push({
-            wmmc_name: wmmcName,
-            best_match: best?.mlb_name ?? null,
-            best_score: best?.score ?? 0,
-            candidates,
-          });
+          // If the top fuzzy hit's MLB name has multiple catalog entries (e.g. "Max Muncy (LAD)"
+          // -> two "Max Muncy"s tied at the top score), this is really a duplicate-name pick:
+          // route to duplicate_review so the commissioner sees all the colliding ids together.
+          const topMlbDupes = best ? byNorm.get(normalizeName(best.mlb_name)) || [] : [];
+          if (topMlbDupes.length > 1) {
+            duplicateReview.push({
+              wmmc_name: wmmcName,
+              reason: 'fuzzy_top_match_has_multiple_catalog_entries',
+              fuzzy_score: best.score,
+              candidates: topMlbDupes.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team, position: e.position, score: best.score })),
+            });
+          } else {
+            rosteredReview.push({
+              wmmc_name: wmmcName,
+              best_match: best?.mlb_name ?? null,
+              best_score: best?.score ?? 0,
+              candidates,
+            });
+          }
         }
         continue;
       }
