@@ -4127,3 +4127,59 @@ body::before {
   margin-top: 0.5rem;
   min-height: 1.1rem;
 }
+
+/* ---- Live scoring tab ---- */
+.live-header-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.live-status {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.live-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.live-pill-live {
+  background: var(--accent);
+  color: #fff;
+}
+.live-pill-final {
+  background: var(--text-muted);
+  color: #fff;
+}
+.live-pill-preview {
+  background: var(--border);
+  color: var(--text);
+  text-transform: none;
+  font-weight: 500;
+}
+.live-game-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.live-game-row:last-child { border-bottom: none; }
+.live-game-line {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95rem;
+}
+.empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 0.5rem;
+}
+.muted { color: var(--text-muted); font-weight: normal; }
+.num-cell { text-align: right; font-variant-numeric: tabular-nums; }

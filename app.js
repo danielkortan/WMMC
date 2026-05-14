@@ -656,6 +656,7 @@ function enterApp(mgr) {
   // Trigger tab-specific renders for tabs that need them
   if (savedTab === 'trends') renderTrends();
   if (savedTab === 'hall-of-fame') renderHallOfFame();
+  if (savedTab === 'live') startLivePolling();
 
   // Poll for changes every 45 seconds so logged-in users always see
   // the latest data without needing a page refresh.
@@ -1060,6 +1061,9 @@ function setupNav() {
       init();
       if (btn.dataset.tab === 'trends') renderTrends();
       if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
+      // Live tab owns its own polling lifecycle — start when entering, stop on leaving.
+      if (btn.dataset.tab === 'live') startLivePolling();
+      else stopLivePolling();
     });
   });
 }
@@ -1072,6 +1076,171 @@ function showHistoricalSeason() {
   renderWeekly();
   renderPlayers();
   renderBracket();
+}
+
+// ============================================================
+// LIVE SCORING — auto-refreshing view of in-progress + final games for
+// the active schedule week. Polls /api/mlb/live every 60s while the tab
+// is active AND the document is visible.
+// ============================================================
+const LIVE_POLL_MS = 60_000;
+let _livePollTimer = null;
+let _liveLastFetchedAt = 0;
+
+function startLivePolling() {
+  if (_livePollTimer) return;
+  refreshLive();
+  _livePollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') refreshLive();
+  }, LIVE_POLL_MS);
+}
+
+function stopLivePolling() {
+  if (_livePollTimer) {
+    clearInterval(_livePollTimer);
+    _livePollTimer = null;
+  }
+}
+
+async function refreshLive() {
+  if (!SELECTED_SEASON) return;
+  const statusEl = document.getElementById('live-status');
+  if (statusEl) statusEl.textContent = 'Refreshing…';
+  try {
+    const resp = await fetch(`/api/mlb/live?year=${encodeURIComponent(SELECTED_SEASON)}`);
+    const data = await resp.json();
+    _liveLastFetchedAt = Date.now();
+    renderLiveContent(data);
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `Error: ${e.message}`;
+  }
+}
+
+function renderLiveContent(d) {
+  const titleEl = document.getElementById('live-week-title');
+  const statusEl = document.getElementById('live-status');
+  const managersEl = document.getElementById('live-managers');
+  const gamesEl = document.getElementById('live-games');
+  const playersEl = document.getElementById('live-players');
+
+  if (!d.active_week) {
+    if (titleEl) titleEl.textContent = 'Live';
+    if (statusEl) statusEl.textContent = `No active schedule week for today (${d.today}).`;
+    if (managersEl) managersEl.innerHTML = '';
+    if (gamesEl) gamesEl.innerHTML = '';
+    if (playersEl) playersEl.innerHTML = '';
+    return;
+  }
+
+  const aw = d.active_week;
+  if (titleEl) titleEl.textContent = `Live — ${aw.round} · ${aw.week}`;
+  const s = d.summary || {};
+  if (statusEl) {
+    const updated = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString() : '';
+    statusEl.textContent =
+      `${s.games_live ?? 0} live · ${s.games_final ?? 0} final · ${s.games_preview ?? 0} upcoming` +
+      (updated ? ` · updated ${updated}` : '');
+  }
+
+  // Manager standings (running weekly score)
+  if (managersEl) {
+    const rows = (d.managers || [])
+      .map((m, i) => `
+        <tr>
+          <td class="rank-cell">${i + 1}</td>
+          <td>${escapeHtml(m.name)}</td>
+          <td class="num-cell"><strong>${m.running_score.toFixed(2)}</strong></td>
+          <td class="num-cell">${m.players_active}</td>
+          <td class="num-cell">${m.players_finished}</td>
+          <td class="num-cell">${m.games_remaining}</td>
+        </tr>`)
+      .join('');
+    managersEl.innerHTML = `
+      <div class="card">
+        <h3>Running Standings</h3>
+        <div class="table-wrapper">
+          <table class="data-table compact-table">
+            <thead><tr>
+              <th>#</th><th>Manager</th><th>Score</th>
+              <th title="Players currently in a live game">Live</th>
+              <th title="Players whose games are final">Done</th>
+              <th title="Upcoming games for this manager's rostered teams">Left</th>
+            </tr></thead>
+            <tbody>${rows || '<tr><td colspan="6" class="empty">No managers with data yet.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // Today's games
+  if (gamesEl) {
+    const today = d.today;
+    const todays = (d.games || []).filter((g) => g.date === today);
+    const fmtGame = (g) => {
+      const stateLabel = g.state === 'Live'
+        ? `<span class="live-pill live-pill-live">LIVE · ${g.inning_half || ''} ${g.inning || ''}</span>`
+        : g.state === 'Final'
+          ? '<span class="live-pill live-pill-final">FINAL</span>'
+          : `<span class="live-pill live-pill-preview">${(g.scheduled_time ? new Date(g.scheduled_time).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : 'TBD')}</span>`;
+      const scoreLine = (g.state === 'Live' || g.state === 'Final')
+        ? `${g.away.team ?? '?'} ${g.away.score ?? 0} @ ${g.home.team ?? '?'} ${g.home.score ?? 0}`
+        : `${g.away.team ?? '?'} @ ${g.home.team ?? '?'}`;
+      return `<div class="live-game-row">${stateLabel}<span class="live-game-line">${escapeHtml(scoreLine)}</span></div>`;
+    };
+    gamesEl.innerHTML = `
+      <div class="card">
+        <h3>Today's Games <span class="muted">(${today})</span></h3>
+        ${todays.length ? todays.map(fmtGame).join('') : '<div class="empty">No games today.</div>'}
+      </div>`;
+  }
+
+  // Per-player stat lines (top scorers this week so far)
+  if (playersEl) {
+    const fmtStats = (row) => {
+      if (row.type === 'batting') {
+        const s = row.stats;
+        return `${s.abs||0} AB · ${(s['1b']||0)+(s['2b']||0)+(s['3b']||0)+(s.hr||0)} H · ${s.hr||0} HR · ${s.r||0} R · ${s.rbi||0} RBI · ${s.bb||0} BB · ${s.sb||0} SB`;
+      }
+      return `${(row.stats.ip||0).toFixed(1)} IP · ${row.stats.h||0} H · ${row.stats.er||0} ER · ${row.stats.bb||0} BB · ${row.stats.k||0} K · ${row.stats.w||0} W · ${row.stats.qs||0} QS`;
+    };
+    const stateBadge = (row) =>
+      row.any_live ? '<span class="live-pill live-pill-live">LIVE</span>' :
+      row.any_final ? '<span class="live-pill live-pill-final">FINAL</span>' : '';
+    const rows = (d.players || [])
+      .map((row) => `
+        <tr>
+          <td>${escapeHtml(row.name)}</td>
+          <td>${escapeHtml(row.manager || '')}</td>
+          <td>${escapeHtml(row.team || '')}</td>
+          <td>${row.type}</td>
+          <td>${stateBadge(row)}</td>
+          <td class="num-cell"><strong>${row.running_score.toFixed(2)}</strong></td>
+          <td>${fmtStats(row)}</td>
+        </tr>`)
+      .join('');
+    playersEl.innerHTML = `
+      <div class="card">
+        <h3>Player Stat Lines This Week</h3>
+        <div class="table-wrapper">
+          <table class="data-table compact-table">
+            <thead><tr>
+              <th>Player</th><th>Manager</th><th>Team</th><th>Type</th><th>State</th><th>Score</th><th>Line</th>
+            </tr></thead>
+            <tbody>${rows || '<tr><td colspan="7" class="empty">No player data yet.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+}
+
+// Hook up visibility change so background tabs don't waste poll cycles.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const liveTab = document.querySelector('.nav-btn.active[data-tab="live"]');
+      if (liveTab && Date.now() - _liveLastFetchedAt > LIVE_POLL_MS) refreshLive();
+    }
+  });
 }
 
 // ============================================================
