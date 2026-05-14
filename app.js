@@ -1098,6 +1098,10 @@ const LIVE_GRACE_MS = 30 * 60 * 1000;     // 30 minutes after last live game
 let _livePollTimer = null;
 let _liveLastFetchedAt = 0;
 let _liveLastSawLiveGame = 0;
+// Tracks which manager rows have their today's-stats drop-down expanded so the
+// 2-minute poll re-render doesn't collapse the panel under the user.
+const _liveExpandedManagers = new Set();
+const _liveKey = (s) => String(s || '').replace(/[^a-z0-9]/gi, '_').toLowerCase();
 
 function startLivePolling() {
   stopLivePolling();
@@ -1194,13 +1198,137 @@ function renderLiveContent(d) {
       const cls = d > 0 ? 'rank-delta-up' : 'rank-delta-down';
       return `<span class="${cls}">${sign}${d}</span>`;
     };
+
+    // Roll player rows up by manager, but only those with at least one game today.
+    // /api/mlb/live already filters playerRows to rostered-for-active-week players,
+    // so this list is the active rostered set actually accumulating stats today.
+    const todayDate = d.today;
+    const todayByMgr = {};
+    for (const p of d.players || []) {
+      const todayGames = (p.games || []).filter((g) => g.date === todayDate);
+      if (todayGames.length === 0) continue;
+      const statsToday = {};
+      let scoreToday = 0;
+      let liveToday = false;
+      let finalToday = false;
+      for (const g of todayGames) {
+        for (const k of Object.keys(g.stats || {})) {
+          statsToday[k] = (statsToday[k] || 0) + (g.stats[k] || 0);
+        }
+        scoreToday += g.game_score || 0;
+        if (g.state === 'Live') liveToday = true;
+        if (g.state === 'Final') finalToday = true;
+      }
+      if (!todayByMgr[p.manager]) todayByMgr[p.manager] = { batting: [], pitching: [] };
+      todayByMgr[p.manager][p.type].push({
+        name: p.name,
+        team: p.team,
+        stats: statsToday,
+        score: Math.round(scoreToday * 100) / 100,
+        liveToday,
+        finalToday,
+      });
+    }
+
+    const stateBadge = (pl) =>
+      pl.liveToday ? '<span class="live-pill live-pill-live">LIVE</span>' :
+      pl.finalToday ? '<span class="live-pill live-pill-final">FINAL</span>' : '';
+
+    const batterRow = (pl) => `<tr>
+      <td>${escapeHtml(pl.name)}</td>
+      <td>${escapeHtml(pl.team || '')}</td>
+      <td>${stateBadge(pl)}</td>
+      <td class="num-cell">${pl.stats.abs || 0}</td>
+      <td class="num-cell">${pl.stats['1b'] || 0}</td>
+      <td class="num-cell">${pl.stats['2b'] || 0}</td>
+      <td class="num-cell">${pl.stats['3b'] || 0}</td>
+      <td class="num-cell">${pl.stats.hr || 0}</td>
+      <td class="num-cell">${pl.stats.r || 0}</td>
+      <td class="num-cell">${pl.stats.rbi || 0}</td>
+      <td class="num-cell">${pl.stats.sb || 0}</td>
+      <td class="num-cell">${pl.stats.bb || 0}</td>
+      <td class="num-cell"><strong>${fmt(pl.score)}</strong></td>
+    </tr>`;
+
+    const pitcherRow = (pl) => `<tr>
+      <td>${escapeHtml(pl.name)}</td>
+      <td>${escapeHtml(pl.team || '')}</td>
+      <td>${stateBadge(pl)}</td>
+      <td class="num-cell">${pl.stats.gs || 0}</td>
+      <td class="num-cell">${pl.stats.w || 0}</td>
+      <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
+      <td class="num-cell">${pl.stats.cg || 0}</td>
+      <td class="num-cell">${pl.stats.cgso || 0}</td>
+      <td class="num-cell">${pl.stats.nh || 0}</td>
+      <td class="num-cell">${fmtDec(pl.stats.ip || 0)}</td>
+      <td class="num-cell">${pl.stats.h || 0}</td>
+      <td class="num-cell">${pl.stats.er || 0}</td>
+      <td class="num-cell">${pl.stats.bb || 0}</td>
+      <td class="num-cell">${pl.stats.k || 0}</td>
+      <td class="num-cell"><strong>${fmt(pl.score)}</strong></td>
+    </tr>`;
+
+    const renderTodayPanel = (managerName) => {
+      const data = todayByMgr[managerName] || { batting: [], pitching: [] };
+      const batters = [...data.batting].sort((a, b) => b.score - a.score);
+      const pitchers = [...data.pitching].sort((a, b) => b.score - a.score);
+      if (batters.length === 0 && pitchers.length === 0) {
+        return '<div class="mgr-detail-panel"><div class="live-mgr-detail-empty">No active rostered players accumulating stats today.</div></div>';
+      }
+      const battingTable = batters.length
+        ? `<div class="table-wrapper"><table class="data-table compact-table">
+            <thead><tr>
+              <th>Player</th><th>Team</th><th>State</th>
+              <th class="num-cell">AB</th><th class="num-cell">1B</th><th class="num-cell">2B</th>
+              <th class="num-cell">3B</th><th class="num-cell">HR</th><th class="num-cell">R</th>
+              <th class="num-cell">RBI</th><th class="num-cell">SB</th><th class="num-cell">BB</th>
+              <th class="num-cell">Pts</th>
+            </tr></thead>
+            <tbody>${batters.map(batterRow).join('')}</tbody>
+          </table></div>`
+        : '<div class="live-mgr-detail-empty">No batter activity today.</div>';
+      const pitchingTable = pitchers.length
+        ? `<div class="table-wrapper"><table class="data-table compact-table">
+            <thead><tr>
+              <th>Player</th><th>Team</th><th>State</th>
+              <th class="num-cell">GS</th><th class="num-cell">W</th><th class="num-cell">QS</th>
+              <th class="num-cell">CG</th><th class="num-cell">CGSO</th><th class="num-cell">NH</th>
+              <th class="num-cell">IP</th><th class="num-cell">H</th><th class="num-cell">ER</th>
+              <th class="num-cell">BB</th><th class="num-cell">K</th><th class="num-cell">Pts</th>
+            </tr></thead>
+            <tbody>${pitchers.map(pitcherRow).join('')}</tbody>
+          </table></div>`
+        : '<div class="live-mgr-detail-empty">No pitcher activity today.</div>';
+      return `<div class="mgr-detail-panel">
+        <div class="live-mgr-detail-section">
+          <div class="mgr-detail-header">Batters Today</div>
+          ${battingTable}
+        </div>
+        <div class="live-mgr-detail-section">
+          <div class="mgr-detail-header">Pitchers Today</div>
+          ${pitchingTable}
+        </div>
+      </div>`;
+    };
+
+    // Drop any expanded managers that no longer appear in the response so the
+    // Set doesn't grow unbounded across season changes.
+    const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
+    for (const n of [..._liveExpandedManagers]) {
+      if (!currentMgrNames.has(n)) _liveExpandedManagers.delete(n);
+    }
+
     const rows = (d.managers || [])
       .map((m, i) => {
         const nameCls = m.is_active_today ? 'live-mgr-active' : '';
+        const key = _liveKey(m.name);
+        const expanded = _liveExpandedManagers.has(m.name);
+        const arrow = expanded ? '&#9650;' : '&#9660;';
+        const safeMgr = jsStr(m.name);
         return `
-        <tr>
+        <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
-          <td class="${nameCls}">${escapeHtml(m.name)}</td>
+          <td class="${nameCls}">${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
           <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
           <td class="num-cell">${(m.running_score ?? 0).toFixed(2)}</td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
@@ -1208,6 +1336,9 @@ function renderLiveContent(d) {
           <td class="num-cell">${m.players_active ?? 0}</td>
           <td class="num-cell">${m.players_finished ?? 0}</td>
           <td class="num-cell">${m.players_remaining ?? 0}</td>
+        </tr>
+        <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">
+          <td colspan="9">${renderTodayPanel(m.name)}</td>
         </tr>`;
       })
       .join('');
@@ -1296,6 +1427,25 @@ function renderLiveContent(d) {
       </div>`;
   }
 }
+
+// Toggle the today's-stats drop-down for a manager row on the Live tab. Mirrors
+// the Scoreboard's toggleManagerDetails interaction, but the panel is rebuilt
+// inline by renderLiveContent on each poll, so this only flips visibility and
+// the persisted expansion Set (_liveExpandedManagers).
+window.toggleLiveManagerDetails = function (mgrKey, managerName) {
+  const row = document.getElementById('live-detail-' + mgrKey);
+  const arrow = document.getElementById('live-arrow-' + mgrKey);
+  if (!row) return;
+  if (row.style.display === 'none') {
+    row.style.display = '';
+    if (arrow) arrow.innerHTML = '&#9650;';
+    _liveExpandedManagers.add(managerName);
+  } else {
+    row.style.display = 'none';
+    if (arrow) arrow.innerHTML = '&#9660;';
+    _liveExpandedManagers.delete(managerName);
+  }
+};
 
 // On becoming visible again, only refresh if we're still inside the polling window
 // (live games or the 30-min grace period) AND the data is older than the poll

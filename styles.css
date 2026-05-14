@@ -4192,3 +4192,25 @@ body::before {
 .rank-delta-up { color: var(--success); font-weight: 600; }
 .rank-delta-down { color: var(--accent); font-weight: 600; }
 .rank-delta-zero { color: var(--text-muted); }
+
+/* Live tab manager-row drop-down: click any row to reveal today's batter +
+   pitcher stats for that manager's active rostered players. */
+.live-mgr-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.live-mgr-row:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+.live-mgr-detail-row td {
+  padding: 0;
+  border-top: none;
+}
+.live-mgr-detail-section + .live-mgr-detail-section {
+  margin-top: 0.6rem;
+}
+.live-mgr-detail-empty {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.1rem;
+}
