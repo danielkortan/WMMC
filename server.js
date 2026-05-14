@@ -1843,8 +1843,10 @@ function parseBoxscore(box, idToWmmcName = new Map()) {
         pitching[name] = {
           gs: started,
           w: ps.wins || 0,
-          // QS: started, >= 6 IP, <= 3 ER
-          qs: started > 0 && ipDec >= 6 && er <= 3 ? 1 : 0,
+          // WMMC custom QS rule: started, >= 5 IP, <= 2 ER (tighter than MLB's
+          // standard 6/3 — applied wherever the server auto-credits QS from a
+          // boxscore so live, preview, and per-game sync paths all agree).
+          qs: started > 0 && ipDec >= 5 && er <= 2 ? 1 : 0,
           // CG/CGSO/NH derived from outs and hit/ER counts
           cg: isCG,
           cgso: isCG && er === 0 ? 1 : 0,
@@ -3118,14 +3120,6 @@ app.get('/api/mlb/live', async (req, res) => {
         continue;
       }
       const { batting, pitching } = parseBoxscore(box, idToWmmcName);
-
-      // WMMC custom QS rule: started AND IP >= 5 AND ER <= 2. parseBoxscore
-      // uses the MLB-standard 6 IP / 3 ER threshold (the sync workflow and
-      // historical paths still want that field shape for now). Override it
-      // here so the Live tab credits and prices QS per the league's rule.
-      for (const stats of Object.values(pitching)) {
-        stats.qs = stats.gs > 0 && stats.ip >= 5 && stats.er <= 2 ? 1 : 0;
-      }
 
       const collect = (statsMap, type, scorer) => {
         for (const [name, stats] of Object.entries(statsMap)) {
