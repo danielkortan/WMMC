@@ -1989,7 +1989,7 @@ app.get('/api/mlb/games', requireCommissioner, async (req, res) => {
     }
 
     // Add weekly totals to each player
-    const withTotals = (log, calcFn) =>
+    const withTotals = (log) =>
       Object.entries(log).map(([name, data]) => {
         const weekly_score = data.games.reduce((s, g) => s + g.game_score, 0);
         return { name, ...data, games: data.games.sort((a, b) => a.date.localeCompare(b.date)), weekly_score: Math.round(weekly_score * 100) / 100 };
@@ -2211,6 +2211,271 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ============================================================
+// MLB Name Normalization
+// ============================================================
+
+// Standard Levenshtein distance.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Strip accents, suffixes (Jr/Sr/III), and punctuation for comparison.
+function normalizeName(name) {
+  return String(name)
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Similarity score 0–1. Tries both forward and token-sorted order.
+function nameSimilarity(a, b) {
+  const na = normalizeName(a);
+  const nb = normalizeName(b);
+  if (na === nb) return 1.0;
+  const maxLen = Math.max(na.length, nb.length);
+  if (maxLen === 0) return 1.0;
+  const fwd = 1 - levenshtein(na, nb) / maxLen;
+  // token-sorted: handles "Last, First" vs "First Last"
+  const sorted = (s) => s.split(' ').sort().join(' ');
+  const srt = 1 - levenshtein(sorted(na), sorted(nb)) / maxLen;
+  return Math.max(fwd, srt);
+}
+
+// Collect every unique player name referenced anywhere in a season's data.
+function extractSeasonPlayerNames(sd) {
+  const names = new Set();
+  const add = (v) => { if (v && typeof v === 'string') names.add(v); };
+
+  (sd.batters_pool || []).forEach(add);
+  (sd.pitchers_pool || []).forEach(add);
+
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      (roster.batters || []).forEach(add);
+      (roster.pitchers || []).forEach(add);
+    }
+  }
+
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    (sub.batters || []).forEach(add);
+    (sub.pitchers || []).forEach(add);
+  }
+
+  for (const s of sd.swaps || []) {
+    add(s.player_in);
+    add(s.player_out);
+  }
+
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) {
+      Object.keys(weekDates).forEach(add);
+    }
+  }
+
+  (sd.weekly_batting || []).forEach((b) => add(b.batter));
+  (sd.weekly_pitching || []).forEach((p) => add(p.pitcher));
+  (sd.daily_batting || []).forEach((b) => add(b.batter));
+  (sd.daily_pitching || []).forEach((p) => add(p.pitcher));
+
+  for (const weekTypes of Object.values(sd.player_dates || {})) {
+    Object.keys(weekTypes.batter || {}).forEach(add);
+    Object.keys(weekTypes.pitcher || {}).forEach(add);
+  }
+
+  Object.keys(sd.batters_team || {}).forEach(add);
+  Object.keys(sd.pitchers_team || {}).forEach(add);
+
+  return [...names].filter(Boolean).sort();
+}
+
+// Rename one player everywhere in a season (mutates sd). Returns count of fields changed.
+function renamePlayerInSeason(sd, oldName, newName) {
+  let count = 0;
+
+  const renameArr = (arr) => {
+    if (!arr) return;
+    arr.forEach((v, i) => { if (v === oldName) { arr[i] = newName; count++; } });
+  };
+  const renameKey = (obj) => {
+    if (!obj || !(oldName in obj)) return;
+    obj[newName] = obj[oldName];
+    delete obj[oldName];
+    count++;
+  };
+  const renameField = (obj, field) => {
+    if (obj && obj[field] === oldName) { obj[field] = newName; count++; }
+  };
+
+  renameArr(sd.batters_pool);
+  renameArr(sd.pitchers_pool);
+
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      renameArr(roster.batters);
+      renameArr(roster.pitchers);
+    }
+  }
+
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    renameArr(sub.batters);
+    renameArr(sub.pitchers);
+  }
+
+  for (const s of sd.swaps || []) {
+    renameField(s, 'player_in');
+    renameField(s, 'player_out');
+  }
+
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) renameKey(weekDates);
+  }
+
+  (sd.weekly_batting || []).forEach((b) => renameField(b, 'batter'));
+  (sd.weekly_pitching || []).forEach((p) => renameField(p, 'pitcher'));
+  (sd.daily_batting || []).forEach((b) => renameField(b, 'batter'));
+  (sd.daily_pitching || []).forEach((p) => renameField(p, 'pitcher'));
+
+  for (const weekTypes of Object.values(sd.player_dates || {})) {
+    renameKey(weekTypes.batter);
+    renameKey(weekTypes.pitcher);
+  }
+
+  renameKey(sd.batters_team);
+  renameKey(sd.pitchers_team);
+
+  return count;
+}
+
+// Fetch all MLB player full names for a given season.
+async function fetchMLBPlayerNames(season) {
+  const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}`);
+  return (data.people || []).map((p) => p.fullName).filter(Boolean);
+}
+
+// For each WMMC name find the best MLB API match. Returns array of match objects.
+function buildNameMatchReport(wmmcNames, mlbNames) {
+  const mlbSet = new Set(mlbNames);
+  return wmmcNames.map((wmmcName) => {
+    if (mlbSet.has(wmmcName)) {
+      return { wmmc_name: wmmcName, mlb_name: wmmcName, score: 1.0, exact: true, action: 'none' };
+    }
+    let bestName = null, bestScore = 0;
+    for (const mlbName of mlbNames) {
+      const s = nameSimilarity(wmmcName, mlbName);
+      if (s > bestScore) { bestScore = s; bestName = mlbName; }
+    }
+    const score = Math.round(bestScore * 1000) / 1000;
+    return {
+      wmmc_name: wmmcName,
+      mlb_name: bestName,
+      score,
+      exact: false,
+      // >= 0.9: high confidence auto-fix; 0.75–0.89: review first; < 0.75: likely wrong sport/pool entry
+      action: score >= 0.9 ? 'auto' : score >= 0.75 ? 'review' : 'no_match',
+    };
+  });
+}
+
+// GET /api/mlb/name-check?year=2025
+// Compares every player name in the WMMC database against the MLB Stats API canonical list.
+// Returns match report with confidence scores. Nothing is changed.
+app.get('/api/mlb/name-check', requireCommissioner, async (req, res) => {
+  const { year } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const [mlbNames, wmmcNames] = await Promise.all([
+      fetchMLBPlayerNames(year),
+      Promise.resolve(extractSeasonPlayerNames(sd)),
+    ]);
+
+    const report = buildNameMatchReport(wmmcNames, mlbNames);
+
+    res.json({
+      season: year,
+      wmmc_player_count: wmmcNames.length,
+      mlb_roster_size: mlbNames.length,
+      exact_matches: report.filter((r) => r.exact).length,
+      auto_fixable: report.filter((r) => r.action === 'auto').length,
+      needs_review: report.filter((r) => r.action === 'review').length,
+      no_match: report.filter((r) => r.action === 'no_match').length,
+      // Worst matches first so problems are immediately visible
+      players: report.sort((a, b) => a.score - b.score),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/mlb/name-fix
+// Applies name corrections across the entire season database.
+//
+// Two modes:
+//   { year, mappings: [{ from, to }, ...] }        — apply specific corrections you've reviewed
+//   { year, auto_threshold: 0.9 }                  — auto-apply all matches at or above the threshold
+//
+// Always returns what was changed so you can verify before running again.
+app.post('/api/mlb/name-fix', requireCommissioner, async (req, res) => {
+  const { year, mappings, auto_threshold } = req.body || {};
+  if (!year) return res.status(400).json({ error: 'year is required' });
+  if (!mappings && auto_threshold === undefined) {
+    return res.status(400).json({ error: 'Provide either mappings or auto_threshold' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  let toApply = mappings || [];
+
+  if (auto_threshold !== undefined && !mappings) {
+    try {
+      const [mlbNames, wmmcNames] = await Promise.all([
+        fetchMLBPlayerNames(year),
+        Promise.resolve(extractSeasonPlayerNames(sd)),
+      ]);
+      const report = buildNameMatchReport(wmmcNames, mlbNames);
+      toApply = report
+        .filter((r) => !r.exact && r.score >= auto_threshold && r.mlb_name)
+        .map((r) => ({ from: r.wmmc_name, to: r.mlb_name }));
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  const applied = [];
+  for (const { from, to } of toApply) {
+    if (!from || !to || from === to) continue;
+    const occurrences = renamePlayerInSeason(sd, from, to);
+    applied.push({ from, to, occurrences_updated: occurrences });
+  }
+
+  if (applied.length > 0) {
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'mlb_name_fix', { year, renames: applied.length, detail: applied });
+    writeDB(db);
+  }
+
+  res.json({ ok: true, renames_applied: applied.length, applied });
 });
 
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
