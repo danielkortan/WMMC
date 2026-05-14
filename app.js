@@ -1142,8 +1142,8 @@ function renderLiveContent(d) {
       (updated ? ` · updated ${updated}` : '');
   }
 
-  // Manager standings: live total + today's points + rank change vs overall scoreboard.
-  // Managers with players in live games OR games still to play today get a green name.
+  // Manager standings: round total (incl. live) · weekly · rank delta · daily · today's player counts.
+  // Managers with players in live or upcoming-today games get a green name.
   if (managersEl) {
     const fmtDelta = (d) => {
       if (!d || d === 0) return '<span class="rank-delta-zero">—</span>';
@@ -1158,15 +1158,17 @@ function renderLiveContent(d) {
         <tr>
           <td class="rank-cell">${i + 1}</td>
           <td class="${nameCls}">${escapeHtml(m.name)}</td>
-          <td class="num-cell"><strong>${m.running_score.toFixed(2)}</strong></td>
-          <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
+          <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
+          <td class="num-cell">${(m.running_score ?? 0).toFixed(2)}</td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
-          <td class="num-cell">${m.players_active}</td>
-          <td class="num-cell">${m.players_finished}</td>
-          <td class="num-cell">${m.games_remaining_today ?? 0}</td>
+          <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
+          <td class="num-cell">${m.players_active ?? 0}</td>
+          <td class="num-cell">${m.players_finished ?? 0}</td>
+          <td class="num-cell">${m.players_remaining ?? 0}</td>
         </tr>`;
       })
       .join('');
+    const roundLabel = (d.active_week?.round) || '';
     managersEl.innerHTML = `
       <div class="card">
         <h3>Running Standings</h3>
@@ -1174,14 +1176,15 @@ function renderLiveContent(d) {
           <table class="data-table compact-table">
             <thead><tr>
               <th>#</th><th>Manager</th>
-              <th title="Total live score this week">Live Score</th>
-              <th title="Points accumulated today only">Today</th>
+              <th title="Total ${escapeHtml(roundLabel)} score including live week">Total</th>
+              <th title="Live weekly score for the active week">Weekly</th>
               <th title="Rank movement vs the overall scoreboard">&Delta; Rank</th>
-              <th title="Players currently in a live game">Live</th>
-              <th title="Players whose games today are final">Done</th>
-              <th title="Upcoming games TODAY involving this manager's rostered teams">Left</th>
+              <th title="Points accumulated today only">Daily</th>
+              <th title="Rostered players whose team has a live game today">Live</th>
+              <th title="Rostered players whose team's games today are final">Done</th>
+              <th title="Rostered players whose team has a game today that hasn't started">Left</th>
             </tr></thead>
-            <tbody>${rows || '<tr><td colspan="8" class="empty">No managers with data yet.</td></tr>'}</tbody>
+            <tbody>${rows || '<tr><td colspan="9" class="empty">No managers with data yet.</td></tr>'}</tbody>
           </table>
         </div>
       </div>`;
