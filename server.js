@@ -3318,48 +3318,59 @@ app.get('/api/mlb/live', async (req, res) => {
       incrementPlayerStateCounts(m, managerPitchers[m], sd.pitchers_team);
     }
 
-    // ---- Rank delta vs the certified scoreboard ----
-    // The certified scoreboard is owned by the nightly sync; the Live tab must layer
-    // ONLY today's real-time points on top of it, never replace prior days. So the
-    // baseline is the full committed total (including the current week's last-synced
-    // value), and the live total adds just today_score.
-    const baseline = {};
-    for (const b of sd.weekly_batting || []) {
-      if (!b.manager) continue;
-      baseline[b.manager] = (baseline[b.manager] || 0) + (b.weekly_score || 0);
-    }
-    for (const p of sd.weekly_pitching || []) {
-      if (!p.manager) continue;
-      baseline[p.manager] = (baseline[p.manager] || 0) + (p.weekly_score || 0);
-    }
-    // Seed managers who have no committed totals yet so they appear in the ranking.
-    for (const m of Object.keys(managerMap)) if (!(m in baseline)) baseline[m] = 0;
+    // ---- Certified scoreboard total (matches the Scoreboard view exactly) ----
+    // The naive `if (b.manager) sum(weekly_score)` approach over-counts rows for
+    // players who were on the manager's roster when stats were uploaded but are
+    // no longer on the roster for that week (mid-week swaps, dropped carry-overs).
+    // The displayed Scoreboard re-validates roster membership per week before
+    // crediting points; the Live tab must do the same so Live Total exactly equals
+    // (Scoreboard Total + today's daily points).
+    //
+    // The active phase decides which rounds to roll up: pool play (PP1/PP2) maps
+    // to the Pool Play Overall view (PP1 + PP2 + their *P import variants); a
+    // playoff round maps to just that round's scoreboard.
+    const isPoolPlayPhase = weekRound === 'PP1' || weekRound === 'PP2';
+    const certifiedRoundSet = isPoolPlayPhase
+      ? new Set(['PP1', 'PP1P', 'PP2', 'PP2P'])
+      : new Set([weekRound]);
+
+    const certifiedTotals = {};
+    const creditCertified = (rows, playerKey, rosterListKey, scoringType) => {
+      for (const r of rows) {
+        if (!certifiedRoundSet.has(r.round)) continue;
+        const playerName = r[playerKey];
+        // Honor an explicit manager field; otherwise fall back to the roster
+        // lookup for that specific week (handles legacy rows with manager=null).
+        const mgr = r.manager || findManagerForPlayerWeek(sd, playerName, scoringType, r.round, r.week);
+        if (!mgr) continue;
+        // Only credit the manager when the player actually appears on their roster
+        // for that week (or was added/dropped mid-week). This is what filters out
+        // the stale rows that were inflating Daniel's and Chris's Live Totals.
+        const weekKey = `${r.round}|${r.week}`;
+        const wkRoster = (sd.rosters && sd.rosters[mgr] && sd.rosters[mgr][weekKey]) || {};
+        const wkDates = (sd.roster_dates && sd.roster_dates[mgr] && sd.roster_dates[mgr][weekKey]) || {};
+        const rosterList = wkRoster[rosterListKey] || [];
+        if (!rosterList.includes(playerName) && !wkDates[playerName]) continue;
+        certifiedTotals[mgr] = (certifiedTotals[mgr] || 0) + (r.weekly_score || 0);
+      }
+    };
+    creditCertified(sd.weekly_batting || [], 'batter', 'batters', 'batting');
+    creditCertified(sd.weekly_pitching || [], 'pitcher', 'pitchers', 'pitching');
+    // Seed managers who have no certified points yet so they still get a rank.
+    for (const m of Object.keys(managerMap)) if (!(m in certifiedTotals)) certifiedTotals[m] = 0;
 
     const rankByTotals = (totalsMap) =>
       Object.entries(totalsMap)
         .sort((a, b) => b[1] - a[1])
         .reduce((acc, [name], i) => { acc[name] = i + 1; return acc; }, {});
 
-    const baselineRanks = rankByTotals(baseline);
-    const liveTotals = { ...baseline };
-    for (const [m, agg] of Object.entries(managerMap)) {
-      liveTotals[m] = (liveTotals[m] || 0) + agg.today_score;
+    const baselineRanks = rankByTotals(certifiedTotals);
+    const liveTotalsMap = {};
+    for (const m of Object.keys(certifiedTotals)) {
+      const today = (managerMap[m] && managerMap[m].today_score) || 0;
+      liveTotalsMap[m] = certifiedTotals[m] + today;
     }
-    const liveRanks = rankByTotals(liveTotals);
-
-    // Round-level total = certified scoreboard total for this round (sum of all
-    // committed weekly scores, including the current week's last-synced value)
-    // PLUS today's accumulated points. The certified total is the floor; today's
-    // live scoring is the only delta layered on top until the next nightly sync.
-    const roundCommitted = {};
-    for (const b of sd.weekly_batting || []) {
-      if (!b.manager || b.round !== weekRound) continue;
-      roundCommitted[b.manager] = (roundCommitted[b.manager] || 0) + (b.weekly_score || 0);
-    }
-    for (const p of sd.weekly_pitching || []) {
-      if (!p.manager || p.round !== weekRound) continue;
-      roundCommitted[p.manager] = (roundCommitted[p.manager] || 0) + (p.weekly_score || 0);
-    }
+    const liveRanks = rankByTotals(liveTotalsMap);
 
     for (const [m, agg] of Object.entries(managerMap)) {
       const baseRank = baselineRanks[m] ?? null;
@@ -3367,7 +3378,7 @@ app.get('/api/mlb/live', async (req, res) => {
       agg.baseline_rank = baseRank;
       agg.live_rank = liveRank;
       agg.rank_delta = baseRank != null && liveRank != null ? baseRank - liveRank : 0;
-      agg.round_total = Math.round(((roundCommitted[m] || 0) + agg.today_score) * 100) / 100;
+      agg.round_total = Math.round(((certifiedTotals[m] || 0) + agg.today_score) * 100) / 100;
       agg.is_active_today = agg.players_active > 0 || agg.players_remaining > 0;
     }
 
