@@ -1899,8 +1899,10 @@ function parseBoxscore(box, idToWmmcName = new Map()) {
         pitching[name] = {
           gs: started,
           w: ps.wins || 0,
-          // QS: started, >= 6 IP, <= 3 ER
-          qs: started > 0 && ipDec >= 6 && er <= 3 ? 1 : 0,
+          // WMMC custom QS rule: started, >= 5 IP, <= 2 ER (tighter than MLB's
+          // standard 6/3 — applied wherever the server auto-credits QS from a
+          // boxscore so live, preview, and per-game sync paths all agree).
+          qs: started > 0 && ipDec >= 5 && er <= 2 ? 1 : 0,
           // CG/CGSO/NH derived from outs and hit/ER counts
           cg: isCG,
           cgso: isCG && er === 0 ? 1 : 0,
