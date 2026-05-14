@@ -3406,6 +3406,121 @@ app.get('/api/mlb/live', async (req, res) => {
   }
 });
 
+// GET /api/mlb/live/game/:gamePk?year=YYYY
+// Full single-game boxscore for the Live tab's per-game expand UI. Returns
+// every batter and pitcher from both teams (not just rostered), with each
+// player flagged `rostered` against the active schedule week and tagged with
+// their WMMC manager when one exists. Lazily called only when the user
+// opens a game card, so it never inflates the routine 2-minute /live poll.
+app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
+  const { gamePk } = req.params;
+  const { year } = req.query;
+  if (!gamePk) return res.status(400).json({ error: 'gamePk is required' });
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  // Resolve the active week so we can flag each MLB player as rostered (or not)
+  // for the currently-running WMMC week. If today doesn't fall inside a week,
+  // we just leave week-specific lookups off and fall back to historical roster.
+  const today = new Date().toISOString().slice(0, 10);
+  const scheduleDates = sd.schedule_dates || [];
+  let activeIdx = -1;
+  for (let i = 0; i < scheduleDates.length; i++) {
+    const d = scheduleDates[i];
+    if (d && d.start && d.end && today >= d.start && today <= d.end) {
+      activeIdx = i;
+      break;
+    }
+  }
+  const schedWeek = activeIdx >= 0 ? SEASON_SCHEDULE[activeIdx] : null;
+  const weekRound = schedWeek?.round || null;
+  const weekName = schedWeek?.week || null;
+
+  try {
+    const idToWmmcName = buildIdToWmmcName(sd);
+    const box = await mlbApiFetch(`/api/v1/game/${gamePk}/boxscore`);
+    const { batting, pitching } = parseBoxscore(box, idToWmmcName);
+
+    const teams = {};
+    for (const side of ['away', 'home']) {
+      const t = box.teams?.[side];
+      if (!t) continue;
+      teams[side] = {
+        team: t.team?.abbreviation || null,
+        team_name: t.team?.name || null,
+        runs: t.teamStats?.batting?.runs ?? null,
+        hits: t.teamStats?.batting?.hits ?? null,
+        errors: t.teamStats?.fielding?.errors ?? null,
+      };
+    }
+
+    const sidedBatting = { away: [], home: [] };
+    const sidedPitching = { away: [], home: [] };
+
+    for (const side of ['away', 'home']) {
+      const teamData = box.teams?.[side];
+      if (!teamData) continue;
+      const abbrev = teamData.team?.abbreviation || '';
+      for (const player of Object.values(teamData.players || {})) {
+        const fullName = player.person?.fullName;
+        const mlbId = player.person?.id;
+        if (!fullName) continue;
+        const name = (mlbId && idToWmmcName.get(mlbId)) || fullName;
+
+        const bStats = batting[name];
+        if (bStats) {
+          const manager =
+            (weekRound && findManagerForPlayerWeek(sd, name, 'batting', weekRound, weekName)) ||
+            findManagerForPlayer(sd, name, 'batting') ||
+            null;
+          sidedBatting[side].push({
+            name,
+            team: abbrev,
+            position: player.position?.abbreviation || null,
+            batting_order: player.battingOrder ? parseInt(player.battingOrder, 10) : null,
+            stats: bStats,
+            pts: Math.round(calculateBattingScore(bStats) * 100) / 100,
+            manager,
+            rostered: !!manager,
+          });
+        }
+
+        const pStats = pitching[name];
+        if (pStats) {
+          const manager =
+            (weekRound && findManagerForPlayerWeek(sd, name, 'pitching', weekRound, weekName)) ||
+            findManagerForPlayer(sd, name, 'pitching') ||
+            null;
+          sidedPitching[side].push({
+            name,
+            team: abbrev,
+            stats: pStats,
+            pts: Math.round(calculatePitchingScore(pStats) * 100) / 100,
+            manager,
+            rostered: !!manager,
+          });
+        }
+      }
+      sidedBatting[side].sort((a, b) => (a.batting_order ?? 9999) - (b.batting_order ?? 9999));
+      sidedPitching[side].sort((a, b) => (b.stats.ip || 0) - (a.stats.ip || 0));
+    }
+
+    res.json({
+      game_pk: Number(gamePk),
+      fetched_at: new Date().toISOString(),
+      active_week: schedWeek ? { round: weekRound, week: weekName } : null,
+      teams,
+      batting: sidedBatting,
+      pitching: sidedPitching,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   if (!SLACK_WEBHOOK_URL) {
