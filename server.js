@@ -2580,17 +2580,80 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
   }
 });
 
+// Remove every trace of a player from a season (mutates sd). Returns count of fields removed.
+function purgePlayerFromSeason(sd, name) {
+  let count = 0;
+
+  const removeFromArr = (arr) => {
+    if (!arr) return;
+    const before = arr.length;
+    arr.splice(0, arr.length, ...arr.filter((v) => v !== name));
+    count += before - arr.length;
+  };
+  const removeKey = (obj) => {
+    if (obj && name in obj) { delete obj[name]; count++; }
+  };
+
+  removeFromArr(sd.batters_pool);
+  removeFromArr(sd.pitchers_pool);
+
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      removeFromArr(roster.batters);
+      removeFromArr(roster.pitchers);
+    }
+  }
+
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    removeFromArr(sub.batters);
+    removeFromArr(sub.pitchers);
+  }
+
+  if (sd.swaps) {
+    const before = sd.swaps.length;
+    sd.swaps = sd.swaps.filter((s) => s.player_in !== name && s.player_out !== name);
+    count += before - sd.swaps.length;
+  }
+
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) removeKey(weekDates);
+  }
+
+  const filterField = (arr, field) => {
+    if (!arr) return;
+    const before = arr.length;
+    const next = arr.filter((r) => r[field] !== name);
+    arr.splice(0, arr.length, ...next);
+    count += before - arr.length;
+  };
+
+  filterField(sd.weekly_batting, 'batter');
+  filterField(sd.weekly_pitching, 'pitcher');
+  filterField(sd.daily_batting, 'batter');
+  filterField(sd.daily_pitching, 'pitcher');
+
+  for (const weekTypes of Object.values(sd.player_dates || {})) {
+    removeKey(weekTypes.batter);
+    removeKey(weekTypes.pitcher);
+  }
+
+  removeKey(sd.batters_team);
+  removeKey(sd.pitchers_team);
+
+  return count;
+}
+
 // POST /api/mlb/roster-fix
 // Body: { year, manual_mappings: [{ from, to }] }
 //
-// Applies the full audit fix in one pass:
-//   1. Applies your manual_mappings for the rostered_review players you confirmed.
-//   2. Auto-renames all unrostered_auto players (score >= 0.75) to their best MLB match.
-//   3. Replaces all unrostered_replace players with their best MLB match
-//      (the old wrong-spelled name is removed everywhere; the MLB name takes its place
-//       in pool lists if it was there, but roster/stats entries are re-keyed to the MLB name).
-//
-// Any rostered_review player NOT in manual_mappings is left unchanged until next call.
+// One-pass cleanup:
+//   1. Renames rostered players automatically when score >= 0.9.
+//      Rostered players with score < 0.9 require an explicit { from, to } in manual_mappings;
+//      they appear in the response's `needs_manual` list if omitted.
+//   2. manual_mappings entries always apply regardless of score (use for low-confidence overrides).
+//   3. Unrostered players with any name mismatch are PURGED entirely from the database —
+//      their old misspelled records are removed and the MLB API sync will repopulate them
+//      under the correct name on next run.
 app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
   const { year, manual_mappings } = req.body || {};
   if (!year) return res.status(400).json({ error: 'year is required' });
@@ -2604,52 +2667,114 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
     const mlbSet = new Set(mlbNames);
     const allWmmcNames = extractSeasonPlayerNames(sd);
     const rostered = getRosteredNames(sd);
-
-    // Build the auto mappings for unrostered players
-    const autoMappings = [];
-    for (const wmmcName of allWmmcNames) {
-      if (rostered.has(wmmcName) || mlbSet.has(wmmcName)) continue;
-      const best = topCandidates(wmmcName, mlbNames, 1)[0];
-      if (best) autoMappings.push({ from: wmmcName, to: best.mlb_name, score: best.score, auto: true });
-    }
-
-    // Merge: manual mappings (for rostered players) + auto (for unrostered)
-    // Manual mappings override auto if the same 'from' appears in both
-    const manualSet = new Set((manual_mappings || []).map((m) => m.from));
-    const allMappings = [
-      ...(manual_mappings || []).map((m) => ({ ...m, auto: false })),
-      ...autoMappings.filter((m) => !manualSet.has(m.from)),
-    ];
+    const manualMap = new Map((manual_mappings || []).map((m) => [m.from, m.to]));
 
     const applied = [];
-    const skipped = [];
+    const needsManual = [];
+    const purged = [];
 
-    for (const mapping of allMappings) {
-      const { from, to } = mapping;
-      if (!from || !to || from === to) continue;
+    for (const wmmcName of allWmmcNames) {
+      if (mlbSet.has(wmmcName)) continue; // already correct
 
-      // Safety: never auto-rename a rostered player without explicit manual confirmation
-      if (rostered.has(from) && mapping.auto) {
-        skipped.push({ from, reason: 'rostered — requires manual_mappings confirmation' });
-        continue;
+      if (rostered.has(wmmcName)) {
+        // Rostered player: use manual override if provided, else auto-rename if score >= 0.9
+        if (manualMap.has(wmmcName)) {
+          const to = manualMap.get(wmmcName);
+          const occurrences = renamePlayerInSeason(sd, wmmcName, to);
+          applied.push({ from: wmmcName, to, score: null, auto: false, occurrences_updated: occurrences });
+        } else {
+          const best = topCandidates(wmmcName, mlbNames, 1)[0];
+          if (best && best.score >= 0.9) {
+            const occurrences = renamePlayerInSeason(sd, wmmcName, best.mlb_name);
+            applied.push({ from: wmmcName, to: best.mlb_name, score: best.score, auto: true, occurrences_updated: occurrences });
+          } else {
+            needsManual.push({ wmmc_name: wmmcName, best_match: best?.mlb_name ?? null, score: best?.score ?? 0, candidates: topCandidates(wmmcName, mlbNames, 5) });
+          }
+        }
+      } else {
+        // Unrostered player: purge entirely — MLB sync will re-add under the correct name
+        const removed = purgePlayerFromSeason(sd, wmmcName);
+        purged.push({ name: wmmcName, records_removed: removed });
       }
-
-      const occurrences = renamePlayerInSeason(sd, from, to);
-      applied.push({ from, to, score: mapping.score ?? null, auto: mapping.auto, occurrences_updated: occurrences });
     }
 
-    if (applied.length > 0) {
+    if (applied.length > 0 || purged.length > 0) {
       db.seasons[year] = sd;
-      addAuditEntry(db, 'roster_name_fix', { year, renames: applied.length, detail: applied });
+      addAuditEntry(db, 'roster_name_fix', { year, renames: applied.length, purged: purged.length, detail: { applied, purged } });
       writeDB(db);
     }
 
     res.json({
       ok: true,
       renames_applied: applied.length,
-      skipped_rostered_without_confirmation: skipped.length,
+      players_purged: purged.length,
+      needs_manual_review: needsManual.length,
       applied,
-      skipped,
+      purged,
+      // If non-empty: re-POST with manual_mappings entries for these players
+      needs_manual: needsManual,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/mlb/recent-stats?year=2025&days=2
+// Returns per-game stats from the last N days for every currently rostered player.
+// Use this to verify MLB API data looks correct before committing name fixes to production.
+app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
+  const { year, days = '2' } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const rostered = getRosteredNames(sd);
+  if (rostered.size === 0) return res.json({ period: {}, games_checked: 0, batting: [], pitching: [] });
+
+  const numDays = Math.min(Math.max(parseInt(days) || 2, 1), 7);
+  const endDate = new Date().toISOString().split('T')[0];
+  const startDate = new Date(Date.now() - (numDays - 1) * 86400000).toISOString().split('T')[0];
+
+  try {
+    const gameRecords = await fetchMLBPerGameStats(startDate, endDate);
+
+    const batterLog = {};
+    const pitcherLog = {};
+
+    for (const { gameId, date, batting, pitching, teamMap } of gameRecords) {
+      for (const [name, stats] of Object.entries(batting)) {
+        if (!rostered.has(name)) continue;
+        const manager = findManagerForPlayer(sd, name, 'batting');
+        if (!batterLog[name]) batterLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
+        batterLog[name].games.push({ date, game_id: gameId, ...stats, game_score: Math.round(calculateBattingScore(stats) * 100) / 100 });
+      }
+      for (const [name, stats] of Object.entries(pitching)) {
+        if (!rostered.has(name)) continue;
+        const manager = findManagerForPlayer(sd, name, 'pitching');
+        if (!pitcherLog[name]) pitcherLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
+        pitcherLog[name].games.push({ date, game_id: gameId, ...stats, game_score: Math.round(calculatePitchingScore(stats) * 100) / 100 });
+      }
+    }
+
+    const summarise = (log) =>
+      Object.entries(log)
+        .map(([name, data]) => ({
+          name,
+          manager: data.manager,
+          team: data.team,
+          games: data.games.sort((a, b) => a.date.localeCompare(b.date)),
+          period_score: Math.round(data.games.reduce((s, g) => s + g.game_score, 0) * 100) / 100,
+        }))
+        .sort((a, b) => b.period_score - a.period_score);
+
+    res.json({
+      period: { start: startDate, end: endDate, days: numDays },
+      games_checked: gameRecords.length,
+      rostered_player_count: rostered.size,
+      batting: summarise(batterLog),
+      pitching: summarise(pitcherLog),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
