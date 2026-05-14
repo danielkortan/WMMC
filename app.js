@@ -1329,12 +1329,12 @@ function renderLiveContent(d) {
           <td class="rank-cell">${i + 1}</td>
           <td class="${nameCls}">${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
           <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
-          <td class="num-cell">${(m.running_score ?? 0).toFixed(2)}</td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
           <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
           <td class="num-cell">${m.players_active ?? 0}</td>
           <td class="num-cell">${m.players_finished ?? 0}</td>
           <td class="num-cell">${m.players_remaining ?? 0}</td>
+          <td class="num-cell">${(m.running_score ?? 0).toFixed(2)}</td>
         </tr>
         <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">
           <td colspan="9">${renderTodayPanel(m.name)}</td>
@@ -1350,12 +1350,12 @@ function renderLiveContent(d) {
             <thead><tr>
               <th>#</th><th>Manager</th>
               <th title="Certified ${escapeHtml(roundLabel)} scoreboard total + today's points (live weekly does not affect this until the next nightly sync)">Total</th>
-              <th title="Live weekly score for the active week (visibility only — not reflected in Total until the next nightly sync)">Weekly</th>
               <th title="Rank movement vs the certified scoreboard, given today's points">&Delta; Rank</th>
               <th title="Points accumulated today only (added to the certified scoreboard total)">Daily</th>
               <th title="Rostered players whose team has a live game today">Live</th>
               <th title="Rostered players whose team's games today are final">Done</th>
               <th title="Rostered players whose team has a game today that hasn't started">Left</th>
+              <th title="Live weekly score for the active week (visibility only — not reflected in Total until the next nightly sync)">Weekly</th>
             </tr></thead>
             <tbody>${rows || '<tr><td colspan="9" class="empty">No managers with data yet.</td></tr>'}</tbody>
           </table>
