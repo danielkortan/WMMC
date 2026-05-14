@@ -238,8 +238,8 @@ function getQFQualifiers(sd) {
         bPP2 = s.pp2;
       }
     });
-    if (bestPP1) pp1Leaders.add(bestPP1);
-    if (bestPP2) pp2Leaders.add(bestPP2);
+    if (bestPP1 && bPP1 > 0) pp1Leaders.add(bestPP1);
+    if (bestPP2 && bPP2 > 0) pp2Leaders.add(bestPP2);
   }
   const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
   const ppTotals = {};
@@ -248,8 +248,8 @@ function getQFQualifiers(sd) {
   });
   const wildcardsNeeded = Math.max(0, 8 - allLeaders.size);
   const wildcards = managers
+    .filter((m) => m.pool && !allLeaders.has(m.name))
     .map((m) => m.name)
-    .filter((n) => !allLeaders.has(n))
     .sort((a, b) => ppTotals[b] - ppTotals[a])
     .slice(0, wildcardsNeeded);
   const qualifiers = [...[...allLeaders].sort((a, b) => ppTotals[b] - ppTotals[a]), ...wildcards];
@@ -3397,8 +3397,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
         bestPP2Score = s.pp2;
       }
     });
-    if (bestPP1) pp1Leaders.add(bestPP1);
-    if (bestPP2) pp2Leaders.add(bestPP2);
+    if (bestPP1 && bestPP1Score > 0) pp1Leaders.add(bestPP1);
+    if (bestPP2 && bestPP2Score > 0) pp2Leaders.add(bestPP2);
   }
 
   const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
@@ -3410,8 +3410,12 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     ppTotals[name] = s.pp1 + s.pp2;
   });
 
+  // Wildcard candidates must be active managers assigned to a pool
+  const pooledManagers = new Set();
+  Object.values(poolGroups).forEach((members) => members.forEach((n) => pooledManagers.add(n)));
+
   const nonLeaders = Object.keys(ppTotals)
-    .filter((n) => !allLeaders.has(n))
+    .filter((n) => pooledManagers.has(n) && !allLeaders.has(n))
     .sort((a, b) => ppTotals[b] - ppTotals[a]);
   const wildcards = nonLeaders.slice(0, wildcardsNeeded);
 
