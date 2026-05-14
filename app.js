@@ -1079,27 +1079,53 @@ function showHistoricalSeason() {
 }
 
 // ============================================================
-// LIVE SCORING — auto-refreshing view of in-progress + final games for
-// the active schedule week. Polls /api/mlb/live every 60s while the tab
-// is active AND the document is visible.
+// LIVE SCORING — auto-refreshing view of in-progress + final games
+// for the active schedule week.
+//
+// Polling policy (to keep MLB API traffic light):
+//   - One fetch immediately when the tab is opened.
+//   - While at least one game is Live, re-poll every 2 minutes.
+//   - After all live games end, keep polling every 2 minutes for a
+//     30-minute grace window so final-stat corrections come through.
+//   - Once the grace window elapses with no Live games, polling
+//     stops. Switching tabs and coming back triggers a fresh fetch.
+//   - Background tabs never fetch; on returning to a visible state
+//     a fetch fires only if the cached data is older than the poll
+//     interval and we're still inside the polling window.
 // ============================================================
-const LIVE_POLL_MS = 60_000;
+const LIVE_POLL_MS = 120_000;             // 2 minutes between active polls
+const LIVE_GRACE_MS = 30 * 60 * 1000;     // 30 minutes after last live game
 let _livePollTimer = null;
 let _liveLastFetchedAt = 0;
+let _liveLastSawLiveGame = 0;
 
 function startLivePolling() {
-  if (_livePollTimer) return;
+  stopLivePolling();
+  // Always do an initial fetch on entering the tab; the response decides whether
+  // to schedule a follow-up poll.
   refreshLive();
-  _livePollTimer = setInterval(() => {
-    if (document.visibilityState === 'visible') refreshLive();
-  }, LIVE_POLL_MS);
 }
 
 function stopLivePolling() {
   if (_livePollTimer) {
-    clearInterval(_livePollTimer);
+    clearTimeout(_livePollTimer);
     _livePollTimer = null;
   }
+}
+
+function shouldKeepPolling(data) {
+  const hasLive = (data?.summary?.games_live ?? 0) > 0;
+  const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
+  return hasLive || withinGrace;
+}
+
+function scheduleNextLivePoll(data) {
+  stopLivePolling();
+  if (!shouldKeepPolling(data)) return;
+  _livePollTimer = setTimeout(() => {
+    if (document.visibilityState === 'visible') refreshLive();
+    else scheduleNextLivePoll(data); // tab hidden — re-arm without fetching
+  }, LIVE_POLL_MS);
 }
 
 async function refreshLive() {
@@ -1110,9 +1136,16 @@ async function refreshLive() {
     const resp = await fetch(`/api/mlb/live?year=${encodeURIComponent(SELECTED_SEASON)}`);
     const data = await resp.json();
     _liveLastFetchedAt = Date.now();
+    if ((data?.summary?.games_live ?? 0) > 0) _liveLastSawLiveGame = Date.now();
     renderLiveContent(data);
+    scheduleNextLivePoll(data);
   } catch (e) {
     if (statusEl) statusEl.textContent = `Error: ${e.message}`;
+    // Retry once at the normal interval even on error so a brief network blip doesn't kill polling.
+    stopLivePolling();
+    _livePollTimer = setTimeout(() => {
+      if (document.visibilityState === 'visible') refreshLive();
+    }, LIVE_POLL_MS);
   }
 }
 
@@ -1137,9 +1170,19 @@ function renderLiveContent(d) {
   const s = d.summary || {};
   if (statusEl) {
     const updated = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString() : '';
+    const hasLive = (s.games_live ?? 0) > 0;
+    const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
+    let pollNote;
+    if (hasLive) pollNote = '· refreshing every 2m';
+    else if (withinGrace) {
+      const remainingMin = Math.max(1, Math.ceil((LIVE_GRACE_MS - (Date.now() - _liveLastSawLiveGame)) / 60_000));
+      pollNote = `· grace window (${remainingMin}m left)`;
+    } else {
+      pollNote = '· polling paused — no live games';
+    }
     statusEl.textContent =
       `${s.games_live ?? 0} live · ${s.games_final ?? 0} final · ${s.games_preview ?? 0} upcoming` +
-      (updated ? ` · updated ${updated}` : '');
+      (updated ? ` · updated ${updated} ${pollNote}` : '');
   }
 
   // Manager standings: round total (incl. live) · weekly · rank delta · daily · today's player counts.
@@ -1254,13 +1297,18 @@ function renderLiveContent(d) {
   }
 }
 
-// Hook up visibility change so background tabs don't waste poll cycles.
+// On becoming visible again, only refresh if we're still inside the polling window
+// (live games or the 30-min grace period) AND the data is older than the poll
+// interval. Otherwise leave the stale data on screen — switching to another tab and
+// back will resume polling.
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      const liveTab = document.querySelector('.nav-btn.active[data-tab="live"]');
-      if (liveTab && Date.now() - _liveLastFetchedAt > LIVE_POLL_MS) refreshLive();
-    }
+    if (document.visibilityState !== 'visible') return;
+    const liveTab = document.querySelector('.nav-btn.active[data-tab="live"]');
+    if (!liveTab) return;
+    const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
+    const stale = Date.now() - _liveLastFetchedAt > LIVE_POLL_MS;
+    if (withinGrace && stale) refreshLive();
   });
 }
 
