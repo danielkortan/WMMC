@@ -1158,7 +1158,6 @@ function renderLiveContent(d) {
   const statusEl = document.getElementById('live-status');
   const managersEl = document.getElementById('live-managers');
   const gamesEl = document.getElementById('live-games');
-  const playersEl = document.getElementById('live-players');
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
@@ -1389,43 +1388,6 @@ function renderLiveContent(d) {
       </div>`;
   }
 
-  // Per-player stat lines (top scorers this week so far)
-  if (playersEl) {
-    const fmtStats = (row) => {
-      if (row.type === 'batting') {
-        const s = row.stats;
-        return `${s.abs||0} AB · ${(s['1b']||0)+(s['2b']||0)+(s['3b']||0)+(s.hr||0)} H · ${s.hr||0} HR · ${s.r||0} R · ${s.rbi||0} RBI · ${s.bb||0} BB · ${s.sb||0} SB`;
-      }
-      return `${(row.stats.ip||0).toFixed(1)} IP · ${row.stats.h||0} H · ${row.stats.er||0} ER · ${row.stats.bb||0} BB · ${row.stats.k||0} K · ${row.stats.w||0} W · ${row.stats.qs||0} QS`;
-    };
-    const stateBadge = (row) =>
-      row.any_live ? '<span class="live-pill live-pill-live">LIVE</span>' :
-      row.any_final ? '<span class="live-pill live-pill-final">FINAL</span>' : '';
-    const rows = (d.players || [])
-      .map((row) => `
-        <tr>
-          <td>${escapeHtml(row.name)}</td>
-          <td>${escapeHtml(row.manager || '')}</td>
-          <td>${escapeHtml(row.team || '')}</td>
-          <td>${row.type}</td>
-          <td>${stateBadge(row)}</td>
-          <td class="num-cell"><strong>${row.running_score.toFixed(2)}</strong></td>
-          <td>${fmtStats(row)}</td>
-        </tr>`)
-      .join('');
-    playersEl.innerHTML = `
-      <div class="card">
-        <h3>Player Stat Lines This Week</h3>
-        <div class="table-wrapper">
-          <table class="data-table compact-table">
-            <thead><tr>
-              <th>Player</th><th>Manager</th><th>Team</th><th>Type</th><th>State</th><th>Score</th><th>Line</th>
-            </tr></thead>
-            <tbody>${rows || '<tr><td colspan="7" class="empty">No player data yet.</td></tr>'}</tbody>
-          </table>
-        </div>
-      </div>`;
-  }
 }
 
 // Toggle the today's-stats drop-down for a manager row on the Live tab. Mirrors
