@@ -1231,7 +1231,7 @@ async function analyzeImageContrast(imageDataUrl, posX, posY, scale, bannerW, ba
     const sampleH = 120;
     canvas.width = sampleW;
     canvas.height = sampleH;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
     // Calculate how the image would be rendered at the given scale/position
     const imgAspect = img.width / img.height;
