@@ -1756,6 +1756,426 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
   });
 });
 
+// ============================================================
+// MLB Stats API Integration
+// ============================================================
+
+const MLB_API_BASE = 'https://statsapi.mlb.com';
+
+async function mlbApiFetch(path) {
+  const resp = await fetch(`${MLB_API_BASE}${path}`);
+  if (!resp.ok) throw new Error(`MLB API ${resp.status}: ${path}`);
+  return resp.json();
+}
+
+// Fetch all final regular-season game IDs in a date range.
+async function fetchMLBGameIds(startDate, endDate) {
+  const data = await mlbApiFetch(
+    `/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&gameType=R,F,D,L,W`
+  );
+  const ids = [];
+  for (const dateEntry of data.dates || []) {
+    for (const game of dateEntry.games || []) {
+      if (game.status?.abstractGameState === 'Final') ids.push(game.gamePk);
+    }
+  }
+  return ids;
+}
+
+// Aggregate batting + pitching stats from a list of game IDs.
+// Returns { batting: { playerName: stats }, pitching: { playerName: stats }, teamMap: { playerName: abbrev } }
+async function aggregateMLBWeekStats(gameIds) {
+  const batting = {};
+  const pitching = {};
+  const teamMap = {};
+
+  for (const gameId of gameIds) {
+    let box;
+    try {
+      box = await mlbApiFetch(`/api/v1/game/${gameId}/boxscore`);
+    } catch {
+      continue;
+    }
+
+    for (const side of ['away', 'home']) {
+      const teamData = box.teams?.[side];
+      if (!teamData) continue;
+      const abbrev = teamData.team?.abbreviation || '';
+      const teamTotalOuts = teamData.teamStats?.pitching?.outs ?? null;
+
+      for (const player of Object.values(teamData.players || {})) {
+        const name = player.person?.fullName;
+        if (!name) continue;
+
+        // Batting
+        const bs = player.stats?.batting;
+        if (bs && bs.atBats !== undefined) {
+          teamMap[name] = abbrev;
+          if (!batting[name]) batting[name] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0 };
+          const hits = bs.hits || 0;
+          const doubles = bs.doubles || 0;
+          const triples = bs.triples || 0;
+          const hr = bs.homeRuns || 0;
+          batting[name]['1b'] += Math.max(0, hits - doubles - triples - hr);
+          batting[name]['2b'] += doubles;
+          batting[name]['3b'] += triples;
+          batting[name].hr += hr;
+          batting[name].r += bs.runs || 0;
+          batting[name].rbi += bs.rbi || 0;
+          batting[name].sb += bs.stolenBases || 0;
+          batting[name].bb += bs.baseOnBalls || 0;
+          batting[name].abs += bs.atBats || 0;
+        }
+
+        // Pitching
+        const ps = player.stats?.pitching;
+        if (ps && ps.inningsPitched !== undefined) {
+          teamMap[name] = abbrev;
+          if (!pitching[name]) pitching[name] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+          const ipDec = convertIPDecimal(ps.inningsPitched || 0);
+          const er = ps.earnedRuns || 0;
+          const hits = ps.hits || 0;
+          const started = ps.gamesStarted || 0;
+          // CG: one pitcher faced all outs for their team this game
+          const pitcherOuts = ps.outs ?? null;
+          const isCG = started > 0 && teamTotalOuts !== null && pitcherOuts !== null && pitcherOuts === teamTotalOuts ? 1 : 0;
+          const isCGSO = isCG && er === 0 ? 1 : 0;
+          const isNH = isCG && hits === 0 ? 1 : 0;
+          // QS: started, >= 6 IP, <= 3 ER
+          const isQS = started > 0 && ipDec >= 6 && er <= 3 ? 1 : 0;
+
+          pitching[name].gs += started;
+          pitching[name].w += ps.wins || 0;
+          pitching[name].qs += isQS;
+          pitching[name].cg += isCG;
+          pitching[name].cgso += isCGSO;
+          pitching[name].nh += isNH;
+          pitching[name].ip = Math.round((pitching[name].ip + ipDec) * 1000) / 1000;
+          pitching[name].h += hits;
+          pitching[name].er += er;
+          pitching[name].bb += ps.baseOnBalls || 0;
+          pitching[name].k += ps.strikeOuts || 0;
+        }
+      }
+    }
+  }
+
+  return { batting, pitching, teamMap };
+}
+
+// Attach manager + score to each player's aggregated stats.
+function enrichBatting(battingMap, teamMap, sd, schedWeek) {
+  return Object.entries(battingMap).map(([name, stats]) => {
+    const manager =
+      findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
+      findManagerForPlayer(sd, name, 'batting');
+    return {
+      name,
+      manager: manager || null,
+      team: teamMap[name] || null,
+      ...stats,
+      weekly_score: calculateBattingScore(stats),
+    };
+  });
+}
+
+function enrichPitching(pitchingMap, teamMap, sd, schedWeek) {
+  return Object.entries(pitchingMap).map(([name, stats]) => {
+    const manager =
+      findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
+      findManagerForPlayer(sd, name, 'pitching');
+    return {
+      name,
+      manager: manager || null,
+      team: teamMap[name] || null,
+      ...stats,
+      weekly_score: calculatePitchingScore(stats),
+    };
+  });
+}
+
+// GET /api/mlb/preview?year=2025&round=PP1&week=Week+1
+// Dry-run: shows what the MLB Stats API would produce for a week without saving anything.
+app.get('/api/mlb/preview', requireCommissioner, async (req, res) => {
+  const { year, round, week } = req.query;
+  if (!year || !round || !week) return res.status(400).json({ error: 'year, round, and week are required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
+  if (weekIdx === -1) return res.status(400).json({ error: `Unknown schedule slot: ${round} / ${week}` });
+
+  const dates = (sd.schedule_dates || [])[weekIdx];
+  if (!dates?.start || !dates?.end) {
+    return res.status(400).json({
+      error: `No schedule dates configured for ${round} ${week}. Set week start/end dates in the Commissioner panel first.`,
+    });
+  }
+
+  try {
+    const gameIds = await fetchMLBGameIds(dates.start, dates.end);
+    const { batting, pitching, teamMap } = await aggregateMLBWeekStats(gameIds);
+    const schedWeek = SEASON_SCHEDULE[weekIdx];
+
+    const batRows = enrichBatting(batting, teamMap, sd, schedWeek).sort((a, b) => b.weekly_score - a.weekly_score);
+    const pitRows = enrichPitching(pitching, teamMap, sd, schedWeek).sort((a, b) => b.weekly_score - a.weekly_score);
+
+    res.json({
+      source: 'mlbapi',
+      week: { round, week, start: dates.start, end: dates.end },
+      games_fetched: gameIds.length,
+      batting: batRows,
+      pitching: pitRows,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/mlb/compare?year=2025&round=PP1&week=Week+1
+// Shows MLB API stats side-by-side with currently stored stats, highlighting score differences.
+// This is the primary tool for validating the MLB API before committing to it.
+app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
+  const { year, round, week } = req.query;
+  if (!year || !round || !week) return res.status(400).json({ error: 'year, round, and week are required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
+  if (weekIdx === -1) return res.status(400).json({ error: `Unknown schedule slot: ${round} / ${week}` });
+
+  const dates = (sd.schedule_dates || [])[weekIdx];
+  if (!dates?.start || !dates?.end) {
+    return res.status(400).json({ error: `No schedule dates for ${round} ${week}` });
+  }
+
+  try {
+    const gameIds = await fetchMLBGameIds(dates.start, dates.end);
+    const { batting, pitching, teamMap } = await aggregateMLBWeekStats(gameIds);
+    const schedWeek = SEASON_SCHEDULE[weekIdx];
+
+    const mlbBat = enrichBatting(batting, teamMap, sd, schedWeek);
+    const mlbPit = enrichPitching(pitching, teamMap, sd, schedWeek);
+
+    // Stored stats for this week
+    const storedBat = (sd.weekly_batting || []).filter((b) => b.round === round && b.week === week);
+    const storedPit = (sd.weekly_pitching || []).filter((p) => p.round === round && p.week === week);
+
+    // Build comparison rows: union of all player names from both sources
+    const allBatters = new Set([...mlbBat.map((b) => b.name), ...storedBat.map((b) => b.batter)]);
+    const allPitchers = new Set([...mlbPit.map((p) => p.name), ...storedPit.map((p) => p.pitcher)]);
+
+    const battingComparison = [...allBatters].map((name) => {
+      const mlb = mlbBat.find((b) => b.name === name) || null;
+      const stored = storedBat.find((b) => b.batter === name) || null;
+      const mlbScore = mlb?.weekly_score ?? null;
+      const storedScore = stored?.weekly_score ?? null;
+      const diff = mlbScore !== null && storedScore !== null ? Math.round((mlbScore - storedScore) * 100) / 100 : null;
+      return { name, manager: mlb?.manager || stored?.manager || null, mlb: mlb || null, stored: stored || null, score_diff: diff };
+    }).sort((a, b) => Math.abs(b.score_diff ?? 0) - Math.abs(a.score_diff ?? 0));
+
+    const pitchingComparison = [...allPitchers].map((name) => {
+      const mlb = mlbPit.find((p) => p.name === name) || null;
+      const stored = storedPit.find((p) => p.pitcher === name) || null;
+      const mlbScore = mlb?.weekly_score ?? null;
+      const storedScore = stored?.weekly_score ?? null;
+      const diff = mlbScore !== null && storedScore !== null ? Math.round((mlbScore - storedScore) * 100) / 100 : null;
+      return { name, manager: mlb?.manager || stored?.manager || null, mlb: mlb || null, stored: stored || null, score_diff: diff };
+    }).sort((a, b) => Math.abs(b.score_diff ?? 0) - Math.abs(a.score_diff ?? 0));
+
+    // Manager-level score totals
+    const managerTotals = {};
+    for (const row of [...battingComparison, ...pitchingComparison]) {
+      const mgr = row.manager;
+      if (!mgr) continue;
+      if (!managerTotals[mgr]) managerTotals[mgr] = { mlb: 0, stored: 0 };
+      managerTotals[mgr].mlb += row.mlb?.weekly_score ?? 0;
+      managerTotals[mgr].stored += row.stored?.weekly_score ?? 0;
+    }
+    const managerSummary = Object.entries(managerTotals).map(([manager, t]) => ({
+      manager,
+      mlb_total: Math.round(t.mlb * 100) / 100,
+      stored_total: Math.round(t.stored * 100) / 100,
+      diff: Math.round((t.mlb - t.stored) * 100) / 100,
+    })).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+
+    res.json({
+      week: { round, week, start: dates.start, end: dates.end },
+      games_fetched: gameIds.length,
+      manager_summary: managerSummary,
+      batting: battingComparison,
+      pitching: pitchingComparison,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/mlb/sync
+// Saves MLB API stats for a week, replacing any existing mlbapi records (respects manual overrides).
+// Body: { year, round, week }
+app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
+  const { year, round, week } = req.body || {};
+  if (!year || !round || !week) return res.status(400).json({ error: 'year, round, and week are required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
+  if (weekIdx === -1) return res.status(400).json({ error: `Unknown schedule slot: ${round} / ${week}` });
+
+  const dates = (sd.schedule_dates || [])[weekIdx];
+  if (!dates?.start || !dates?.end) {
+    return res.status(400).json({ error: `No schedule dates for ${round} ${week}` });
+  }
+
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+  if (!sd.batters_team) sd.batters_team = {};
+  if (!sd.pitchers_team) sd.pitchers_team = {};
+
+  repairGhostInitialRosterPlayers(sd);
+  syncPlayerDatesFromRosterDates(sd);
+
+  try {
+    const gameIds = await fetchMLBGameIds(dates.start, dates.end);
+    const { batting, pitching, teamMap } = await aggregateMLBWeekStats(gameIds);
+    const schedWeek = SEASON_SCHEDULE[weekIdx];
+    const syncDate = new Date().toISOString().split('T')[0];
+
+    // Update team maps
+    for (const [name, abbrev] of Object.entries(teamMap)) {
+      sd.batters_team[name] = abbrev;
+      sd.pitchers_team[name] = abbrev;
+    }
+
+    let batImported = 0, batSkipped = 0, pitImported = 0, pitSkipped = 0;
+
+    // Process batting
+    for (const [name, cumulative] of Object.entries(batting)) {
+      const manager =
+        findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
+        findManagerForPlayer(sd, name, 'batting');
+      const isUnassigned = !manager;
+
+      // Don't overwrite manually-locked daily records
+      const lockedDaily = sd.daily_batting.find(
+        (r) => r.date === syncDate && r.round === round && r.week === week && r.batter === name &&
+          ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+      );
+      if (lockedDaily) { if (isUnassigned) batSkipped++; else batImported++; continue; }
+
+      // Daily snapshot delta
+      const prevSnapshot = sd.daily_batting
+        .filter((r) => r.batter === name && r.round === round && r.week === week && r.date < syncDate)
+        .sort((a, b) => b.date.localeCompare(a.date))[0];
+      const delta = prevSnapshot ? battingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
+
+      sd.daily_batting = sd.daily_batting.filter(
+        (r) => !(r.date === syncDate && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
+      );
+      sd.daily_batting.push({ date: syncDate, round, week, batter: name, cumulative, delta, source: 'mlbapi' });
+
+      // Don't overwrite manually-edited or drop-locked weekly records
+      const existingManual = sd.weekly_batting.find(
+        (b) => b.round === round && b.week === week && b.batter === name &&
+          ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      );
+      if (existingManual) { if (isUnassigned) batSkipped++; else batImported++; continue; }
+
+      const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
+      const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
+
+      sd.weekly_batting = sd.weekly_batting.filter(
+        (b) => !(b.round === round && b.week === week && b.batter === name && b.source === 'mlbapi')
+      );
+      sd.weekly_batting.push({
+        round, week, manager: manager || null, batter: name, team: teamMap[name] || null,
+        ...cumulative, weekly_score: weeklyScore, total_score: weeklyScore, source: 'mlbapi',
+      });
+
+      if (isUnassigned) batSkipped++; else batImported++;
+    }
+
+    // Process pitching
+    for (const [name, cumulative] of Object.entries(pitching)) {
+      const manager =
+        findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
+        findManagerForPlayer(sd, name, 'pitching');
+      const isUnassigned = !manager;
+
+      const lockedDaily = sd.daily_pitching.find(
+        (r) => r.date === syncDate && r.round === round && r.week === week && r.pitcher === name &&
+          ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+      );
+      if (lockedDaily) { if (isUnassigned) pitSkipped++; else pitImported++; continue; }
+
+      const prevSnapshot = sd.daily_pitching
+        .filter((r) => r.pitcher === name && r.round === round && r.week === week && r.date < syncDate)
+        .sort((a, b) => b.date.localeCompare(a.date))[0];
+      const delta = prevSnapshot ? pitchingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
+
+      sd.daily_pitching = sd.daily_pitching.filter(
+        (r) => !(r.date === syncDate && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
+      );
+      sd.daily_pitching.push({ date: syncDate, round, week, pitcher: name, cumulative, delta, source: 'mlbapi' });
+
+      const existingManual = sd.weekly_pitching.find(
+        (p) => p.round === round && p.week === week && p.pitcher === name &&
+          ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      );
+      if (existingManual) { if (isUnassigned) pitSkipped++; else pitImported++; continue; }
+
+      const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
+      const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
+
+      sd.weekly_pitching = sd.weekly_pitching.filter(
+        (p) => !(p.round === round && p.week === week && p.pitcher === name && p.source === 'mlbapi')
+      );
+      sd.weekly_pitching.push({
+        round, week, manager: manager || null, pitcher: name, team: teamMap[name] || null,
+        ...cumulative, qs_highlight: cumulative.gs >= 2, weekly_score: weeklyScore, source: 'mlbapi',
+      });
+
+      if (isUnassigned) pitSkipped++; else pitImported++;
+    }
+
+    if (!sd.upload_log) sd.upload_log = [];
+    sd.upload_log.push({
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      type: 'mlbapi_sync',
+      round, week,
+      success: true,
+      batting_imported: batImported,
+      pitching_imported: pitImported,
+      games: gameIds.length,
+    });
+    pruneSyncHistory(sd);
+
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'mlbapi_sync', { year, round, week, batting_imported: batImported, pitching_imported: pitImported });
+    writeDB(db);
+
+    res.json({
+      ok: true,
+      games_fetched: gameIds.length,
+      batting_imported: batImported,
+      batting_skipped: batSkipped,
+      pitching_imported: pitImported,
+      pitching_skipped: pitSkipped,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   if (!SLACK_WEBHOOK_URL) {
