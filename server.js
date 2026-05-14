@@ -3262,19 +3262,18 @@ app.get('/api/mlb/live', async (req, res) => {
       incrementPlayerStateCounts(m, managerPitchers[m], sd.pitchers_team);
     }
 
-    // ---- Rank delta vs the overall scoreboard ----
-    // Baseline = sum of committed weekly_batting + weekly_pitching across all weeks
-    // OTHER than the active one. Live-adjusted = baseline + this week's running live
-    // score per manager. A positive delta means the manager has moved up vs baseline.
+    // ---- Rank delta vs the certified scoreboard ----
+    // The certified scoreboard is owned by the nightly sync; the Live tab must layer
+    // ONLY today's real-time points on top of it, never replace prior days. So the
+    // baseline is the full committed total (including the current week's last-synced
+    // value), and the live total adds just today_score.
     const baseline = {};
     for (const b of sd.weekly_batting || []) {
       if (!b.manager) continue;
-      if (b.round === weekRound && b.week === weekName) continue;
       baseline[b.manager] = (baseline[b.manager] || 0) + (b.weekly_score || 0);
     }
     for (const p of sd.weekly_pitching || []) {
       if (!p.manager) continue;
-      if (p.round === weekRound && p.week === weekName) continue;
       baseline[p.manager] = (baseline[p.manager] || 0) + (p.weekly_score || 0);
     }
     // Seed managers who have no committed totals yet so they appear in the ranking.
@@ -3288,21 +3287,21 @@ app.get('/api/mlb/live', async (req, res) => {
     const baselineRanks = rankByTotals(baseline);
     const liveTotals = { ...baseline };
     for (const [m, agg] of Object.entries(managerMap)) {
-      liveTotals[m] = (liveTotals[m] || 0) + agg.running_score;
+      liveTotals[m] = (liveTotals[m] || 0) + agg.today_score;
     }
     const liveRanks = rankByTotals(liveTotals);
 
-    // Round-level total (pool play if active round is PP1/PP2). Sum committed weekly
-    // scores for the current round across all OTHER weeks, then add live running.
+    // Round-level total = certified scoreboard total for this round (sum of all
+    // committed weekly scores, including the current week's last-synced value)
+    // PLUS today's accumulated points. The certified total is the floor; today's
+    // live scoring is the only delta layered on top until the next nightly sync.
     const roundCommitted = {};
     for (const b of sd.weekly_batting || []) {
       if (!b.manager || b.round !== weekRound) continue;
-      if (b.week === weekName) continue;
       roundCommitted[b.manager] = (roundCommitted[b.manager] || 0) + (b.weekly_score || 0);
     }
     for (const p of sd.weekly_pitching || []) {
       if (!p.manager || p.round !== weekRound) continue;
-      if (p.week === weekName) continue;
       roundCommitted[p.manager] = (roundCommitted[p.manager] || 0) + (p.weekly_score || 0);
     }
 
@@ -3312,7 +3311,7 @@ app.get('/api/mlb/live', async (req, res) => {
       agg.baseline_rank = baseRank;
       agg.live_rank = liveRank;
       agg.rank_delta = baseRank != null && liveRank != null ? baseRank - liveRank : 0;
-      agg.round_total = Math.round(((roundCommitted[m] || 0) + agg.running_score) * 100) / 100;
+      agg.round_total = Math.round(((roundCommitted[m] || 0) + agg.today_score) * 100) / 100;
       agg.is_active_today = agg.players_active > 0 || agg.players_remaining > 0;
     }
 

@@ -1219,10 +1219,10 @@ function renderLiveContent(d) {
           <table class="data-table compact-table">
             <thead><tr>
               <th>#</th><th>Manager</th>
-              <th title="Total ${escapeHtml(roundLabel)} score including live week">Total</th>
-              <th title="Live weekly score for the active week">Weekly</th>
-              <th title="Rank movement vs the overall scoreboard">&Delta; Rank</th>
-              <th title="Points accumulated today only">Daily</th>
+              <th title="Certified ${escapeHtml(roundLabel)} scoreboard total + today's points (live weekly does not affect this until the next nightly sync)">Total</th>
+              <th title="Live weekly score for the active week (visibility only — not reflected in Total until the next nightly sync)">Weekly</th>
+              <th title="Rank movement vs the certified scoreboard, given today's points">&Delta; Rank</th>
+              <th title="Points accumulated today only (added to the certified scoreboard total)">Daily</th>
               <th title="Rostered players whose team has a live game today">Live</th>
               <th title="Rostered players whose team's games today are final">Done</th>
               <th title="Rostered players whose team has a game today that hasn't started">Left</th>
