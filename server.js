@@ -1756,6 +1756,1031 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
   });
 });
 
+// ============================================================
+// MLB Stats API Integration
+// ============================================================
+
+const MLB_API_BASE = 'https://statsapi.mlb.com';
+
+async function mlbApiFetch(path) {
+  const resp = await fetch(`${MLB_API_BASE}${path}`);
+  if (!resp.ok) throw new Error(`MLB API ${resp.status}: ${path}`);
+  return resp.json();
+}
+
+// Returns [{ gameId, date }] for all final games in a date range.
+async function fetchMLBGames(startDate, endDate) {
+  const data = await mlbApiFetch(
+    `/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&gameType=R,F,D,L,W`
+  );
+  const games = [];
+  for (const dateEntry of data.dates || []) {
+    for (const game of dateEntry.games || []) {
+      if (game.status?.abstractGameState === 'Final') {
+        games.push({ gameId: game.gamePk, date: dateEntry.date });
+      }
+    }
+  }
+  return games;
+}
+
+// Parse one boxscore into per-player batting and pitching stat objects for that game.
+// Returns { batting: { name: stats }, pitching: { name: stats }, teamMap: { name: abbrev } }
+function parseBoxscore(box) {
+  const batting = {};
+  const pitching = {};
+  const teamMap = {};
+
+  for (const side of ['away', 'home']) {
+    const teamData = box.teams?.[side];
+    if (!teamData) continue;
+    const abbrev = teamData.team?.abbreviation || '';
+    const teamTotalOuts = teamData.teamStats?.pitching?.outs ?? null;
+
+    for (const player of Object.values(teamData.players || {})) {
+      const name = player.person?.fullName;
+      if (!name) continue;
+
+      const bs = player.stats?.batting;
+      if (bs && bs.atBats !== undefined) {
+        teamMap[name] = abbrev;
+        const hits = bs.hits || 0;
+        const doubles = bs.doubles || 0;
+        const triples = bs.triples || 0;
+        const hr = bs.homeRuns || 0;
+        batting[name] = {
+          '1b': Math.max(0, hits - doubles - triples - hr),
+          '2b': doubles,
+          '3b': triples,
+          hr,
+          r: bs.runs || 0,
+          rbi: bs.rbi || 0,
+          sb: bs.stolenBases || 0,
+          bb: bs.baseOnBalls || 0,
+          abs: bs.atBats || 0,
+        };
+      }
+
+      const ps = player.stats?.pitching;
+      if (ps && ps.inningsPitched !== undefined) {
+        teamMap[name] = abbrev;
+        const ipDec = convertIPDecimal(ps.inningsPitched || 0);
+        const er = ps.earnedRuns || 0;
+        const hits = ps.hits || 0;
+        const started = ps.gamesStarted || 0;
+        const pitcherOuts = ps.outs ?? null;
+        const isCG = started > 0 && teamTotalOuts !== null && pitcherOuts !== null && pitcherOuts === teamTotalOuts ? 1 : 0;
+        pitching[name] = {
+          gs: started,
+          w: ps.wins || 0,
+          // QS: started, >= 6 IP, <= 3 ER
+          qs: started > 0 && ipDec >= 6 && er <= 3 ? 1 : 0,
+          // CG/CGSO/NH derived from outs and hit/ER counts
+          cg: isCG,
+          cgso: isCG && er === 0 ? 1 : 0,
+          nh: isCG && hits === 0 ? 1 : 0,
+          ip: ipDec,
+          h: hits,
+          er,
+          bb: ps.baseOnBalls || 0,
+          k: ps.strikeOuts || 0,
+        };
+      }
+    }
+  }
+
+  return { batting, pitching, teamMap };
+}
+
+// Fetch per-game per-player stats for a date range.
+// Returns [{ gameId, date, batting, pitching, teamMap }]
+async function fetchMLBPerGameStats(startDate, endDate) {
+  const games = await fetchMLBGames(startDate, endDate);
+  const results = [];
+  for (const { gameId, date } of games) {
+    let box;
+    try {
+      box = await mlbApiFetch(`/api/v1/game/${gameId}/boxscore`);
+    } catch {
+      continue;
+    }
+    const { batting, pitching, teamMap } = parseBoxscore(box);
+    results.push({ gameId, date, batting, pitching, teamMap });
+  }
+  return results;
+}
+
+// Sum per-game records into weekly totals per player.
+// Returns { batting: { name: totals }, pitching: { name: totals }, teamMap: { name: abbrev } }
+function aggregatePerGame(gameRecords) {
+  const batting = {};
+  const pitching = {};
+  const teamMap = {};
+
+  for (const { batting: gb, pitching: gp, teamMap: gt } of gameRecords) {
+    Object.assign(teamMap, gt);
+
+    for (const [name, stats] of Object.entries(gb)) {
+      if (!batting[name]) batting[name] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0 };
+      for (const k of Object.keys(batting[name])) batting[name][k] += stats[k] || 0;
+    }
+
+    for (const [name, stats] of Object.entries(gp)) {
+      if (!pitching[name]) pitching[name] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+      for (const k of Object.keys(pitching[name])) {
+        if (k === 'ip') pitching[name].ip = Math.round((pitching[name].ip + (stats.ip || 0)) * 1000) / 1000;
+        else pitching[name][k] += stats[k] || 0;
+      }
+    }
+  }
+
+  return { batting, pitching, teamMap };
+}
+
+// Attach manager + weekly score to aggregated batting stats.
+function enrichBatting(battingMap, teamMap, sd, schedWeek) {
+  return Object.entries(battingMap).map(([name, stats]) => {
+    const manager =
+      findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
+      findManagerForPlayer(sd, name, 'batting');
+    return { name, manager: manager || null, team: teamMap[name] || null, ...stats, weekly_score: calculateBattingScore(stats) };
+  });
+}
+
+// Attach manager + weekly score to aggregated pitching stats.
+function enrichPitching(pitchingMap, teamMap, sd, schedWeek) {
+  return Object.entries(pitchingMap).map(([name, stats]) => {
+    const manager =
+      findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
+      findManagerForPlayer(sd, name, 'pitching');
+    return { name, manager: manager || null, team: teamMap[name] || null, ...stats, weekly_score: calculatePitchingScore(stats) };
+  });
+}
+
+// Shared param validation + season/week lookup for all MLB endpoints.
+function resolveMLBWeek(req, isBody = false) {
+  const src = isBody ? req.body || {} : req.query;
+  const { year, round, week } = src;
+  if (!year || !round || !week) return { error: 'year, round, and week are required' };
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return { error: `Season ${year} not found` };
+  const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
+  if (weekIdx === -1) return { error: `Unknown schedule slot: ${round} / ${week}` };
+  const dates = (sd.schedule_dates || [])[weekIdx];
+  if (!dates?.start || !dates?.end) {
+    return { error: `No schedule dates for ${round} ${week}. Set them in the Commissioner panel first.` };
+  }
+  return { db, sd, year, round, week, weekIdx, dates, schedWeek: SEASON_SCHEDULE[weekIdx] };
+}
+
+// GET /api/mlb/preview?year=2025&round=PP1&week=Week+1
+// Dry-run: returns per-player weekly totals derived from per-game data. Nothing is saved.
+app.get('/api/mlb/preview', requireCommissioner, async (req, res) => {
+  const ctx = resolveMLBWeek(req);
+  if (ctx.error) return res.status(400).json({ error: ctx.error });
+  const { sd, round, week, dates, schedWeek } = ctx;
+
+  try {
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+    const { batting, pitching, teamMap } = aggregatePerGame(gameRecords);
+
+    res.json({
+      source: 'mlbapi',
+      week: { round, week, start: dates.start, end: dates.end },
+      games_fetched: gameRecords.length,
+      batting: enrichBatting(batting, teamMap, sd, schedWeek).sort((a, b) => b.weekly_score - a.weekly_score),
+      pitching: enrichPitching(pitching, teamMap, sd, schedWeek).sort((a, b) => b.weekly_score - a.weekly_score),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/mlb/games?year=2025&round=PP1&week=Week+1
+// Per-player per-game log: each player's stats broken out by individual game date.
+app.get('/api/mlb/games', requireCommissioner, async (req, res) => {
+  const ctx = resolveMLBWeek(req);
+  if (ctx.error) return res.status(400).json({ error: ctx.error });
+  const { sd, round, week, dates, schedWeek } = ctx;
+
+  try {
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+
+    // Build per-player game log: { name -> [{ date, gameId, batting/pitching, score }] }
+    const batterLog = {};
+    const pitcherLog = {};
+
+    for (const { gameId, date, batting, pitching, teamMap } of gameRecords) {
+      for (const [name, stats] of Object.entries(batting)) {
+        const manager =
+          findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
+          findManagerForPlayer(sd, name, 'batting');
+        if (!batterLog[name]) batterLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
+        batterLog[name].games.push({ date, game_id: gameId, ...stats, game_score: calculateBattingScore(stats) });
+      }
+      for (const [name, stats] of Object.entries(pitching)) {
+        const manager =
+          findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
+          findManagerForPlayer(sd, name, 'pitching');
+        if (!pitcherLog[name]) pitcherLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
+        pitcherLog[name].games.push({ date, game_id: gameId, ...stats, game_score: calculatePitchingScore(stats) });
+      }
+    }
+
+    // Add weekly totals to each player
+    const withTotals = (log) =>
+      Object.entries(log).map(([name, data]) => {
+        const weekly_score = data.games.reduce((s, g) => s + g.game_score, 0);
+        return { name, ...data, games: data.games.sort((a, b) => a.date.localeCompare(b.date)), weekly_score: Math.round(weekly_score * 100) / 100 };
+      });
+
+    res.json({
+      week: { round, week, start: dates.start, end: dates.end },
+      games_fetched: gameRecords.length,
+      batting: withTotals(batterLog).sort((a, b) => b.weekly_score - a.weekly_score),
+      pitching: withTotals(pitcherLog).sort((a, b) => b.weekly_score - a.weekly_score),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/mlb/compare?year=2025&round=PP1&week=Week+1
+// Side-by-side: MLB API weekly totals vs. currently stored stats. Sorted by largest score diff.
+app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
+  const ctx = resolveMLBWeek(req);
+  if (ctx.error) return res.status(400).json({ error: ctx.error });
+  const { sd, round, week, dates, schedWeek } = ctx;
+
+  try {
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+    const { batting, pitching, teamMap } = aggregatePerGame(gameRecords);
+
+    const mlbBat = enrichBatting(batting, teamMap, sd, schedWeek);
+    const mlbPit = enrichPitching(pitching, teamMap, sd, schedWeek);
+    const storedBat = (sd.weekly_batting || []).filter((b) => b.round === round && b.week === week);
+    const storedPit = (sd.weekly_pitching || []).filter((p) => p.round === round && p.week === week);
+
+    const allBatters = new Set([...mlbBat.map((b) => b.name), ...storedBat.map((b) => b.batter)]);
+    const allPitchers = new Set([...mlbPit.map((p) => p.name), ...storedPit.map((p) => p.pitcher)]);
+
+    const compareRows = (names, mlbList, storedList, nameKey) =>
+      [...names].map((name) => {
+        const mlb = mlbList.find((x) => x.name === name) || null;
+        const stored = storedList.find((x) => x[nameKey] === name) || null;
+        const mlbScore = mlb?.weekly_score ?? null;
+        const storedScore = stored?.weekly_score ?? null;
+        const diff = mlbScore !== null && storedScore !== null ? Math.round((mlbScore - storedScore) * 100) / 100 : null;
+        return { name, manager: mlb?.manager || stored?.manager || null, mlb, stored, score_diff: diff };
+      }).sort((a, b) => Math.abs(b.score_diff ?? 0) - Math.abs(a.score_diff ?? 0));
+
+    const battingComparison = compareRows(allBatters, mlbBat, storedBat, 'batter');
+    const pitchingComparison = compareRows(allPitchers, mlbPit, storedPit, 'pitcher');
+
+    const managerTotals = {};
+    for (const row of [...battingComparison, ...pitchingComparison]) {
+      const mgr = row.manager;
+      if (!mgr) continue;
+      if (!managerTotals[mgr]) managerTotals[mgr] = { mlb: 0, stored: 0 };
+      managerTotals[mgr].mlb += row.mlb?.weekly_score ?? 0;
+      managerTotals[mgr].stored += row.stored?.weekly_score ?? 0;
+    }
+
+    res.json({
+      week: { round, week, start: dates.start, end: dates.end },
+      games_fetched: gameRecords.length,
+      manager_summary: Object.entries(managerTotals).map(([manager, t]) => ({
+        manager,
+        mlb_total: Math.round(t.mlb * 100) / 100,
+        stored_total: Math.round(t.stored * 100) / 100,
+        diff: Math.round((t.mlb - t.stored) * 100) / 100,
+      })).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff)),
+      batting: battingComparison,
+      pitching: pitchingComparison,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/mlb/sync  { year, round, week }
+// Stores one daily_batting / daily_pitching record per player per game (keyed by game_id).
+// Re-syncing a completed week replaces existing game records so MLB stat corrections propagate.
+// Respects manual overrides and drop-locked records exactly like the Google Sheets sync.
+app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
+  const ctx = resolveMLBWeek(req, true);
+  if (ctx.error) return res.status(400).json({ error: ctx.error });
+  const { db, sd, year, round, week, dates, schedWeek } = ctx;
+
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+  if (!sd.batters_team) sd.batters_team = {};
+  if (!sd.pitchers_team) sd.pitchers_team = {};
+
+  repairGhostInitialRosterPlayers(sd);
+  syncPlayerDatesFromRosterDates(sd);
+
+  try {
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+
+    // Update team maps from all games
+    for (const { teamMap } of gameRecords) {
+      for (const [name, abbrev] of Object.entries(teamMap)) {
+        sd.batters_team[name] = abbrev;
+        sd.pitchers_team[name] = abbrev;
+      }
+    }
+
+    let batImported = 0, batSkipped = 0, pitImported = 0, pitSkipped = 0;
+
+    // Store one daily record per player per game, then recompute weekly totals.
+    for (const { gameId, date, batting, pitching, teamMap } of gameRecords) {
+      for (const [name, gameStats] of Object.entries(batting)) {
+        const manager =
+          findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
+          findManagerForPlayer(sd, name, 'batting');
+
+        // Skip if a manual/locked record already exists for this game
+        const lockedDaily = sd.daily_batting.find(
+          (r) => r.game_id === gameId && r.round === round && r.week === week && r.batter === name &&
+            ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+        );
+        if (lockedDaily) { manager ? batImported++ : batSkipped++; continue; }
+
+        // Replace any previous mlbapi record for this game (handles stat corrections)
+        sd.daily_batting = sd.daily_batting.filter(
+          (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
+        );
+        // delta = game stats; cumulative = game stats (per-game: each record is its own increment)
+        sd.daily_batting.push({ date, round, week, batter: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+
+        manager ? batImported++ : batSkipped++;
+      }
+
+      for (const [name, gameStats] of Object.entries(pitching)) {
+        const manager =
+          findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
+          findManagerForPlayer(sd, name, 'pitching');
+
+        const lockedDaily = sd.daily_pitching.find(
+          (r) => r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name &&
+            ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+        );
+        if (lockedDaily) { manager ? pitImported++ : pitSkipped++; continue; }
+
+        sd.daily_pitching = sd.daily_pitching.filter(
+          (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
+        );
+        sd.daily_pitching.push({ date, round, week, pitcher: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+
+        manager ? pitImported++ : pitSkipped++;
+      }
+    }
+
+    // Aggregate totals across all stored game records and write weekly summary rows.
+    const { batting: weeklyBat, pitching: weeklyPit, teamMap: allTeams } = aggregatePerGame(gameRecords);
+
+    for (const [name, cumulative] of Object.entries(weeklyBat)) {
+      const manager =
+        findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
+        findManagerForPlayer(sd, name, 'batting');
+
+      const existingManual = sd.weekly_batting.find(
+        (b) => b.round === round && b.week === week && b.batter === name &&
+          ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      );
+      if (existingManual) continue;
+
+      const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
+      const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
+
+      sd.weekly_batting = sd.weekly_batting.filter(
+        (b) => !(b.round === round && b.week === week && b.batter === name && b.source === 'mlbapi')
+      );
+      sd.weekly_batting.push({
+        round, week, manager: manager || null, batter: name, team: allTeams[name] || null,
+        ...cumulative, weekly_score: weeklyScore, total_score: weeklyScore, source: 'mlbapi',
+      });
+    }
+
+    for (const [name, cumulative] of Object.entries(weeklyPit)) {
+      const manager =
+        findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
+        findManagerForPlayer(sd, name, 'pitching');
+
+      const existingManual = sd.weekly_pitching.find(
+        (p) => p.round === round && p.week === week && p.pitcher === name &&
+          ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      );
+      if (existingManual) continue;
+
+      const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
+      const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
+
+      sd.weekly_pitching = sd.weekly_pitching.filter(
+        (p) => !(p.round === round && p.week === week && p.pitcher === name && p.source === 'mlbapi')
+      );
+      sd.weekly_pitching.push({
+        round, week, manager: manager || null, pitcher: name, team: allTeams[name] || null,
+        ...cumulative, qs_highlight: cumulative.gs >= 2, weekly_score: weeklyScore, source: 'mlbapi',
+      });
+    }
+
+    if (!sd.upload_log) sd.upload_log = [];
+    sd.upload_log.push({
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      type: 'mlbapi_sync',
+      round, week, games: gameRecords.length,
+      batting_imported: batImported, pitching_imported: pitImported,
+    });
+    pruneSyncHistory(sd);
+
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'mlbapi_sync', { year, round, week, batting_imported: batImported, pitching_imported: pitImported });
+    writeDB(db);
+
+    res.json({
+      ok: true,
+      games_fetched: gameRecords.length,
+      batting_imported: batImported, batting_skipped: batSkipped,
+      pitching_imported: pitImported, pitching_skipped: pitSkipped,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
+// MLB Name Normalization
+// ============================================================
+
+// Standard Levenshtein distance.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Strip accents, suffixes (Jr/Sr/III), and punctuation for comparison.
+function normalizeName(name) {
+  return String(name)
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Similarity score 0–1. Tries both forward and token-sorted order.
+function nameSimilarity(a, b) {
+  const na = normalizeName(a);
+  const nb = normalizeName(b);
+  if (na === nb) return 1.0;
+  const maxLen = Math.max(na.length, nb.length);
+  if (maxLen === 0) return 1.0;
+  const fwd = 1 - levenshtein(na, nb) / maxLen;
+  // token-sorted: handles "Last, First" vs "First Last"
+  const sorted = (s) => s.split(' ').sort().join(' ');
+  const srt = 1 - levenshtein(sorted(na), sorted(nb)) / maxLen;
+  return Math.max(fwd, srt);
+}
+
+// Collect every unique player name referenced anywhere in a season's data.
+function extractSeasonPlayerNames(sd) {
+  const names = new Set();
+  const add = (v) => { if (v && typeof v === 'string') names.add(v); };
+
+  (sd.batters_pool || []).forEach(add);
+  (sd.pitchers_pool || []).forEach(add);
+
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      (roster.batters || []).forEach(add);
+      (roster.pitchers || []).forEach(add);
+    }
+  }
+
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    (sub.batters || []).forEach(add);
+    (sub.pitchers || []).forEach(add);
+  }
+
+  for (const s of sd.swaps || []) {
+    add(s.player_in);
+    add(s.player_out);
+  }
+
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) {
+      Object.keys(weekDates).forEach(add);
+    }
+  }
+
+  (sd.weekly_batting || []).forEach((b) => add(b.batter));
+  (sd.weekly_pitching || []).forEach((p) => add(p.pitcher));
+  (sd.daily_batting || []).forEach((b) => add(b.batter));
+  (sd.daily_pitching || []).forEach((p) => add(p.pitcher));
+
+  for (const weekTypes of Object.values(sd.player_dates || {})) {
+    Object.keys(weekTypes.batter || {}).forEach(add);
+    Object.keys(weekTypes.pitcher || {}).forEach(add);
+  }
+
+  Object.keys(sd.batters_team || {}).forEach(add);
+  Object.keys(sd.pitchers_team || {}).forEach(add);
+
+  return [...names].filter(Boolean).sort();
+}
+
+// Rename one player everywhere in a season (mutates sd). Returns count of fields changed.
+function renamePlayerInSeason(sd, oldName, newName) {
+  let count = 0;
+
+  const renameArr = (arr) => {
+    if (!arr) return;
+    arr.forEach((v, i) => { if (v === oldName) { arr[i] = newName; count++; } });
+  };
+  const renameKey = (obj) => {
+    if (!obj || !(oldName in obj)) return;
+    obj[newName] = obj[oldName];
+    delete obj[oldName];
+    count++;
+  };
+  const renameField = (obj, field) => {
+    if (obj && obj[field] === oldName) { obj[field] = newName; count++; }
+  };
+
+  renameArr(sd.batters_pool);
+  renameArr(sd.pitchers_pool);
+
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      renameArr(roster.batters);
+      renameArr(roster.pitchers);
+    }
+  }
+
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    renameArr(sub.batters);
+    renameArr(sub.pitchers);
+  }
+
+  for (const s of sd.swaps || []) {
+    renameField(s, 'player_in');
+    renameField(s, 'player_out');
+  }
+
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) renameKey(weekDates);
+  }
+
+  (sd.weekly_batting || []).forEach((b) => renameField(b, 'batter'));
+  (sd.weekly_pitching || []).forEach((p) => renameField(p, 'pitcher'));
+  (sd.daily_batting || []).forEach((b) => renameField(b, 'batter'));
+  (sd.daily_pitching || []).forEach((p) => renameField(p, 'pitcher'));
+
+  for (const weekTypes of Object.values(sd.player_dates || {})) {
+    renameKey(weekTypes.batter);
+    renameKey(weekTypes.pitcher);
+  }
+
+  renameKey(sd.batters_team);
+  renameKey(sd.pitchers_team);
+
+  return count;
+}
+
+// Fetch all MLB player full names for a given season.
+async function fetchMLBPlayerNames(season) {
+  const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}`);
+  return (data.people || []).map((p) => p.fullName).filter(Boolean);
+}
+
+// For each WMMC name find the best MLB API match. Returns array of match objects.
+function buildNameMatchReport(wmmcNames, mlbNames) {
+  const mlbSet = new Set(mlbNames);
+  return wmmcNames.map((wmmcName) => {
+    if (mlbSet.has(wmmcName)) {
+      return { wmmc_name: wmmcName, mlb_name: wmmcName, score: 1.0, exact: true, action: 'none' };
+    }
+    let bestName = null, bestScore = 0;
+    for (const mlbName of mlbNames) {
+      const s = nameSimilarity(wmmcName, mlbName);
+      if (s > bestScore) { bestScore = s; bestName = mlbName; }
+    }
+    const score = Math.round(bestScore * 1000) / 1000;
+    return {
+      wmmc_name: wmmcName,
+      mlb_name: bestName,
+      score,
+      exact: false,
+      // >= 0.9: high confidence auto-fix; 0.75–0.89: review first; < 0.75: likely wrong sport/pool entry
+      action: score >= 0.9 ? 'auto' : score >= 0.75 ? 'review' : 'no_match',
+    };
+  });
+}
+
+// GET /api/mlb/name-check?year=2025
+// Compares every player name in the WMMC database against the MLB Stats API canonical list.
+// Returns match report with confidence scores. Nothing is changed.
+app.get('/api/mlb/name-check', requireCommissioner, async (req, res) => {
+  const { year } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const [mlbNames, wmmcNames] = await Promise.all([
+      fetchMLBPlayerNames(year),
+      Promise.resolve(extractSeasonPlayerNames(sd)),
+    ]);
+
+    const report = buildNameMatchReport(wmmcNames, mlbNames);
+
+    res.json({
+      season: year,
+      wmmc_player_count: wmmcNames.length,
+      mlb_roster_size: mlbNames.length,
+      exact_matches: report.filter((r) => r.exact).length,
+      auto_fixable: report.filter((r) => r.action === 'auto').length,
+      needs_review: report.filter((r) => r.action === 'review').length,
+      no_match: report.filter((r) => r.action === 'no_match').length,
+      // Worst matches first so problems are immediately visible
+      players: report.sort((a, b) => a.score - b.score),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/mlb/name-fix
+// Applies name corrections across the entire season database.
+//
+// Two modes:
+//   { year, mappings: [{ from, to }, ...] }        — apply specific corrections you've reviewed
+//   { year, auto_threshold: 0.9 }                  — auto-apply all matches at or above the threshold
+//
+// Always returns what was changed so you can verify before running again.
+app.post('/api/mlb/name-fix', requireCommissioner, async (req, res) => {
+  const { year, mappings, auto_threshold } = req.body || {};
+  if (!year) return res.status(400).json({ error: 'year is required' });
+  if (!mappings && auto_threshold === undefined) {
+    return res.status(400).json({ error: 'Provide either mappings or auto_threshold' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  let toApply = mappings || [];
+
+  if (auto_threshold !== undefined && !mappings) {
+    try {
+      const [mlbNames, wmmcNames] = await Promise.all([
+        fetchMLBPlayerNames(year),
+        Promise.resolve(extractSeasonPlayerNames(sd)),
+      ]);
+      const report = buildNameMatchReport(wmmcNames, mlbNames);
+      toApply = report
+        .filter((r) => !r.exact && r.score >= auto_threshold && r.mlb_name)
+        .map((r) => ({ from: r.wmmc_name, to: r.mlb_name }));
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  const applied = [];
+  for (const { from, to } of toApply) {
+    if (!from || !to || from === to) continue;
+    const occurrences = renamePlayerInSeason(sd, from, to);
+    applied.push({ from, to, occurrences_updated: occurrences });
+  }
+
+  if (applied.length > 0) {
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'mlb_name_fix', { year, renames: applied.length, detail: applied });
+    writeDB(db);
+  }
+
+  res.json({ ok: true, renames_applied: applied.length, applied });
+});
+
+// Returns the top N closest MLB names to a WMMC name, with scores.
+function topCandidates(wmmcName, mlbNames, n = 5) {
+  return mlbNames
+    .map((mlbName) => ({ mlb_name: mlbName, score: Math.round(nameSimilarity(wmmcName, mlbName) * 1000) / 1000 }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n);
+}
+
+// Collect all player names that appear in any manager's roster for the given season.
+// "currently rostered" = present in sd.rosters for any week this season.
+function getRosteredNames(sd) {
+  const rostered = new Set();
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      (roster.batters || []).forEach((n) => rostered.add(n));
+      (roster.pitchers || []).forEach((n) => rostered.add(n));
+    }
+  }
+  return rostered;
+}
+
+// GET /api/mlb/roster-audit?year=2025
+//
+// Tiers every player name in the database into four buckets:
+//
+//   rostered_exact    — on a roster, name already matches MLB API exactly
+//   rostered_review   — on a roster, fuzzy score < 0.9; shows top-5 candidates for manual pick
+//   unrostered_auto   — not on any roster, score >= 0.75; will be auto-replaced on fix
+//   unrostered_replace— not on any roster, score < 0.75; best MLB candidate will replace old name
+//
+// Nothing is changed by this endpoint.
+app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
+  const { year } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const mlbNames = await fetchMLBPlayerNames(year);
+    const mlbSet = new Set(mlbNames);
+    const allWmmcNames = extractSeasonPlayerNames(sd);
+    const rostered = getRosteredNames(sd);
+
+    const rosteredExact = [];
+    const rosteredReview = [];
+    const unrosteredAuto = [];
+    const unrosteredReplace = [];
+
+    for (const wmmcName of allWmmcNames) {
+      const isRostered = rostered.has(wmmcName);
+      const exact = mlbSet.has(wmmcName);
+
+      if (exact) {
+        if (isRostered) rosteredExact.push({ name: wmmcName });
+        // Exact-match unrostered names need no action — skip them
+        continue;
+      }
+
+      const candidates = topCandidates(wmmcName, mlbNames, 5);
+      const best = candidates[0];
+
+      if (isRostered) {
+        // Always show for review regardless of score — commissioner must confirm
+        rosteredReview.push({
+          wmmc_name: wmmcName,
+          best_match: best.mlb_name,
+          best_score: best.score,
+          candidates,
+        });
+      } else if (best.score >= 0.75) {
+        unrosteredAuto.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, score: best.score });
+      } else {
+        unrosteredReplace.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, score: best.score, candidates });
+      }
+    }
+
+    // Sort review list: worst score first so the most uncertain are at the top
+    rosteredReview.sort((a, b) => a.best_score - b.best_score);
+
+    res.json({
+      season: year,
+      summary: {
+        rostered_exact: rosteredExact.length,
+        rostered_review: rosteredReview.length,
+        unrostered_auto: unrosteredAuto.length,
+        unrostered_replace: unrosteredReplace.length,
+      },
+      // These need your input before the fix endpoint will touch them
+      rostered_review: rosteredReview,
+      // These will be auto-handled by roster-fix with no input needed
+      unrostered_auto: unrosteredAuto,
+      unrostered_replace: unrosteredReplace,
+      // Already correct — listed for completeness
+      rostered_exact: rosteredExact,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Remove every trace of a player from a season (mutates sd). Returns count of fields removed.
+function purgePlayerFromSeason(sd, name) {
+  let count = 0;
+
+  const removeFromArr = (arr) => {
+    if (!arr) return;
+    const before = arr.length;
+    arr.splice(0, arr.length, ...arr.filter((v) => v !== name));
+    count += before - arr.length;
+  };
+  const removeKey = (obj) => {
+    if (obj && name in obj) { delete obj[name]; count++; }
+  };
+
+  removeFromArr(sd.batters_pool);
+  removeFromArr(sd.pitchers_pool);
+
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      removeFromArr(roster.batters);
+      removeFromArr(roster.pitchers);
+    }
+  }
+
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    removeFromArr(sub.batters);
+    removeFromArr(sub.pitchers);
+  }
+
+  if (sd.swaps) {
+    const before = sd.swaps.length;
+    sd.swaps = sd.swaps.filter((s) => s.player_in !== name && s.player_out !== name);
+    count += before - sd.swaps.length;
+  }
+
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) removeKey(weekDates);
+  }
+
+  const filterField = (arr, field) => {
+    if (!arr) return;
+    const before = arr.length;
+    const next = arr.filter((r) => r[field] !== name);
+    arr.splice(0, arr.length, ...next);
+    count += before - arr.length;
+  };
+
+  filterField(sd.weekly_batting, 'batter');
+  filterField(sd.weekly_pitching, 'pitcher');
+  filterField(sd.daily_batting, 'batter');
+  filterField(sd.daily_pitching, 'pitcher');
+
+  for (const weekTypes of Object.values(sd.player_dates || {})) {
+    removeKey(weekTypes.batter);
+    removeKey(weekTypes.pitcher);
+  }
+
+  removeKey(sd.batters_team);
+  removeKey(sd.pitchers_team);
+
+  return count;
+}
+
+// POST /api/mlb/roster-fix
+// Body: { year, manual_mappings: [{ from, to }] }
+//
+// One-pass cleanup:
+//   1. Renames rostered players automatically when score >= 0.9.
+//      Rostered players with score < 0.9 require an explicit { from, to } in manual_mappings;
+//      they appear in the response's `needs_manual` list if omitted.
+//   2. manual_mappings entries always apply regardless of score (use for low-confidence overrides).
+//   3. Unrostered players with any name mismatch are PURGED entirely from the database —
+//      their old misspelled records are removed and the MLB API sync will repopulate them
+//      under the correct name on next run.
+app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
+  const { year, manual_mappings } = req.body || {};
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const mlbNames = await fetchMLBPlayerNames(year);
+    const mlbSet = new Set(mlbNames);
+    const allWmmcNames = extractSeasonPlayerNames(sd);
+    const rostered = getRosteredNames(sd);
+    const manualMap = new Map((manual_mappings || []).map((m) => [m.from, m.to]));
+
+    const applied = [];
+    const needsManual = [];
+    const purged = [];
+
+    for (const wmmcName of allWmmcNames) {
+      if (mlbSet.has(wmmcName)) continue; // already correct
+
+      if (rostered.has(wmmcName)) {
+        // Rostered player: use manual override if provided, else auto-rename if score >= 0.9
+        if (manualMap.has(wmmcName)) {
+          const to = manualMap.get(wmmcName);
+          const occurrences = renamePlayerInSeason(sd, wmmcName, to);
+          applied.push({ from: wmmcName, to, score: null, auto: false, occurrences_updated: occurrences });
+        } else {
+          const best = topCandidates(wmmcName, mlbNames, 1)[0];
+          if (best && best.score >= 0.9) {
+            const occurrences = renamePlayerInSeason(sd, wmmcName, best.mlb_name);
+            applied.push({ from: wmmcName, to: best.mlb_name, score: best.score, auto: true, occurrences_updated: occurrences });
+          } else {
+            needsManual.push({ wmmc_name: wmmcName, best_match: best?.mlb_name ?? null, score: best?.score ?? 0, candidates: topCandidates(wmmcName, mlbNames, 5) });
+          }
+        }
+      } else {
+        // Unrostered player: purge entirely — MLB sync will re-add under the correct name
+        const removed = purgePlayerFromSeason(sd, wmmcName);
+        purged.push({ name: wmmcName, records_removed: removed });
+      }
+    }
+
+    if (applied.length > 0 || purged.length > 0) {
+      db.seasons[year] = sd;
+      addAuditEntry(db, 'roster_name_fix', { year, renames: applied.length, purged: purged.length, detail: { applied, purged } });
+      writeDB(db);
+    }
+
+    res.json({
+      ok: true,
+      renames_applied: applied.length,
+      players_purged: purged.length,
+      needs_manual_review: needsManual.length,
+      applied,
+      purged,
+      // If non-empty: re-POST with manual_mappings entries for these players
+      needs_manual: needsManual,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/mlb/recent-stats?year=2025&days=2
+// Returns per-game stats from the last N days for every currently rostered player.
+// Use this to verify MLB API data looks correct before committing name fixes to production.
+app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
+  const { year, days = '2' } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const rostered = getRosteredNames(sd);
+  if (rostered.size === 0) return res.json({ period: {}, games_checked: 0, batting: [], pitching: [] });
+
+  const numDays = Math.min(Math.max(parseInt(days) || 2, 1), 7);
+  const endDate = new Date().toISOString().split('T')[0];
+  const startDate = new Date(Date.now() - (numDays - 1) * 86400000).toISOString().split('T')[0];
+
+  try {
+    const gameRecords = await fetchMLBPerGameStats(startDate, endDate);
+
+    const batterLog = {};
+    const pitcherLog = {};
+
+    for (const { gameId, date, batting, pitching, teamMap } of gameRecords) {
+      for (const [name, stats] of Object.entries(batting)) {
+        if (!rostered.has(name)) continue;
+        const manager = findManagerForPlayer(sd, name, 'batting');
+        if (!batterLog[name]) batterLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
+        batterLog[name].games.push({ date, game_id: gameId, ...stats, game_score: Math.round(calculateBattingScore(stats) * 100) / 100 });
+      }
+      for (const [name, stats] of Object.entries(pitching)) {
+        if (!rostered.has(name)) continue;
+        const manager = findManagerForPlayer(sd, name, 'pitching');
+        if (!pitcherLog[name]) pitcherLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
+        pitcherLog[name].games.push({ date, game_id: gameId, ...stats, game_score: Math.round(calculatePitchingScore(stats) * 100) / 100 });
+      }
+    }
+
+    const summarise = (log) =>
+      Object.entries(log)
+        .map(([name, data]) => ({
+          name,
+          manager: data.manager,
+          team: data.team,
+          games: data.games.sort((a, b) => a.date.localeCompare(b.date)),
+          period_score: Math.round(data.games.reduce((s, g) => s + g.game_score, 0) * 100) / 100,
+        }))
+        .sort((a, b) => b.period_score - a.period_score);
+
+    res.json({
+      period: { start: startDate, end: endDate, days: numDays },
+      games_checked: gameRecords.length,
+      rostered_player_count: rostered.size,
+      batting: summarise(batterLog),
+      pitching: summarise(pitcherLog),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   if (!SLACK_WEBHOOK_URL) {
