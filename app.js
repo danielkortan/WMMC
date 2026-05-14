@@ -9996,12 +9996,28 @@ window.addToRoster = function (manager, type, selectId, weekKey) {
       }
     });
 
-    // Store add date in roster_dates
+    // Store add date in roster_dates.  Default to today for in-progress weeks, but
+    // clamp to the week's start when adding to a week that has already ended — otherwise
+    // the daily-stat cutoff zeros the player's score for the entire week.
+    const todayStr = new Date().toISOString().split('T')[0];
+    const scheduleDatesForAdd = getScheduleDates();
+    const weekIdxForAdd = SEASON_SCHEDULE.findIndex((s) => `${s.round}|${s.week}` === weekKey);
+    const weekEndForAdd =
+      weekIdxForAdd >= 0 && scheduleDatesForAdd && scheduleDatesForAdd[weekIdxForAdd]
+        ? scheduleDatesForAdd[weekIdxForAdd].end
+        : null;
+    const weekStartForAdd =
+      weekIdxForAdd >= 0 && scheduleDatesForAdd && scheduleDatesForAdd[weekIdxForAdd]
+        ? scheduleDatesForAdd[weekIdxForAdd].start
+        : null;
+    let effectiveAddDate = todayStr;
+    if (weekEndForAdd && todayStr > weekEndForAdd && weekStartForAdd) effectiveAddDate = weekStartForAdd;
+
     if (!sd.roster_dates) sd.roster_dates = {};
     if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
     if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
     if (!sd.roster_dates[manager][weekKey][player]) sd.roster_dates[manager][weekKey][player] = {};
-    sd.roster_dates[manager][weekKey][player].add_date = new Date().toISOString().split('T')[0];
+    sd.roster_dates[manager][weekKey][player].add_date = effectiveAddDate;
 
     // Create swap log entry for the add
     if (!sd.swaps) sd.swaps = [];
@@ -10013,7 +10029,7 @@ window.addToRoster = function (manager, type, selectId, weekKey) {
       player_out: null,
       player_in: player,
       reason: 'Commissioner Add',
-      swap_date: new Date().toISOString().split('T')[0],
+      swap_date: effectiveAddDate,
       week_key: weekKey,
       status: 'approved',
     });

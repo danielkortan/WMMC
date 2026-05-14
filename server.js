@@ -379,8 +379,8 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
   // here because it would zero out dropped players' correctly banked scores when their
   // stats live in a daily record dated after weekDates.end (see recomputeMidWeekAddScores).
   if ((sd.daily_batting && sd.daily_batting.length) || (sd.daily_pitching && sd.daily_pitching.length)) {
-    syncPlayerDatesFromRosterDates(sd);
-    recomputeMidWeekAddScores(sd);
+    const wipedAuto = syncPlayerDatesFromRosterDates(sd);
+    recomputeMidWeekAddScores(sd, wipedAuto);
   }
   db.seasons[req.params.year] = sd;
   writeDB(db);
@@ -1084,8 +1084,14 @@ function addOneDay(dateStr) {
 //   - Entries created here are marked { auto: true } so they can be refreshed on
 //     subsequent saves without clobbering manual commissioner overrides.
 function syncPlayerDatesFromRosterDates(sd) {
-  if (!sd || !sd.roster_dates) return;
+  if (!sd || !sd.roster_dates) return new Set();
   if (!sd.player_dates) sd.player_dates = {};
+
+  // Track auto entries that get wiped so callers can recompute the affected
+  // weekly_score values. Without this, a player whose add_date is corrected
+  // from a post-week-end value back to the week start would keep the zeroed
+  // score that the now-removed cutoff produced.
+  const wiped = new Set();
 
   // Wipe previously auto-generated entries so stale data (e.g. incorrect end dates
   // from an earlier version) is cleaned up on every run.
@@ -1094,7 +1100,10 @@ function syncPlayerDatesFromRosterDates(sd) {
       const typeMap = (sd.player_dates[weekKey] || {})[type];
       if (!typeMap) continue;
       for (const [player, entry] of Object.entries(typeMap)) {
-        if (entry && entry.auto) delete typeMap[player];
+        if (entry && entry.auto) {
+          wiped.add(`${weekKey}|${type}|${player}`);
+          delete typeMap[player];
+        }
       }
     }
   }
@@ -1128,36 +1137,83 @@ function syncPlayerDatesFromRosterDates(sd) {
       }
     }
   }
+
+  return wiped;
 }
 
-// Recompute weekly scores ONLY for mid-week additions (player_dates entries with auto:true).
-// Dropped players' banked scores are intentionally left alone — calling recomputeAllWeeklyScores
-// on a save would zero them out when their stats live in a sync record dated after weekDates.end
-// (the morning sync captures the previous day's games, so a player who pitches on the last day
-// of a scoring week has their stats in a record dated end+1, which the end-date filter excludes).
-function recomputeMidWeekAddScores(sd) {
-  const playerDates = sd.player_dates || {};
-  for (const [weekKey, weekTypes] of Object.entries(playerDates)) {
+// Recompute weekly scores for any player whose roster_dates entry could have triggered
+// a date-based cutoff at any point — i.e. anyone with an add_date set, plus any auto
+// entry that was just wiped by syncPlayerDatesFromRosterDates. This covers three cases:
+//   1. Current mid-week add (auto entry active): apply the cutoff from daily data.
+//   2. add_date just corrected from post-week to the week start (auto entry wiped,
+//      no new auto entry): restore full-week score that the old cutoff zeroed out.
+//   3. Already-stale data from a prior save where the cutoff was wiped before this
+//      logic existed: recompute on the next save to self-heal.
+// Dropped players' banked scores are intentionally left alone (drop_locked check)
+// because they may include stats dated after the week end (the morning sync captures
+// the previous day's games, so a final-day pitcher's stats live in a record dated
+// end+1, which is included by the +1-day shift in computeEffective*).
+function recomputeMidWeekAddScores(sd, wipedAutoEntries = new Set()) {
+  // Collect (weekKey, type, player) tuples to recompute.
+  const toRecompute = new Set();
+
+  // Current auto entries in player_dates (active mid-week cutoffs).
+  for (const [weekKey, weekTypes] of Object.entries(sd.player_dates || {})) {
+    for (const type of ['batter', 'pitcher']) {
+      for (const [player, entry] of Object.entries(weekTypes[type] || {})) {
+        if (entry && entry.auto) toRecompute.add(`${weekKey}|${type}|${player}`);
+      }
+    }
+  }
+
+  // Auto entries wiped this run that were not re-created.
+  for (const key of wipedAutoEntries) toRecompute.add(key);
+
+  // All roster_dates entries with an add_date — covers the no-longer-mid-week case
+  // and self-heals any stale weekly_score values left from earlier saves.
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const [weekKey, players] of Object.entries(mgrDates)) {
+      for (const [player, dates] of Object.entries(players)) {
+        if (!dates || !dates.add_date) continue;
+        toRecompute.add(`${weekKey}|batter|${player}`);
+        toRecompute.add(`${weekKey}|pitcher|${player}`);
+      }
+    }
+  }
+
+  for (const key of toRecompute) {
+    const [weekKey, type, player] = key.split('|');
     const parts = weekKey.split('|');
     const round = parts[0];
     const week = parts.slice(1).join('|');
-    for (const [batter, entry] of Object.entries(weekTypes.batter || {})) {
-      if (!entry || !entry.auto) continue;
+
+    if (type === 'batter') {
       (sd.weekly_batting || []).forEach((b) => {
-        if (b.batter !== batter || b.round !== round || b.week !== week) return;
+        if (b.batter !== player || b.round !== round || b.week !== week) return;
         if (b.drop_locked || (b.manual_fields && b.manual_fields.length > 0)) return;
-        const score = computeEffectiveBattingScore(sd, batter, round, week);
-        b.weekly_score = score !== null ? score : 0;
-        b.total_score = b.weekly_score;
+        const score = computeEffectiveBattingScore(sd, player, round, week);
+        // If there is no daily data, preserve the stored score (e.g. gsheets-only weeks)
+        // unless an auto cutoff is currently active, in which case 0 is the right answer.
+        const hasAutoEntry = !!(((sd.player_dates || {})[weekKey] || {}).batter || {})[player];
+        if (score !== null) {
+          b.weekly_score = score;
+          b.total_score = score;
+        } else if (hasAutoEntry) {
+          b.weekly_score = 0;
+          b.total_score = 0;
+        }
       });
-    }
-    for (const [pitcher, entry] of Object.entries(weekTypes.pitcher || {})) {
-      if (!entry || !entry.auto) continue;
+    } else {
       (sd.weekly_pitching || []).forEach((p) => {
-        if (p.pitcher !== pitcher || p.round !== round || p.week !== week) return;
+        if (p.pitcher !== player || p.round !== round || p.week !== week) return;
         if (p.drop_locked || (p.manual_fields && p.manual_fields.length > 0)) return;
-        const score = computeEffectivePitchingScore(sd, pitcher, round, week);
-        p.weekly_score = score !== null ? score : 0;
+        const score = computeEffectivePitchingScore(sd, player, round, week);
+        const hasAutoEntry = !!(((sd.player_dates || {})[weekKey] || {}).pitcher || {})[player];
+        if (score !== null) {
+          p.weekly_score = score;
+        } else if (hasAutoEntry) {
+          p.weekly_score = 0;
+        }
       });
     }
   }
