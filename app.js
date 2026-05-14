@@ -1243,6 +1243,11 @@ if (typeof document !== 'undefined') {
   });
 }
 
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 // ============================================================
 // SCOREBOARD - Combined Dashboard + Standings
 // ============================================================
