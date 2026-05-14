@@ -1101,6 +1101,9 @@ let _liveLastSawLiveGame = 0;
 // Tracks which manager rows have their today's-stats drop-down expanded so the
 // 2-minute poll re-render doesn't collapse the panel under the user.
 const _liveExpandedManagers = new Set();
+// Same idea for the per-game full-boxscore expand panels in Today's Games.
+// Values are gamePks (as strings).
+const _liveExpandedGames = new Set();
 const _liveKey = (s) => String(s || '').replace(/[^a-z0-9]/gi, '_').toLowerCase();
 
 function startLivePolling() {
@@ -1379,15 +1382,163 @@ function renderLiveContent(d) {
       const scoreLine = (g.state === 'Live' || g.state === 'Final')
         ? `${away} ${g.away.score ?? 0} @ ${home} ${g.home.score ?? 0}`
         : `${away} @ ${home}`;
-      return `<div class="live-game-row">${stateLabel}<span class="live-game-line">${escapeHtml(scoreLine)}</span></div>`;
+      const canExpand = (g.state === 'Live' || g.state === 'Final');
+      const key = String(g.game_id);
+      const expanded = _liveExpandedGames.has(key);
+      const arrow = canExpand
+        ? `<span class="sb-expand-arrow" id="live-game-arrow-${key}">${expanded ? '&#9650;' : '&#9660;'}</span>`
+        : '';
+      const rowAttrs = canExpand
+        ? `class="live-game-row live-game-clickable" onclick="toggleLiveGameBox('${key}')"`
+        : 'class="live-game-row"';
+      const detail = canExpand
+        ? `<div class="live-game-detail" id="live-game-detail-${key}" style="display:${expanded ? '' : 'none'};"></div>`
+        : '';
+      return `<div ${rowAttrs}>${stateLabel}<span class="live-game-line">${escapeHtml(scoreLine)}</span>${arrow}</div>${detail}`;
     };
     gamesEl.innerHTML = `
       <div class="card">
         <h3>Today's Games <span class="muted">(${today})</span></h3>
         ${todays.length ? todays.map(fmtGame).join('') : '<div class="empty">No games today.</div>'}
       </div>`;
+
+    // Drop any expanded games that aren't in today's set (e.g. day rolled over).
+    const todaysIds = new Set(todays.map((g) => String(g.game_id)));
+    for (const gp of [..._liveExpandedGames]) {
+      if (!todaysIds.has(gp)) _liveExpandedGames.delete(gp);
+    }
+    // Re-fetch the box for every currently-expanded game so the open panel
+    // tracks each 2-minute poll. The fetch is lazy and per-game so a single
+    // user looking at one card never costs more than one MLB boxscore call.
+    for (const gp of _liveExpandedGames) {
+      fetchAndRenderLiveBoxscore(gp);
+    }
   }
 
+}
+
+// Toggle the per-game full-boxscore drop-down beneath a Today's Games row.
+// On open we kick off a lazy fetch to /api/mlb/live/game/:gamePk and inject
+// the result. The expanded set is preserved across renderLiveContent calls
+// so the panel survives the 2-minute live poll re-render.
+window.toggleLiveGameBox = function (gamePk) {
+  const key = String(gamePk);
+  const detail = document.getElementById('live-game-detail-' + key);
+  const arrow = document.getElementById('live-game-arrow-' + key);
+  if (!detail) return;
+  if (_liveExpandedGames.has(key)) {
+    _liveExpandedGames.delete(key);
+    detail.style.display = 'none';
+    if (arrow) arrow.innerHTML = '&#9660;';
+  } else {
+    _liveExpandedGames.add(key);
+    detail.style.display = '';
+    if (arrow) arrow.innerHTML = '&#9650;';
+    fetchAndRenderLiveBoxscore(gamePk);
+  }
+};
+
+async function fetchAndRenderLiveBoxscore(gamePk) {
+  if (!SELECTED_SEASON) return;
+  const key = String(gamePk);
+  const target = document.getElementById('live-game-detail-' + key);
+  if (!target) return;
+  // Only show the spinner on the first open; on subsequent poll-driven
+  // refreshes leave the existing content in place to avoid a flicker.
+  if (!target.dataset.loaded) {
+    target.innerHTML = '<div class="live-box-loading">Loading box score…</div>';
+  }
+  try {
+    const resp = await fetch(
+      `/api/mlb/live/game/${encodeURIComponent(gamePk)}?year=${encodeURIComponent(SELECTED_SEASON)}`
+    );
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (!_liveExpandedGames.has(key)) return; // user collapsed mid-flight
+    target.innerHTML = renderLiveBoxscoreHTML(data);
+    target.dataset.loaded = '1';
+  } catch (e) {
+    target.innerHTML = `<div class="live-box-loading">Error loading box score: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderLiveBoxscoreHTML(d) {
+  const renderSide = (sideKey) => {
+    const t = (d.teams || {})[sideKey] || {};
+    const batters = ((d.batting || {})[sideKey]) || [];
+    const pitchers = ((d.pitching || {})[sideKey]) || [];
+
+    const heading = `<div class="live-box-team-header">
+        ${escapeHtml(t.team_name || t.team || sideKey)}
+        <span class="muted">${t.runs ?? 0} R · ${t.hits ?? 0} H · ${t.errors ?? 0} E</span>
+      </div>`;
+
+    const batterRow = (p) => `<tr class="${p.rostered ? 'live-box-rostered' : ''}">
+      <td>${escapeHtml(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${escapeHtml(p.manager)}</span>` : ''}</td>
+      <td>${escapeHtml(p.position || '')}</td>
+      <td class="num-cell">${p.stats.abs || 0}</td>
+      <td class="num-cell">${p.stats['1b'] || 0}</td>
+      <td class="num-cell">${p.stats['2b'] || 0}</td>
+      <td class="num-cell">${p.stats['3b'] || 0}</td>
+      <td class="num-cell">${p.stats.hr || 0}</td>
+      <td class="num-cell">${p.stats.r || 0}</td>
+      <td class="num-cell">${p.stats.rbi || 0}</td>
+      <td class="num-cell">${p.stats.sb || 0}</td>
+      <td class="num-cell">${p.stats.bb || 0}</td>
+      <td class="num-cell"><strong>${(p.pts || 0).toFixed(2)}</strong></td>
+    </tr>`;
+
+    const pitcherRow = (p) => `<tr class="${p.rostered ? 'live-box-rostered' : ''}">
+      <td>${escapeHtml(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${escapeHtml(p.manager)}</span>` : ''}</td>
+      <td class="num-cell">${fmtDec(p.stats.ip || 0)}</td>
+      <td class="num-cell">${p.stats.h || 0}</td>
+      <td class="num-cell">${p.stats.er || 0}</td>
+      <td class="num-cell">${p.stats.bb || 0}</td>
+      <td class="num-cell">${p.stats.k || 0}</td>
+      <td class="num-cell">${p.stats.w || 0}</td>
+      <td class="num-cell">${p.stats.qs || 0}</td>
+      <td class="num-cell">${p.stats.cg || 0}</td>
+      <td class="num-cell">${p.stats.cgso || 0}</td>
+      <td class="num-cell">${p.stats.nh || 0}</td>
+      <td class="num-cell"><strong>${(p.pts || 0).toFixed(2)}</strong></td>
+    </tr>`;
+
+    const battingTable = batters.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table live-box-table">
+          <thead><tr>
+            <th>Batter</th><th>Pos</th>
+            <th class="num-cell">AB</th><th class="num-cell">1B</th><th class="num-cell">2B</th>
+            <th class="num-cell">3B</th><th class="num-cell">HR</th><th class="num-cell">R</th>
+            <th class="num-cell">RBI</th><th class="num-cell">SB</th><th class="num-cell">BB</th>
+            <th class="num-cell">Pts</th>
+          </tr></thead>
+          <tbody>${batters.map(batterRow).join('')}</tbody>
+        </table></div>`
+      : '<div class="live-mgr-detail-empty">No batting activity yet.</div>';
+
+    const pitchingTable = pitchers.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table live-box-table">
+          <thead><tr>
+            <th>Pitcher</th>
+            <th class="num-cell">IP</th><th class="num-cell">H</th><th class="num-cell">ER</th>
+            <th class="num-cell">BB</th><th class="num-cell">K</th><th class="num-cell">W</th>
+            <th class="num-cell">QS</th><th class="num-cell">CG</th><th class="num-cell">CGSO</th>
+            <th class="num-cell">NH</th><th class="num-cell">Pts</th>
+          </tr></thead>
+          <tbody>${pitchers.map(pitcherRow).join('')}</tbody>
+        </table></div>`
+      : '<div class="live-mgr-detail-empty">No pitching activity yet.</div>';
+
+    return `<div class="live-box-side">
+      ${heading}
+      <div class="live-box-section-title">Batters</div>
+      ${battingTable}
+      <div class="live-box-section-title">Pitchers</div>
+      ${pitchingTable}
+    </div>`;
+  };
+
+  return `<div class="live-box-panel">${renderSide('away')}${renderSide('home')}</div>`;
 }
 
 // Toggle the today's-stats drop-down for a manager row on the Live tab. Mirrors
