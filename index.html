@@ -60,6 +60,7 @@
 
     <nav id="main-nav">
       <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
+      <button class="nav-btn" data-tab="live">Live</button>
       <button class="nav-btn" data-tab="my-roster">My Roster</button>
       <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
       <button class="nav-btn" data-tab="trends">Trends</button>
@@ -76,6 +77,19 @@
         <div class="champion-banner" id="champion-banner"></div>
         <div id="scoreboard-content"></div>
         <div id="scoreboard-bracket"></div>
+      </section>
+
+      <!-- Live Scoring -->
+      <section id="live" class="tab-content">
+        <div id="live-header" class="card">
+          <div class="live-header-inner">
+            <h2 id="live-week-title">Live</h2>
+            <div id="live-status" class="live-status">Loading…</div>
+          </div>
+        </div>
+        <div id="live-managers"></div>
+        <div id="live-games"></div>
+        <div id="live-players"></div>
       </section>
 
       <!-- Weekly Scores -->

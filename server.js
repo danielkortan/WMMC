@@ -3024,6 +3024,227 @@ app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
   }
 });
 
+// GET /api/mlb/live?year=2026
+// Live scoring snapshot for the schedule week that contains today's date.
+// Combines the in-progress + final games' boxscore stats with the upcoming Preview games
+// so the UI can render running totals plus a "games left" indicator per manager.
+//
+// Unlike /preview or /sync this endpoint includes Live games and is safe to poll on a
+// short interval (~60s). It's read-only — nothing is written to the database.
+app.get('/api/mlb/live', async (req, res) => {
+  const { year } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Find the schedule week whose [start, end] contains today.
+  const scheduleDates = sd.schedule_dates || [];
+  let activeIdx = -1;
+  for (let i = 0; i < scheduleDates.length; i++) {
+    const d = scheduleDates[i];
+    if (d && d.start && d.end && today >= d.start && today <= d.end) {
+      activeIdx = i;
+      break;
+    }
+  }
+
+  if (activeIdx < 0) {
+    return res.json({
+      season: year,
+      active_week: null,
+      reason: 'no_active_week_for_today',
+      today,
+      fetched_at: new Date().toISOString(),
+      games: [],
+      managers: [],
+      players: [],
+    });
+  }
+
+  const schedWeek = SEASON_SCHEDULE[activeIdx];
+  const { start, end } = scheduleDates[activeIdx];
+  const weekRound = schedWeek.round;
+  const weekName = schedWeek.week;
+
+  try {
+    const idToWmmcName = buildIdToWmmcName(sd);
+
+    // Pull the week's full schedule including in-progress + scheduled games.
+    const scheduleData = await mlbApiFetch(
+      `/api/v1/schedule?sportId=1&startDate=${start}&endDate=${end}&gameType=R,F,D,L,W`
+    );
+
+    const games = [];
+    for (const dateEntry of scheduleData.dates || []) {
+      for (const g of dateEntry.games || []) {
+        const state = g.status?.abstractGameState || 'Preview';
+        games.push({
+          game_id: g.gamePk,
+          date: dateEntry.date,
+          scheduled_time: g.gameDate || null,
+          state,
+          status_detail: g.status?.detailedState || null,
+          inning: g.linescore?.currentInning || null,
+          inning_half: g.linescore?.inningHalf || null,
+          away: {
+            team: g.teams?.away?.team?.abbreviation || null,
+            team_name: g.teams?.away?.team?.name || null,
+            score: g.teams?.away?.score ?? null,
+          },
+          home: {
+            team: g.teams?.home?.team?.abbreviation || null,
+            team_name: g.teams?.home?.team?.name || null,
+            score: g.teams?.home?.score ?? null,
+          },
+        });
+      }
+    }
+
+    // Fetch boxscores for Live + Final games. Preview games have no stats yet.
+    // Done sequentially to avoid hammering the MLB API; ~15 games/day is fine on a 60s poll.
+    const playerAgg = {}; // wmmcName -> { type, stats, games:[{game_id, date, state, stats}] }
+    for (const game of games) {
+      if (game.state !== 'Live' && game.state !== 'Final') continue;
+      let box;
+      try {
+        box = await mlbApiFetch(`/api/v1/game/${game.game_id}/boxscore`);
+      } catch {
+        continue;
+      }
+      const { batting, pitching } = parseBoxscore(box, idToWmmcName);
+
+      const collect = (statsMap, type, scorer) => {
+        for (const [name, stats] of Object.entries(statsMap)) {
+          if (!playerAgg[name]) {
+            playerAgg[name] = { type, stats: {}, games: [] };
+          }
+          // Sum stats across games this week so the weekly running total stays correct.
+          for (const k of Object.keys(stats)) {
+            playerAgg[name].stats[k] = (playerAgg[name].stats[k] || 0) + (stats[k] || 0);
+          }
+          playerAgg[name].games.push({
+            game_id: game.game_id,
+            date: game.date,
+            state: game.state,
+            stats: { ...stats },
+            game_score: Math.round(scorer(stats) * 100) / 100,
+          });
+        }
+      };
+      collect(batting, 'batting', calculateBattingScore);
+      collect(pitching, 'pitching', calculatePitchingScore);
+    }
+
+    // Resolve manager + team for each player and compute running scores.
+    // Only include rostered players in the live view — unrostered names are noise here.
+    const playerRows = [];
+    for (const [name, agg] of Object.entries(playerAgg)) {
+      const manager =
+        findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) ||
+        findManagerForPlayer(sd, name, agg.type);
+      if (!manager) continue;
+      const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
+      const score =
+        agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
+      const hasLive = agg.games.some((g) => g.state === 'Live');
+      const hasFinal = agg.games.some((g) => g.state === 'Final');
+      playerRows.push({
+        name,
+        manager,
+        team: teamMap?.[name] || null,
+        type: agg.type,
+        running_score: Math.round(score * 100) / 100,
+        stats: agg.stats,
+        games_played: agg.games.length,
+        any_live: hasLive,
+        any_final: hasFinal,
+        games: agg.games.sort((a, b) => a.date.localeCompare(b.date)),
+      });
+    }
+    playerRows.sort((a, b) => b.running_score - a.running_score);
+
+    // Build the per-team set of WMMC players a manager has rostered this week so we can
+    // attribute Preview games to "games remaining" for the right managers.
+    const weekKey = `${weekRound}|${weekName}`;
+    const managerTeamsBatting = {}; // manager -> Set<teamAbbrev>
+    const managerTeamsPitching = {};
+    for (const [manager, weekRosters] of Object.entries(sd.rosters || {})) {
+      const roster = weekRosters?.[weekKey];
+      if (!roster) continue;
+      const battingTeams = new Set();
+      const pitchingTeams = new Set();
+      for (const n of roster.batters || []) {
+        const t = sd.batters_team?.[n];
+        if (t) battingTeams.add(t);
+      }
+      for (const n of roster.pitchers || []) {
+        const t = sd.pitchers_team?.[n];
+        if (t) pitchingTeams.add(t);
+      }
+      managerTeamsBatting[manager] = battingTeams;
+      managerTeamsPitching[manager] = pitchingTeams;
+    }
+
+    // Per-manager rollup: running score + games-remaining counts.
+    const managerMap = {};
+    const ensureMgr = (m) => {
+      if (!managerMap[m]) {
+        managerMap[m] = {
+          name: m,
+          running_score: 0,
+          players_active: 0,    // has a Live game this week
+          players_finished: 0,  // has a Final game this week, no Live remaining
+          games_remaining: 0,   // count of Preview games involving one of their rostered teams
+        };
+      }
+      return managerMap[m];
+    };
+
+    for (const row of playerRows) {
+      const m = ensureMgr(row.manager);
+      m.running_score = Math.round((m.running_score + row.running_score) * 100) / 100;
+      if (row.any_live) m.players_active++;
+      else if (row.any_final) m.players_finished++;
+    }
+
+    for (const game of games) {
+      if (game.state !== 'Preview') continue;
+      const teamsInGame = [game.away.team, game.home.team].filter(Boolean);
+      for (const manager of Object.keys(managerTeamsBatting)) {
+        const batSet = managerTeamsBatting[manager];
+        const pitSet = managerTeamsPitching[manager];
+        if (teamsInGame.some((t) => batSet.has(t) || pitSet.has(t))) {
+          ensureMgr(manager).games_remaining++;
+        }
+      }
+    }
+
+    const managers = Object.values(managerMap).sort((a, b) => b.running_score - a.running_score);
+
+    res.json({
+      season: year,
+      active_week: { round: weekRound, week: weekName, start, end, week_index: activeIdx },
+      today,
+      fetched_at: new Date().toISOString(),
+      summary: {
+        games_total: games.length,
+        games_live: games.filter((g) => g.state === 'Live').length,
+        games_final: games.filter((g) => g.state === 'Final').length,
+        games_preview: games.filter((g) => g.state === 'Preview').length,
+      },
+      games,
+      managers,
+      players: playerRows,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   if (!SLACK_WEBHOOK_URL) {
