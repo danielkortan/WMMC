@@ -2478,6 +2478,184 @@ app.post('/api/mlb/name-fix', requireCommissioner, async (req, res) => {
   res.json({ ok: true, renames_applied: applied.length, applied });
 });
 
+// Returns the top N closest MLB names to a WMMC name, with scores.
+function topCandidates(wmmcName, mlbNames, n = 5) {
+  return mlbNames
+    .map((mlbName) => ({ mlb_name: mlbName, score: Math.round(nameSimilarity(wmmcName, mlbName) * 1000) / 1000 }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n);
+}
+
+// Collect all player names that appear in any manager's roster for the given season.
+// "currently rostered" = present in sd.rosters for any week this season.
+function getRosteredNames(sd) {
+  const rostered = new Set();
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      (roster.batters || []).forEach((n) => rostered.add(n));
+      (roster.pitchers || []).forEach((n) => rostered.add(n));
+    }
+  }
+  return rostered;
+}
+
+// GET /api/mlb/roster-audit?year=2025
+//
+// Tiers every player name in the database into four buckets:
+//
+//   rostered_exact    — on a roster, name already matches MLB API exactly
+//   rostered_review   — on a roster, fuzzy score < 0.9; shows top-5 candidates for manual pick
+//   unrostered_auto   — not on any roster, score >= 0.75; will be auto-replaced on fix
+//   unrostered_replace— not on any roster, score < 0.75; best MLB candidate will replace old name
+//
+// Nothing is changed by this endpoint.
+app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
+  const { year } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const mlbNames = await fetchMLBPlayerNames(year);
+    const mlbSet = new Set(mlbNames);
+    const allWmmcNames = extractSeasonPlayerNames(sd);
+    const rostered = getRosteredNames(sd);
+
+    const rosteredExact = [];
+    const rosteredReview = [];
+    const unrosteredAuto = [];
+    const unrosteredReplace = [];
+
+    for (const wmmcName of allWmmcNames) {
+      const isRostered = rostered.has(wmmcName);
+      const exact = mlbSet.has(wmmcName);
+
+      if (exact) {
+        if (isRostered) rosteredExact.push({ name: wmmcName });
+        // Exact-match unrostered names need no action — skip them
+        continue;
+      }
+
+      const candidates = topCandidates(wmmcName, mlbNames, 5);
+      const best = candidates[0];
+
+      if (isRostered) {
+        // Always show for review regardless of score — commissioner must confirm
+        rosteredReview.push({
+          wmmc_name: wmmcName,
+          best_match: best.mlb_name,
+          best_score: best.score,
+          candidates,
+        });
+      } else if (best.score >= 0.75) {
+        unrosteredAuto.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, score: best.score });
+      } else {
+        unrosteredReplace.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, score: best.score, candidates });
+      }
+    }
+
+    // Sort review list: worst score first so the most uncertain are at the top
+    rosteredReview.sort((a, b) => a.best_score - b.best_score);
+
+    res.json({
+      season: year,
+      summary: {
+        rostered_exact: rosteredExact.length,
+        rostered_review: rosteredReview.length,
+        unrostered_auto: unrosteredAuto.length,
+        unrostered_replace: unrosteredReplace.length,
+      },
+      // These need your input before the fix endpoint will touch them
+      rostered_review: rosteredReview,
+      // These will be auto-handled by roster-fix with no input needed
+      unrostered_auto: unrosteredAuto,
+      unrostered_replace: unrosteredReplace,
+      // Already correct — listed for completeness
+      rostered_exact: rosteredExact,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/mlb/roster-fix
+// Body: { year, manual_mappings: [{ from, to }] }
+//
+// Applies the full audit fix in one pass:
+//   1. Applies your manual_mappings for the rostered_review players you confirmed.
+//   2. Auto-renames all unrostered_auto players (score >= 0.75) to their best MLB match.
+//   3. Replaces all unrostered_replace players with their best MLB match
+//      (the old wrong-spelled name is removed everywhere; the MLB name takes its place
+//       in pool lists if it was there, but roster/stats entries are re-keyed to the MLB name).
+//
+// Any rostered_review player NOT in manual_mappings is left unchanged until next call.
+app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
+  const { year, manual_mappings } = req.body || {};
+  if (!year) return res.status(400).json({ error: 'year is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const mlbNames = await fetchMLBPlayerNames(year);
+    const mlbSet = new Set(mlbNames);
+    const allWmmcNames = extractSeasonPlayerNames(sd);
+    const rostered = getRosteredNames(sd);
+
+    // Build the auto mappings for unrostered players
+    const autoMappings = [];
+    for (const wmmcName of allWmmcNames) {
+      if (rostered.has(wmmcName) || mlbSet.has(wmmcName)) continue;
+      const best = topCandidates(wmmcName, mlbNames, 1)[0];
+      if (best) autoMappings.push({ from: wmmcName, to: best.mlb_name, score: best.score, auto: true });
+    }
+
+    // Merge: manual mappings (for rostered players) + auto (for unrostered)
+    // Manual mappings override auto if the same 'from' appears in both
+    const manualSet = new Set((manual_mappings || []).map((m) => m.from));
+    const allMappings = [
+      ...(manual_mappings || []).map((m) => ({ ...m, auto: false })),
+      ...autoMappings.filter((m) => !manualSet.has(m.from)),
+    ];
+
+    const applied = [];
+    const skipped = [];
+
+    for (const mapping of allMappings) {
+      const { from, to } = mapping;
+      if (!from || !to || from === to) continue;
+
+      // Safety: never auto-rename a rostered player without explicit manual confirmation
+      if (rostered.has(from) && mapping.auto) {
+        skipped.push({ from, reason: 'rostered — requires manual_mappings confirmation' });
+        continue;
+      }
+
+      const occurrences = renamePlayerInSeason(sd, from, to);
+      applied.push({ from, to, score: mapping.score ?? null, auto: mapping.auto, occurrences_updated: occurrences });
+    }
+
+    if (applied.length > 0) {
+      db.seasons[year] = sd;
+      addAuditEntry(db, 'roster_name_fix', { year, renames: applied.length, detail: applied });
+      writeDB(db);
+    }
+
+    res.json({
+      ok: true,
+      renames_applied: applied.length,
+      skipped_rostered_without_confirmation: skipped.length,
+      applied,
+      skipped,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   if (!SLACK_WEBHOOK_URL) {
