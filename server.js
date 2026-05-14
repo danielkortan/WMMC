@@ -3119,6 +3119,14 @@ app.get('/api/mlb/live', async (req, res) => {
       }
       const { batting, pitching } = parseBoxscore(box, idToWmmcName);
 
+      // WMMC custom QS rule: started AND IP >= 5 AND ER <= 2. parseBoxscore
+      // uses the MLB-standard 6 IP / 3 ER threshold (the sync workflow and
+      // historical paths still want that field shape for now). Override it
+      // here so the Live tab credits and prices QS per the league's rule.
+      for (const stats of Object.values(pitching)) {
+        stats.qs = stats.gs > 0 && stats.ip >= 5 && stats.er <= 2 ? 1 : 0;
+      }
+
       const collect = (statsMap, type, scorer) => {
         for (const [name, stats] of Object.entries(statsMap)) {
           if (!playerAgg[name]) {
