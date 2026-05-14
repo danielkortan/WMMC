@@ -1786,7 +1786,13 @@ async function fetchMLBGames(startDate, endDate) {
 
 // Parse one boxscore into per-player batting and pitching stat objects for that game.
 // Returns { batting: { name: stats }, pitching: { name: stats }, teamMap: { name: abbrev } }
-function parseBoxscore(box) {
+//
+// idToWmmcName (optional): Map<mlbPlayerId, wmmcDisplayName>. When the MLB player's ID
+// is present in the map, stats are keyed under the WMMC display name — this is what lets
+// two MLB players who share a fullName (e.g. both "Max Muncy") be tracked separately as
+// "Max Muncy (LAD)" and "Max Muncy (OAK)". Unmapped players fall back to their fullName
+// (back-compat with pre-ID-migration data).
+function parseBoxscore(box, idToWmmcName = new Map()) {
   const batting = {};
   const pitching = {};
   const teamMap = {};
@@ -1798,8 +1804,12 @@ function parseBoxscore(box) {
     const teamTotalOuts = teamData.teamStats?.pitching?.outs ?? null;
 
     for (const player of Object.values(teamData.players || {})) {
-      const name = player.person?.fullName;
-      if (!name) continue;
+      const fullName = player.person?.fullName;
+      const mlbId = player.person?.id;
+      if (!fullName) continue;
+      // Prefer the WMMC display name when this MLB player has been claimed by a WMMC entry,
+      // so stats land on the correct roster slot even when two MLB players share a name.
+      const name = (mlbId && idToWmmcName.get(mlbId)) || fullName;
 
       const bs = player.stats?.batting;
       if (bs && bs.atBats !== undefined) {
@@ -1853,8 +1863,10 @@ function parseBoxscore(box) {
 }
 
 // Fetch per-game per-player stats for a date range.
+// idToWmmcName: passed through to parseBoxscore so duplicate-fullName MLB players
+// can be routed to the correct WMMC display name.
 // Returns [{ gameId, date, batting, pitching, teamMap }]
-async function fetchMLBPerGameStats(startDate, endDate) {
+async function fetchMLBPerGameStats(startDate, endDate, idToWmmcName = new Map()) {
   const games = await fetchMLBGames(startDate, endDate);
   const results = [];
   for (const { gameId, date } of games) {
@@ -1864,7 +1876,7 @@ async function fetchMLBPerGameStats(startDate, endDate) {
     } catch {
       continue;
     }
-    const { batting, pitching, teamMap } = parseBoxscore(box);
+    const { batting, pitching, teamMap } = parseBoxscore(box, idToWmmcName);
     results.push({ gameId, date, batting, pitching, teamMap });
   }
   return results;
@@ -1942,7 +1954,7 @@ app.get('/api/mlb/preview', requireCommissioner, async (req, res) => {
   const { sd, round, week, dates, schedWeek } = ctx;
 
   try {
-    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end, buildIdToWmmcName(ctx.sd));
     const { batting, pitching, teamMap } = aggregatePerGame(gameRecords);
 
     res.json({
@@ -1965,7 +1977,7 @@ app.get('/api/mlb/games', requireCommissioner, async (req, res) => {
   const { sd, round, week, dates, schedWeek } = ctx;
 
   try {
-    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end, buildIdToWmmcName(sd));
 
     // Build per-player game log: { name -> [{ date, gameId, batting/pitching, score }] }
     const batterLog = {};
@@ -2014,7 +2026,7 @@ app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
   const { sd, round, week, dates, schedWeek } = ctx;
 
   try {
-    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end, buildIdToWmmcName(sd));
     const { batting, pitching, teamMap } = aggregatePerGame(gameRecords);
 
     const mlbBat = enrichBatting(batting, teamMap, sd, schedWeek);
@@ -2084,7 +2096,7 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
   syncPlayerDatesFromRosterDates(sd);
 
   try {
-    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end);
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end, buildIdToWmmcName(sd));
 
     // Update team maps from all games
     for (const { teamMap } of gameRecords) {
@@ -2357,14 +2369,58 @@ function renamePlayerInSeason(sd, oldName, newName) {
 
   renameKey(sd.batters_team);
   renameKey(sd.pitchers_team);
+  renameKey(sd.mlb_ids);
 
   return count;
 }
 
-// Fetch all MLB player full names for a given season.
-async function fetchMLBPlayerNames(season) {
+// Fetch the MLB player catalog for a season: id + name + current team.
+// Cached per-season for the lifetime of the process — the catalog is large (~2k players)
+// and stable enough within a session that re-fetching on every audit call is wasteful.
+const _mlbCatalogCache = new Map();
+async function fetchMLBPlayerCatalog(season) {
+  const key = String(season);
+  if (_mlbCatalogCache.has(key)) return _mlbCatalogCache.get(key);
   const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}`);
-  return (data.people || []).map((p) => p.fullName).filter(Boolean);
+  const catalog = (data.people || [])
+    .filter((p) => p && p.id && p.fullName)
+    .map((p) => ({
+      id: p.id,
+      fullName: p.fullName,
+      team: p.currentTeam?.abbreviation || p.currentTeam?.name || null,
+      position: p.primaryPosition?.abbreviation || null,
+    }));
+  _mlbCatalogCache.set(key, catalog);
+  return catalog;
+}
+
+// Back-compat: callers that only need names still work.
+async function fetchMLBPlayerNames(season) {
+  const catalog = await fetchMLBPlayerCatalog(season);
+  return catalog.map((p) => p.fullName);
+}
+
+// Index a catalog by normalized fullName so duplicates (e.g. two "Max Muncy"s) surface as arrays.
+function indexCatalogByName(catalog) {
+  const byNorm = new Map();
+  const byId = new Map();
+  for (const entry of catalog) {
+    byId.set(entry.id, entry);
+    const norm = normalizeName(entry.fullName);
+    if (!byNorm.has(norm)) byNorm.set(norm, []);
+    byNorm.get(norm).push(entry);
+  }
+  return { byNorm, byId };
+}
+
+// Build the reverse lookup MLB ID -> WMMC display name from sd.mlb_ids.
+// Used during stats merge to route boxscore stats to the right WMMC roster slot.
+function buildIdToWmmcName(sd) {
+  const map = new Map();
+  for (const [name, id] of Object.entries(sd.mlb_ids || {})) {
+    if (typeof id === 'number') map.set(id, name);
+  }
+  return map;
 }
 
 // For each WMMC name find the best MLB API match. Returns array of match objects.
@@ -2499,14 +2555,33 @@ function getRosteredNames(sd) {
   return rostered;
 }
 
+// Return top N fuzzy candidates as catalog entries (id + fullName + team + score),
+// so the commissioner can disambiguate duplicate-name MLB players.
+function topCatalogCandidates(wmmcName, catalog, n = 5) {
+  return catalog
+    .map((entry) => ({
+      mlb_id: entry.id,
+      mlb_name: entry.fullName,
+      team: entry.team,
+      score: Math.round(nameSimilarity(wmmcName, entry.fullName) * 1000) / 1000,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n);
+}
+
 // GET /api/mlb/roster-audit?year=2025
 //
-// Tiers every player name in the database into four buckets:
+// Tiers every player name in the database. The buckets are designed around the
+// new ID-based identity model: a WMMC name is "fully identified" only when it
+// has a stable MLB player ID in sd.mlb_ids.
 //
-//   rostered_exact    — on a roster, name already matches MLB API exactly
-//   rostered_review   — on a roster, fuzzy score < 0.9; shows top-5 candidates for manual pick
-//   unrostered_auto   — not on any roster, score >= 0.75; will be auto-replaced on fix
-//   unrostered_replace— not on any roster, score < 0.75; best MLB candidate will replace old name
+//   rostered_exact     — on a roster AND has a confirmed mlb_id in sd.mlb_ids
+//   needs_id_assignment— rostered, no mlb_id yet, single catalog match → safe auto-assign
+//   duplicate_review   — rostered, multiple catalog entries share this name (e.g. two "Max Muncy")
+//                        OR fuzzy candidates resolve to multiple ids; requires explicit mlb_id pick
+//   rostered_review    — rostered, no exact catalog match; fuzzy candidates listed for manual pick
+//   unrostered_auto    — not rostered, fuzzy score >= 0.75; will be auto-replaced on fix
+//   unrostered_replace — not rostered, fuzzy score < 0.75; best MLB candidate will replace old name
 //
 // Nothing is changed by this endpoint.
 app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
@@ -2518,61 +2593,99 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
   try {
-    const mlbNames = await fetchMLBPlayerNames(year);
-    const mlbSet = new Set(mlbNames);
+    const catalog = await fetchMLBPlayerCatalog(year);
+    const { byNorm, byId } = indexCatalogByName(catalog);
     const allWmmcNames = extractSeasonPlayerNames(sd);
     const rostered = getRosteredNames(sd);
+    const mlbIds = sd.mlb_ids || {};
 
     const rosteredExact = [];
+    const needsIdAssignment = [];
+    const duplicateReview = [];
     const rosteredReview = [];
     const unrosteredAuto = [];
     const unrosteredReplace = [];
 
     for (const wmmcName of allWmmcNames) {
       const isRostered = rostered.has(wmmcName);
-      const exact = mlbSet.has(wmmcName);
+      const assignedId = mlbIds[wmmcName];
 
-      if (exact) {
-        if (isRostered) rosteredExact.push({ name: wmmcName });
-        // Exact-match unrostered names need no action — skip them
+      // Already confirmed via mlb_id — validate the id still exists in the catalog.
+      if (typeof assignedId === 'number') {
+        const entry = byId.get(assignedId);
+        if (entry) {
+          if (isRostered) {
+            rosteredExact.push({ name: wmmcName, mlb_id: assignedId, mlb_name: entry.fullName, team: entry.team });
+          }
+          continue;
+        }
+        // Stale id — fall through to re-resolve.
+      }
+
+      const normMatches = byNorm.get(normalizeName(wmmcName)) || [];
+
+      if (isRostered) {
+        if (normMatches.length === 1) {
+          // Single normalized-name match in catalog — safe to auto-assign on fix.
+          const entry = normMatches[0];
+          needsIdAssignment.push({
+            wmmc_name: wmmcName,
+            mlb_id: entry.id,
+            mlb_name: entry.fullName,
+            team: entry.team,
+            rename_needed: entry.fullName !== wmmcName,
+          });
+        } else if (normMatches.length > 1) {
+          // Duplicate fullName in MLB — must pick by id.
+          duplicateReview.push({
+            wmmc_name: wmmcName,
+            reason: 'multiple_catalog_entries_share_name',
+            candidates: normMatches.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team, position: e.position, score: 1.0 })),
+          });
+        } else {
+          // No normalized match — fall back to fuzzy.
+          const candidates = topCatalogCandidates(wmmcName, catalog, 5);
+          const best = candidates[0];
+          rosteredReview.push({
+            wmmc_name: wmmcName,
+            best_match: best?.mlb_name ?? null,
+            best_score: best?.score ?? 0,
+            candidates,
+          });
+        }
         continue;
       }
 
-      const candidates = topCandidates(wmmcName, mlbNames, 5);
+      // Unrostered: keep the historical name-only behavior — these get purged anyway on fix.
+      const candidates = topCatalogCandidates(wmmcName, catalog, 5);
       const best = candidates[0];
-
-      if (isRostered) {
-        // Always show for review regardless of score — commissioner must confirm
-        rosteredReview.push({
-          wmmc_name: wmmcName,
-          best_match: best.mlb_name,
-          best_score: best.score,
-          candidates,
-        });
-      } else if (best.score >= 0.75) {
-        unrosteredAuto.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, score: best.score });
+      if (best && best.score >= 0.75) {
+        unrosteredAuto.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, mlb_id: best.mlb_id, score: best.score });
       } else {
-        unrosteredReplace.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, score: best.score, candidates });
+        unrosteredReplace.push({ wmmc_name: wmmcName, mlb_name: best?.mlb_name ?? null, mlb_id: best?.mlb_id ?? null, score: best?.score ?? 0, candidates });
       }
     }
 
-    // Sort review list: worst score first so the most uncertain are at the top
     rosteredReview.sort((a, b) => a.best_score - b.best_score);
 
     res.json({
       season: year,
       summary: {
         rostered_exact: rosteredExact.length,
+        needs_id_assignment: needsIdAssignment.length,
+        duplicate_review: duplicateReview.length,
         rostered_review: rosteredReview.length,
         unrostered_auto: unrosteredAuto.length,
         unrostered_replace: unrosteredReplace.length,
       },
-      // These need your input before the fix endpoint will touch them
+      // Auto-assignable on next roster-fix run, no input needed.
+      needs_id_assignment: needsIdAssignment,
+      // Requires explicit { from, mlb_id } in manual_mappings.
+      duplicate_review: duplicateReview,
+      // Fuzzy match — confirm before applying.
       rostered_review: rosteredReview,
-      // These will be auto-handled by roster-fix with no input needed
       unrostered_auto: unrosteredAuto,
       unrostered_replace: unrosteredReplace,
-      // Already correct — listed for completeness
       rostered_exact: rosteredExact,
     });
   } catch (e) {
@@ -2639,21 +2752,34 @@ function purgePlayerFromSeason(sd, name) {
 
   removeKey(sd.batters_team);
   removeKey(sd.pitchers_team);
+  removeKey(sd.mlb_ids);
 
   return count;
 }
 
 // POST /api/mlb/roster-fix
-// Body: { year, manual_mappings: [{ from, to }] }
+// Body: { year, manual_mappings: [{ from, to?, mlb_id? }] }
 //
-// One-pass cleanup:
-//   1. Renames rostered players automatically when score >= 0.9.
-//      Rostered players with score < 0.9 require an explicit { from, to } in manual_mappings;
-//      they appear in the response's `needs_manual` list if omitted.
-//   2. manual_mappings entries always apply regardless of score (use for low-confidence overrides).
-//   3. Unrostered players with any name mismatch are PURGED entirely from the database —
-//      their old misspelled records are removed and the MLB API sync will repopulate them
-//      under the correct name on next run.
+// One-pass cleanup. Every rostered WMMC name ends up either with a confirmed mlb_id in
+// sd.mlb_ids or in `needs_manual` waiting on user input:
+//
+//   1. manual_mappings entries always win. Shape:
+//        { from: <wmmc name>, to?: <new wmmc name>, mlb_id?: <int> }
+//      - If `to` is omitted, only the id is assigned (no rename).
+//      - `mlb_id` is REQUIRED when the target name has multiple MLB catalog entries
+//        (e.g. two "Max Muncy"s) — otherwise the id can be inferred.
+//   2. For unmapped rostered players, the endpoint auto-assigns the id when there is
+//      exactly one normalized-name catalog match (covers accent-only diffs like
+//      "Ranger Suárez" -> id of "Ranger Suarez"). It also auto-renames when the WMMC
+//      name differs from the canonical fullName.
+//   3. Fuzzy fallback for rostered players with no normalized match: auto-apply when
+//      score >= 0.9 AND the target name is unique in the catalog.
+//   4. Unrostered players with any name mismatch are PURGED entirely from the database —
+//      their old misspelled records are removed and the MLB API sync will repopulate
+//      them under the correct name on next run.
+//
+// sd.mlb_ids is the source of truth for player identity going forward: stats merge
+// keys boxscore rows by MLB id and routes them to the WMMC display name via this map.
 app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
   const { year, manual_mappings } = req.body || {};
   if (!year) return res.status(400).json({ error: 'year is required' });
@@ -2663,53 +2789,153 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
   try {
-    const mlbNames = await fetchMLBPlayerNames(year);
-    const mlbSet = new Set(mlbNames);
+    const catalog = await fetchMLBPlayerCatalog(year);
+    const { byNorm, byId } = indexCatalogByName(catalog);
     const allWmmcNames = extractSeasonPlayerNames(sd);
     const rostered = getRosteredNames(sd);
-    const manualMap = new Map((manual_mappings || []).map((m) => [m.from, m.to]));
+    const manualMap = new Map((manual_mappings || []).map((m) => [m.from, m]));
+
+    if (!sd.mlb_ids) sd.mlb_ids = {};
+    const idsInUse = new Map(Object.entries(sd.mlb_ids).map(([n, id]) => [id, n]));
 
     const applied = [];
+    const idsAssigned = [];
     const needsManual = [];
     const purged = [];
 
-    for (const wmmcName of allWmmcNames) {
-      if (mlbSet.has(wmmcName)) continue; // already correct
+    // Single source of truth for writing an id assignment: rejects collisions
+    // (two WMMC names mapped to the same mlb id) since that would re-introduce the
+    // exact ambiguity this system is meant to eliminate.
+    const assignId = (wmmcName, mlbId) => {
+      const existingHolder = idsInUse.get(mlbId);
+      if (existingHolder && existingHolder !== wmmcName) {
+        return { ok: false, error: `mlb_id ${mlbId} already assigned to "${existingHolder}"` };
+      }
+      sd.mlb_ids[wmmcName] = mlbId;
+      idsInUse.set(mlbId, wmmcName);
+      return { ok: true };
+    };
 
-      if (rostered.has(wmmcName)) {
-        // Rostered player: use manual override if provided, else auto-rename if score >= 0.9
-        if (manualMap.has(wmmcName)) {
-          const to = manualMap.get(wmmcName);
-          const occurrences = renamePlayerInSeason(sd, wmmcName, to);
-          applied.push({ from: wmmcName, to, score: null, auto: false, occurrences_updated: occurrences });
-        } else {
-          const best = topCandidates(wmmcName, mlbNames, 1)[0];
-          if (best && best.score >= 0.9) {
-            const occurrences = renamePlayerInSeason(sd, wmmcName, best.mlb_name);
-            applied.push({ from: wmmcName, to: best.mlb_name, score: best.score, auto: true, occurrences_updated: occurrences });
-          } else {
-            needsManual.push({ wmmc_name: wmmcName, best_match: best?.mlb_name ?? null, score: best?.score ?? 0, candidates: topCandidates(wmmcName, mlbNames, 5) });
+    for (const wmmcName of allWmmcNames) {
+      const isRostered = rostered.has(wmmcName);
+      const manual = manualMap.get(wmmcName);
+
+      // Manual mapping path — always applied (overrides every other rule).
+      if (manual) {
+        const to = manual.to || wmmcName;
+        let mlbId = manual.mlb_id;
+        // Allow id inference when target name is unambiguous in the catalog.
+        if (mlbId == null) {
+          const matches = byNorm.get(normalizeName(to)) || [];
+          if (matches.length === 1) mlbId = matches[0].id;
+          else if (matches.length > 1) {
+            needsManual.push({
+              wmmc_name: wmmcName,
+              reason: 'mlb_id_required_for_ambiguous_target',
+              candidates: matches.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team })),
+            });
+            continue;
           }
         }
-      } else {
-        // Unrostered player: purge entirely — MLB sync will re-add under the correct name
-        const removed = purgePlayerFromSeason(sd, wmmcName);
-        purged.push({ name: wmmcName, records_removed: removed });
+        if (mlbId != null && !byId.has(mlbId)) {
+          needsManual.push({ wmmc_name: wmmcName, reason: `mlb_id ${mlbId} not found in ${year} catalog` });
+          continue;
+        }
+
+        let occurrences = 0;
+        if (to !== wmmcName) occurrences = renamePlayerInSeason(sd, wmmcName, to);
+        if (mlbId != null) {
+          const r = assignId(to, mlbId);
+          if (!r.ok) { needsManual.push({ wmmc_name: wmmcName, reason: r.error }); continue; }
+          idsAssigned.push({ wmmc_name: to, mlb_id: mlbId, source: 'manual' });
+        }
+        if (to !== wmmcName || mlbId != null) {
+          applied.push({ from: wmmcName, to, mlb_id: mlbId ?? null, source: 'manual', occurrences_updated: occurrences });
+        }
+        continue;
       }
+
+      if (isRostered) {
+        // Already has a confirmed id — verify catalog still has it.
+        const existingId = sd.mlb_ids[wmmcName];
+        if (typeof existingId === 'number' && byId.has(existingId)) continue;
+
+        const normMatches = byNorm.get(normalizeName(wmmcName)) || [];
+
+        if (normMatches.length === 1) {
+          // Unambiguous: auto-assign id (and rename if WMMC name differs from canonical).
+          const entry = normMatches[0];
+          let occurrences = 0;
+          let finalName = wmmcName;
+          if (entry.fullName !== wmmcName) {
+            occurrences = renamePlayerInSeason(sd, wmmcName, entry.fullName);
+            finalName = entry.fullName;
+          }
+          const r = assignId(finalName, entry.id);
+          if (!r.ok) { needsManual.push({ wmmc_name: wmmcName, reason: r.error }); continue; }
+          idsAssigned.push({ wmmc_name: finalName, mlb_id: entry.id, source: 'normalized_match' });
+          if (occurrences > 0) {
+            applied.push({ from: wmmcName, to: finalName, mlb_id: entry.id, source: 'normalized_match', occurrences_updated: occurrences });
+          }
+          continue;
+        }
+
+        if (normMatches.length > 1) {
+          // Duplicate fullName in MLB — require explicit mlb_id.
+          needsManual.push({
+            wmmc_name: wmmcName,
+            reason: 'multiple_catalog_entries_share_name',
+            candidates: normMatches.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team, position: e.position })),
+          });
+          continue;
+        }
+
+        // No normalized match — fall back to fuzzy.
+        const fuzzy = topCatalogCandidates(wmmcName, catalog, 5);
+        const best = fuzzy[0];
+        if (best && best.score >= 0.9) {
+          const targetMatches = byNorm.get(normalizeName(best.mlb_name)) || [];
+          if (targetMatches.length === 1) {
+            const entry = targetMatches[0];
+            const occurrences = renamePlayerInSeason(sd, wmmcName, entry.fullName);
+            const r = assignId(entry.fullName, entry.id);
+            if (!r.ok) { needsManual.push({ wmmc_name: wmmcName, reason: r.error }); continue; }
+            idsAssigned.push({ wmmc_name: entry.fullName, mlb_id: entry.id, source: 'fuzzy_auto' });
+            applied.push({ from: wmmcName, to: entry.fullName, mlb_id: entry.id, source: 'fuzzy_auto', score: best.score, occurrences_updated: occurrences });
+            continue;
+          }
+        }
+        needsManual.push({ wmmc_name: wmmcName, best_match: best?.mlb_name ?? null, score: best?.score ?? 0, candidates: fuzzy });
+        continue;
+      }
+
+      // Unrostered: purge entirely. MLB sync will re-add under canonical fullName next run.
+      const removed = purgePlayerFromSeason(sd, wmmcName);
+      purged.push({ name: wmmcName, records_removed: removed });
     }
 
-    if (applied.length > 0 || purged.length > 0) {
+    if (applied.length > 0 || idsAssigned.length > 0 || purged.length > 0) {
       db.seasons[year] = sd;
-      addAuditEntry(db, 'roster_name_fix', { year, renames: applied.length, purged: purged.length, detail: { applied, purged } });
+      addAuditEntry(db, 'roster_name_fix', {
+        year,
+        renames: applied.length,
+        ids_assigned: idsAssigned.length,
+        purged: purged.length,
+        detail: { applied, ids_assigned: idsAssigned, purged },
+      });
       writeDB(db);
     }
 
     res.json({
       ok: true,
-      renames_applied: applied.length,
-      players_purged: purged.length,
-      needs_manual_review: needsManual.length,
+      summary: {
+        renames_applied: applied.length,
+        ids_assigned: idsAssigned.length,
+        players_purged: purged.length,
+        needs_manual_review: needsManual.length,
+      },
       applied,
+      ids_assigned: idsAssigned,
       purged,
       // If non-empty: re-POST with manual_mappings entries for these players
       needs_manual: needsManual,
@@ -2738,7 +2964,7 @@ app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
   const startDate = new Date(Date.now() - (numDays - 1) * 86400000).toISOString().split('T')[0];
 
   try {
-    const gameRecords = await fetchMLBPerGameStats(startDate, endDate);
+    const gameRecords = await fetchMLBPerGameStats(startDate, endDate, buildIdToWmmcName(sd));
 
     const batterLog = {};
     const pitcherLog = {};
