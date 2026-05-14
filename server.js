@@ -3175,69 +3175,91 @@ app.get('/api/mlb/live', async (req, res) => {
     }
     playerRows.sort((a, b) => b.running_score - a.running_score);
 
-    // Build the per-team set of WMMC players a manager has rostered this week so we can
-    // attribute Preview games to "games remaining" for the right managers.
+    // Build per-manager roster team sets for the active week. Also keep the player lists
+    // so we can count Live/Done/Remaining at the player level (today only) below.
     const weekKey = `${weekRound}|${weekName}`;
-    const managerTeamsBatting = {}; // manager -> Set<teamAbbrev>
-    const managerTeamsPitching = {};
+    const managerBatters = {};  // manager -> string[]
+    const managerPitchers = {}; // manager -> string[]
     for (const [manager, weekRosters] of Object.entries(sd.rosters || {})) {
       const roster = weekRosters?.[weekKey];
       if (!roster) continue;
-      const battingTeams = new Set();
-      const pitchingTeams = new Set();
-      for (const n of roster.batters || []) {
-        const t = sd.batters_team?.[n];
-        if (t) battingTeams.add(t);
-      }
-      for (const n of roster.pitchers || []) {
-        const t = sd.pitchers_team?.[n];
-        if (t) pitchingTeams.add(t);
-      }
-      managerTeamsBatting[manager] = battingTeams;
-      managerTeamsPitching[manager] = pitchingTeams;
+      managerBatters[manager] = [...(roster.batters || [])];
+      managerPitchers[manager] = [...(roster.pitchers || [])];
     }
 
-    // Per-manager rollup: running score + games-remaining counts.
-    // Seed every manager who's rostered this week so the standings show all 12 even if
-    // some haven't played yet today.
+    // For each team, classify their day relative to today's games:
+    //   ACTIVE     — at least one game today is Live
+    //   REMAINING  — at least one Preview game today, no Live
+    //   DONE       — only Final game(s) today
+    //   none       — no game today
+    // This drives both the per-player Live/Done/Remaining counts and the per-manager
+    // green highlight when they still have skin in the game today.
+    const teamTodayStates = {}; // teamAbbr -> { live, preview, final }
+    for (const game of games) {
+      if (game.date !== today) continue;
+      for (const side of [game.away, game.home]) {
+        const t = side?.team;
+        if (!t) continue;
+        if (!teamTodayStates[t]) teamTodayStates[t] = { live: 0, preview: 0, final: 0 };
+        if (game.state === 'Live') teamTodayStates[t].live++;
+        else if (game.state === 'Preview') teamTodayStates[t].preview++;
+        else if (game.state === 'Final') teamTodayStates[t].final++;
+      }
+    }
+    const classifyTeamToday = (t) => {
+      const s = teamTodayStates[t];
+      if (!s) return null;
+      if (s.live > 0) return 'ACTIVE';
+      if (s.preview > 0) return 'REMAINING';
+      if (s.final > 0) return 'DONE';
+      return null;
+    };
+
+    // Per-manager rollup. Seed all rostered managers so the standings show every entry
+    // even when a manager has no recorded play yet today.
     const managerMap = {};
     const ensureMgr = (m) => {
       if (!managerMap[m]) {
         managerMap[m] = {
           name: m,
-          running_score: 0,
-          today_score: 0,
-          players_active: 0,         // has a Live game right now
-          players_finished: 0,       // has a Final game this week, no Live remaining
-          games_remaining: 0,        // Preview games (any day this week) for their teams
-          games_remaining_today: 0,  // Preview games TODAY for their teams (drives the green highlight)
+          running_score: 0,       // sum of player running scores this week
+          today_score: 0,         // sum of player scores from today's games only
+          round_total: 0,         // see below — fills in after we have running_score
+          players_active: 0,      // rostered players whose team has a Live game today
+          players_finished: 0,    // rostered players whose team's games today are Final-only
+          players_remaining: 0,   // rostered players whose team has a Preview game today
         };
       }
       return managerMap[m];
     };
-    for (const manager of Object.keys(managerTeamsBatting)) ensureMgr(manager);
+    for (const m of Object.keys(managerBatters)) ensureMgr(m);
 
     for (const row of playerRows) {
       const m = ensureMgr(row.manager);
       m.running_score = Math.round((m.running_score + row.running_score) * 100) / 100;
       m.today_score = Math.round((m.today_score + (row.today_score || 0)) * 100) / 100;
-      if (row.any_live) m.players_active++;
-      else if (row.any_final) m.players_finished++;
     }
 
-    for (const game of games) {
-      if (game.state !== 'Preview') continue;
-      const teamsInGame = [game.away.team, game.home.team].filter(Boolean);
-      const isToday = game.date === today;
-      for (const manager of Object.keys(managerTeamsBatting)) {
-        const batSet = managerTeamsBatting[manager];
-        const pitSet = managerTeamsPitching[manager];
-        if (teamsInGame.some((t) => batSet.has(t) || pitSet.has(t))) {
-          const mgr = ensureMgr(manager);
-          mgr.games_remaining++;
-          if (isToday) mgr.games_remaining_today++;
-        }
+    // Per-player today-state counts, derived from the rostered player's team's today-state.
+    // A player without a known team or whose team has no game today is not counted.
+    const incrementPlayerStateCounts = (manager, names, teamMap) => {
+      const seenPlayers = new Set();
+      for (const name of names || []) {
+        if (seenPlayers.has(name)) continue;
+        seenPlayers.add(name);
+        const team = teamMap?.[name];
+        if (!team) continue;
+        const state = classifyTeamToday(team);
+        if (!state) continue;
+        const mgr = ensureMgr(manager);
+        if (state === 'ACTIVE') mgr.players_active++;
+        else if (state === 'REMAINING') mgr.players_remaining++;
+        else if (state === 'DONE') mgr.players_finished++;
       }
+    };
+    for (const m of Object.keys(managerMap)) {
+      incrementPlayerStateCounts(m, managerBatters[m], sd.batters_team);
+      incrementPlayerStateCounts(m, managerPitchers[m], sd.pitchers_team);
     }
 
     // ---- Rank delta vs the overall scoreboard ----
@@ -3270,17 +3292,31 @@ app.get('/api/mlb/live', async (req, res) => {
     }
     const liveRanks = rankByTotals(liveTotals);
 
+    // Round-level total (pool play if active round is PP1/PP2). Sum committed weekly
+    // scores for the current round across all OTHER weeks, then add live running.
+    const roundCommitted = {};
+    for (const b of sd.weekly_batting || []) {
+      if (!b.manager || b.round !== weekRound) continue;
+      if (b.week === weekName) continue;
+      roundCommitted[b.manager] = (roundCommitted[b.manager] || 0) + (b.weekly_score || 0);
+    }
+    for (const p of sd.weekly_pitching || []) {
+      if (!p.manager || p.round !== weekRound) continue;
+      if (p.week === weekName) continue;
+      roundCommitted[p.manager] = (roundCommitted[p.manager] || 0) + (p.weekly_score || 0);
+    }
+
     for (const [m, agg] of Object.entries(managerMap)) {
       const baseRank = baselineRanks[m] ?? null;
       const liveRank = liveRanks[m] ?? null;
-      // Positive delta = moved up in the standings; negative = moved down.
       agg.baseline_rank = baseRank;
       agg.live_rank = liveRank;
       agg.rank_delta = baseRank != null && liveRank != null ? baseRank - liveRank : 0;
-      agg.is_active_today = agg.players_active > 0 || agg.games_remaining_today > 0;
+      agg.round_total = Math.round(((roundCommitted[m] || 0) + agg.running_score) * 100) / 100;
+      agg.is_active_today = agg.players_active > 0 || agg.players_remaining > 0;
     }
 
-    const managers = Object.values(managerMap).sort((a, b) => b.running_score - a.running_score);
+    const managers = Object.values(managerMap).sort((a, b) => b.round_total - a.round_total);
 
     res.json({
       season: year,
