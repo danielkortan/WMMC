@@ -4183,3 +4183,12 @@ body::before {
 }
 .muted { color: var(--text-muted); font-weight: normal; }
 .num-cell { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Highlight a manager's name while they still have games in progress or to play today. */
+.live-mgr-active {
+  color: var(--success);
+  font-weight: 600;
+}
+.rank-delta-up { color: var(--success); font-weight: 600; }
+.rank-delta-down { color: var(--accent); font-weight: 600; }
+.rank-delta-zero { color: var(--text-muted); }

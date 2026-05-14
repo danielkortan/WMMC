@@ -3074,8 +3074,10 @@ app.get('/api/mlb/live', async (req, res) => {
     const idToWmmcName = buildIdToWmmcName(sd);
 
     // Pull the week's full schedule including in-progress + scheduled games.
+    // hydrate=team is required because the bare schedule endpoint returns team.id/name
+    // but not abbreviation, leaving the UI to render "?" for matchups.
     const scheduleData = await mlbApiFetch(
-      `/api/v1/schedule?sportId=1&startDate=${start}&endDate=${end}&gameType=R,F,D,L,W`
+      `/api/v1/schedule?sportId=1&startDate=${start}&endDate=${end}&gameType=R,F,D,L,W&hydrate=team`
     );
 
     const games = [];
@@ -3152,12 +3154,18 @@ app.get('/api/mlb/live', async (req, res) => {
         agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
       const hasLive = agg.games.some((g) => g.state === 'Live');
       const hasFinal = agg.games.some((g) => g.state === 'Final');
+      // today_score = sum of just today's game contributions, so the standings can show
+      // both this week's total and what a manager added in the current day.
+      const todayScore = agg.games
+        .filter((g) => g.date === today)
+        .reduce((s, g) => s + (g.game_score || 0), 0);
       playerRows.push({
         name,
         manager,
         team: teamMap?.[name] || null,
         type: agg.type,
         running_score: Math.round(score * 100) / 100,
+        today_score: Math.round(todayScore * 100) / 100,
         stats: agg.stats,
         games_played: agg.games.length,
         any_live: hasLive,
@@ -3190,23 +3198,29 @@ app.get('/api/mlb/live', async (req, res) => {
     }
 
     // Per-manager rollup: running score + games-remaining counts.
+    // Seed every manager who's rostered this week so the standings show all 12 even if
+    // some haven't played yet today.
     const managerMap = {};
     const ensureMgr = (m) => {
       if (!managerMap[m]) {
         managerMap[m] = {
           name: m,
           running_score: 0,
-          players_active: 0,    // has a Live game this week
-          players_finished: 0,  // has a Final game this week, no Live remaining
-          games_remaining: 0,   // count of Preview games involving one of their rostered teams
+          today_score: 0,
+          players_active: 0,         // has a Live game right now
+          players_finished: 0,       // has a Final game this week, no Live remaining
+          games_remaining: 0,        // Preview games (any day this week) for their teams
+          games_remaining_today: 0,  // Preview games TODAY for their teams (drives the green highlight)
         };
       }
       return managerMap[m];
     };
+    for (const manager of Object.keys(managerTeamsBatting)) ensureMgr(manager);
 
     for (const row of playerRows) {
       const m = ensureMgr(row.manager);
       m.running_score = Math.round((m.running_score + row.running_score) * 100) / 100;
+      m.today_score = Math.round((m.today_score + (row.today_score || 0)) * 100) / 100;
       if (row.any_live) m.players_active++;
       else if (row.any_final) m.players_finished++;
     }
@@ -3214,13 +3228,56 @@ app.get('/api/mlb/live', async (req, res) => {
     for (const game of games) {
       if (game.state !== 'Preview') continue;
       const teamsInGame = [game.away.team, game.home.team].filter(Boolean);
+      const isToday = game.date === today;
       for (const manager of Object.keys(managerTeamsBatting)) {
         const batSet = managerTeamsBatting[manager];
         const pitSet = managerTeamsPitching[manager];
         if (teamsInGame.some((t) => batSet.has(t) || pitSet.has(t))) {
-          ensureMgr(manager).games_remaining++;
+          const mgr = ensureMgr(manager);
+          mgr.games_remaining++;
+          if (isToday) mgr.games_remaining_today++;
         }
       }
+    }
+
+    // ---- Rank delta vs the overall scoreboard ----
+    // Baseline = sum of committed weekly_batting + weekly_pitching across all weeks
+    // OTHER than the active one. Live-adjusted = baseline + this week's running live
+    // score per manager. A positive delta means the manager has moved up vs baseline.
+    const baseline = {};
+    for (const b of sd.weekly_batting || []) {
+      if (!b.manager) continue;
+      if (b.round === weekRound && b.week === weekName) continue;
+      baseline[b.manager] = (baseline[b.manager] || 0) + (b.weekly_score || 0);
+    }
+    for (const p of sd.weekly_pitching || []) {
+      if (!p.manager) continue;
+      if (p.round === weekRound && p.week === weekName) continue;
+      baseline[p.manager] = (baseline[p.manager] || 0) + (p.weekly_score || 0);
+    }
+    // Seed managers who have no committed totals yet so they appear in the ranking.
+    for (const m of Object.keys(managerMap)) if (!(m in baseline)) baseline[m] = 0;
+
+    const rankByTotals = (totalsMap) =>
+      Object.entries(totalsMap)
+        .sort((a, b) => b[1] - a[1])
+        .reduce((acc, [name], i) => { acc[name] = i + 1; return acc; }, {});
+
+    const baselineRanks = rankByTotals(baseline);
+    const liveTotals = { ...baseline };
+    for (const [m, agg] of Object.entries(managerMap)) {
+      liveTotals[m] = (liveTotals[m] || 0) + agg.running_score;
+    }
+    const liveRanks = rankByTotals(liveTotals);
+
+    for (const [m, agg] of Object.entries(managerMap)) {
+      const baseRank = baselineRanks[m] ?? null;
+      const liveRank = liveRanks[m] ?? null;
+      // Positive delta = moved up in the standings; negative = moved down.
+      agg.baseline_rank = baseRank;
+      agg.live_rank = liveRank;
+      agg.rank_delta = baseRank != null && liveRank != null ? baseRank - liveRank : 0;
+      agg.is_active_today = agg.players_active > 0 || agg.games_remaining_today > 0;
     }
 
     const managers = Object.values(managerMap).sort((a, b) => b.running_score - a.running_score);
