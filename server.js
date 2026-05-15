@@ -759,23 +759,33 @@ function detectCurrentRound(scheduleDates) {
 }
 
 // Sum batting + pitching weekly_scores for the given rounds
-function computeRoundScores(batting, pitching, rounds) {
-  const roundSet = new Set(rounds);
+// Roster-validated rollup: only credit a row's weekly_score to a manager
+// when the player is on that manager's roster (or roster_dates) for that
+// round/week. Falls back to a roster lookup when a row's manager field is
+// missing. Keeps Slack standings consistent with the in-app Pool Play
+// Scoreboard. `rounds` may be null/undefined to sum across every round.
+function computeRoundScores(batting, pitching, rounds, sd) {
+  const roundSet = rounds ? new Set(rounds) : null;
   const map = {};
-  batting
-    .filter((b) => roundSet.has(b.round))
-    .forEach((b) => {
-      if (!b.manager) return;
-      if (!map[b.manager]) map[b.manager] = { batting: 0, pitching: 0 };
-      map[b.manager].batting += b.weekly_score || 0;
-    });
-  pitching
-    .filter((p) => roundSet.has(p.round))
-    .forEach((p) => {
-      if (!p.manager) return;
-      if (!map[p.manager]) map[p.manager] = { batting: 0, pitching: 0 };
-      map[p.manager].pitching += p.weekly_score || 0;
-    });
+  const credit = (rows, playerKey, rosterListKey, type) => {
+    for (const r of rows) {
+      if (roundSet && !roundSet.has(r.round)) continue;
+      const playerName = r[playerKey];
+      const mgr = r.manager || (sd ? findManagerForPlayerWeek(sd, playerName, type, r.round, r.week) : null);
+      if (!mgr) continue;
+      if (sd) {
+        const weekKey = `${r.round}|${r.week}`;
+        const wkRoster = (sd.rosters && sd.rosters[mgr] && sd.rosters[mgr][weekKey]) || {};
+        const wkDates = (sd.roster_dates && sd.roster_dates[mgr] && sd.roster_dates[mgr][weekKey]) || {};
+        const rosterList = wkRoster[rosterListKey] || [];
+        if (!rosterList.includes(playerName) && !wkDates[playerName]) continue;
+      }
+      if (!map[mgr]) map[mgr] = { batting: 0, pitching: 0 };
+      map[mgr][type] += r.weekly_score || 0;
+    }
+  };
+  credit(batting, 'batter', 'batters', 'batting');
+  credit(pitching, 'pitcher', 'pitchers', 'pitching');
   return Object.entries(map).map(([manager, s]) => ({
     manager,
     batting: Math.round(s.batting * 100) / 100,
@@ -820,8 +830,8 @@ function buildScoreboardBlocks(db, year) {
     poolGroups[poolNum].push(mgr);
   });
 
-  const pp1Scores = computeRoundScores(batting, pitching, ['PP1']);
-  const pp2Scores = computeRoundScores(batting, pitching, ['PP2']);
+  const pp1Scores = computeRoundScores(batting, pitching, ['PP1'], seasonData);
+  const pp2Scores = computeRoundScores(batting, pitching, ['PP2'], seasonData);
 
   const pp1WinnerSet = new Set();
   const pp2WinnerSet = new Set();
@@ -835,7 +845,7 @@ function buildScoreboardBlocks(db, year) {
   const allPPWinners = new Set([...pp1WinnerSet, ...pp2WinnerSet]);
   const numWildcards = Math.max(0, 8 - allPPWinners.size);
   const wildcardSet = new Set();
-  const ppOverall = computeRoundScores(batting, pitching, ['PP1', 'PP2']).sort((a, b) => b.total - a.total);
+  const ppOverall = computeRoundScores(batting, pitching, ['PP1', 'PP2'], seasonData).sort((a, b) => b.total - a.total);
   let wcCount = 0;
   for (const m of ppOverall) {
     if (wcCount >= numWildcards) break;
@@ -862,56 +872,18 @@ function buildScoreboardBlocks(db, year) {
   }
 
   // ---- Overall standings (all rounds) ----
-  const overallMap = {};
-  batting.forEach((b) => {
-    if (!b.manager) return;
-    if (!overallMap[b.manager]) overallMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0 };
-    overallMap[b.manager].batting += b.weekly_score || 0;
-  });
-  pitching.forEach((p) => {
-    if (!p.manager) return;
-    if (!overallMap[p.manager]) overallMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0 };
-    overallMap[p.manager].pitching += p.weekly_score || 0;
-  });
-  const overall = Object.values(overallMap)
-    .map((m) => ({
-      ...m,
-      batting: Math.round(m.batting * 100) / 100,
-      pitching: Math.round(m.pitching * 100) / 100,
-      total: Math.round((m.batting + m.pitching) * 100) / 100,
-    }))
-    .sort((a, b) => b.total - a.total);
+  // Route through computeRoundScores so we get the same roster-validated
+  // attribution as the in-app Pool Play Scoreboard.
+  const overall = computeRoundScores(batting, pitching, null, seasonData).sort((a, b) => b.total - a.total);
 
   const overallLastMgr = overall.length > 0 ? overall[overall.length - 1].manager : null;
 
   // ---- Current-round pool standings ----
-  const poolRoundMap = {};
-  if (currentRound) {
-    batting
-      .filter((b) => b.round === currentRound)
-      .forEach((b) => {
-        if (!b.manager) return;
-        if (!poolRoundMap[b.manager])
-          {poolRoundMap[b.manager] = { manager: b.manager, batting: 0, pitching: 0, pool: managerPoolMap[b.manager] };}
-        poolRoundMap[b.manager].batting += b.weekly_score || 0;
-      });
-    pitching
-      .filter((p) => p.round === currentRound)
-      .forEach((p) => {
-        if (!p.manager) return;
-        if (!poolRoundMap[p.manager])
-          {poolRoundMap[p.manager] = { manager: p.manager, batting: 0, pitching: 0, pool: managerPoolMap[p.manager] };}
-        poolRoundMap[p.manager].pitching += p.weekly_score || 0;
-      });
-  }
-  const poolStandings = Object.values(poolRoundMap)
-    .map((m) => ({
-      ...m,
-      batting: Math.round(m.batting * 100) / 100,
-      pitching: Math.round(m.pitching * 100) / 100,
-      total: Math.round((m.batting + m.pitching) * 100) / 100,
-    }))
-    .sort((a, b) => b.total - a.total);
+  const poolStandings = currentRound
+    ? computeRoundScores(batting, pitching, [currentRound], seasonData)
+        .map((m) => ({ ...m, pool: managerPoolMap[m.manager] }))
+        .sort((a, b) => b.total - a.total)
+    : [];
 
   // Group by pool — already sorted desc so last entry = pool's last place
   const pools = {};
