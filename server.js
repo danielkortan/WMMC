@@ -933,34 +933,145 @@ function detectCurrentRound(scheduleDates) {
   return null;
 }
 
-// Sum batting + pitching weekly_scores for the given rounds
-// Roster-validated rollup: only credit a row's weekly_score to a manager
-// when the player is on that manager's roster (or roster_dates) for that
-// round/week. Falls back to a roster lookup when a row's manager field is
-// missing. Keeps Slack standings consistent with the in-app Pool Play
-// Scoreboard. `rounds` may be null/undefined to sum across every round.
-function computeRoundScores(batting, pitching, rounds, sd) {
-  const roundSet = rounds ? new Set(rounds) : null;
-  const map = {};
-  const credit = (rows, playerKey, rosterListKey, type) => {
-    for (const r of rows) {
-      if (roundSet && !roundSet.has(r.round)) continue;
-      const playerName = r[playerKey];
-      const mgr = r.manager || (sd ? findManagerForPlayerWeek(sd, playerName, type, r.round, r.week) : null);
-      if (!mgr) continue;
-      if (sd) {
-        const weekKey = `${r.round}|${r.week}`;
-        const wkRoster = (sd.rosters && sd.rosters[mgr] && sd.rosters[mgr][weekKey]) || {};
-        const wkDates = (sd.roster_dates && sd.roster_dates[mgr] && sd.roster_dates[mgr][weekKey]) || {};
-        const rosterList = wkRoster[rosterListKey] || [];
-        if (!rosterList.includes(playerName) && !wkDates[playerName]) continue;
-      }
-      if (!map[mgr]) map[mgr] = { batting: 0, pitching: 0 };
-      map[mgr][type] += r.weekly_score || 0;
-    }
+// Per-week subtotal for one manager. Mirrors app.js' managerWeekSubtotal
+// exactly so the Slack scoreboard and Live tab totals reconcile to the
+// in-app My Roster page (wasDroppedBefore filter -> eligibility set ->
+// manager/null dedup -> sum of weekly_score).
+function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey) {
+  if (!sd || !managerName) return 0;
+  const round = schedWeek.round;
+  const week = schedWeek.week;
+  const weekKey = `${round}|${week}`;
+
+  // Legacy 'PP1P' / 'PP2P' import variants share weeks with their parents.
+  const matchesRoundWeek = (r) => {
+    if (r.week !== week) return false;
+    if (r.round === round) return true;
+    if (r.round && r.round.endsWith('P') && r.round.slice(0, -1) === round) return true;
+    return false;
   };
-  credit(batting, 'batter', 'batters', 'batting');
-  credit(pitching, 'pitcher', 'pitchers', 'pitching');
+
+  const scheduleDates = sd.schedule_dates || [];
+  const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
+  const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+  const allMgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || null;
+
+  let weekRoster =
+    (sd.rosters && sd.rosters[managerName] && sd.rosters[managerName][weekKey]) ||
+    { batters: [], pitchers: [] };
+  const weekRosterDates =
+    (sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]) ||
+    {};
+
+  const weekStart = scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
+  if (weekStart && allMgrDates) {
+    const addedThisWeek = new Set([
+      ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+      ...Object.entries(weekRosterDates).filter(([, d]) => d.add_date).map(([p]) => p),
+    ]);
+    const wasDroppedBefore = (player) => {
+      if (addedThisWeek.has(player)) return false;
+      for (const [wk, players] of Object.entries(allMgrDates)) {
+        if (wk === weekKey) continue;
+        const pd = players[player];
+        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+      }
+      return false;
+    };
+    weekRoster = {
+      batters: weekRoster.batters.filter((p) => !wasDroppedBefore(p)),
+      pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
+    };
+  }
+
+  const eligible = new Set([
+    ...weekRoster[listKey],
+    ...Object.keys(weekRosterDates).filter(
+      (p) =>
+        !seasonStartDate ||
+        !weekRosterDates[p].drop_date ||
+        weekRosterDates[p].drop_date >= seasonStartDate
+    ),
+    ...approvedSwaps
+      .filter(
+        (s) =>
+          s.player_in &&
+          s.week_key === weekKey &&
+          (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
+          (weekRosterDates[s.player_in] ||
+            rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
+      )
+      .map((s) => s.player_in),
+  ]);
+
+  const weekManagerRows = rowsArr.filter((r) => r.manager === managerName && matchesRoundWeek(r));
+  const allWeekRows = weekManagerRows.slice();
+  rowsArr.forEach((r) => {
+    if (
+      matchesRoundWeek(r) &&
+      !r.manager &&
+      eligible.has(r[playerKey]) &&
+      !allWeekRows.some((x) => x[playerKey] === r[playerKey])
+    ) {
+      allWeekRows.push(r);
+    }
+  });
+
+  return allWeekRows
+    .filter((r) => eligible.has(r[playerKey]))
+    .reduce((s, r) => s + (r.weekly_score || 0), 0);
+}
+
+// Sum batting + pitching weekly_scores for the given rounds, scoped per
+// manager. `rounds` may be null/undefined to sum across every round.
+function computeRoundScores(batting, pitching, rounds, sd) {
+  if (!sd) {
+    // Backwards-compat: no season data available — fall back to a naive
+    // sum by row.manager (matches the pre-refactor behavior).
+    const roundSet = rounds ? new Set(rounds) : null;
+    const map = {};
+    const credit = (rows, type) => {
+      for (const r of rows) {
+        if (roundSet && !roundSet.has(r.round)) continue;
+        const mgr = r.manager;
+        if (!mgr) continue;
+        if (!map[mgr]) map[mgr] = { batting: 0, pitching: 0 };
+        map[mgr][type] += r.weekly_score || 0;
+      }
+    };
+    credit(batting, 'batting');
+    credit(pitching, 'pitching');
+    return Object.entries(map).map(([manager, s]) => ({
+      manager,
+      batting: Math.round(s.batting * 100) / 100,
+      pitching: Math.round(s.pitching * 100) / 100,
+      total: Math.round((s.batting + s.pitching) * 100) / 100,
+    }));
+  }
+
+  // Derive the manager list from rosters + attributed stat rows.
+  const managers = new Set(Object.keys(sd.rosters || {}));
+  for (const r of batting) if (r.manager) managers.add(r.manager);
+  for (const r of pitching) if (r.manager) managers.add(r.manager);
+
+  const targetRounds = rounds
+    ? new Set(rounds.map((r) => (r && r.endsWith('P') ? r.slice(0, -1) : r)))
+    : null;
+
+  const map = {};
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (targetRounds && !targetRounds.has(schedWeek.round)) return;
+    for (const mgr of managers) {
+      const bat = managerWeekSubtotal(sd, mgr, schedWeek, idx, batting, 'batter', 'batters');
+      const pit = managerWeekSubtotal(sd, mgr, schedWeek, idx, pitching, 'pitcher', 'pitchers');
+      if (bat || pit) {
+        if (!map[mgr]) map[mgr] = { batting: 0, pitching: 0 };
+        map[mgr].batting += bat;
+        map[mgr].pitching += pit;
+      }
+    }
+  });
+
   return Object.entries(map).map(([manager, s]) => ({
     manager,
     batting: Math.round(s.batting * 100) / 100,
@@ -3594,32 +3705,22 @@ app.get('/api/mlb/live', async (req, res) => {
     // to the Pool Play Overall view (PP1 + PP2 + their *P import variants); a
     // playoff round maps to just that round's scoreboard.
     const isPoolPlayPhase = weekRound === 'PP1' || weekRound === 'PP2';
-    const certifiedRoundSet = isPoolPlayPhase
-      ? new Set(['PP1', 'PP1P', 'PP2', 'PP2P'])
-      : new Set([weekRound]);
+    const certifiedRounds = isPoolPlayPhase ? new Set(['PP1', 'PP2']) : new Set([weekRound]);
 
+    // Roll up certified weekly totals through the shared per-week subtotal
+    // helper, so the Live Total = Scoreboard Total + today's daily points,
+    // reconciled to the My Roster page's Pool Play Total stat card.
     const certifiedTotals = {};
-    const creditCertified = (rows, playerKey, rosterListKey, scoringType) => {
-      for (const r of rows) {
-        if (!certifiedRoundSet.has(r.round)) continue;
-        const playerName = r[playerKey];
-        // Honor an explicit manager field; otherwise fall back to the roster
-        // lookup for that specific week (handles legacy rows with manager=null).
-        const mgr = r.manager || findManagerForPlayerWeek(sd, playerName, scoringType, r.round, r.week);
-        if (!mgr) continue;
-        // Only credit the manager when the player actually appears on their roster
-        // for that week (or was added/dropped mid-week). This is what filters out
-        // the stale rows that were inflating Daniel's and Chris's Live Totals.
-        const weekKey = `${r.round}|${r.week}`;
-        const wkRoster = (sd.rosters && sd.rosters[mgr] && sd.rosters[mgr][weekKey]) || {};
-        const wkDates = (sd.roster_dates && sd.roster_dates[mgr] && sd.roster_dates[mgr][weekKey]) || {};
-        const rosterList = wkRoster[rosterListKey] || [];
-        if (!rosterList.includes(playerName) && !wkDates[playerName]) continue;
-        certifiedTotals[mgr] = (certifiedTotals[mgr] || 0) + (r.weekly_score || 0);
+    const battingRows = sd.weekly_batting || [];
+    const pitchingRows = sd.weekly_pitching || [];
+    SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+      if (!certifiedRounds.has(schedWeek.round)) return;
+      for (const mgr of Object.keys(managerMap)) {
+        const bat = managerWeekSubtotal(sd, mgr, schedWeek, idx, battingRows, 'batter', 'batters');
+        const pit = managerWeekSubtotal(sd, mgr, schedWeek, idx, pitchingRows, 'pitcher', 'pitchers');
+        certifiedTotals[mgr] = (certifiedTotals[mgr] || 0) + bat + pit;
       }
-    };
-    creditCertified(sd.weekly_batting || [], 'batter', 'batters', 'batting');
-    creditCertified(sd.weekly_pitching || [], 'pitcher', 'pitchers', 'pitching');
+    });
     // Seed managers who have no certified points yet so they still get a rank.
     for (const m of Object.keys(managerMap)) if (!(m in certifiedTotals)) certifiedTotals[m] = 0;
 
