@@ -871,17 +871,27 @@ function backfillWmmcQS(db) {
         (d) => d.pitcher === wp.pitcher && d.round === wp.round && d.week === wp.week
       );
       const prevQs = wp.qs || 0;
+      const prevHighlight = wp.qs_highlight === true;
       if (dailies.length > 0) {
         wp.qs = dailies.reduce((s, d) => s + ((d.delta && d.delta.qs) || 0), 0);
+        // Per-game data is authoritative now, so the multi-start manual-review
+        // flag (which made My Roster render "—" for the QS column) no longer
+        // applies — clear it so the computed value is visible.
+        wp.qs_highlight = false;
       } else {
         // No per-day records: apply the rule directly when single-start, zero
         // out no-start weeks, and leave multi-start cumulatives alone.
         const gs = wp.gs || 0;
-        if (gs === 1) wp.qs = isWmmcQS(1, wp.ip, wp.er);
-        else if (gs === 0) wp.qs = 0;
+        if (gs === 1) {
+          wp.qs = isWmmcQS(1, wp.ip, wp.er);
+          wp.qs_highlight = false;
+        } else if (gs === 0) {
+          wp.qs = 0;
+          wp.qs_highlight = false;
+        }
         if ((wp.qs || 0) !== prevQs) wp.weekly_score = calculatePitchingScore(wp);
       }
-      if ((wp.qs || 0) !== prevQs) weeklyTouched++;
+      if ((wp.qs || 0) !== prevQs || prevHighlight !== (wp.qs_highlight === true)) weeklyTouched++;
     }
     recomputeAllWeeklyScores(sd);
   }
@@ -1727,7 +1737,10 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
       pitcher,
       status: findCol(row, ['status', 'Status']) || null,
       ...cumulative,
-      qs_highlight: cumulative.gs >= 2,
+      // Per-day deltas were rewritten with the WMMC rule above, so cumulative.qs
+      // is now the trustworthy per-game sum — no need to flag multi-start weeks
+      // for manual review.
+      qs_highlight: false,
       weekly_score: weeklyScore,
       source: 'gsheets',
     });
@@ -2416,7 +2429,9 @@ async function performMLBSync(sd, schedWeek, dates) {
     );
     sd.weekly_pitching.push({
       round, week, manager: manager || null, pitcher: name, team: allTeams[name] || null,
-      ...cumulative, qs_highlight: cumulative.gs >= 2, weekly_score: weeklyScore, source: 'mlbapi',
+      // Cumulative qs is summed from per-game parseBoxscore output (GS=1 +
+      // IP>=5 + ER<=2), so the multi-start manual-review flag is unnecessary.
+      ...cumulative, qs_highlight: false, weekly_score: weeklyScore, source: 'mlbapi',
     });
   }
 
