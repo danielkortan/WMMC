@@ -738,9 +738,12 @@ function recomputeAllWeeklyScores(sd) {
 // stats and disable the daily Google Sheets sync. Runs once (gated by the
 // `mlb_api_takeover_v1` flag on the db root) so the commissioner can later
 // re-enable gsheets from the UI without this flipping it back. Strips every
-// row with source='gsheets' from the weekly + daily stat arrays so the next
-// MLB-API sync writes a clean state.
-function applyMLBApiTakeover(db) {
+// row with source='gsheets' from the weekly + daily stat arrays, then walks
+// the schedule and re-syncs each week whose start date has passed (and the
+// current in-progress week) from the MLB Stats API. The flag is only set
+// once every past week sync succeeds, so a partial run can resume on the
+// next startup.
+async function applyMLBApiTakeover(db) {
   if (db.mlb_api_takeover_v1) return false;
 
   let stripped = 0;
@@ -757,10 +760,42 @@ function applyMLBApiTakeover(db) {
   if (db.google_sheets_config && db.google_sheets_config.enabled) {
     db.google_sheets_config.enabled = false;
   }
-  db.mlb_api_takeover_v1 = true;
 
+  // Backfill every past (or in-progress) week of the active season from MLB.
+  // performMLBSync replaces mlbapi rows for each game_id, so re-running a
+  // successful week is a no-op — safe to retry after a partial failure.
+  const today = new Date().toISOString().split('T')[0];
+  const config = db.google_sheets_config || {};
+  const season = config.season || new Date().getFullYear().toString();
+  const sd = (db.seasons || {})[season];
+  let weeksSynced = 0;
+  if (sd) {
+    const dates = sd.schedule_dates || [];
+    for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+      const { start } = dates[i] || {};
+      if (!start || start > today) continue; // skip future weeks
+      const schedWeek = SEASON_SCHEDULE[i];
+      try {
+        const result = await performMLBSync(sd, schedWeek, dates[i]);
+        weeksSynced++;
+        console.log(
+          `[MLB-API takeover] Synced ${season} ${schedWeek.round} ${schedWeek.week} — ` +
+          `${result.games_fetched} games, ${result.batting_imported}B / ${result.pitching_imported}P`
+        );
+      } catch (e) {
+        console.error(
+          `[MLB-API takeover] Sync failed for ${season} ${schedWeek.round} ${schedWeek.week}: ${e.message}`
+        );
+        // Leave the flag unset so the next startup retries; partial progress
+        // is preserved by the caller's writeDB.
+        return true;
+      }
+    }
+  }
+
+  db.mlb_api_takeover_v1 = true;
   console.log(
-    `[MLB-API takeover] Stripped ${stripped} gsheets-source row(s); gsheets auto-sync disabled (re-enable from commissioner UI to use as a fallback).`
+    `[MLB-API takeover] Stripped ${stripped} gsheets-source row(s); backfilled ${weeksSynced} past week(s) from MLB; gsheets auto-sync disabled (re-enable from commissioner UI to use as a fallback).`
   );
   return true;
 }
@@ -4490,7 +4525,7 @@ async function main() {
     }
   }
 
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`WMMC server running at http://localhost:${PORT}`);
     if (!fs.existsSync(DB_FILE)) {
       writeDB({ seasons: {}, managers: [], audit_log: [] });
@@ -4519,11 +4554,13 @@ async function main() {
     }
 
     // One-shot: cut over to the MLB Stats API as the sole stats source.
-    // Strips gsheets-sourced rows and flips gsheets auto-sync off (gated by a
-    // db flag so it never re-runs).
+    // Strips gsheets-sourced rows, flips gsheets auto-sync off, and
+    // backfills every past schedule week via MLB. Gated by a db flag so it
+    // only runs once unless a previous attempt failed partway through.
     try {
       const dbForTakeover = readDB();
-      if (applyMLBApiTakeover(dbForTakeover)) writeDB(dbForTakeover);
+      const ran = await applyMLBApiTakeover(dbForTakeover);
+      if (ran) writeDB(dbForTakeover);
     } catch (e) {
       console.error('[MLB-API takeover] Error (continuing):', e.message);
     }
