@@ -5975,76 +5975,108 @@ function computeRosterPeriodScores(managerName, seasonData) {
 
   if (!seasonData || seasonData.status === 'completed') return result;
 
-  // Active season — walk only the canonical SEASON_SCHEDULE weeks for each
-  // period and mirror renderRosterData's per-week eligibility set exactly so
-  // the period totals reconcile to the sum of the weekly subtotals shown on
-  // screen. The previous implementation iterated every weekly_batting row
-  // matching the round, which double-counted any stale null-manager row that
-  // the per-week renderer dedupes against a Joey-attributed entry, and also
-  // counted rows for weeks outside the canonical schedule.
+  // Active season — replicate renderRosterData's per-week subtotal computation
+  // exactly so the period stat cards reconcile to the sum of the weekly PTS
+  // badges. The key piece earlier implementations missed was the
+  // `wasDroppedBefore` filter (renderRosterData lines ~5670-5688) which
+  // strips previously-dropped players from weekRoster before scoring; without
+  // it, stats for a player Joey dropped in Week 1 still leak into the PP1
+  // period total when the row's manager field still says "Joey".
   const scheduleDates = (seasonData.schedule_dates || []);
   const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
   const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved');
   const battingRows = seasonData.weekly_batting || [];
   const pitchingRows = seasonData.weekly_pitching || [];
+  const allMgrDates =
+    (seasonData.roster_dates && seasonData.roster_dates[managerName]) || null;
 
-  function sumWeek(rows, playerKey, listKey, schedWeek) {
+  function sumWeek(rows, playerKey, listKey, schedWeek, weekIdx) {
     const round = schedWeek.round;
     const week = schedWeek.week;
     const weekKey = `${round}|${week}`;
-    const weekRoster =
+    let weekRoster =
       (seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey]) ||
       { batters: [], pitchers: [] };
     const weekRosterDates =
       (seasonData.roster_dates && seasonData.roster_dates[managerName] && seasonData.roster_dates[managerName][weekKey]) ||
       {};
-    const otherList = listKey === 'batters' ? weekRoster.pitchers : weekRoster.batters;
 
+    // wasDroppedBefore: strip players who were dropped in a previous week's
+    // roster_dates (drop_date < weekStart) and not re-added this week.
+    const weekStart = scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
+    if (weekStart && allMgrDates) {
+      const addedThisWeek = new Set([
+        ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+        ...Object.entries(weekRosterDates).filter(([, d]) => d.add_date).map(([p]) => p),
+      ]);
+      const wasDroppedBefore = (player) => {
+        if (addedThisWeek.has(player)) return false;
+        for (const [wk, players] of Object.entries(allMgrDates)) {
+          if (wk === weekKey) continue;
+          const pd = players[player];
+          if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        }
+        return false;
+      };
+      weekRoster = {
+        batters: weekRoster.batters.filter((p) => !wasDroppedBefore(p)),
+        pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
+      };
+    }
+
+    // Eligibility set matches renderRosterData's historicalBatters /
+    // historicalPitchers exactly (post-pool-filter removal).
     const eligible = new Set([
       ...weekRoster[listKey],
       ...Object.keys(weekRosterDates).filter(
         (p) =>
-          !otherList.includes(p) &&
-          (!seasonStartDate ||
-            !weekRosterDates[p].drop_date ||
-            weekRosterDates[p].drop_date >= seasonStartDate)
+          !seasonStartDate ||
+          !weekRosterDates[p].drop_date ||
+          weekRosterDates[p].drop_date >= seasonStartDate
       ),
       ...approvedSwaps
         .filter(
           (s) =>
             s.player_in &&
             s.week_key === weekKey &&
-            (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate)
+            (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
+            (weekRosterDates[s.player_in] ||
+              rows.some((r) => r[playerKey] === s.player_in && r.round === round && r.week === week))
         )
         .map((s) => s.player_in),
     ]);
 
-    // Pick one row per player (the manager-attributed row wins over a stale
-    // null-manager row for the same player/week, matching the per-week
-    // renderer's `weekBatting.slice()` + unattributed-add dedup precedence).
-    const winners = new Map();
-    for (const r of rows) {
-      if (r.round !== round || r.week !== week) continue;
-      if (r.manager !== managerName && r.manager !== null) continue;
-      const player = r[playerKey];
-      if (!eligible.has(player)) continue;
-      const existing = winners.get(player);
-      if (!existing) { winners.set(player, r); continue; }
-      if (existing.manager == null && r.manager === managerName) winners.set(player, r);
-    }
-    let total = 0;
-    for (const r of winners.values()) total += r.weekly_score || 0;
-    return total;
+    // Build the same allWeek* array renderRosterData builds: manager-attributed
+    // rows first, then null-manager rows for eligible players (deduped by
+    // player so a stale ghost row can't double-count alongside the attributed
+    // entry).
+    const weekManagerRows = rows.filter((r) => r.manager === managerName && r.round === round && r.week === week);
+    const allWeekRows = weekManagerRows.slice();
+    rows.forEach((r) => {
+      if (
+        r.round === round &&
+        r.week === week &&
+        !r.manager &&
+        eligible.has(r[playerKey]) &&
+        !allWeekRows.some((x) => x[playerKey] === r[playerKey])
+      ) {
+        allWeekRows.push(r);
+      }
+    });
+
+    return allWeekRows
+      .filter((r) => eligible.has(r[playerKey]))
+      .reduce((s, r) => s + (r.weekly_score || 0), 0);
   }
 
   BREAKDOWN_PERIODS.forEach((period) => {
-    const periodWeeks = SEASON_SCHEDULE.filter((s) => s.round === period.key);
     let batTotal = 0;
     let pitTotal = 0;
-    for (const schedWeek of periodWeeks) {
-      batTotal += sumWeek(battingRows, 'batter', 'batters', schedWeek);
-      pitTotal += sumWeek(pitchingRows, 'pitcher', 'pitchers', schedWeek);
-    }
+    SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+      if (schedWeek.round !== period.key) return;
+      batTotal += sumWeek(battingRows, 'batter', 'batters', schedWeek, idx);
+      pitTotal += sumWeek(pitchingRows, 'pitcher', 'pitchers', schedWeek, idx);
+    });
 
     if (batTotal !== 0 || pitTotal !== 0) {
       result[period.key] = {
