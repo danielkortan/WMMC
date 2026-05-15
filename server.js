@@ -2626,20 +2626,46 @@ function renamePlayerInSeason(sd, oldName, newName) {
 //
 // hydrate=currentTeam is required because the bare endpoint inconsistently returns team
 // info on the player record (some players have only currentTeam.id without name/abbrev).
+// teamId -> short abbreviation (ATL / LAD / NYM / ...). Sourced from
+// /api/v1/teams so the abbreviation is consistent for every player, even
+// when the players-endpoint hydrate response only fills currentTeam.name.
+let _teamAbbrevsCache = null;
+async function fetchMLBTeamAbbrevs({ refresh = false } = {}) {
+  if (!refresh && _teamAbbrevsCache) return _teamAbbrevsCache;
+  const data = await mlbApiFetch('/api/v1/teams?sportId=1');
+  const map = {};
+  for (const t of data.teams || []) {
+    const abbrev = t.abbreviation || t.teamCode;
+    if (t.id && abbrev) map[t.id] = abbrev;
+  }
+  _teamAbbrevsCache = map;
+  return map;
+}
+
 const _mlbCatalogCache = new Map();
 async function fetchMLBPlayerCatalog(season, { refresh = false } = {}) {
   const key = String(season);
   if (!refresh && _mlbCatalogCache.has(key)) return _mlbCatalogCache.get(key);
+  const teamAbbrevs = await fetchMLBTeamAbbrevs({ refresh });
   const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}&hydrate=currentTeam`);
   const catalog = (data.people || [])
     .filter((p) => p && p.id && p.fullName)
-    .map((p) => ({
-      id: p.id,
-      fullName: p.fullName,
-      team: p.currentTeam?.abbreviation || p.currentTeam?.teamCode || p.currentTeam?.name || null,
-      teamId: p.currentTeam?.id || null,
-      position: p.primaryPosition?.abbreviation || null,
-    }));
+    .map((p) => {
+      const teamId = p.currentTeam?.id || null;
+      return {
+        id: p.id,
+        fullName: p.fullName,
+        // Prefer the canonical abbreviation from /api/v1/teams; only fall back
+        // to whatever currentTeam exposed inline when the teamId is unknown.
+        team:
+          (teamId && teamAbbrevs[teamId]) ||
+          p.currentTeam?.abbreviation ||
+          p.currentTeam?.teamCode ||
+          null,
+        teamId,
+        position: p.primaryPosition?.abbreviation || null,
+      };
+    });
   _mlbCatalogCache.set(key, catalog);
   return catalog;
 }
