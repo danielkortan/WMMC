@@ -770,6 +770,18 @@ async function applyMLBApiTakeover(db) {
   const sd = (db.seasons || {})[season];
   let weeksSynced = 0;
   if (sd) {
+    // Seed the player pools so the My Roster autocomplete works for every
+    // active MLB player, including those who haven't played yet.
+    try {
+      const r = await bootstrapPlayerPools(sd, season);
+      console.log(
+        `[MLB-API takeover] Player pool seeded from ${r.catalogSize} active MLB players ` +
+        `(+${r.battersAdded} batters, +${r.pitchersAdded} pitchers).`
+      );
+    } catch (e) {
+      console.error(`[MLB-API takeover] Player pool bootstrap failed: ${e.message}`);
+    }
+
     const dates = sd.schedule_dates || [];
     for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
       const { start } = dates[i] || {};
@@ -2627,9 +2639,9 @@ function renamePlayerInSeason(sd, oldName, newName) {
 // hydrate=currentTeam is required because the bare endpoint inconsistently returns team
 // info on the player record (some players have only currentTeam.id without name/abbrev).
 const _mlbCatalogCache = new Map();
-async function fetchMLBPlayerCatalog(season) {
+async function fetchMLBPlayerCatalog(season, { refresh = false } = {}) {
   const key = String(season);
-  if (_mlbCatalogCache.has(key)) return _mlbCatalogCache.get(key);
+  if (!refresh && _mlbCatalogCache.has(key)) return _mlbCatalogCache.get(key);
   const data = await mlbApiFetch(`/api/v1/sports/1/players?season=${season}&hydrate=currentTeam`);
   const catalog = (data.people || [])
     .filter((p) => p && p.id && p.fullName)
@@ -2661,6 +2673,54 @@ function indexCatalogByName(catalog) {
     byNorm.get(norm).push(entry);
   }
   return { byNorm, byId };
+}
+
+// Seed sd.batters_pool / sd.pitchers_pool from MLB's active-player catalog so
+// every name that could earn fantasy points is searchable in the My Roster
+// autocomplete, including players who haven't appeared in a boxscore yet
+// (injured, just promoted, on bench). Two-way players (Ohtani-style) land in
+// both pools. Team maps are refreshed every call so mid-season trades stay
+// current. Names already in a pool are preserved — never removed — so any
+// commissioner-curated additions survive a refresh.
+async function bootstrapPlayerPools(sd, season, { refresh = false } = {}) {
+  const catalog = await fetchMLBPlayerCatalog(season, { refresh });
+
+  if (!sd.batters_pool) sd.batters_pool = [];
+  if (!sd.pitchers_pool) sd.pitchers_pool = [];
+  if (!sd.batters_team) sd.batters_team = {};
+  if (!sd.pitchers_team) sd.pitchers_team = {};
+
+  const battersSet = new Set(sd.batters_pool);
+  const pitchersSet = new Set(sd.pitchers_pool);
+  let battersAdded = 0;
+  let pitchersAdded = 0;
+
+  for (const p of catalog) {
+    const name = p.fullName;
+    if (!name) continue;
+    const pos = p.position || '';
+    const isPitcher = pos === 'P' || pos === 'SP' || pos === 'RP' || pos === 'TWP';
+    const isBatter = pos !== 'P' && pos !== 'SP' && pos !== 'RP'; // TWP also bats
+
+    if (isBatter) {
+      if (!battersSet.has(name)) {
+        sd.batters_pool.push(name);
+        battersSet.add(name);
+        battersAdded++;
+      }
+      if (p.team) sd.batters_team[name] = p.team;
+    }
+    if (isPitcher) {
+      if (!pitchersSet.has(name)) {
+        sd.pitchers_pool.push(name);
+        pitchersSet.add(name);
+        pitchersAdded++;
+      }
+      if (p.team) sd.pitchers_team[name] = p.team;
+    }
+  }
+
+  return { battersAdded, pitchersAdded, catalogSize: catalog.length };
 }
 
 // Build the reverse lookup MLB ID -> WMMC display name from sd.mlb_ids.
@@ -4441,27 +4501,53 @@ function scheduleMLBApiSync() {
       const season = config.season || now.getFullYear().toString();
       const sd = (db.seasons || {})[season];
 
-      if (!isWithinSyncWindow(sd)) {
-        console.log(`[MLB-API] Skipping — outside season window for ${season}`);
+      if (!sd) {
+        console.log(`[MLB-API] Skipping — no season data for ${season}`);
       } else {
-        const wk = detectCurrentScheduleWeek(sd);
-        if (!wk) {
-          console.log(`[MLB-API] Skipping — no current schedule week for ${season}`);
+        let dirty = false;
+
+        // Refresh the player pool first so call-ups and trades show up in the
+        // autocomplete even before the player appears in a boxscore. Runs even
+        // when we're outside the active sync window so off-season opens with a
+        // fresh roster of names.
+        try {
+          const r = await bootstrapPlayerPools(sd, season, { refresh: true });
+          if (r.battersAdded > 0 || r.pitchersAdded > 0) {
+            console.log(
+              `[MLB-API] Pool refresh: +${r.battersAdded} batters, +${r.pitchersAdded} pitchers from ${r.catalogSize} active players.`
+            );
+            dirty = true;
+          }
+        } catch (e) {
+          console.error('[MLB-API] Pool refresh error (continuing):', e.message);
+        }
+
+        if (!isWithinSyncWindow(sd)) {
+          console.log(`[MLB-API] Stats sync skipped — outside season window for ${season}`);
         } else {
-          const result = await performMLBSync(sd, wk.schedWeek, wk.dates);
+          const wk = detectCurrentScheduleWeek(sd);
+          if (!wk) {
+            console.log(`[MLB-API] Stats sync skipped — no current schedule week for ${season}`);
+          } else {
+            const result = await performMLBSync(sd, wk.schedWeek, wk.dates);
+            addAuditEntry(db, 'mlbapi_auto_sync', {
+              year: season,
+              round: wk.schedWeek.round,
+              week: wk.schedWeek.week,
+              batting_imported: result.batting_imported,
+              pitching_imported: result.pitching_imported,
+            });
+            console.log(
+              `[MLB-API] Daily sync complete: ${season} ${wk.schedWeek.round} ${wk.schedWeek.week} — ` +
+              `${result.batting_imported} batting / ${result.pitching_imported} pitching (${result.games_fetched} games)`
+            );
+            dirty = true;
+          }
+        }
+
+        if (dirty) {
           db.seasons[season] = sd;
-          addAuditEntry(db, 'mlbapi_auto_sync', {
-            year: season,
-            round: wk.schedWeek.round,
-            week: wk.schedWeek.week,
-            batting_imported: result.batting_imported,
-            pitching_imported: result.pitching_imported,
-          });
           writeDB(db);
-          console.log(
-            `[MLB-API] Daily sync complete: ${season} ${wk.schedWeek.round} ${wk.schedWeek.week} — ` +
-            `${result.batting_imported} batting / ${result.pitching_imported} pitching (${result.games_fetched} games)`
-          );
         }
       }
     } catch (e) {
