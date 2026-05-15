@@ -5847,14 +5847,27 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         }
       });
     }
-    // Only show dropped players who actually accumulated stats during the scoring period.
-    // Includes both players dropped in a previous week and players dropped during this week.
+    // Only show dropped players who actually banked points during the
+    // rostered window of this week. Their stats may still include games
+    // played outside the window (the underlying weekly_pitching row carries
+    // cumulative stats for every game of the week), but if weekly_score
+    // resolves to 0 the row is noise — hide it to match "show stats only
+    // when the player could earn points".
+    const playerWeekScore = (rows, key, name) => {
+      const row = rows.find((r) => r[key] === name);
+      return row ? row.weekly_score || 0 : 0;
+    };
     const droppedBatters = [...historicalBatters].filter(
-      (p) => (!weekRoster.batters.includes(p) || droppedThisWeek.has(p)) && allWeekBatting.some((b) => b.batter === p)
+      (p) =>
+        (!weekRoster.batters.includes(p) || droppedThisWeek.has(p)) &&
+        allWeekBatting.some((b) => b.batter === p) &&
+        playerWeekScore(allWeekBatting, 'batter', p) > 0
     );
     const droppedPitchers = [...historicalPitchers].filter(
       (p) =>
-        (!weekRoster.pitchers.includes(p) || droppedThisWeek.has(p)) && allWeekPitching.some((pt) => pt.pitcher === p)
+        (!weekRoster.pitchers.includes(p) || droppedThisWeek.has(p)) &&
+        allWeekPitching.some((pt) => pt.pitcher === p) &&
+        playerWeekScore(allWeekPitching, 'pitcher', p) > 0
     );
 
     // Compute weekly rankings for this week
@@ -5904,10 +5917,16 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
 
     // Pool filter: only show batting stats for players in historicalBatters (already pool-validated)
     const weekBattingForTable = allWeekBatting.filter((b) => historicalBatters.has(b.batter));
+    const currentBatRoster = new Set(weekRoster.batters.filter((p) => !droppedThisWeek.has(p)));
     const allBattersThisWeek = new Set([
-      ...weekRoster.batters.filter((p) => !droppedThisWeek.has(p)),
+      ...currentBatRoster,
       ...droppedBatters,
-      ...weekBattingForTable.map((b) => b.batter),
+      // Stat rows that aren't currently rostered only earn a slot if they
+      // actually banked points — keeps a player's post-drop games from
+      // showing as a stat line with WK PTS = 0.
+      ...weekBattingForTable
+        .filter((b) => currentBatRoster.has(b.batter) || (b.weekly_score || 0) > 0)
+        .map((b) => b.batter),
     ]);
     if (allBattersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
@@ -5966,10 +5985,13 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     });
 
     const weekPitchingForTable = allWeekPitching.filter((p) => historicalPitchers.has(p.pitcher));
+    const currentPitRoster = new Set(weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p)));
     const allPitchersThisWeek = new Set([
-      ...weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p)),
+      ...currentPitRoster,
       ...droppedPitchers,
-      ...weekPitchingForTable.map((p) => p.pitcher),
+      ...weekPitchingForTable
+        .filter((p) => currentPitRoster.has(p.pitcher) || (p.weekly_score || 0) > 0)
+        .map((p) => p.pitcher),
     ]);
     if (allPitchersThisWeek.size > 0) {
       html += '<div class="table-wrapper"><table class="data-table compact-table wrs-table"><thead><tr>';
@@ -10007,14 +10029,23 @@ window.updateCommRosterWeekView = function (managerName) {
       .map(([p]) => p)
   );
 
-  // Only show dropped players who actually accumulated stats during the scoring period.
-  // Includes both players dropped in a previous week and players dropped during this week.
+  // Hide dropped players whose effective contribution to this week is zero —
+  // stats coming from games outside the rostered window only add visual noise.
+  const commPlayerWeekScore = (rows, key, name) => {
+    const row = rows.find((r) => r[key] === name);
+    return row ? row.weekly_score || 0 : 0;
+  };
   const droppedBatters = [...historicalBatters].filter(
-    (p) => (!roster.batters.includes(p) || commDroppedThisWeek.has(p)) && allWeekBatting.some((b) => b.batter === p)
+    (p) =>
+      (!roster.batters.includes(p) || commDroppedThisWeek.has(p)) &&
+      allWeekBatting.some((b) => b.batter === p) &&
+      commPlayerWeekScore(allWeekBatting, 'batter', p) > 0
   );
   const droppedPitchers = [...historicalPitchers].filter(
     (p) =>
-      (!roster.pitchers.includes(p) || commDroppedThisWeek.has(p)) && allWeekPitching.some((pt) => pt.pitcher === p)
+      (!roster.pitchers.includes(p) || commDroppedThisWeek.has(p)) &&
+      allWeekPitching.some((pt) => pt.pitcher === p) &&
+      commPlayerWeekScore(allWeekPitching, 'pitcher', p) > 0
   );
 
   function getPlayerDates(player) {
@@ -10046,10 +10077,13 @@ window.updateCommRosterWeekView = function (managerName) {
   });
   // Pool filter: only show batting stats for players in historicalBatters (already pool-validated)
   const weekBattingForTable = allWeekBatting.filter((b) => historicalBatters.has(b.batter));
+  const commCurrentBatRoster = new Set(roster.batters.filter((p) => !commDroppedThisWeek.has(p)));
   const allBattersThisWeek = new Set([
-    ...roster.batters.filter((p) => !commDroppedThisWeek.has(p)),
+    ...commCurrentBatRoster,
     ...droppedBatters,
-    ...weekBattingForTable.map((b) => b.batter),
+    ...weekBattingForTable
+      .filter((b) => commCurrentBatRoster.has(b.batter) || (b.weekly_score || 0) > 0)
+      .map((b) => b.batter),
   ]);
   // Include null-manager records for historical players (stats that arrived after a drop)
   const batTotal = allWeekBatting
@@ -10127,10 +10161,13 @@ window.updateCommRosterWeekView = function (managerName) {
     pitStatMap[p.pitcher] = p;
   });
   const weekPitchingForTable = allWeekPitching.filter((p) => historicalPitchers.has(p.pitcher));
+  const commCurrentPitRoster = new Set(roster.pitchers.filter((p) => !commDroppedThisWeek.has(p)));
   const allPitchersThisWeek = new Set([
-    ...roster.pitchers.filter((p) => !commDroppedThisWeek.has(p)),
+    ...commCurrentPitRoster,
     ...droppedPitchers,
-    ...weekPitchingForTable.map((p) => p.pitcher),
+    ...weekPitchingForTable
+      .filter((p) => commCurrentPitRoster.has(p.pitcher) || (p.weekly_score || 0) > 0)
+      .map((p) => p.pitcher),
   ]);
   // Include null-manager records for historical players (stats that arrived after a drop)
   const pitTotal = allWeekPitching
