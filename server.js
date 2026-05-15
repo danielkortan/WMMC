@@ -672,12 +672,13 @@ function computeEffectiveBattingScore(sd, batter, round, week) {
   const weekKey = `${round}|${week}`;
   const override = (((sd.player_dates || {})[weekKey] || {}).batter || {})[batter] || {};
 
+  // Inclusive date window: record.date is the actual MLB game date, so
+  // effectiveStart and effectiveEnd both match the commissioner-facing
+  // add_date / drop_date semantics directly. (Legacy +1 end shift was for
+  // the gsheets snapshot model where record.date carried stats from the
+  // previous day — no longer applies post-takeover.)
   const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
-  // Shift end by +1 day: the daily sync runs in the morning and creates a record dated
-  // today containing yesterday's games. The last day of the scoring week therefore
-  // appears in a record dated end+1, so we must include it.
-  const rawEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
-  const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
+  const effectiveEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
 
   const eligible = records.filter((r) => {
     if (effectiveStart && r.date < effectiveStart) return false;
@@ -700,9 +701,9 @@ function computeEffectivePitchingScore(sd, pitcher, round, week) {
   const weekKey = `${round}|${week}`;
   const override = (((sd.player_dates || {})[weekKey] || {}).pitcher || {})[pitcher] || {};
 
+  // Inclusive date window — see computeEffectiveBattingScore for rationale.
   const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
-  const rawEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
-  const effectiveEnd = rawEnd ? addOneDay(rawEnd) : null;
+  const effectiveEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
 
   const eligible = records.filter((r) => {
     if (effectiveStart && r.date < effectiveStart) return false;
@@ -893,6 +894,11 @@ function backfillWmmcQS(db) {
       }
       if ((wp.qs || 0) !== prevQs || prevHighlight !== (wp.qs_highlight === true)) weeklyTouched++;
     }
+    // Rebuild player_dates from roster_dates so add_date cutoffs land on the
+    // game day (the new policy) rather than the day after (the old gsheets
+    // shift). Then recompute weekly_scores so existing rows pick up the fix
+    // without waiting for the next 4am sync.
+    syncPlayerDatesFromRosterDates(sd);
     recomputeAllWeeklyScores(sd);
   }
   if (dailyTouched > 0 || weeklyTouched > 0 || dupesRemoved > 0) {
@@ -1327,20 +1333,23 @@ function addOneDay(dateStr) {
   return d.toISOString().split('T')[0];
 }
 
-// Populate player_dates from roster_dates for genuine mid-week ADDS only.
+// Populate player_dates from roster_dates so per-day game records are
+// filtered to the inclusive window the player was actually rostered.
 //
-// Key design decisions:
-//   - Only adds a START cutoff, never an END cutoff.  Dropped players' accumulated
-//     scores are locked by drop_locked on the weekly record; we must not re-filter
-//     their already-banked stats by date.
-//   - Only applies when add_date is strictly AFTER the week's start date (initial
-//     roster players should score the full week).
-//   - Shifts start by +1 day because the daily sync captures cumulative stats
-//     through (sync_date - 1): a record dated "May 10" contains May 9's games.
-//     To count only games on/after add_date, we need records dated > add_date,
-//     i.e. effective_start = add_date + 1.
-//   - Entries created here are marked { auto: true } so they can be refreshed on
-//     subsequent saves without clobbering manual commissioner overrides.
+// Date-range contract (matches the commissioner's mental model):
+//   - A player with add_date = X scores from games dated X onward.
+//   - A player with drop_date = Y scores up to and including games dated Y.
+//   - A player rostered for the whole week (no add_date, no drop_date) scores
+//     for every day in scheduleDates[weekIdx].
+//
+// Implementation notes:
+//   - Records carry their actual game date (MLB-API per-game model), so
+//     effectiveStart = add_date and effectiveEnd = drop_date — both
+//     inclusive, no shift. The legacy +1 shift only made sense for the
+//     gsheets snapshot model where a record dated X carried stats from X-1
+//     (gsheets is stripped + disabled after the takeover).
+//   - Entries created here are marked { auto: true } so they can be refreshed
+//     on subsequent saves without clobbering manual commissioner overrides.
 function syncPlayerDatesFromRosterDates(sd) {
   if (!sd || !sd.roster_dates) return new Set();
   if (!sd.player_dates) sd.player_dates = {};
@@ -1377,20 +1386,31 @@ function syncPlayerDatesFromRosterDates(sd) {
         weekIdx >= 0 && sd.schedule_dates && sd.schedule_dates[weekIdx] ? sd.schedule_dates[weekIdx].start : null;
 
       for (const [player, dates] of Object.entries(players)) {
-        if (!dates.add_date) continue;
-        // Skip players rostered from the very start of the week — no cutoff needed.
-        if (weekStart && dates.add_date <= weekStart) continue;
+        if (!dates.add_date && !dates.drop_date) continue;
 
-        // Shift by +1: the sync on add_date records cumulative through (add_date-1).
-        // To capture add_date's own games, include records with date > add_date.
-        const effectiveStart = addOneDay(dates.add_date);
+        // Inclusive game-date range, mirroring the commissioner's intent:
+        //   - add_date sets a start cutoff only when strictly after weekStart
+        //     (rostered from day 1 needs no override).
+        //   - drop_date sets an end cutoff at the player's last rostered day.
+        // Setting a key to null preserves the override semantics
+        // (`'start' in override`) so computeEffective* knows there's no
+        // cutoff on that side without falling back to weekDates.
+        const needsStart = !!(dates.add_date && weekStart && dates.add_date > weekStart);
+        const needsEnd = !!dates.drop_date;
+        if (!needsStart && !needsEnd) continue;
+
+        const entry = {
+          start: needsStart ? dates.add_date : null,
+          end: needsEnd ? dates.drop_date : null,
+          auto: true,
+        };
 
         for (const type of ['batter', 'pitcher']) {
           if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
           if (!sd.player_dates[weekKey][type]) sd.player_dates[weekKey][type] = {};
           const existing = sd.player_dates[weekKey][type][player];
           if (existing && !existing.auto) continue; // preserve manual commissioner override
-          sd.player_dates[weekKey][type][player] = { start: effectiveStart, auto: true };
+          sd.player_dates[weekKey][type][player] = entry;
         }
       }
     }
@@ -1427,12 +1447,13 @@ function recomputeMidWeekAddScores(sd, wipedAutoEntries = new Set()) {
   // Auto entries wiped this run that were not re-created.
   for (const key of wipedAutoEntries) toRecompute.add(key);
 
-  // All roster_dates entries with an add_date — covers the no-longer-mid-week case
-  // and self-heals any stale weekly_score values left from earlier saves.
+  // All roster_dates entries with an add_date or drop_date — covers the
+  // no-longer-mid-week case, mid-week drops, and self-heals any stale
+  // weekly_score values left from earlier saves.
   for (const mgrDates of Object.values(sd.roster_dates || {})) {
     for (const [weekKey, players] of Object.entries(mgrDates)) {
       for (const [player, dates] of Object.entries(players)) {
-        if (!dates || !dates.add_date) continue;
+        if (!dates || (!dates.add_date && !dates.drop_date)) continue;
         toRecompute.add(`${weekKey}|batter|${player}`);
         toRecompute.add(`${weekKey}|pitcher|${player}`);
       }
