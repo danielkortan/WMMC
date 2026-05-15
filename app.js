@@ -5975,53 +5975,76 @@ function computeRosterPeriodScores(managerName, seasonData) {
 
   if (!seasonData || seasonData.status === 'completed') return result;
 
-  // Active season — mirror buildTeamStatsBreakdown's filtering exactly so
-  // the score-box totals match what the Team Stats tab displays.
+  // Active season — walk only the canonical SEASON_SCHEDULE weeks for each
+  // period and mirror renderRosterData's per-week eligibility set exactly so
+  // the period totals reconcile to the sum of the weekly subtotals shown on
+  // screen. The previous implementation iterated every weekly_batting row
+  // matching the round, which double-counted any stale null-manager row that
+  // the per-week renderer dedupes against a Joey-attributed entry, and also
+  // counted rows for weeks outside the canonical schedule.
+  const scheduleDates = (seasonData.schedule_dates || []);
+  const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
+  const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved');
+  const battingRows = seasonData.weekly_batting || [];
+  const pitchingRows = seasonData.weekly_pitching || [];
+
+  function sumWeek(rows, playerKey, listKey, schedWeek) {
+    const round = schedWeek.round;
+    const week = schedWeek.week;
+    const weekKey = `${round}|${week}`;
+    const weekRoster =
+      (seasonData.rosters && seasonData.rosters[managerName] && seasonData.rosters[managerName][weekKey]) ||
+      { batters: [], pitchers: [] };
+    const weekRosterDates =
+      (seasonData.roster_dates && seasonData.roster_dates[managerName] && seasonData.roster_dates[managerName][weekKey]) ||
+      {};
+    const otherList = listKey === 'batters' ? weekRoster.pitchers : weekRoster.batters;
+
+    const eligible = new Set([
+      ...weekRoster[listKey],
+      ...Object.keys(weekRosterDates).filter(
+        (p) =>
+          !otherList.includes(p) &&
+          (!seasonStartDate ||
+            !weekRosterDates[p].drop_date ||
+            weekRosterDates[p].drop_date >= seasonStartDate)
+      ),
+      ...approvedSwaps
+        .filter(
+          (s) =>
+            s.player_in &&
+            s.week_key === weekKey &&
+            (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate)
+        )
+        .map((s) => s.player_in),
+    ]);
+
+    // Pick one row per player (the manager-attributed row wins over a stale
+    // null-manager row for the same player/week, matching the per-week
+    // renderer's `weekBatting.slice()` + unattributed-add dedup precedence).
+    const winners = new Map();
+    for (const r of rows) {
+      if (r.round !== round || r.week !== week) continue;
+      if (r.manager !== managerName && r.manager !== null) continue;
+      const player = r[playerKey];
+      if (!eligible.has(player)) continue;
+      const existing = winners.get(player);
+      if (!existing) { winners.set(player, r); continue; }
+      if (existing.manager == null && r.manager === managerName) winners.set(player, r);
+    }
+    let total = 0;
+    for (const r of winners.values()) total += r.weekly_score || 0;
+    return total;
+  }
+
   BREAKDOWN_PERIODS.forEach((period) => {
+    const periodWeeks = SEASON_SCHEDULE.filter((s) => s.round === period.key);
     let batTotal = 0;
     let pitTotal = 0;
-
-    (seasonData.weekly_batting || []).forEach((b) => {
-      if (b.round !== period.key) return;
-      if (b.manager !== managerName && b.manager !== null) return;
-      const weekKey = `${b.round}|${b.week}`;
-      const weekRoster =
-        (seasonData.rosters &&
-          seasonData.rosters[managerName] &&
-          seasonData.rosters[managerName][weekKey]) ||
-        { batters: [], pitchers: [] };
-      const weekRosterDates =
-        (seasonData.roster_dates &&
-          seasonData.roster_dates[managerName] &&
-          seasonData.roster_dates[managerName][weekKey]) ||
-        {};
-      const onRoster =
-        weekRoster.batters.includes(b.batter) ||
-        (!!weekRosterDates[b.batter] && !weekRoster.pitchers.includes(b.batter));
-      if (!onRoster) return;
-      batTotal += b.weekly_score || 0;
-    });
-
-    (seasonData.weekly_pitching || []).forEach((p) => {
-      if (p.round !== period.key) return;
-      if (p.manager !== managerName && p.manager !== null) return;
-      const weekKey = `${p.round}|${p.week}`;
-      const weekRoster =
-        (seasonData.rosters &&
-          seasonData.rosters[managerName] &&
-          seasonData.rosters[managerName][weekKey]) ||
-        { batters: [], pitchers: [] };
-      const weekRosterDates =
-        (seasonData.roster_dates &&
-          seasonData.roster_dates[managerName] &&
-          seasonData.roster_dates[managerName][weekKey]) ||
-        {};
-      const onRoster =
-        weekRoster.pitchers.includes(p.pitcher) ||
-        (!!weekRosterDates[p.pitcher] && !weekRoster.batters.includes(p.pitcher));
-      if (!onRoster) return;
-      pitTotal += p.weekly_score || 0;
-    });
+    for (const schedWeek of periodWeeks) {
+      batTotal += sumWeek(battingRows, 'batter', 'batters', schedWeek);
+      pitTotal += sumWeek(pitchingRows, 'pitcher', 'pitchers', schedWeek);
+    }
 
     if (batTotal !== 0 || pitTotal !== 0) {
       result[period.key] = {
