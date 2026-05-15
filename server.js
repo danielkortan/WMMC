@@ -893,6 +893,11 @@ function backfillWmmcQS(db) {
       }
       if ((wp.qs || 0) !== prevQs || prevHighlight !== (wp.qs_highlight === true)) weeklyTouched++;
     }
+    // Rebuild player_dates from roster_dates so add_date cutoffs land on the
+    // game day (the new policy) rather than the day after (the old gsheets
+    // shift). Then recompute weekly_scores so existing rows pick up the fix
+    // without waiting for the next 4am sync.
+    syncPlayerDatesFromRosterDates(sd);
     recomputeAllWeeklyScores(sd);
   }
   if (dailyTouched > 0 || weeklyTouched > 0 || dupesRemoved > 0) {
@@ -1381,9 +1386,14 @@ function syncPlayerDatesFromRosterDates(sd) {
         // Skip players rostered from the very start of the week — no cutoff needed.
         if (weekStart && dates.add_date <= weekStart) continue;
 
-        // Shift by +1: the sync on add_date records cumulative through (add_date-1).
-        // To capture add_date's own games, include records with date > add_date.
-        const effectiveStart = addOneDay(dates.add_date);
+        // effectiveStart is the inclusive game date from which we credit stats.
+        // The MLB-API daily records carry the actual game date, so a player
+        // added on add_date should get credit for games dated >= add_date.
+        // (Legacy note: a previous gsheets-snapshot-era implementation shifted
+        // this by +1 because a daily snapshot dated X carried stats from X-1;
+        // that shift caused Braxton-style add-date games to be dropped under
+        // MLB-API per-game records, since their date IS the game date.)
+        const effectiveStart = dates.add_date;
 
         for (const type of ['batter', 'pitcher']) {
           if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
