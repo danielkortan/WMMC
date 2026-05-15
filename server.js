@@ -770,18 +770,6 @@ async function applyMLBApiTakeover(db) {
   const sd = (db.seasons || {})[season];
   let weeksSynced = 0;
   if (sd) {
-    // Seed the player pools so the My Roster autocomplete works for every
-    // active MLB player, including those who haven't played yet.
-    try {
-      const r = await bootstrapPlayerPools(sd, season);
-      console.log(
-        `[MLB-API takeover] Player pool seeded from ${r.catalogSize} active MLB players ` +
-        `(+${r.battersAdded} batters, +${r.pitchersAdded} pitchers).`
-      );
-    } catch (e) {
-      console.error(`[MLB-API takeover] Player pool bootstrap failed: ${e.message}`);
-    }
-
     const dates = sd.schedule_dates || [];
     for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
       const { start } = dates[i] || {};
@@ -4664,6 +4652,28 @@ async function main() {
       if (ran) writeDB(dbForTakeover);
     } catch (e) {
       console.error('[MLB-API takeover] Error (continuing):', e.message);
+    }
+
+    // Seed the player pool from MLB's active-player catalog on every boot.
+    // bootstrapPlayerPools only adds names, so re-running is safe and keeps
+    // call-ups visible in the My Roster autocomplete without waiting for the
+    // next daily refresh.
+    try {
+      const dbForPool = readDB();
+      const cfg = dbForPool.google_sheets_config || {};
+      const season = cfg.season || new Date().getFullYear().toString();
+      const sd = (dbForPool.seasons || {})[season];
+      if (sd) {
+        const r = await bootstrapPlayerPools(sd, season);
+        console.log(
+          `[Player Pool] Seeded from ${r.catalogSize} active MLB players ` +
+          `(+${r.battersAdded} batters, +${r.pitchersAdded} pitchers).`
+        );
+        dbForPool.seasons[season] = sd;
+        writeDB(dbForPool);
+      }
+    } catch (e) {
+      console.error('[Player Pool] Bootstrap error (continuing):', e.message);
     }
 
     // Re-derive QS on existing pitching records using the WMMC rule.
