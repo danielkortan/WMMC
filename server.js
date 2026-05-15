@@ -734,6 +734,45 @@ function recomputeAllWeeklyScores(sd) {
   });
 }
 
+// Collapse weekly_batting / weekly_pitching duplicates that arise when both
+// the Google Sheets sync and the MLB-API sync have written rows for the same
+// (round, week, player) — each sync's filter only purges its own source, so
+// the rows pile up and the on-page Batting Total / Pitching Total subtotals
+// double-count. We keep at most one row per (round, week, player), preferring
+// rows the commissioner has touched (manual_fields / drop_locked) and
+// otherwise the most recently pushed entry.
+function dedupeWeeklyRows(sd) {
+  let removed = 0;
+  for (const arrName of ['weekly_batting', 'weekly_pitching']) {
+    const arr = sd[arrName];
+    if (!Array.isArray(arr)) continue;
+    const playerKey = arrName === 'weekly_batting' ? 'batter' : 'pitcher';
+    const isManual = (r) => (r.manual_fields && r.manual_fields.length > 0) || r.drop_locked;
+    const winnerByKey = new Map();
+    arr.forEach((r, idx) => {
+      const key = `${r.round}|${r.week}|${r[playerKey]}`;
+      const existing = winnerByKey.get(key);
+      if (!existing) {
+        winnerByKey.set(key, { row: r, idx });
+        return;
+      }
+      // Keep the commissioner-touched row; otherwise the later push wins.
+      if (isManual(existing.row) && !isManual(r)) return;
+      if (isManual(r) && !isManual(existing.row)) {
+        winnerByKey.set(key, { row: r, idx });
+        return;
+      }
+      winnerByKey.set(key, { row: r, idx });
+    });
+    const survivors = [...winnerByKey.values()].sort((a, b) => a.idx - b.idx).map((v) => v.row);
+    if (survivors.length !== arr.length) {
+      removed += arr.length - survivors.length;
+      sd[arrName] = survivors;
+    }
+  }
+  return removed;
+}
+
 // Re-derive QS on existing pitching records using the WMMC rule. Idempotent
 // — repeated runs converge on the same values — so it's safe to invoke on
 // every server startup. Manual commissioner overrides (manual_fields=qs or
@@ -743,8 +782,10 @@ function recomputeAllWeeklyScores(sd) {
 function backfillWmmcQS(db) {
   let dailyTouched = 0;
   let weeklyTouched = 0;
+  let dupesRemoved = 0;
   for (const sd of Object.values(db.seasons || {})) {
     if (!sd) continue;
+    dupesRemoved += dedupeWeeklyRows(sd);
     for (const r of sd.daily_pitching || []) {
       if ((r.manual_fields || []).includes('qs') || r.drop_locked) continue;
       const d = r.delta || {};
@@ -778,8 +819,10 @@ function backfillWmmcQS(db) {
     }
     recomputeAllWeeklyScores(sd);
   }
-  if (dailyTouched > 0 || weeklyTouched > 0) {
-    console.log(`[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s)`);
+  if (dailyTouched > 0 || weeklyTouched > 0 || dupesRemoved > 0) {
+    console.log(
+      `[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s), removed ${dupesRemoved} duplicate weekly row(s)`
+    );
   }
 }
 
@@ -1452,13 +1495,14 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
 
     // Remove any previous non-manual sync record for this player/week
+    // (regardless of source) so dual-source syncs don't double up rows.
     sd.weekly_batting = sd.weekly_batting.filter(
       (b) =>
         !(
           b.round === scheduleWeek.round &&
           b.week === scheduleWeek.week &&
           b.batter === batter &&
-          b.source === 'gsheets'
+          !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
         )
     );
 
@@ -1606,7 +1650,7 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
           p.round === scheduleWeek.round &&
           p.week === scheduleWeek.week &&
           p.pitcher === pitcher &&
-          p.source === 'gsheets'
+          !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
         )
     );
 
@@ -2271,7 +2315,13 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
       const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
 
       sd.weekly_batting = sd.weekly_batting.filter(
-        (b) => !(b.round === round && b.week === week && b.batter === name && b.source === 'mlbapi')
+        (b) =>
+          !(
+            b.round === round &&
+            b.week === week &&
+            b.batter === name &&
+            !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+          )
       );
       sd.weekly_batting.push({
         round, week, manager: manager || null, batter: name, team: allTeams[name] || null,
@@ -2294,7 +2344,13 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
       const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
 
       sd.weekly_pitching = sd.weekly_pitching.filter(
-        (p) => !(p.round === round && p.week === week && p.pitcher === name && p.source === 'mlbapi')
+        (p) =>
+          !(
+            p.round === round &&
+            p.week === week &&
+            p.pitcher === name &&
+            !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+          )
       );
       sd.weekly_pitching.push({
         round, week, manager: manager || null, pitcher: name, team: allTeams[name] || null,
