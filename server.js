@@ -649,6 +649,13 @@ function pitchingDelta(curr, prev) {
   return delta;
 }
 
+// WMMC custom quality-start rule (tighter than MLB's 6 IP / 3 ER): a started
+// outing of >= 5 IP with <= 2 ER. Shared by parseBoxscore, the gsheets sync
+// pipeline, and the startup backfill so every ingest path stays in sync.
+function isWmmcQS(gs, ip, er) {
+  return (gs || 0) > 0 && (ip || 0) >= 5 && (er || 0) <= 2 ? 1 : 0;
+}
+
 // Find the SEASON_SCHEDULE index for a given round+week
 function getScheduleWeekIndex(round, week) {
   return SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
@@ -725,6 +732,55 @@ function recomputeAllWeeklyScores(sd) {
       p.weekly_score = score;
     }
   });
+}
+
+// Re-derive QS on existing pitching records using the WMMC rule. Idempotent
+// — repeated runs converge on the same values — so it's safe to invoke on
+// every server startup. Manual commissioner overrides (manual_fields=qs or
+// drop_locked) are left intact. After fixing the daily deltas we refresh the
+// cumulative QS on each weekly_pitching row and recompute weekly_score so
+// every downstream view (My Roster, scoreboard, Live tab) agrees.
+function backfillWmmcQS(db) {
+  let dailyTouched = 0;
+  let weeklyTouched = 0;
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd) continue;
+    for (const r of sd.daily_pitching || []) {
+      if ((r.manual_fields || []).includes('qs') || r.drop_locked) continue;
+      const d = r.delta || {};
+      const gs = d.gs || 0;
+      const prev = d.qs || 0;
+      let next = prev;
+      if (gs === 1) next = isWmmcQS(1, d.ip, d.er);
+      else if (gs === 0) next = 0;
+      if (next !== prev) {
+        d.qs = next;
+        dailyTouched++;
+      }
+    }
+    for (const wp of sd.weekly_pitching || []) {
+      if ((wp.manual_fields || []).includes('qs') || wp.drop_locked) continue;
+      const dailies = (sd.daily_pitching || []).filter(
+        (d) => d.pitcher === wp.pitcher && d.round === wp.round && d.week === wp.week
+      );
+      const prevQs = wp.qs || 0;
+      if (dailies.length > 0) {
+        wp.qs = dailies.reduce((s, d) => s + ((d.delta && d.delta.qs) || 0), 0);
+      } else {
+        // No per-day records: apply the rule directly when single-start, zero
+        // out no-start weeks, and leave multi-start cumulatives alone.
+        const gs = wp.gs || 0;
+        if (gs === 1) wp.qs = isWmmcQS(1, wp.ip, wp.er);
+        else if (gs === 0) wp.qs = 0;
+        if ((wp.qs || 0) !== prevQs) wp.weekly_score = calculatePitchingScore(wp);
+      }
+      if ((wp.qs || 0) !== prevQs) weeklyTouched++;
+    }
+    recomputeAllWeeklyScores(sd);
+  }
+  if (dailyTouched > 0 || weeklyTouched > 0) {
+    console.log(`[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s)`);
+  }
 }
 
 // ============================================================
@@ -1486,6 +1542,15 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
 
     const delta = prevSnapshot ? pitchingDelta(cumulative, prevSnapshot.cumulative) : { ...cumulative };
 
+    // Override the sheet's QS for any single-start day using the WMMC rule;
+    // for no-start days force QS to 0. Multi-start days (rare, gs>=2) keep
+    // the sheet value because cumulative IP/ER can't recover per-game splits.
+    if ((delta.gs || 0) === 1) {
+      delta.qs = isWmmcQS(1, delta.ip, delta.er);
+    } else if ((delta.gs || 0) === 0) {
+      delta.qs = 0;
+    }
+
     // Replace any existing gsheets snapshot for today
     sd.daily_pitching = sd.daily_pitching.filter(
       (r) =>
@@ -1506,6 +1571,15 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
       delta,
       source: 'gsheets',
     });
+
+    // Keep cumulative.qs aligned with the corrected daily deltas so the
+    // weekly_pitching row's QS column matches what feeds weekly_score.
+    cumulative.qs = sd.daily_pitching
+      .filter(
+        (r) =>
+          r.pitcher === pitcher && r.round === scheduleWeek.round && r.week === scheduleWeek.week
+      )
+      .reduce((sum, r) => sum + ((r.delta && r.delta.qs) || 0), 0);
 
     // Don't overwrite manually-edited or drop-locked weekly records
     const existingManual = sd.weekly_pitching.find(
@@ -1871,10 +1945,7 @@ function parseBoxscore(box, idToWmmcName = new Map()) {
         pitching[name] = {
           gs: started,
           w: ps.wins || 0,
-          // WMMC custom QS rule: started, >= 5 IP, <= 2 ER (tighter than MLB's
-          // standard 6/3 — applied wherever the server auto-credits QS from a
-          // boxscore so live, preview, and per-game sync paths all agree).
-          qs: started > 0 && ipDec >= 5 && er <= 2 ? 1 : 0,
+          qs: isWmmcQS(started, ipDec, er),
           // CG/CGSO/NH derived from outs and hit/ER counts
           cg: isCG,
           cgso: isCG && er === 0 ? 1 : 0,
@@ -4271,6 +4342,15 @@ async function main() {
       } catch (e) {
         console.error('Could not seed managers from data.json:', e.message);
       }
+    }
+
+    // Re-derive QS on existing pitching records using the WMMC rule.
+    try {
+      const dbForBackfill = readDB();
+      backfillWmmcQS(dbForBackfill);
+      writeDB(dbForBackfill);
+    } catch (e) {
+      console.error('[WMMC-QS] Backfill error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler
