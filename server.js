@@ -3491,7 +3491,9 @@ app.get('/api/mlb/live', async (req, res) => {
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
-  const today = new Date().toISOString().slice(0, 10);
+  // Use Eastern time — MLB games are dated in ET, and late-evening games would produce
+  // a UTC date that's already tomorrow, breaking game-date comparisons entirely.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
   // Find the schedule week whose [start, end] contains today.
   const scheduleDates = sd.schedule_dates || [];
@@ -3809,7 +3811,9 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   // Resolve the active week so we can flag each MLB player as rostered (or not)
   // for the currently-running WMMC week. If today doesn't fall inside a week,
   // we just leave week-specific lookups off and fall back to historical roster.
-  const today = new Date().toISOString().slice(0, 10);
+  // Use Eastern time — MLB game dates are ET-based; a UTC "today" drifts to tomorrow
+  // after ~8 PM ET and breaks the rostered-player flagging logic.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const scheduleDates = sd.schedule_dates || [];
   let activeIdx = -1;
   for (let i = 0; i < scheduleDates.length; i++) {
