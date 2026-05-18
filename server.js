@@ -2604,6 +2604,49 @@ async function performMLBSync(sd, schedWeek, dates) {
   };
 }
 
+// POST /api/mlb/sync-current  { year }
+// Commissioner "Sync Now" endpoint: syncs yesterday's week (catch-up for late games)
+// and today's week when they differ, mirroring the 4am auto-sync logic exactly.
+app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
+  const year = (req.body.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const results = [];
+  try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+    const todayWk = detectScheduleWeekForDate(sd, todayET) || detectCurrentScheduleWeek(sd);
+    const prevWk = detectScheduleWeekForDate(sd, yesterdayET);
+    const curKey = todayWk ? `${todayWk.schedWeek.round}|${todayWk.schedWeek.week}` : null;
+    const prevKey = prevWk ? `${prevWk.schedWeek.round}|${prevWk.schedWeek.week}` : null;
+
+    // Sync yesterday's week first if it differs (trailing-day catch-up).
+    if (prevWk && prevKey !== curKey) {
+      const r = await performMLBSync(sd, prevWk.schedWeek, prevWk.dates);
+      addAuditEntry(db, 'mlbapi_sync', { year, round: prevWk.schedWeek.round, week: prevWk.schedWeek.week, batting_imported: r.batting_imported, pitching_imported: r.pitching_imported, note: 'trailing-day catch-up' });
+      results.push({ week: `${prevWk.schedWeek.round} ${prevWk.schedWeek.week}`, ...r });
+    }
+
+    if (todayWk) {
+      const r = await performMLBSync(sd, todayWk.schedWeek, todayWk.dates);
+      addAuditEntry(db, 'mlbapi_sync', { year, round: todayWk.schedWeek.round, week: todayWk.schedWeek.week, batting_imported: r.batting_imported, pitching_imported: r.pitching_imported });
+      results.push({ week: `${todayWk.schedWeek.round} ${todayWk.schedWeek.week}`, ...r });
+    }
+
+    if (results.length === 0) return res.status(400).json({ error: 'No schedule week found for today' });
+
+    db.seasons[year] = sd;
+    writeDB(db);
+    res.json({ ok: true, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/mlb/sync  { year, round, week }
 // Stores one daily_batting / daily_pitching record per player per game (keyed by game_id).
 // Re-syncing a completed week replaces existing game records so MLB stat corrections propagate.
@@ -4635,7 +4678,9 @@ let mlbApiSyncTimer = null;
 function detectCurrentScheduleWeek(sd) {
   if (!sd) return null;
   const dates = sd.schedule_dates || [];
-  const today = new Date().toISOString().split('T')[0];
+  // Use Eastern time — MLB games are dated in ET; UTC date at 4am ET is the same
+  // calendar day but we make this explicit to match fetchMLBPerGameStats behaviour.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
     const { start, end } = dates[i] || {};
     if (start && end && today >= start && today <= end) {
@@ -4645,6 +4690,19 @@ function detectCurrentScheduleWeek(sd) {
   for (let i = SEASON_SCHEDULE.length - 1; i >= 0; i--) {
     const { start, end } = dates[i] || {};
     if (start && end && today > end) {
+      return { schedWeek: SEASON_SCHEDULE[i], dates: dates[i] };
+    }
+  }
+  return null;
+}
+
+// Find the schedule week that contains a specific date string (YYYY-MM-DD).
+function detectScheduleWeekForDate(sd, dateISO) {
+  if (!sd) return null;
+  const dates = sd.schedule_dates || [];
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    const { start, end } = dates[i] || {};
+    if (start && end && dateISO >= start && dateISO <= end) {
       return { schedWeek: SEASON_SCHEDULE[i], dates: dates[i] };
     }
   }
@@ -4690,6 +4748,32 @@ function scheduleMLBApiSync() {
           if (!wk) {
             console.log(`[MLB-API] Stats sync skipped — no current schedule week for ${season}`);
           } else {
+            // At 4am ET on the first day of a new week the previous week's
+            // evening games are finalized but were missed by yesterday's 4am run.
+            // Always do a catch-up sync on yesterday's week when it differs from
+            // today's so those games land in weekly_batting/pitching.
+            const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000)
+              .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const prevWk = detectScheduleWeekForDate(sd, yesterdayET);
+            const prevKey = prevWk ? `${prevWk.schedWeek.round}|${prevWk.schedWeek.week}` : null;
+            const curKey = `${wk.schedWeek.round}|${wk.schedWeek.week}`;
+            if (prevWk && prevKey !== curKey) {
+              const prevResult = await performMLBSync(sd, prevWk.schedWeek, prevWk.dates);
+              addAuditEntry(db, 'mlbapi_auto_sync', {
+                year: season,
+                round: prevWk.schedWeek.round,
+                week: prevWk.schedWeek.week,
+                batting_imported: prevResult.batting_imported,
+                pitching_imported: prevResult.pitching_imported,
+                note: 'trailing-day catch-up',
+              });
+              console.log(
+                `[MLB-API] Trailing-day catch-up: ${season} ${prevWk.schedWeek.round} ${prevWk.schedWeek.week} — ` +
+                `${prevResult.batting_imported} batting / ${prevResult.pitching_imported} pitching (${prevResult.games_fetched} games)`
+              );
+              dirty = true;
+            }
+
             const result = await performMLBSync(sd, wk.schedWeek, wk.dates);
             addAuditEntry(db, 'mlbapi_auto_sync', {
               year: season,

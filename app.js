@@ -7548,18 +7548,10 @@ function renderMLBSyncLog() {
 window.triggerMLBSync = function () {
   const btn = document.querySelector('#mlb-sync-controls .btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
-  const seasons = getSeasons();
-  const sd = seasons && seasons[SELECTED_SEASON];
-  const wk = sd && detectCurrentScheduleWeekClient(sd);
-  if (!wk) {
-    alert('No active schedule week found — nothing to sync.');
-    if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
-    return;
-  }
-  apiFetch('/api/mlb/sync', {
+  apiFetch('/api/mlb/sync-current', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ year: SELECTED_SEASON, round: wk.round, week: wk.week }),
+    body: JSON.stringify({ year: SELECTED_SEASON }),
   })
     .then((r) => r.json())
     .then((res) => {
@@ -7571,18 +7563,6 @@ window.triggerMLBSync = function () {
     .catch((e) => alert(`Sync error: ${e.message}`))
     .finally(() => { if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; } });
 };
-
-function detectCurrentScheduleWeekClient(sd) {
-  const scheduleDates = sd.schedule_dates || [];
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
-    const d = scheduleDates[i];
-    if (d && d.start && d.end && today >= d.start && today <= d.end) {
-      return { round: SEASON_SCHEDULE[i].round, week: SEASON_SCHEDULE[i].week };
-    }
-  }
-  return null;
-}
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
 function renderPendingSwapRequests() {
