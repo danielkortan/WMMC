@@ -7526,14 +7526,26 @@ function renderMLBSyncLog() {
       </div><div id="mlb-log-entries" style="display:none;" class="gsheets-log-list">`;
 
       logs.forEach((l) => {
-        const isAuto = l.type === 'mlbapi_auto_sync';
-        const typeBadge = isAuto
-          ? 'background:var(--accent,#6c63ff);color:#fff;'
-          : 'background:var(--secondary,#555);color:#fff;';
-        const detail = `${l.batting_imported ?? '?'} batting, ${l.pitching_imported ?? '?'} pitching (${l.games ?? '?'} games) — ${esc(l.round || '')} ${esc(l.week || '')}`;
+        const note = l.note || '';
+        let badgeLabel, badgeStyle;
+        if (note.startsWith('daily-delta')) {
+          badgeLabel = 'Daily';
+          badgeStyle = 'background:#0ea5e9;color:#fff;';
+        } else if (note.startsWith('wed-correction') || note.startsWith('catchup')) {
+          badgeLabel = 'Correction';
+          badgeStyle = 'background:var(--accent,#6c63ff);color:#fff;';
+        } else if (l.type === 'mlbapi_auto_sync') {
+          badgeLabel = 'Auto';
+          badgeStyle = 'background:var(--accent,#6c63ff);color:#fff;';
+        } else {
+          badgeLabel = 'Manual';
+          badgeStyle = 'background:var(--secondary,#555);color:#fff;';
+        }
+        const noteLabel = note.startsWith('catchup-') ? ` (${note.slice(8)})` : note.startsWith('wed-correction:') ? ` (${note.slice(15)})` : '';
+        const detail = `${l.batting_imported ?? '?'} batting, ${l.pitching_imported ?? '?'} pitching (${l.games ?? '?'} games) — ${esc(l.round || '')} ${esc(l.week || '')}${noteLabel}`;
         logHtml += `<div class="gsheets-log-item">
           <span class="gsheets-log-time">${esc(l.timestamp || '')}</span>
-          <span class="swap-badge" style="${typeBadge}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${isAuto ? 'Auto' : 'Manual'}</span>
+          <span class="swap-badge" style="${badgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${badgeLabel}</span>
           <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
         </div>`;
       });
@@ -7548,18 +7560,10 @@ function renderMLBSyncLog() {
 window.triggerMLBSync = function () {
   const btn = document.querySelector('#mlb-sync-controls .btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
-  const seasons = getSeasons();
-  const sd = seasons && seasons[SELECTED_SEASON];
-  const wk = sd && detectCurrentScheduleWeekClient(sd);
-  if (!wk) {
-    alert('No active schedule week found — nothing to sync.');
-    if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
-    return;
-  }
-  apiFetch('/api/mlb/sync', {
+  apiFetch('/api/mlb/sync-current', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ year: SELECTED_SEASON, round: wk.round, week: wk.week }),
+    body: JSON.stringify({ year: SELECTED_SEASON }),
   })
     .then((r) => r.json())
     .then((res) => {
@@ -7571,18 +7575,6 @@ window.triggerMLBSync = function () {
     .catch((e) => alert(`Sync error: ${e.message}`))
     .finally(() => { if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; } });
 };
-
-function detectCurrentScheduleWeekClient(sd) {
-  const scheduleDates = sd.schedule_dates || [];
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
-    const d = scheduleDates[i];
-    if (d && d.start && d.end && today >= d.start && today <= d.end) {
-      return { round: SEASON_SCHEDULE[i].round, week: SEASON_SCHEDULE[i].week };
-    }
-  }
-  return null;
-}
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
 function renderPendingSwapRequests() {
