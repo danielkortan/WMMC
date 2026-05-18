@@ -7505,7 +7505,7 @@ function renderMLBSyncLog() {
 
   controlsDiv.innerHTML = `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>`;
 
-  fetch('/api/mlb/sync-status')
+  apiFetch('/api/mlb/sync-status')
     .then((r) => r.json())
     .then((s) => {
       const nextDate = s.next_sync ? new Date(s.next_sync) : null;
@@ -7556,7 +7556,7 @@ window.triggerMLBSync = function () {
     if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
     return;
   }
-  fetch('/api/mlb/sync', {
+  apiFetch('/api/mlb/sync', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ year: SELECTED_SEASON, round: wk.round, week: wk.week }),
