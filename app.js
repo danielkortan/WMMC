@@ -538,12 +538,6 @@ function displayPlayer(name, sd) {
   return `${esc(name)} (${esc(team)})`;
 }
 
-// Visible badge for pitchers who had 2+ starts in a week — QS can't be auto-calculated,
-// commissioner needs to manually score it in the app.
-function multiStartTag() {
-  return ' <span class="multi-start-tag" title="Multiple starts this week — review and set QS manually">⚠ Multi-Start</span>';
-}
-
 // ============================================================
 // Data helpers (localStorage cache + server persistence)
 // ============================================================
@@ -2543,7 +2537,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
         return `<tr>
         <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
         <td class="num">${r.gs || 0}</td><td class="num">${r.w || 0}</td>
-        <td class="num">${r.qs_highlight ? '&mdash;' : fmtDec(r.qs)}</td>
+        <td class="num">${fmtDec(r.qs)}</td>
         <td class="num">${r.cg || 0}</td><td class="num">${r.cgso || 0}</td>
         <td class="num">${r.nh || 0}</td><td class="num">${fmtDec(r.ip || 0)}</td>
         <td class="num">${r.h || 0}</td><td class="num">${r.er || 0}</td>
@@ -6008,16 +6002,10 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
           const cumScore = pitCum[pitcher] || 0;
           const cumRank = pRankingsPit.pitRanks[pitcher];
           html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-          html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}${s.qs_highlight ? multiStartTag() : ''}</td>`;
+          html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}</td>`;
           html += pitStatCell(s, 'gs', s.gs || 0);
           html += pitStatCell(s, 'w', s.w || 0);
-          // QS: highlight yellow if pitcher had 2+ GS (qs_highlight flag)
-          if (s.qs_highlight) {
-            const manual = (s.manual_fields || []).includes('qs');
-            html += `<td class="num qs-highlight${manual ? ' stat-manual' : ''}" title="Multiple GS this week - QS not calculated">&mdash;</td>`;
-          } else {
-            html += pitStatCell(s, 'qs', s.qs != null ? fmtDec(s.qs) : 0);
-          }
+          html += pitStatCell(s, 'qs', s.qs != null ? fmtDec(s.qs) : 0);
           html += pitStatCell(s, 'cg', s.cg || 0);
           html += pitStatCell(s, 'cgso', s.cgso || 0);
           html += pitStatCell(s, 'nh', s.nh || 0);
@@ -7417,7 +7405,7 @@ function showCommissionerPanel() {
   renderSwapLog();
   renderManagersTable();
   renderPlayerPoolDisplay();
-  renderTwoStartWorklist();
+  renderMLBSyncLog();
   renderWeeklyUploadSections();
   setupPlayerPoolUploads();
   setupSeasonSetupToggle();
@@ -7509,125 +7497,92 @@ window.saveSwapLogReason = function (swapId, newReason) {
   renderSwapLog();
 };
 
-// ---- Two-Start Pitcher Worklist (Commissioner Tab: Stats Data) ----
-// Lists every weekly_pitching record flagged as a multi-start (GS >= 2 or
-// qs_highlight) whose QS has not yet been entered. Commissioner sets QS
-// in-line; on save the row's weekly score is recomputed and the row is
-// removed from the worklist.
-function renderTwoStartWorklist() {
-  const container = document.getElementById('two-start-worklist');
-  if (!container) return;
+// ---- MLB API Sync Log (Commissioner Tab: Stats Data) ----
+function renderMLBSyncLog() {
+  const controlsDiv = document.getElementById('mlb-sync-controls');
+  const logDiv = document.getElementById('mlb-sync-log');
+  if (!controlsDiv) return;
 
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  const pitching = (sd && sd.weekly_pitching) || [];
+  controlsDiv.innerHTML = `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>`;
 
-  const pending = pitching.filter((p) => {
-    const gs = parseFloat(p.gs) || 0;
-    const isMulti = p.qs_highlight === true || gs >= 2;
-    // Server-side sync stores qs: 0 (not null) for multi-start pitchers, so
-    // we can't rely on qs == null. Use the manual_fields stamp instead — once
-    // the commissioner enters QS it gets added there, which is the reliable
-    // "resolved" signal regardless of how the record was created.
-    const qsResolved = (p.manual_fields || []).includes('qs');
-    return isMulti && !qsResolved && !!p.manager;
-  });
+  fetch('/api/mlb/sync-status')
+    .then((r) => r.json())
+    .then((s) => {
+      const nextDate = s.next_sync ? new Date(s.next_sync) : null;
+      if (nextDate) {
+        controlsDiv.innerHTML += `<span style="font-size:0.82rem;color:var(--text-muted,#666);margin-left:0.75rem;">Next auto-sync: ${nextDate.toLocaleString()}</span>`;
+      }
 
-  if (pending.length === 0) {
-    container.innerHTML = '<p class="text-muted">No two-start pitchers awaiting QS entry.</p>';
-    return;
-  }
+      if (!logDiv) return;
+      const logs = s.recent_logs || [];
+      if (logs.length === 0) {
+        logDiv.innerHTML = '<p class="text-muted" style="font-size:0.85rem;">No sync runs recorded yet.</p>';
+        return;
+      }
 
-  // Sort by schedule order (most recent week first), then manager, then pitcher
-  pending.sort((a, b) => {
-    const ai = weekIndexFromKey(a.round, a.week);
-    const bi = weekIndexFromKey(b.round, b.week);
-    if (ai !== bi) return bi - ai;
-    const am = a.manager || '';
-    const bm = b.manager || '';
-    if (am !== bm) return am.localeCompare(bm);
-    return (a.pitcher || '').localeCompare(b.pitcher || '');
-  });
+      let logHtml = `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
+        <h3 style="margin:0;">Sync Log</h3>
+        <button class="btn btn-sm btn-secondary" onclick="const e=document.getElementById('mlb-log-entries');e.style.display=e.style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
+      </div><div id="mlb-log-entries" style="display:none;" class="gsheets-log-list">`;
 
-  let html =
-    '<div class="table-wrapper"><table class="data-table compact-table two-start-worklist-table"><thead><tr>' +
-    '<th>Week</th><th>Manager</th><th>Pitcher</th><th class="num">GS</th><th class="num">IP</th>' +
-    '<th class="num">ER</th><th class="num">QS</th><th></th>' +
-    '</tr></thead><tbody>';
-
-  pending.forEach((p) => {
-    const round = esc(p.round || '');
-    const week = esc(p.week || '');
-    const weekKey = `${p.round || ''}|${p.week || ''}`;
-    const safeMgr = jsStr(p.manager || '');
-    const safePit = jsStr(p.pitcher || '');
-    const safeKey = jsStr(weekKey);
-    const inputId = `tsw-qs-${(p.manager || 'none').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.pitcher || '').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.round || '').replace(/[^a-zA-Z0-9]/g, '_')}-${(p.week || '').replace(/[^a-zA-Z0-9]/g, '_')}`;
-    const gs = parseFloat(p.gs) || 0;
-    html += `<tr>
-      <td style="white-space:nowrap;">${round} ${week}</td>
-      <td>${esc(p.manager || '—')}</td>
-      <td>${esc(p.pitcher || '')}${multiStartTag()}</td>
-      <td class="num">${gs}</td>
-      <td class="num">${fmtDec(p.ip || 0)}</td>
-      <td class="num">${p.er || 0}</td>
-      <td class="num"><input type="number" id="${inputId}" class="two-start-qs-input" min="0" max="${gs}" step="1" value="" placeholder="0"></td>
-      <td><button class="btn btn-sm btn-primary" onclick="saveTwoStartQS('${safeMgr}','${safePit}','${safeKey}','${inputId}')">Save</button></td>
-    </tr>`;
-  });
-
-  html += '</tbody></table></div>';
-  container.innerHTML = html;
+      logs.forEach((l) => {
+        const isAuto = l.type === 'mlbapi_auto_sync';
+        const typeBadge = isAuto
+          ? 'background:var(--accent,#6c63ff);color:#fff;'
+          : 'background:var(--secondary,#555);color:#fff;';
+        const detail = `${l.batting_imported ?? '?'} batting, ${l.pitching_imported ?? '?'} pitching (${l.games ?? '?'} games) — ${esc(l.round || '')} ${esc(l.week || '')}`;
+        logHtml += `<div class="gsheets-log-item">
+          <span class="gsheets-log-time">${esc(l.timestamp || '')}</span>
+          <span class="swap-badge" style="${typeBadge}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${isAuto ? 'Auto' : 'Manual'}</span>
+          <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
+        </div>`;
+      });
+      logHtml += '</div>';
+      logDiv.innerHTML = logHtml;
+    })
+    .catch(() => {
+      if (logDiv) logDiv.innerHTML = '<p class="text-muted" style="font-size:0.85rem;">Could not load sync log.</p>';
+    });
 }
 
-// Save the QS value entered in the worklist for a multi-start pitcher.
-// Sets qs on the matching weekly_pitching record, marks 'qs' as a manual
-// field (so future uploads won't overwrite it), clears the qs_highlight
-// flag, recalculates weekly_score, and re-renders the worklist.
-window.saveTwoStartQS = function (manager, pitcher, weekKey, inputId) {
-  const input = document.getElementById(inputId);
-  if (!input) return;
-  const raw = input.value;
-  if (raw === '' || raw == null) {
-    alert('Enter a QS value before saving.');
-    return;
-  }
-  const qsVal = parseNum(raw);
-
+window.triggerMLBSync = function () {
+  const btn = document.querySelector('#mlb-sync-controls .btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
   const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || !sd.weekly_pitching) return;
-
-  const [round, week] = weekKey.split('|');
-  const mgrKey = manager || null;
-  const rec = sd.weekly_pitching.find(
-    (p) =>
-      p.pitcher === pitcher &&
-      (p.manager || null) === mgrKey &&
-      p.round === round &&
-      p.week === week
-  );
-  if (!rec) {
-    alert('Could not find pitcher record to update.');
+  const sd = seasons && seasons[SELECTED_SEASON];
+  const wk = sd && detectCurrentScheduleWeekClient(sd);
+  if (!wk) {
+    alert('No active schedule week found — nothing to sync.');
+    if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; }
     return;
   }
-
-  const gs = parseFloat(rec.gs) || 0;
-  if (qsVal < 0 || qsVal > gs) {
-    alert(`QS must be between 0 and ${gs} (number of starts).`);
-    return;
-  }
-
-  rec.qs = qsVal;
-  rec.qs_highlight = false;
-  const manualFields = new Set(rec.manual_fields || []);
-  manualFields.add('qs');
-  rec.manual_fields = [...manualFields];
-  rec.weekly_score = calculatePitchingScore(rec);
-
-  saveSeason(SELECTED_SEASON, sd);
-  renderTwoStartWorklist();
+  fetch('/api/mlb/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ year: SELECTED_SEASON, round: wk.round, week: wk.week }),
+  })
+    .then((r) => r.json())
+    .then((res) => {
+      if (res.error) { alert(`Sync failed: ${res.error}`); }
+      else {
+        syncFromServer().then(() => { init(); renderMLBSyncLog(); });
+      }
+    })
+    .catch((e) => alert(`Sync error: ${e.message}`))
+    .finally(() => { if (btn) { btn.disabled = false; btn.textContent = 'Sync Now'; } });
 };
+
+function detectCurrentScheduleWeekClient(sd) {
+  const scheduleDates = sd.schedule_dates || [];
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    const d = scheduleDates[i];
+    if (d && d.start && d.end && today >= d.start && today <= d.end) {
+      return { round: SEASON_SCHEDULE[i].round, week: SEASON_SCHEDULE[i].week };
+    }
+  }
+  return null;
+}
 
 // ---- Pending Swap Requests (Commissioner Tab) ----
 function renderPendingSwapRequests() {
@@ -8573,7 +8528,6 @@ function gsProcessPitchingRows(rows, sd, scheduleWeek) {
       gs: gsGSVal,
       w: pn(gsFindCol(row, ['w', 'W', 'wins'])),
       qs: gsQSVal,
-      qs_highlight: gsGSVal >= 2,
       cg: pn(gsFindCol(row, ['cg', 'CG'])),
       cgso: pn(gsFindCol(row, ['cgso', 'CGSO'])),
       nh: pn(gsFindCol(row, ['nh', 'NH'])),
@@ -10199,14 +10153,10 @@ window.updateCommRosterWeekView = function (managerName) {
             ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
             : ' <span class="wrs-hist-tag">not rostered</span>';
         pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : pitDroppedTag}${s.qs_highlight ? multiStartTag() : ''}</td>`;
+        pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : pitDroppedTag}</td>`;
         pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
         pitHtml += `<td class="num${manual('w')}">${s.w || 0}</td>`;
-        if (s.qs_highlight) {
-          pitHtml += `<td class="num qs-highlight" title="Multiple GS - QS not calculated">&mdash;</td>`;
-        } else {
-          pitHtml += `<td class="num${manual('qs')}">${s.qs != null ? fmtDec(s.qs) : 0}</td>`;
-        }
+        pitHtml += `<td class="num${manual('qs')}">${s.qs != null ? fmtDec(s.qs) : 0}</td>`;
         pitHtml += `<td class="num${manual('cg')}">${s.cg || 0}</td>`;
         pitHtml += `<td class="num${manual('cgso')}">${s.cgso || 0}</td>`;
         pitHtml += `<td class="num${manual('nh')}">${s.nh || 0}</td>`;
@@ -11270,7 +11220,6 @@ window.uploadWeeklyPitching = function (weekIndex) {
         gs: gsVal,
         w: parseNum(row['w'] || row['W'] || row['wins'] || 0),
         qs: qsVal,
-        qs_highlight: gsVal >= 2, // flag for yellow highlight
         cg: parseNum(row['cg'] || row['CG'] || 0),
         cgso: parseNum(row['cgso'] || row['CGSO'] || 0),
         nh: parseNum(row['nh'] || row['NH'] || 0),

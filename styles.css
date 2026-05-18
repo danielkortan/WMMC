@@ -3212,40 +3212,6 @@ body::before {
   font-weight: 600;
 }
 
-/* ---- Two-Start Pitcher Worklist (Commissioner Stats Data tab) ---- */
-.two-start-worklist-table .two-start-qs-input {
-  width: 64px;
-  padding: 0.25rem 0.4rem;
-  font-size: 0.85rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--card-bg, #fff);
-  color: inherit;
-  text-align: right;
-}
-
-.two-start-worklist-table .two-start-qs-input:focus {
-  outline: 2px solid var(--navy);
-  outline-offset: -1px;
-  border-color: var(--navy);
-}
-
-/* ---- Multi-Start warning badge (next to pitcher name when GS >= 2) ---- */
-.multi-start-tag {
-  display: inline-block;
-  font-size: 0.65rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #92400e;
-  background: #fef3c7;
-  border: 1px solid #f59e0b;
-  border-radius: 3px;
-  padding: 0 0.3rem;
-  margin-left: 0.3rem;
-  vertical-align: middle;
-}
-
 /* ---- Roster Tabs ---- */
 .roster-tabs {
   display: flex;

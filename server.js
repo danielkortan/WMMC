@@ -2113,6 +2113,27 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
   });
 });
 
+// GET /api/mlb/sync-status
+app.get('/api/mlb/sync-status', requireCommissioner, (req, res) => {
+  const db = readDB();
+  const config = db.google_sheets_config || {};
+  const season = config.season || new Date().getFullYear().toString();
+  const sd = (db.seasons || {})[season] || {};
+  const recentLogs = (sd.upload_log || [])
+    .filter((l) => l.type === 'mlbapi_sync' || l.type === 'mlbapi_auto_sync')
+    .slice(-30)
+    .reverse();
+  const auditLogs = (db.audit_log || [])
+    .filter((l) => l.action === 'mlbapi_sync' || l.action === 'mlbapi_auto_sync')
+    .slice(0, 20);
+  const next = getNextEasternHour(4);
+  res.json({
+    next_sync: next.toISOString(),
+    recent_logs: recentLogs,
+    audit_logs: auditLogs,
+  });
+});
+
 // ============================================================
 // MLB Stats API Integration
 // ============================================================
