@@ -735,6 +735,76 @@ function recomputeAllWeeklyScores(sd) {
   });
 }
 
+// Rebuild weekly_batting/pitching summary rows for one week by aggregating
+// ALL stored daily_batting/pitching records for that week. This ensures the
+// weekly row always reflects the full week's accumulated games — not just the
+// ones fetched in the most recent API call — so a daily one-day fetch
+// correctly adds to the running total rather than overwriting it.
+// Skips any row with manual_fields or drop_locked (commissioner overrides stay intact).
+function rebuildWeeklyFromDaily(sd, round, week) {
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
+
+  const dailyBat = (sd.daily_batting || []).filter((r) => r.round === round && r.week === week);
+  const dailyPit = (sd.daily_pitching || []).filter((r) => r.round === round && r.week === week);
+
+  // Sum batting stats per player across all stored game records.
+  const batMap = {};
+  for (const r of dailyBat) {
+    const d = r.delta || r.cumulative || {};
+    if (!batMap[r.batter]) batMap[r.batter] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0 };
+    for (const k of Object.keys(batMap[r.batter])) batMap[r.batter][k] += d[k] || 0;
+  }
+
+  // Sum pitching stats per player (IP requires decimal arithmetic).
+  const pitMap = {};
+  for (const r of dailyPit) {
+    const d = r.delta || r.cumulative || {};
+    if (!pitMap[r.pitcher]) pitMap[r.pitcher] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+    const m = pitMap[r.pitcher];
+    for (const k of Object.keys(m)) {
+      if (k === 'ip') m.ip = Math.round((m.ip + (d.ip || 0)) * 1000) / 1000;
+      else m[k] += d[k] || 0;
+    }
+  }
+
+  for (const [name, cumulative] of Object.entries(batMap)) {
+    if (sd.weekly_batting.find(
+      (b) => b.round === round && b.week === week && b.batter === name &&
+        ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+    )) continue;
+    const manager = findManagerForPlayerWeek(sd, name, 'batting', round, week) || findManagerForPlayer(sd, name, 'batting');
+    const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
+    const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
+    sd.weekly_batting = sd.weekly_batting.filter(
+      (b) => !(b.round === round && b.week === week && b.batter === name && !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked))
+    );
+    sd.weekly_batting.push({
+      round, week, manager: manager || null, batter: name,
+      team: (sd.batters_team || {})[name] || null,
+      ...cumulative, weekly_score: weeklyScore, total_score: weeklyScore, source: 'mlbapi',
+    });
+  }
+
+  for (const [name, cumulative] of Object.entries(pitMap)) {
+    if (sd.weekly_pitching.find(
+      (p) => p.round === round && p.week === week && p.pitcher === name &&
+        ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+    )) continue;
+    const manager = findManagerForPlayerWeek(sd, name, 'pitching', round, week) || findManagerForPlayer(sd, name, 'pitching');
+    const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
+    const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
+    sd.weekly_pitching = sd.weekly_pitching.filter(
+      (p) => !(p.round === round && p.week === week && p.pitcher === name && !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked))
+    );
+    sd.weekly_pitching.push({
+      round, week, manager: manager || null, pitcher: name,
+      team: (sd.pitchers_team || {})[name] || null,
+      ...cumulative, qs_highlight: false, weekly_score: weeklyScore, source: 'mlbapi',
+    });
+  }
+}
+
 // One-shot migration: make the MLB Stats API the single source of truth for
 // stats and disable the daily Google Sheets sync. Runs once (gated by the
 // `mlb_api_takeover_v1` flag on the db root) so the commissioner can later
@@ -2525,68 +2595,10 @@ async function performMLBSync(sd, schedWeek, dates) {
     }
   }
 
-  // Aggregate totals across all stored game records and write weekly summary rows.
-  const { batting: weeklyBat, pitching: weeklyPit, teamMap: allTeams } = aggregatePerGame(gameRecords);
-
-  for (const [name, cumulative] of Object.entries(weeklyBat)) {
-    const manager =
-      findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
-      findManagerForPlayer(sd, name, 'batting');
-
-    const existingManual = sd.weekly_batting.find(
-      (b) => b.round === round && b.week === week && b.batter === name &&
-        ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
-    );
-    if (existingManual) continue;
-
-    const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
-    const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
-
-    sd.weekly_batting = sd.weekly_batting.filter(
-      (b) =>
-        !(
-          b.round === round &&
-          b.week === week &&
-          b.batter === name &&
-          !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
-        )
-    );
-    sd.weekly_batting.push({
-      round, week, manager: manager || null, batter: name, team: allTeams[name] || null,
-      ...cumulative, weekly_score: weeklyScore, total_score: weeklyScore, source: 'mlbapi',
-    });
-  }
-
-  for (const [name, cumulative] of Object.entries(weeklyPit)) {
-    const manager =
-      findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
-      findManagerForPlayer(sd, name, 'pitching');
-
-    const existingManual = sd.weekly_pitching.find(
-      (p) => p.round === round && p.week === week && p.pitcher === name &&
-        ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
-    );
-    if (existingManual) continue;
-
-    const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
-    const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
-
-    sd.weekly_pitching = sd.weekly_pitching.filter(
-      (p) =>
-        !(
-          p.round === round &&
-          p.week === week &&
-          p.pitcher === name &&
-          !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
-        )
-    );
-    sd.weekly_pitching.push({
-      round, week, manager: manager || null, pitcher: name, team: allTeams[name] || null,
-      // Cumulative qs is summed from per-game parseBoxscore output (GS=1 +
-      // IP>=5 + ER<=2), so the multi-start manual-review flag is unnecessary.
-      ...cumulative, qs_highlight: false, weekly_score: weeklyScore, source: 'mlbapi',
-    });
-  }
+  // Rebuild weekly summary rows from ALL stored daily records (not just the
+  // games fetched this call). This means a partial-date fetch correctly
+  // accumulates on top of prior data rather than overwriting it.
+  rebuildWeeklyFromDaily(sd, round, week);
 
   if (!sd.upload_log) sd.upload_log = [];
   sd.upload_log.push({
@@ -2604,40 +2616,134 @@ async function performMLBSync(sd, schedWeek, dates) {
   };
 }
 
+// Fetch one calendar day's games and add them to the daily records, then
+// rebuild the containing week's summary from all stored daily data.
+// Used for the daily 4am incremental update — doesn't overwrite other days.
+async function performMLBDailySync(sd, dateISO) {
+  const wk = detectScheduleWeekForDate(sd, dateISO);
+  if (!wk) return null;
+  const { round, week } = wk.schedWeek;
+
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
+  if (!sd.daily_batting) sd.daily_batting = [];
+  if (!sd.daily_pitching) sd.daily_pitching = [];
+  if (!sd.batters_team) sd.batters_team = {};
+  if (!sd.pitchers_team) sd.pitchers_team = {};
+
+  repairGhostInitialRosterPlayers(sd);
+  syncPlayerDatesFromRosterDates(sd);
+
+  const gameRecords = await fetchMLBPerGameStats(dateISO, dateISO, buildIdToWmmcName(sd));
+
+  for (const { teamMap } of gameRecords) {
+    for (const [name, abbrev] of Object.entries(teamMap)) {
+      sd.batters_team[name] = abbrev;
+      sd.pitchers_team[name] = abbrev;
+    }
+  }
+
+  let batImported = 0, pitImported = 0;
+
+  for (const { gameId, date, batting, pitching } of gameRecords) {
+    for (const [name, gameStats] of Object.entries(batting)) {
+      const locked = sd.daily_batting.find(
+        (r) => r.game_id === gameId && r.round === round && r.week === week && r.batter === name &&
+          ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+      );
+      if (locked) { batImported++; continue; }
+      sd.daily_batting = sd.daily_batting.filter(
+        (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
+      );
+      sd.daily_batting.push({ date, round, week, batter: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+      batImported++;
+    }
+    for (const [name, gameStats] of Object.entries(pitching)) {
+      const locked = sd.daily_pitching.find(
+        (r) => r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name &&
+          ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
+      );
+      if (locked) { pitImported++; continue; }
+      sd.daily_pitching = sd.daily_pitching.filter(
+        (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
+      );
+      sd.daily_pitching.push({ date, round, week, pitcher: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+      pitImported++;
+    }
+  }
+
+  rebuildWeeklyFromDaily(sd, round, week);
+
+  if (!sd.upload_log) sd.upload_log = [];
+  sd.upload_log.push({
+    timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    type: 'mlbapi_sync',
+    round, week, games: gameRecords.length,
+    batting_imported: batImported, pitching_imported: pitImported,
+    note: `daily-delta:${dateISO}`,
+  });
+  pruneSyncHistory(sd);
+
+  return { games_fetched: gameRecords.length, batting_imported: batImported, pitching_imported: pitImported, round, week };
+}
+
+// Determine which weeks to full-sync during a Wednesday correction run or a
+// Commissioner Sync Now. Returns 1-2 entries: the current week plus the prior
+// week, but only when both are in the same scoring phase (pool play or playoff).
+// Pool play weeks are never re-synced once the season enters playoffs, and
+// a new playoff round never re-syncs the previous playoff round.
+function resolveWeeksForCatchUp(sd, todayISO) {
+  const scheduleDates = sd.schedule_dates || [];
+  const todayWk = detectScheduleWeekForDate(sd, todayISO) || detectCurrentScheduleWeek(sd);
+  if (!todayWk) return [];
+  const curIdx = SEASON_SCHEDULE.findIndex(
+    (s) => s.round === todayWk.schedWeek.round && s.week === todayWk.schedWeek.week
+  );
+  const result = [{ schedWeek: todayWk.schedWeek, dates: todayWk.dates, label: 'current' }];
+  if (curIdx > 0) {
+    const prevSched = SEASON_SCHEDULE[curIdx - 1];
+    const prevDates = scheduleDates[curIdx - 1];
+    if (prevDates && prevDates.start && prevDates.end && shouldCatchUpPrior(todayWk.schedWeek.round, prevSched.round)) {
+      result.unshift({ schedWeek: prevSched, dates: prevDates, label: 'prior' });
+    }
+  }
+  return result;
+}
+
+// Pool play weeks sync together across the PP1→PP2 boundary.
+// Playoff rounds only sync within the same round (QF Week 2 catches up QF Week 1,
+// but SF Week 1 does NOT go back and re-sync QF Week 2).
+function shouldCatchUpPrior(currentRound, priorRound) {
+  const pp = new Set(['PP1', 'PP2']);
+  if (pp.has(currentRound) && pp.has(priorRound)) return true;
+  if (!pp.has(currentRound) && !pp.has(priorRound)) return currentRound === priorRound;
+  return false;
+}
+
 // POST /api/mlb/sync-current  { year }
-// Commissioner "Sync Now" endpoint: syncs yesterday's week (catch-up for late games)
-// and today's week when they differ, mirroring the 4am auto-sync logic exactly.
+// Commissioner "Sync Now": full-week correction for current week + prior week
+// (when same round/phase), same as what runs automatically on Wednesdays.
 app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
   const year = (req.body.year || new Date().getFullYear()).toString();
   const db = readDB();
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
-  const results = [];
   try {
     const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000)
-      .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const weekPairs = resolveWeeksForCatchUp(sd, todayET);
+    if (weekPairs.length === 0) return res.status(400).json({ error: 'No schedule week found for today' });
 
-    const todayWk = detectScheduleWeekForDate(sd, todayET) || detectCurrentScheduleWeek(sd);
-    const prevWk = detectScheduleWeekForDate(sd, yesterdayET);
-    const curKey = todayWk ? `${todayWk.schedWeek.round}|${todayWk.schedWeek.week}` : null;
-    const prevKey = prevWk ? `${prevWk.schedWeek.round}|${prevWk.schedWeek.week}` : null;
-
-    // Sync yesterday's week first if it differs (trailing-day catch-up).
-    if (prevWk && prevKey !== curKey) {
-      const r = await performMLBSync(sd, prevWk.schedWeek, prevWk.dates);
-      addAuditEntry(db, 'mlbapi_sync', { year, round: prevWk.schedWeek.round, week: prevWk.schedWeek.week, batting_imported: r.batting_imported, pitching_imported: r.pitching_imported, note: 'trailing-day catch-up' });
-      results.push({ week: `${prevWk.schedWeek.round} ${prevWk.schedWeek.week}`, ...r });
+    const results = [];
+    for (const { schedWeek, dates, label } of weekPairs) {
+      const r = await performMLBSync(sd, schedWeek, dates);
+      addAuditEntry(db, 'mlbapi_sync', {
+        year, round: schedWeek.round, week: schedWeek.week,
+        batting_imported: r.batting_imported, pitching_imported: r.pitching_imported,
+        note: `catchup-${label}`,
+      });
+      results.push({ week: `${schedWeek.round} ${schedWeek.week}`, label, ...r });
     }
-
-    if (todayWk) {
-      const r = await performMLBSync(sd, todayWk.schedWeek, todayWk.dates);
-      addAuditEntry(db, 'mlbapi_sync', { year, round: todayWk.schedWeek.round, week: todayWk.schedWeek.week, batting_imported: r.batting_imported, pitching_imported: r.pitching_imported });
-      results.push({ week: `${todayWk.schedWeek.round} ${todayWk.schedWeek.week}`, ...r });
-    }
-
-    if (results.length === 0) return res.status(400).json({ error: 'No schedule week found for today' });
 
     db.seasons[year] = sd;
     writeDB(db);
@@ -4709,6 +4815,20 @@ function detectScheduleWeekForDate(sd, dateISO) {
   return null;
 }
 
+// Sync schedule:
+//
+//  Every day at 4am ET — daily delta:
+//    Fetch only yesterday's games and add them to daily records, then rebuild
+//    the containing week's summary from all stored daily data. Keeps the
+//    Scoreboard and My Roster current without re-fetching the whole week.
+//
+//  Every Wednesday at 4am ET — full-week correction (in addition to the delta):
+//    Fetch the complete current week + prior week from MLB and rebuild weekly
+//    summaries. Catches MLB stat corrections that arrive days after games finish.
+//    Pool-play weeks are only re-synced while still in pool play; a new playoff
+//    round never goes back and re-syncs the previous round.
+//
+//  Commissioner Sync Now — same as Wednesday correction (current + prior week).
 function scheduleMLBApiSync() {
   if (mlbApiSyncTimer) clearTimeout(mlbApiSyncTimer);
 
@@ -4725,16 +4845,11 @@ function scheduleMLBApiSync() {
       } else {
         let dirty = false;
 
-        // Refresh the player pool first so call-ups and trades show up in the
-        // autocomplete even before the player appears in a boxscore. Runs even
-        // when we're outside the active sync window so off-season opens with a
-        // fresh roster of names.
+        // Refresh player pool every day so call-ups / trades appear in autocomplete.
         try {
           const r = await bootstrapPlayerPools(sd, season, { refresh: true });
           if (r.battersAdded > 0 || r.pitchersAdded > 0) {
-            console.log(
-              `[MLB-API] Pool refresh: +${r.battersAdded} batters, +${r.pitchersAdded} pitchers from ${r.catalogSize} active players.`
-            );
+            console.log(`[MLB-API] Pool refresh: +${r.battersAdded} batters, +${r.pitchersAdded} pitchers`);
             dirty = true;
           }
         } catch (e) {
@@ -4744,49 +4859,44 @@ function scheduleMLBApiSync() {
         if (!isWithinSyncWindow(sd)) {
           console.log(`[MLB-API] Stats sync skipped — outside season window for ${season}`);
         } else {
-          const wk = detectCurrentScheduleWeek(sd);
-          if (!wk) {
-            console.log(`[MLB-API] Stats sync skipped — no current schedule week for ${season}`);
-          } else {
-            // At 4am ET on the first day of a new week the previous week's
-            // evening games are finalized but were missed by yesterday's 4am run.
-            // Always do a catch-up sync on yesterday's week when it differs from
-            // today's so those games land in weekly_batting/pitching.
-            const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000)
-              .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-            const prevWk = detectScheduleWeekForDate(sd, yesterdayET);
-            const prevKey = prevWk ? `${prevWk.schedWeek.round}|${prevWk.schedWeek.week}` : null;
-            const curKey = `${wk.schedWeek.round}|${wk.schedWeek.week}`;
-            if (prevWk && prevKey !== curKey) {
-              const prevResult = await performMLBSync(sd, prevWk.schedWeek, prevWk.dates);
+          const todayET = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          const yesterdayET = new Date(now - 24 * 60 * 60 * 1000)
+            .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          const dayOfWeek = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+
+          // Wednesday: full-week correction for current + prior week (same phase).
+          if (dayOfWeek === 'Wednesday') {
+            const weekPairs = resolveWeeksForCatchUp(sd, todayET);
+            for (const { schedWeek, dates, label } of weekPairs) {
+              const r = await performMLBSync(sd, schedWeek, dates);
               addAuditEntry(db, 'mlbapi_auto_sync', {
-                year: season,
-                round: prevWk.schedWeek.round,
-                week: prevWk.schedWeek.week,
-                batting_imported: prevResult.batting_imported,
-                pitching_imported: prevResult.pitching_imported,
-                note: 'trailing-day catch-up',
+                year: season, round: schedWeek.round, week: schedWeek.week,
+                batting_imported: r.batting_imported, pitching_imported: r.pitching_imported,
+                note: `wed-correction:${label}`,
               });
               console.log(
-                `[MLB-API] Trailing-day catch-up: ${season} ${prevWk.schedWeek.round} ${prevWk.schedWeek.week} — ` +
-                `${prevResult.batting_imported} batting / ${prevResult.pitching_imported} pitching (${prevResult.games_fetched} games)`
+                `[MLB-API] Wed correction (${label}): ${season} ${schedWeek.round} ${schedWeek.week} — ` +
+                `${r.batting_imported} bat / ${r.pitching_imported} pit (${r.games_fetched} games)`
               );
-              dirty = true;
             }
+            dirty = true;
+          }
 
-            const result = await performMLBSync(sd, wk.schedWeek, wk.dates);
+          // Daily delta: fetch yesterday's games and add to existing weekly data.
+          const dailyResult = await performMLBDailySync(sd, yesterdayET);
+          if (dailyResult) {
             addAuditEntry(db, 'mlbapi_auto_sync', {
-              year: season,
-              round: wk.schedWeek.round,
-              week: wk.schedWeek.week,
-              batting_imported: result.batting_imported,
-              pitching_imported: result.pitching_imported,
+              year: season, round: dailyResult.round, week: dailyResult.week,
+              batting_imported: dailyResult.batting_imported, pitching_imported: dailyResult.pitching_imported,
+              note: `daily-delta:${yesterdayET}`,
             });
             console.log(
-              `[MLB-API] Daily sync complete: ${season} ${wk.schedWeek.round} ${wk.schedWeek.week} — ` +
-              `${result.batting_imported} batting / ${result.pitching_imported} pitching (${result.games_fetched} games)`
+              `[MLB-API] Daily delta (${yesterdayET}): ${season} ${dailyResult.round} ${dailyResult.week} — ` +
+              `${dailyResult.batting_imported} bat / ${dailyResult.pitching_imported} pit (${dailyResult.games_fetched} games)`
             );
             dirty = true;
+          } else {
+            console.log(`[MLB-API] Daily delta skipped — ${yesterdayET} outside season schedule`);
           }
         }
 
@@ -4807,9 +4917,7 @@ function scheduleMLBApiSync() {
 
   const next = getNextEasternHour(4);
   const delay = next - Date.now();
-  console.log(
-    `[MLB-API] Auto-sync enabled. Next sync at ${next.toISOString()} (4am Eastern, in ${Math.round(delay / 60000)} minutes)`
-  );
+  console.log(`[MLB-API] Auto-sync enabled. Next sync at ${next.toISOString()} (4am Eastern, in ${Math.round(delay / 60000)} minutes)`);
   mlbApiSyncTimer = setTimeout(runAndReschedule, delay);
 }
 
