@@ -1298,6 +1298,7 @@ function buildScoreboardBlocks(db, year) {
     }
   }
 
+  const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
   // ---- PP1 / PP2 pool winners (mirrors app hlClass logic) ----
