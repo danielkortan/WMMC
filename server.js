@@ -4302,51 +4302,52 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
 });
 
 // POST /api/slack/command — Slack slash command handler
-// Slack sends application/x-www-form-urlencoded; we need the raw body to verify the signature.
-function captureRawBody(req, res, next) {
-  let data = '';
+// Slack sends application/x-www-form-urlencoded. Body reading is inlined so
+// that express.json() (which runs globally) cannot leave the stream in a state
+// where the 'end' event never fires, which would cause a 3-second Slack timeout.
+app.post('/api/slack/command', (req, res) => {
+  let rawBody = '';
   req.setEncoding('utf8');
-  req.on('data', (chunk) => {
-    data += chunk;
-  });
+  req.on('data', (chunk) => { rawBody += chunk; });
+  req.on('error', () => res.status(400).send('Bad request'));
   req.on('end', () => {
-    req.rawBody = data;
-    next();
-  });
-}
+    try {
+      // Verify the request came from Slack
+      if (SLACK_SIGNING_SECRET) {
+        const timestamp = req.headers['x-slack-request-timestamp'];
+        const signature = req.headers['x-slack-signature'];
+        const age = Math.abs(Date.now() / 1000 - parseInt(timestamp || '0', 10));
+        if (!timestamp || !signature || age > 300) {
+          return res.status(403).send('Invalid request');
+        }
+        const hmac = crypto
+          .createHmac('sha256', SLACK_SIGNING_SECRET)
+          .update(`v0:${timestamp}:${rawBody}`)
+          .digest('hex');
+        if (`v0=${hmac}` !== signature) return res.status(403).send('Invalid signature');
+      }
 
-app.post('/api/slack/command', captureRawBody, (req, res) => {
-  // Verify the request came from Slack
-  if (SLACK_SIGNING_SECRET) {
-    const timestamp = req.headers['x-slack-request-timestamp'];
-    const signature = req.headers['x-slack-signature'];
-    const age = Math.abs(Date.now() / 1000 - parseInt(timestamp || '0', 10));
-    if (!timestamp || !signature || age > 300) {
-      return res.status(403).send('Invalid request');
+      // Parse the URL-encoded body Slack sends
+      const params = new URLSearchParams(rawBody || '');
+      const body = Object.fromEntries(params.entries());
+      const text = (body.text || '').trim().toLowerCase();
+
+      const db = readDB();
+      const config = db.google_sheets_config || {};
+      const year = config.season || String(new Date().getFullYear());
+
+      // Support optional year argument: /wmmc 2024
+      const requestedYear = /^\d{4}$/.test(text) ? text : year;
+
+      const { blocks, text: fallback } = buildScoreboardBlocks(db, requestedYear);
+
+      // response_type: in_channel makes the reply visible to everyone in the channel
+      res.json({ response_type: 'in_channel', text: fallback, blocks });
+    } catch (err) {
+      console.error('[Slack] /wmmc command error:', err);
+      res.json({ response_type: 'ephemeral', text: 'An error occurred generating the scoreboard.' });
     }
-    const hmac = crypto
-      .createHmac('sha256', SLACK_SIGNING_SECRET)
-      .update(`v0:${timestamp}:${req.rawBody}`)
-      .digest('hex');
-    if (`v0=${hmac}` !== signature) return res.status(403).send('Invalid signature');
-  }
-
-  // Parse the URL-encoded body Slack sends
-  const params = new URLSearchParams(req.rawBody || '');
-  const body = Object.fromEntries(params.entries());
-  const text = (body.text || '').trim().toLowerCase();
-
-  const db = readDB();
-  const config = db.google_sheets_config || {};
-  const year = config.season || String(new Date().getFullYear());
-
-  // Support optional year argument: /wmmc 2024
-  const requestedYear = /^\d{4}$/.test(text) ? text : year;
-
-  const { blocks, text: fallback } = buildScoreboardBlocks(db, requestedYear);
-
-  // response_type: in_channel makes the reply visible to everyone in the channel
-  res.json({ response_type: 'in_channel', text: fallback, blocks });
+  });
 });
 
 // DELETE /api/seasons/:year/week-data — clear all stats for a given week
