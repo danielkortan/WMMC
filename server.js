@@ -1156,6 +1156,95 @@ function computeRoundScores(batting, pitching, rounds, sd) {
   }));
 }
 
+// Compute high/low scores for a specific date (YYYY-MM-DD).
+// Returns { bestManager, worstManager, bestPlayer, worstPlayer } or null if no data.
+function computeDailyHighLow(sd, date) {
+  const dailyBat = (sd.daily_batting || []).filter((r) => r.date === date);
+  const dailyPit = (sd.daily_pitching || []).filter((r) => r.date === date);
+  if (dailyBat.length === 0 && dailyPit.length === 0) return null;
+
+  // Aggregate player scores across games on the same day (e.g. doubleheaders)
+  const batterScores = {};
+  const batRoundWeek = {};
+  for (const r of dailyBat) {
+    batterScores[r.batter] = (batterScores[r.batter] || 0) + calculateBattingScore(r.delta || {});
+    if (!batRoundWeek[r.batter]) batRoundWeek[r.batter] = { round: r.round, week: r.week };
+  }
+  const pitcherScores = {};
+  const pitRoundWeek = {};
+  for (const r of dailyPit) {
+    pitcherScores[r.pitcher] = (pitcherScores[r.pitcher] || 0) + calculatePitchingScore(r.delta || {});
+    if (!pitRoundWeek[r.pitcher]) pitRoundWeek[r.pitcher] = { round: r.round, week: r.week };
+  }
+
+  // Combined player list for individual high/low
+  const allPlayers = [
+    ...Object.entries(batterScores).map(([name, score]) => ({
+      name,
+      score: Math.round(score * 100) / 100,
+      type: 'Batter',
+    })),
+    ...Object.entries(pitcherScores).map(([name, score]) => ({
+      name,
+      score: Math.round(score * 100) / 100,
+      type: 'Pitcher',
+    })),
+  ];
+  if (allPlayers.length === 0) return null;
+  allPlayers.sort((a, b) => b.score - a.score);
+  const bestPlayer = allPlayers[0];
+  const worstPlayer = allPlayers[allPlayers.length - 1];
+
+  // Manager daily totals — respect player_dates date windows
+  const managerTotals = {};
+  const addToManager = (playerName, pdType, score, round, week) => {
+    const playerType = pdType === 'batter' ? 'batting' : 'pitching';
+    const mgr =
+      findManagerForPlayerWeek(sd, playerName, playerType, round, week) ||
+      findManagerForPlayer(sd, playerName, playerType);
+    if (!mgr) return;
+
+    const weekKey = `${round}|${week}`;
+    const weekIdx = getScheduleWeekIndex(round, week);
+    const weekDates = weekIdx >= 0 ? (sd.schedule_dates || [])[weekIdx] : null;
+    const override = (((sd.player_dates || {})[weekKey] || {})[pdType] || {})[playerName] || {};
+    const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
+    const effectiveEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
+    if (effectiveStart && date < effectiveStart) return;
+    if (effectiveEnd && date > effectiveEnd) return;
+
+    if (!managerTotals[mgr]) managerTotals[mgr] = { batting: 0, pitching: 0 };
+    managerTotals[mgr][playerType] += score;
+  };
+
+  for (const [name, score] of Object.entries(batterScores)) {
+    const { round, week } = batRoundWeek[name];
+    addToManager(name, 'batter', score, round, week);
+  }
+  for (const [name, score] of Object.entries(pitcherScores)) {
+    const { round, week } = pitRoundWeek[name];
+    addToManager(name, 'pitcher', score, round, week);
+  }
+
+  const managers = Object.entries(managerTotals)
+    .map(([manager, s]) => ({
+      manager,
+      batting: Math.round(s.batting * 100) / 100,
+      pitching: Math.round(s.pitching * 100) / 100,
+      total: Math.round((s.batting + s.pitching) * 100) / 100,
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  if (managers.length === 0) return null;
+
+  return {
+    topManagers: managers.slice(0, 3),
+    bottomManagers: managers.slice(-3).reverse(),
+    topPlayers: allPlayers.slice(0, 3),
+    bottomPlayers: allPlayers.slice(-3).reverse(),
+  };
+}
+
 function buildScoreboardBlocks(db, year) {
   const seasonData = (db.seasons || {})[year] || {};
   const managers = db.managers || [];
@@ -1277,21 +1366,23 @@ function buildScoreboardBlocks(db, year) {
         .join('\n')
     : '_No scores recorded yet._';
 
-  // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
+  // ---- Build pool text (combined into one string for the right column) ----
   const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
-  const poolFields = sortedPoolEntries.map(([poolName, members]) => {
-    const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
-    const lines = members
-      .map((m, i) => {
-        const d = dot(m.manager, currentRound);
-        const dotStr = d ? `${d} ` : '';
-        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-        const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
-        return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
-      })
-      .join('\n');
-    return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
-  });
+  const poolText = sortedPoolEntries
+    .map(([poolName, members]) => {
+      const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
+      const lines = members
+        .map((m, i) => {
+          const d = dot(m.manager, currentRound);
+          const dotStr = d ? `${d} ` : '';
+          const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+          const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+          return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+        })
+        .join('\n');
+      return `*${poolName}*\n${lines}`;
+    })
+    .join('\n\n');
 
   // ---- Assemble blocks ----
   const blocks = [];
@@ -1310,13 +1401,73 @@ function buildScoreboardBlocks(db, year) {
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: parts.join('  ·  ') }] });
   }
 
+  // ---- Standings: overall (left) + pool (right) in a 2-column layout ----
   blocks.push({ type: 'divider' });
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
+  if (currentRound && poolText) {
+    blocks.push({
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` },
+        { type: 'mrkdwn', text: `*\u{1F4CA} ${currentRoundLabel} Pool Standings*\n${poolText}` },
+      ],
+    });
+  } else {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
+  }
 
-  if (currentRound && poolFields.length > 0) {
+  // ---- Daily high/low section ----
+  const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000).toLocaleDateString('en-CA', {
+    timeZone: 'America/New_York',
+  });
+  const dailyHL = computeDailyHighLow(seasonData, yesterdayET);
+  if (dailyHL) {
+    const dateLabel = new Date(yesterdayET + 'T12:00:00Z').toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      timeZone: 'UTC',
+    });
+    const { topManagers, bottomManagers, topPlayers, bottomPlayers } = dailyHL;
+
+    const fmtMgr = (m, i, isBottom) => {
+      const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
+      return `${label} *${m.manager}* — ${fmt(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+    };
+    const fmtPlayer = (p, i, isBottom) => {
+      const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
+      return `${label} *${p.name}* (${p.type}) — ${fmt(p.score)} pts`;
+    };
+
     blocks.push({ type: 'divider' });
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F4CA} ${currentRoundLabel} Pool Standings*` } });
-    blocks.push({ type: 'section', fields: poolFields });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*\u{1F4C5} Yesterday's Best & Worst (${dateLabel})*` },
+    });
+    blocks.push({
+      type: 'section',
+      fields: [
+        {
+          type: 'mrkdwn',
+          text: `\u{1F3C6} *Best Manager Days*\n${topManagers.map((m, i) => fmtMgr(m, i, false)).join('\n')}`,
+        },
+        {
+          type: 'mrkdwn',
+          text: `\u{1F5D1}️ *Worst Manager Days*\n${bottomManagers.map((m, i) => fmtMgr(m, i, true)).join('\n')}`,
+        },
+      ],
+    });
+    blocks.push({
+      type: 'section',
+      fields: [
+        {
+          type: 'mrkdwn',
+          text: `\u{2B50} *Best Player Days*\n${topPlayers.map((p, i) => fmtPlayer(p, i, false)).join('\n')}`,
+        },
+        {
+          type: 'mrkdwn',
+          text: `\u{1F4C9} *Worst Player Days*\n${bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n')}`,
+        },
+      ],
+    });
   }
 
   blocks.push({ type: 'divider' });
