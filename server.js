@@ -1177,26 +1177,11 @@ function computeDailyHighLow(sd, date) {
     if (!pitRoundWeek[r.pitcher]) pitRoundWeek[r.pitcher] = { round: r.round, week: r.week };
   }
 
-  // Combined player list for individual high/low
-  const allPlayers = [
-    ...Object.entries(batterScores).map(([name, score]) => ({
-      name,
-      score: Math.round(score * 100) / 100,
-      type: 'Batter',
-    })),
-    ...Object.entries(pitcherScores).map(([name, score]) => ({
-      name,
-      score: Math.round(score * 100) / 100,
-      type: 'Pitcher',
-    })),
-  ];
-  if (allPlayers.length === 0) return null;
-  allPlayers.sort((a, b) => b.score - a.score);
-  const bestPlayer = allPlayers[0];
-  const worstPlayer = allPlayers[allPlayers.length - 1];
-
-  // Manager daily totals — respect player_dates date windows
+  // Manager daily totals — respect player_dates date windows.
+  // Track attributed players so the player high/low only covers rostered players.
   const managerTotals = {};
+  const attributedBatters = new Set();
+  const attributedPitchers = new Set();
   const addToManager = (playerName, pdType, score, round, week) => {
     const playerType = pdType === 'batter' ? 'batting' : 'pitching';
     const mgr =
@@ -1215,6 +1200,8 @@ function computeDailyHighLow(sd, date) {
 
     if (!managerTotals[mgr]) managerTotals[mgr] = { batting: 0, pitching: 0 };
     managerTotals[mgr][playerType] += score;
+    if (pdType === 'batter') attributedBatters.add(playerName);
+    else attributedPitchers.add(playerName);
   };
 
   for (const [name, score] of Object.entries(batterScores)) {
@@ -1226,6 +1213,17 @@ function computeDailyHighLow(sd, date) {
     addToManager(name, 'pitcher', score, round, week);
   }
 
+  // Combined rostered-player list for individual high/low
+  const allPlayers = [
+    ...Object.entries(batterScores)
+      .filter(([name]) => attributedBatters.has(name))
+      .map(([name, score]) => ({ name, score: Math.round(score * 100) / 100, type: 'Batter' })),
+    ...Object.entries(pitcherScores)
+      .filter(([name]) => attributedPitchers.has(name))
+      .map(([name, score]) => ({ name, score: Math.round(score * 100) / 100, type: 'Pitcher' })),
+  ];
+  if (allPlayers.length === 0) return null;
+  allPlayers.sort((a, b) => b.score - a.score);
   const managers = Object.entries(managerTotals)
     .map(([manager, s]) => ({
       manager,
@@ -1430,7 +1428,7 @@ function buildScoreboardBlocks(db, year) {
 
     const fmtMgr = (m, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
-      return `${label} *${m.manager}* — ${fmt(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+      return `${label} *${m.manager}* — ${fmt(m.total)} pts\n_(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
     };
     const fmtPlayer = (p, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
