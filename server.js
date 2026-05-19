@@ -1359,7 +1359,7 @@ function buildScoreboardBlocks(db, year) {
           const nameStr = d !== null ? `*${m.manager}*` : m.manager;
           const dotStr = d ? `${d} ` : '';
           const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-          return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+          return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
         })
         .join('\n')
     : '_No scores recorded yet._';
@@ -1374,7 +1374,7 @@ function buildScoreboardBlocks(db, year) {
           const d = dot(m.manager, currentRound);
           const dotStr = d ? `${d} ` : '';
           const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-          const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+          const trash = m.manager === poolLastMgr ? ' \u{1F4A9}' : '';
           return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
         })
         .join('\n');
