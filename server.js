@@ -1238,10 +1238,10 @@ function computeDailyHighLow(sd, date) {
   if (managers.length === 0) return null;
 
   return {
-    bestManager: managers[0],
-    worstManager: managers[managers.length - 1],
-    bestPlayer,
-    worstPlayer,
+    topManagers: managers.slice(0, 3),
+    bottomManagers: managers.slice(-3).reverse(),
+    topPlayers: allPlayers.slice(0, 3),
+    bottomPlayers: allPlayers.slice(-3).reverse(),
   };
 }
 
@@ -1366,21 +1366,23 @@ function buildScoreboardBlocks(db, year) {
         .join('\n')
     : '_No scores recorded yet._';
 
-  // ---- Build pool fields (side-by-side via Slack fields, 2-column grid) ----
+  // ---- Build pool text (combined into one string for the right column) ----
   const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
-  const poolFields = sortedPoolEntries.map(([poolName, members]) => {
-    const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
-    const lines = members
-      .map((m, i) => {
-        const d = dot(m.manager, currentRound);
-        const dotStr = d ? `${d} ` : '';
-        const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-        const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
-        return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
-      })
-      .join('\n');
-    return { type: 'mrkdwn', text: `*${poolName}*\n${lines}` };
-  });
+  const poolText = sortedPoolEntries
+    .map(([poolName, members]) => {
+      const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
+      const lines = members
+        .map((m, i) => {
+          const d = dot(m.manager, currentRound);
+          const dotStr = d ? `${d} ` : '';
+          const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+          const trash = m.manager === poolLastMgr ? ` ${dumpster}` : '';
+          return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+        })
+        .join('\n');
+      return `*${poolName}*\n${lines}`;
+    })
+    .join('\n\n');
 
   // ---- Assemble blocks ----
   const blocks = [];
@@ -1399,13 +1401,18 @@ function buildScoreboardBlocks(db, year) {
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: parts.join('  ·  ') }] });
   }
 
+  // ---- Standings: overall (left) + pool (right) in a 2-column layout ----
   blocks.push({ type: 'divider' });
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
-
-  if (currentRound && poolFields.length > 0) {
-    blocks.push({ type: 'divider' });
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F4CA} ${currentRoundLabel} Pool Standings*` } });
-    blocks.push({ type: 'section', fields: poolFields });
+  if (currentRound && poolText) {
+    blocks.push({
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` },
+        { type: 'mrkdwn', text: `*\u{1F4CA} ${currentRoundLabel} Pool Standings*\n${poolText}` },
+      ],
+    });
+  } else {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
   }
 
   // ---- Daily high/low section ----
@@ -1419,7 +1426,17 @@ function buildScoreboardBlocks(db, year) {
       day: 'numeric',
       timeZone: 'UTC',
     });
-    const { bestManager, worstManager, bestPlayer, worstPlayer } = dailyHL;
+    const { topManagers, bottomManagers, topPlayers, bottomPlayers } = dailyHL;
+
+    const fmtMgr = (m, i, isBottom) => {
+      const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
+      return `${label} *${m.manager}* — ${fmt(m.total)} pts _(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+    };
+    const fmtPlayer = (p, i, isBottom) => {
+      const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
+      return `${label} *${p.name}* (${p.type}) — ${fmt(p.score)} pts`;
+    };
+
     blocks.push({ type: 'divider' });
     blocks.push({
       type: 'section',
@@ -1430,11 +1447,11 @@ function buildScoreboardBlocks(db, year) {
       fields: [
         {
           type: 'mrkdwn',
-          text: `\u{1F3C6} *Best Manager Day*\n*${bestManager.manager}* — ${fmt(bestManager.total)} pts\n_(B: ${fmtInt(bestManager.batting)} | P: ${fmt(bestManager.pitching)})_`,
+          text: `\u{1F3C6} *Best Manager Days*\n${topManagers.map((m, i) => fmtMgr(m, i, false)).join('\n')}`,
         },
         {
           type: 'mrkdwn',
-          text: `\u{1F5D1}️ *Worst Manager Day*\n*${worstManager.manager}* — ${fmt(worstManager.total)} pts\n_(B: ${fmtInt(worstManager.batting)} | P: ${fmt(worstManager.pitching)})_`,
+          text: `\u{1F5D1}️ *Worst Manager Days*\n${bottomManagers.map((m, i) => fmtMgr(m, i, true)).join('\n')}`,
         },
       ],
     });
@@ -1443,11 +1460,11 @@ function buildScoreboardBlocks(db, year) {
       fields: [
         {
           type: 'mrkdwn',
-          text: `\u{2B50} *Best Player Day*\n*${bestPlayer.name}* (${bestPlayer.type}) — ${fmt(bestPlayer.score)} pts`,
+          text: `\u{2B50} *Best Player Days*\n${topPlayers.map((p, i) => fmtPlayer(p, i, false)).join('\n')}`,
         },
         {
           type: 'mrkdwn',
-          text: `\u{1F4C9} *Worst Player Day*\n*${worstPlayer.name}* (${worstPlayer.type}) — ${fmt(worstPlayer.score)} pts`,
+          text: `\u{1F4C9} *Worst Player Days*\n${bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n')}`,
         },
       ],
     });
