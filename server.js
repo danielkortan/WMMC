@@ -1531,10 +1531,17 @@ function recomputeMidWeekAddScores(sd, wipedAutoEntries = new Set()) {
   }
 
   for (const key of toRecompute) {
-    const [weekKey, type, player] = key.split('|');
-    const parts = weekKey.split('|');
-    const round = parts[0];
-    const week = parts.slice(1).join('|');
+    // Keys are formatted as `${weekKey}|${type}|${player}` where weekKey is
+    // itself `${round}|${week}` (e.g. "PP1|Week 1"). Split from the right so
+    // the embedded '|' in weekKey is not mistaken for a delimiter.
+    const lastPipe = key.lastIndexOf('|');
+    const secondLastPipe = key.lastIndexOf('|', lastPipe - 1);
+    const player = key.slice(lastPipe + 1);
+    const type = key.slice(secondLastPipe + 1, lastPipe);
+    const weekKey = key.slice(0, secondLastPipe);
+    const wkParts = weekKey.split('|');
+    const round = wkParts[0];
+    const week = wkParts.slice(1).join('|');
 
     if (type === 'batter') {
       (sd.weekly_batting || []).forEach((b) => {
