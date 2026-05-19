@@ -1270,7 +1270,34 @@ function buildScoreboardBlocks(db, year) {
 
   const currentRoundLabel = ROUND_LABELS[currentRound] || currentRound || 'Season';
 
-  const batting = seasonData.weekly_batting || [];
+  // Find the specific week within the current round that contains today
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  let currentWeek = null;
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    const { start, end } = scheduleDates[i] || {};
+    if (start && end && todayISO >= start && todayISO <= end) {
+      currentWeek = SEASON_SCHEDULE[i].week;
+      break;
+    }
+  }
+  if (!currentWeek) {
+    for (let i = SEASON_SCHEDULE.length - 1; i >= 0; i--) {
+      const { end } = scheduleDates[i] || {};
+      if (end && todayISO > end) { currentWeek = SEASON_SCHEDULE[i].week; break; }
+    }
+  }
+
+  // Find the end date of the last week belonging to the current round
+  let roundEndDate = null;
+  if (currentRound) {
+    for (let i = SEASON_SCHEDULE.length - 1; i >= 0; i--) {
+      if (SEASON_SCHEDULE[i].round === currentRound && (scheduleDates[i] || {}).end) {
+        roundEndDate = scheduleDates[i].end;
+        break;
+      }
+    }
+  }
+
   const pitching = seasonData.weekly_pitching || [];
 
   // ---- PP1 / PP2 pool winners (mirrors app hlClass logic) ----
@@ -1387,7 +1414,16 @@ function buildScoreboardBlocks(db, year) {
   const blocks = [];
 
   blocks.push({ type: 'header', text: { type: 'plain_text', text: `⚾ WMMC Scoreboard — ${year}`, emoji: true } });
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `\u{1F4C5} Current Period: *${currentRoundLabel}*` } });
+  const periodLabel = currentWeek ? `${currentRoundLabel} - ${currentWeek}` : currentRoundLabel;
+  const roundEndLabel = roundEndDate
+    ? new Date(roundEndDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+        month: 'long', day: 'numeric', timeZone: 'UTC',
+      })
+    : null;
+  const periodText = roundEndLabel
+    ? `\u{1F4C5} Current Period: *${periodLabel}*\nCurrent Round ends: ${roundEndLabel}`
+    : `\u{1F4C5} Current Period: *${periodLabel}*`;
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: periodText } });
 
   // Color legend shown during pool play rounds when leaders are determined
   if (['PP1', 'PP2'].includes(currentRound) && (pp1WinnerSet.size > 0 || pp2WinnerSet.size > 0)) {
