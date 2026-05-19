@@ -1159,8 +1159,9 @@ function computeRoundScores(batting, pitching, rounds, sd) {
 // Compute high/low scores for a specific date (YYYY-MM-DD).
 // Returns { bestManager, worstManager, bestPlayer, worstPlayer } or null if no data.
 function computeDailyHighLow(sd, date) {
-  const dailyBat = (sd.daily_batting || []).filter((r) => r.date === date);
-  const dailyPit = (sd.daily_pitching || []).filter((r) => r.date === date);
+  const hadGame = (delta) => delta && Object.values(delta).some((v) => (parseFloat(v) || 0) !== 0);
+  const dailyBat = (sd.daily_batting || []).filter((r) => r.date === date && hadGame(r.delta));
+  const dailyPit = (sd.daily_pitching || []).filter((r) => r.date === date && hadGame(r.delta));
   if (dailyBat.length === 0 && dailyPit.length === 0) return null;
 
   // Aggregate player scores across games on the same day (e.g. doubleheaders)
