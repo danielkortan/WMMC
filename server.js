@@ -51,7 +51,6 @@ async function postScoreboardSlack(db, year) {
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
 const ASSET_VERSION = Date.now();
 
-// Parse JSON bodies up to 50MB (season data can be large)
 // 10mb body limit — generous enough for banner-config base64 images and full
 // season payloads, but bounded so a malicious client can't OOM the process.
 app.use(express.json({ limit: '10mb' }));
@@ -760,7 +759,8 @@ function rebuildWeeklyFromDaily(sd, round, week) {
   const pitMap = {};
   for (const r of dailyPit) {
     const d = r.delta || r.cumulative || {};
-    if (!pitMap[r.pitcher]) pitMap[r.pitcher] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+    if (!pitMap[r.pitcher])
+      pitMap[r.pitcher] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
     const m = pitMap[r.pitcher];
     for (const k of Object.keys(m)) {
       if (k === 'ip') m.ip = Math.round((m.ip + (d.ip || 0)) * 1000) / 1000;
@@ -769,38 +769,76 @@ function rebuildWeeklyFromDaily(sd, round, week) {
   }
 
   for (const [name, cumulative] of Object.entries(batMap)) {
-    if (sd.weekly_batting.find(
-      (b) => b.round === round && b.week === week && b.batter === name &&
-        ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
-    )) continue;
-    const manager = findManagerForPlayerWeek(sd, name, 'batting', round, week) || findManagerForPlayer(sd, name, 'batting');
+    if (
+      sd.weekly_batting.find(
+        (b) =>
+          b.round === round &&
+          b.week === week &&
+          b.batter === name &&
+          ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+      )
+    )
+      continue;
+    const manager =
+      findManagerForPlayerWeek(sd, name, 'batting', round, week) || findManagerForPlayer(sd, name, 'batting');
     const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
     sd.weekly_batting = sd.weekly_batting.filter(
-      (b) => !(b.round === round && b.week === week && b.batter === name && !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked))
+      (b) =>
+        !(
+          b.round === round &&
+          b.week === week &&
+          b.batter === name &&
+          !((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
+        )
     );
     sd.weekly_batting.push({
-      round, week, manager: manager || null, batter: name,
+      round,
+      week,
+      manager: manager || null,
+      batter: name,
       team: (sd.batters_team || {})[name] || null,
-      ...cumulative, weekly_score: weeklyScore, total_score: weeklyScore, source: 'mlbapi',
+      ...cumulative,
+      weekly_score: weeklyScore,
+      total_score: weeklyScore,
+      source: 'mlbapi',
     });
   }
 
   for (const [name, cumulative] of Object.entries(pitMap)) {
-    if (sd.weekly_pitching.find(
-      (p) => p.round === round && p.week === week && p.pitcher === name &&
-        ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
-    )) continue;
-    const manager = findManagerForPlayerWeek(sd, name, 'pitching', round, week) || findManagerForPlayer(sd, name, 'pitching');
+    if (
+      sd.weekly_pitching.find(
+        (p) =>
+          p.round === round &&
+          p.week === week &&
+          p.pitcher === name &&
+          ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+      )
+    )
+      continue;
+    const manager =
+      findManagerForPlayerWeek(sd, name, 'pitching', round, week) || findManagerForPlayer(sd, name, 'pitching');
     const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
     sd.weekly_pitching = sd.weekly_pitching.filter(
-      (p) => !(p.round === round && p.week === week && p.pitcher === name && !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked))
+      (p) =>
+        !(
+          p.round === round &&
+          p.week === week &&
+          p.pitcher === name &&
+          !((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
+        )
     );
     sd.weekly_pitching.push({
-      round, week, manager: manager || null, pitcher: name,
+      round,
+      week,
+      manager: manager || null,
+      pitcher: name,
       team: (sd.pitchers_team || {})[name] || null,
-      ...cumulative, qs_highlight: false, weekly_score: weeklyScore, source: 'mlbapi',
+      ...cumulative,
+      qs_highlight: false,
+      weekly_score: weeklyScore,
+      source: 'mlbapi',
     });
   }
 }
@@ -851,7 +889,7 @@ async function applyMLBApiTakeover(db) {
         weeksSynced++;
         console.log(
           `[MLB-API takeover] Synced ${season} ${schedWeek.round} ${schedWeek.week} — ` +
-          `${result.games_fetched} games, ${result.batting_imported}B / ${result.pitching_imported}P`
+            `${result.games_fetched} games, ${result.batting_imported}B / ${result.pitching_imported}P`
         );
       } catch (e) {
         console.error(
@@ -1032,18 +1070,20 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
   const allMgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || null;
 
-  let weekRoster =
-    (sd.rosters && sd.rosters[managerName] && sd.rosters[managerName][weekKey]) ||
-    { batters: [], pitchers: [] };
+  let weekRoster = (sd.rosters && sd.rosters[managerName] && sd.rosters[managerName][weekKey]) || {
+    batters: [],
+    pitchers: [],
+  };
   const weekRosterDates =
-    (sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]) ||
-    {};
+    (sd.roster_dates && sd.roster_dates[managerName] && sd.roster_dates[managerName][weekKey]) || {};
 
   const weekStart = scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
   if (weekStart && allMgrDates) {
     const addedThisWeek = new Set([
       ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
-      ...Object.entries(weekRosterDates).filter(([, d]) => d.add_date).map(([p]) => p),
+      ...Object.entries(weekRosterDates)
+        .filter(([, d]) => d.add_date)
+        .map(([p]) => p),
     ]);
     const wasDroppedBefore = (player) => {
       if (addedThisWeek.has(player)) return false;
@@ -1063,10 +1103,7 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   const eligible = new Set([
     ...weekRoster[listKey],
     ...Object.keys(weekRosterDates).filter(
-      (p) =>
-        !seasonStartDate ||
-        !weekRosterDates[p].drop_date ||
-        weekRosterDates[p].drop_date >= seasonStartDate
+      (p) => !seasonStartDate || !weekRosterDates[p].drop_date || weekRosterDates[p].drop_date >= seasonStartDate
     ),
     ...approvedSwaps
       .filter(
@@ -1074,8 +1111,7 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
           s.player_in &&
           s.week_key === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
-          (weekRosterDates[s.player_in] ||
-            rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
+          (weekRosterDates[s.player_in] || rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
       )
       .map((s) => s.player_in),
   ]);
@@ -1093,9 +1129,7 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
     }
   });
 
-  return allWeekRows
-    .filter((r) => eligible.has(r[playerKey]))
-    .reduce((s, r) => s + (r.weekly_score || 0), 0);
+  return allWeekRows.filter((r) => eligible.has(r[playerKey])).reduce((s, r) => s + (r.weekly_score || 0), 0);
 }
 
 // Sum batting + pitching weekly_scores for the given rounds, scoped per
@@ -1130,9 +1164,7 @@ function computeRoundScores(batting, pitching, rounds, sd) {
   for (const r of batting) if (r.manager) managers.add(r.manager);
   for (const r of pitching) if (r.manager) managers.add(r.manager);
 
-  const targetRounds = rounds
-    ? new Set(rounds.map((r) => (r && r.endsWith('P') ? r.slice(0, -1) : r)))
-    : null;
+  const targetRounds = rounds ? new Set(rounds.map((r) => (r && r.endsWith('P') ? r.slice(0, -1) : r))) : null;
 
   const map = {};
   SEASON_SCHEDULE.forEach((schedWeek, idx) => {
@@ -1283,7 +1315,10 @@ function buildScoreboardBlocks(db, year) {
   if (!currentWeek) {
     for (let i = SEASON_SCHEDULE.length - 1; i >= 0; i--) {
       const { end } = scheduleDates[i] || {};
-      if (end && todayISO > end) { currentWeek = SEASON_SCHEDULE[i].week; break; }
+      if (end && todayISO > end) {
+        currentWeek = SEASON_SCHEDULE[i].week;
+        break;
+      }
     }
   }
 
@@ -1418,7 +1453,9 @@ function buildScoreboardBlocks(db, year) {
   const periodLabel = currentWeek ? `${currentRoundLabel} - ${currentWeek}` : currentRoundLabel;
   const roundEndLabel = roundEndDate
     ? new Date(roundEndDate + 'T12:00:00Z').toLocaleDateString('en-US', {
-        month: 'long', day: 'numeric', timeZone: 'UTC',
+        month: 'long',
+        day: 'numeric',
+        timeZone: 'UTC',
       })
     : null;
   const periodText = roundEndLabel
@@ -1545,8 +1582,9 @@ async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
         continue;
       }
       const text = await resp.text();
-      if (resp.status === 429)
-        {throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');}
+      if (resp.status === 429) {
+        throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');
+      }
       throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
     }
     const data = await resp.json();
@@ -1583,13 +1621,6 @@ function findCol(row, names) {
 // computeEffectiveBattingScore / computeEffectivePitchingScore filter daily deltas
 // to only the days a player was actually rostered. Only fills gaps — does not overwrite
 // existing player_dates entries (commissioner manual overrides take precedence).
-// Add one calendar day to a YYYY-MM-DD string.
-function addOneDay(dateStr) {
-  const d = new Date(dateStr + 'T12:00:00Z');
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().split('T')[0];
-}
-
 // Populate player_dates from roster_dates so per-day game records are
 // filtered to the inclusive window the player was actually rostered.
 //
@@ -2091,10 +2122,7 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
     // Keep cumulative.qs aligned with the corrected daily deltas so the
     // weekly_pitching row's QS column matches what feeds weekly_score.
     cumulative.qs = sd.daily_pitching
-      .filter(
-        (r) =>
-          r.pitcher === pitcher && r.round === scheduleWeek.round && r.week === scheduleWeek.week
-      )
+      .filter((r) => r.pitcher === pitcher && r.round === scheduleWeek.round && r.week === scheduleWeek.week)
       .reduce((sum, r) => sum + ((r.delta && r.delta.qs) || 0), 0);
 
     // Don't overwrite manually-edited or drop-locked weekly records
@@ -2185,8 +2213,9 @@ async function syncGoogleSheets(year, syncType = 'daily') {
   // Populate player_dates from roster_dates so mid-week adds/drops filter daily deltas correctly.
   syncPlayerDatesFromRosterDates(sd);
 
-  // Capture today's date once so all rows in this sync share the same snapshot date
-  const syncDate = new Date().toISOString().split('T')[0];
+  // Capture today's date once so all rows in this sync share the same snapshot date.
+  // Use Eastern time to match the MLB game-date convention used everywhere else.
+  const syncDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
   const results = [];
   let totalBatImported = 0,
@@ -2481,7 +2510,8 @@ function parseBoxscore(box, idToWmmcName = new Map()) {
         const hits = ps.hits || 0;
         const started = ps.gamesStarted || 0;
         const pitcherOuts = ps.outs ?? null;
-        const isCG = started > 0 && teamTotalOuts !== null && pitcherOuts !== null && pitcherOuts === teamTotalOuts ? 1 : 0;
+        const isCG =
+          started > 0 && teamTotalOuts !== null && pitcherOuts !== null && pitcherOuts === teamTotalOuts ? 1 : 0;
         pitching[name] = {
           gs: started,
           w: ps.wins || 0,
@@ -2539,7 +2569,8 @@ function aggregatePerGame(gameRecords) {
     }
 
     for (const [name, stats] of Object.entries(gp)) {
-      if (!pitching[name]) pitching[name] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+      if (!pitching[name])
+        pitching[name] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
       for (const k of Object.keys(pitching[name])) {
         if (k === 'ip') pitching[name].ip = Math.round((pitching[name].ip + (stats.ip || 0)) * 1000) / 1000;
         else pitching[name][k] += stats[k] || 0;
@@ -2556,7 +2587,13 @@ function enrichBatting(battingMap, teamMap, sd, schedWeek) {
     const manager =
       findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
       findManagerForPlayer(sd, name, 'batting');
-    return { name, manager: manager || null, team: teamMap[name] || null, ...stats, weekly_score: calculateBattingScore(stats) };
+    return {
+      name,
+      manager: manager || null,
+      team: teamMap[name] || null,
+      ...stats,
+      weekly_score: calculateBattingScore(stats),
+    };
   });
 }
 
@@ -2566,7 +2603,13 @@ function enrichPitching(pitchingMap, teamMap, sd, schedWeek) {
     const manager =
       findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
       findManagerForPlayer(sd, name, 'pitching');
-    return { name, manager: manager || null, team: teamMap[name] || null, ...stats, weekly_score: calculatePitchingScore(stats) };
+    return {
+      name,
+      manager: manager || null,
+      team: teamMap[name] || null,
+      ...stats,
+      weekly_score: calculatePitchingScore(stats),
+    };
   });
 }
 
@@ -2645,7 +2688,12 @@ app.get('/api/mlb/games', requireCommissioner, async (req, res) => {
     const withTotals = (log) =>
       Object.entries(log).map(([name, data]) => {
         const weekly_score = data.games.reduce((s, g) => s + g.game_score, 0);
-        return { name, ...data, games: data.games.sort((a, b) => a.date.localeCompare(b.date)), weekly_score: Math.round(weekly_score * 100) / 100 };
+        return {
+          name,
+          ...data,
+          games: data.games.sort((a, b) => a.date.localeCompare(b.date)),
+          weekly_score: Math.round(weekly_score * 100) / 100,
+        };
       });
 
     res.json({
@@ -2679,14 +2727,17 @@ app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
     const allPitchers = new Set([...mlbPit.map((p) => p.name), ...storedPit.map((p) => p.pitcher)]);
 
     const compareRows = (names, mlbList, storedList, nameKey) =>
-      [...names].map((name) => {
-        const mlb = mlbList.find((x) => x.name === name) || null;
-        const stored = storedList.find((x) => x[nameKey] === name) || null;
-        const mlbScore = mlb?.weekly_score ?? null;
-        const storedScore = stored?.weekly_score ?? null;
-        const diff = mlbScore !== null && storedScore !== null ? Math.round((mlbScore - storedScore) * 100) / 100 : null;
-        return { name, manager: mlb?.manager || stored?.manager || null, mlb, stored, score_diff: diff };
-      }).sort((a, b) => Math.abs(b.score_diff ?? 0) - Math.abs(a.score_diff ?? 0));
+      [...names]
+        .map((name) => {
+          const mlb = mlbList.find((x) => x.name === name) || null;
+          const stored = storedList.find((x) => x[nameKey] === name) || null;
+          const mlbScore = mlb?.weekly_score ?? null;
+          const storedScore = stored?.weekly_score ?? null;
+          const diff =
+            mlbScore !== null && storedScore !== null ? Math.round((mlbScore - storedScore) * 100) / 100 : null;
+          return { name, manager: mlb?.manager || stored?.manager || null, mlb, stored, score_diff: diff };
+        })
+        .sort((a, b) => Math.abs(b.score_diff ?? 0) - Math.abs(a.score_diff ?? 0));
 
     const battingComparison = compareRows(allBatters, mlbBat, storedBat, 'batter');
     const pitchingComparison = compareRows(allPitchers, mlbPit, storedPit, 'pitcher');
@@ -2703,12 +2754,14 @@ app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
     res.json({
       week: { round, week, start: dates.start, end: dates.end },
       games_fetched: gameRecords.length,
-      manager_summary: Object.entries(managerTotals).map(([manager, t]) => ({
-        manager,
-        mlb_total: Math.round(t.mlb * 100) / 100,
-        stored_total: Math.round(t.stored * 100) / 100,
-        diff: Math.round((t.mlb - t.stored) * 100) / 100,
-      })).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff)),
+      manager_summary: Object.entries(managerTotals)
+        .map(([manager, t]) => ({
+          manager,
+          mlb_total: Math.round(t.mlb * 100) / 100,
+          stored_total: Math.round(t.stored * 100) / 100,
+          diff: Math.round((t.mlb - t.stored) * 100) / 100,
+        }))
+        .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff)),
       batting: battingComparison,
       pitching: pitchingComparison,
     });
@@ -2743,7 +2796,10 @@ async function performMLBSync(sd, schedWeek, dates) {
     }
   }
 
-  let batImported = 0, batSkipped = 0, pitImported = 0, pitSkipped = 0;
+  let batImported = 0,
+    batSkipped = 0,
+    pitImported = 0,
+    pitSkipped = 0;
 
   // Store one daily record per player per game, then recompute weekly totals.
   for (const { gameId, date, batting, pitching } of gameRecords) {
@@ -2754,17 +2810,34 @@ async function performMLBSync(sd, schedWeek, dates) {
 
       // Skip if a manual/locked record already exists for this game
       const lockedDaily = sd.daily_batting.find(
-        (r) => r.game_id === gameId && r.round === round && r.week === week && r.batter === name &&
+        (r) =>
+          r.game_id === gameId &&
+          r.round === round &&
+          r.week === week &&
+          r.batter === name &&
           ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
       );
-      if (lockedDaily) { manager ? batImported++ : batSkipped++; continue; }
+      if (lockedDaily) {
+        manager ? batImported++ : batSkipped++;
+        continue;
+      }
 
       // Replace any previous mlbapi record for this game (handles stat corrections)
       sd.daily_batting = sd.daily_batting.filter(
-        (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
+        (r) =>
+          !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
       );
       // delta = game stats; cumulative = game stats (per-game: each record is its own increment)
-      sd.daily_batting.push({ date, round, week, batter: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+      sd.daily_batting.push({
+        date,
+        round,
+        week,
+        batter: name,
+        game_id: gameId,
+        cumulative: gameStats,
+        delta: gameStats,
+        source: 'mlbapi',
+      });
 
       manager ? batImported++ : batSkipped++;
     }
@@ -2775,15 +2848,32 @@ async function performMLBSync(sd, schedWeek, dates) {
         findManagerForPlayer(sd, name, 'pitching');
 
       const lockedDaily = sd.daily_pitching.find(
-        (r) => r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name &&
+        (r) =>
+          r.game_id === gameId &&
+          r.round === round &&
+          r.week === week &&
+          r.pitcher === name &&
           ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
       );
-      if (lockedDaily) { manager ? pitImported++ : pitSkipped++; continue; }
+      if (lockedDaily) {
+        manager ? pitImported++ : pitSkipped++;
+        continue;
+      }
 
       sd.daily_pitching = sd.daily_pitching.filter(
-        (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
+        (r) =>
+          !(r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
       );
-      sd.daily_pitching.push({ date, round, week, pitcher: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+      sd.daily_pitching.push({
+        date,
+        round,
+        week,
+        pitcher: name,
+        game_id: gameId,
+        cumulative: gameStats,
+        delta: gameStats,
+        source: 'mlbapi',
+      });
 
       manager ? pitImported++ : pitSkipped++;
     }
@@ -2798,15 +2888,20 @@ async function performMLBSync(sd, schedWeek, dates) {
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     type: 'mlbapi_sync',
-    round, week, games: gameRecords.length,
-    batting_imported: batImported, pitching_imported: pitImported,
+    round,
+    week,
+    games: gameRecords.length,
+    batting_imported: batImported,
+    pitching_imported: pitImported,
   });
   pruneSyncHistory(sd);
 
   return {
     games_fetched: gameRecords.length,
-    batting_imported: batImported, batting_skipped: batSkipped,
-    pitching_imported: pitImported, pitching_skipped: pitSkipped,
+    batting_imported: batImported,
+    batting_skipped: batSkipped,
+    pitching_imported: pitImported,
+    pitching_skipped: pitSkipped,
   };
 }
 
@@ -2837,31 +2932,66 @@ async function performMLBDailySync(sd, dateISO) {
     }
   }
 
-  let batImported = 0, pitImported = 0;
+  let batImported = 0,
+    pitImported = 0;
 
   for (const { gameId, date, batting, pitching } of gameRecords) {
     for (const [name, gameStats] of Object.entries(batting)) {
       const locked = sd.daily_batting.find(
-        (r) => r.game_id === gameId && r.round === round && r.week === week && r.batter === name &&
+        (r) =>
+          r.game_id === gameId &&
+          r.round === round &&
+          r.week === week &&
+          r.batter === name &&
           ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
       );
-      if (locked) { batImported++; continue; }
+      if (locked) {
+        batImported++;
+        continue;
+      }
       sd.daily_batting = sd.daily_batting.filter(
-        (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
+        (r) =>
+          !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
       );
-      sd.daily_batting.push({ date, round, week, batter: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+      sd.daily_batting.push({
+        date,
+        round,
+        week,
+        batter: name,
+        game_id: gameId,
+        cumulative: gameStats,
+        delta: gameStats,
+        source: 'mlbapi',
+      });
       batImported++;
     }
     for (const [name, gameStats] of Object.entries(pitching)) {
       const locked = sd.daily_pitching.find(
-        (r) => r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name &&
+        (r) =>
+          r.game_id === gameId &&
+          r.round === round &&
+          r.week === week &&
+          r.pitcher === name &&
           ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
       );
-      if (locked) { pitImported++; continue; }
+      if (locked) {
+        pitImported++;
+        continue;
+      }
       sd.daily_pitching = sd.daily_pitching.filter(
-        (r) => !(r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
+        (r) =>
+          !(r.game_id === gameId && r.round === round && r.week === week && r.pitcher === name && r.source === 'mlbapi')
       );
-      sd.daily_pitching.push({ date, round, week, pitcher: name, game_id: gameId, cumulative: gameStats, delta: gameStats, source: 'mlbapi' });
+      sd.daily_pitching.push({
+        date,
+        round,
+        week,
+        pitcher: name,
+        game_id: gameId,
+        cumulative: gameStats,
+        delta: gameStats,
+        source: 'mlbapi',
+      });
       pitImported++;
     }
   }
@@ -2872,13 +3002,22 @@ async function performMLBDailySync(sd, dateISO) {
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     type: 'mlbapi_sync',
-    round, week, games: gameRecords.length,
-    batting_imported: batImported, pitching_imported: pitImported,
+    round,
+    week,
+    games: gameRecords.length,
+    batting_imported: batImported,
+    pitching_imported: pitImported,
     note: `daily-delta:${dateISO}`,
   });
   pruneSyncHistory(sd);
 
-  return { games_fetched: gameRecords.length, batting_imported: batImported, pitching_imported: pitImported, round, week };
+  return {
+    games_fetched: gameRecords.length,
+    batting_imported: batImported,
+    pitching_imported: pitImported,
+    round,
+    week,
+  };
 }
 
 // Determine which weeks to full-sync during a Wednesday correction run or a
@@ -2932,8 +3071,11 @@ app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
     for (const { schedWeek, dates, label } of weekPairs) {
       const r = await performMLBSync(sd, schedWeek, dates);
       addAuditEntry(db, 'mlbapi_sync', {
-        year, round: schedWeek.round, week: schedWeek.week,
-        batting_imported: r.batting_imported, pitching_imported: r.pitching_imported,
+        year,
+        round: schedWeek.round,
+        week: schedWeek.week,
+        batting_imported: r.batting_imported,
+        pitching_imported: r.pitching_imported,
         note: `catchup-${label}`,
       });
       results.push({ week: `${schedWeek.round} ${schedWeek.week}`, label, ...r });
@@ -2959,7 +3101,13 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
   try {
     const result = await performMLBSync(sd, schedWeek, dates);
     db.seasons[year] = sd;
-    addAuditEntry(db, 'mlbapi_sync', { year, round, week, batting_imported: result.batting_imported, pitching_imported: result.pitching_imported });
+    addAuditEntry(db, 'mlbapi_sync', {
+      year,
+      round,
+      week,
+      batting_imported: result.batting_imported,
+      pitching_imported: result.pitching_imported,
+    });
     writeDB(db);
     res.json({ ok: true, ...result });
   } catch (e) {
@@ -2973,8 +3121,9 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
 
 // Standard Levenshtein distance.
 function levenshtein(a, b) {
-  const m = a.length, n = b.length;
-  const dp = Array.from({ length: m + 1 }, (_, i) => new Array(n + 1).fill(0));
+  const m = a.length,
+    n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
   for (let i = 1; i <= m; i++) {
@@ -2988,7 +3137,8 @@ function levenshtein(a, b) {
 // Strip accents, suffixes (Jr/Sr/III), and punctuation for comparison.
 function normalizeName(name) {
   return String(name)
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '')
     .replace(/[^a-z\s]/g, '')
@@ -3013,7 +3163,9 @@ function nameSimilarity(a, b) {
 // Collect every unique player name referenced anywhere in a season's data.
 function extractSeasonPlayerNames(sd) {
   const names = new Set();
-  const add = (v) => { if (v && typeof v === 'string') names.add(v); };
+  const add = (v) => {
+    if (v && typeof v === 'string') names.add(v);
+  };
 
   (sd.batters_pool || []).forEach(add);
   (sd.pitchers_pool || []).forEach(add);
@@ -3063,7 +3215,12 @@ function renamePlayerInSeason(sd, oldName, newName) {
 
   const renameArr = (arr) => {
     if (!arr) return;
-    arr.forEach((v, i) => { if (v === oldName) { arr[i] = newName; count++; } });
+    arr.forEach((v, i) => {
+      if (v === oldName) {
+        arr[i] = newName;
+        count++;
+      }
+    });
   };
   const renameKey = (obj) => {
     if (!obj || !(oldName in obj)) return;
@@ -3072,7 +3229,10 @@ function renamePlayerInSeason(sd, oldName, newName) {
     count++;
   };
   const renameField = (obj, field) => {
-    if (obj && obj[field] === oldName) { obj[field] = newName; count++; }
+    if (obj && obj[field] === oldName) {
+      obj[field] = newName;
+      count++;
+    }
   };
 
   renameArr(sd.batters_pool);
@@ -3153,11 +3313,7 @@ async function fetchMLBPlayerCatalog(season, { refresh = false } = {}) {
         fullName: p.fullName,
         // Prefer the canonical abbreviation from /api/v1/teams; only fall back
         // to whatever currentTeam exposed inline when the teamId is unknown.
-        team:
-          (teamId && teamAbbrevs[teamId]) ||
-          p.currentTeam?.abbreviation ||
-          p.currentTeam?.teamCode ||
-          null,
+        team: (teamId && teamAbbrevs[teamId]) || p.currentTeam?.abbreviation || p.currentTeam?.teamCode || null,
         teamId,
         position: p.primaryPosition?.abbreviation || null,
       };
@@ -3250,10 +3406,14 @@ function buildNameMatchReport(wmmcNames, mlbNames) {
     if (mlbSet.has(wmmcName)) {
       return { wmmc_name: wmmcName, mlb_name: wmmcName, score: 1.0, exact: true, action: 'none' };
     }
-    let bestName = null, bestScore = 0;
+    let bestName = null,
+      bestScore = 0;
     for (const mlbName of mlbNames) {
       const s = nameSimilarity(wmmcName, mlbName);
-      if (s > bestScore) { bestScore = s; bestName = mlbName; }
+      if (s > bestScore) {
+        bestScore = s;
+        bestName = mlbName;
+      }
     }
     const score = Math.round(bestScore * 1000) / 1000;
     return {
@@ -3354,14 +3514,6 @@ app.post('/api/mlb/name-fix', requireCommissioner, async (req, res) => {
   res.json({ ok: true, renames_applied: applied.length, applied });
 });
 
-// Returns the top N closest MLB names to a WMMC name, with scores.
-function topCandidates(wmmcName, mlbNames, n = 5) {
-  return mlbNames
-    .map((mlbName) => ({ mlb_name: mlbName, score: Math.round(nameSimilarity(wmmcName, mlbName) * 1000) / 1000 }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, n);
-}
-
 // Collect all player names that appear in any manager's roster for the given season.
 // "currently rostered" = present in sd.rosters for any week this season.
 function getRosteredNames(sd) {
@@ -3460,7 +3612,13 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
           duplicateReview.push({
             wmmc_name: wmmcName,
             reason: 'multiple_catalog_entries_share_name',
-            candidates: normMatches.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team, position: e.position, score: 1.0 })),
+            candidates: normMatches.map((e) => ({
+              mlb_id: e.id,
+              mlb_name: e.fullName,
+              team: e.team,
+              position: e.position,
+              score: 1.0,
+            })),
           });
         } else {
           // No normalized match — fall back to fuzzy.
@@ -3475,7 +3633,13 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
               wmmc_name: wmmcName,
               reason: 'fuzzy_top_match_has_multiple_catalog_entries',
               fuzzy_score: best.score,
-              candidates: topMlbDupes.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team, position: e.position, score: best.score })),
+              candidates: topMlbDupes.map((e) => ({
+                mlb_id: e.id,
+                mlb_name: e.fullName,
+                team: e.team,
+                position: e.position,
+                score: best.score,
+              })),
             });
           } else {
             rosteredReview.push({
@@ -3495,7 +3659,13 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
       if (best && best.score >= 0.75) {
         unrosteredAuto.push({ wmmc_name: wmmcName, mlb_name: best.mlb_name, mlb_id: best.mlb_id, score: best.score });
       } else {
-        unrosteredReplace.push({ wmmc_name: wmmcName, mlb_name: best?.mlb_name ?? null, mlb_id: best?.mlb_id ?? null, score: best?.score ?? 0, candidates });
+        unrosteredReplace.push({
+          wmmc_name: wmmcName,
+          mlb_name: best?.mlb_name ?? null,
+          mlb_id: best?.mlb_id ?? null,
+          score: best?.score ?? 0,
+          candidates,
+        });
       }
     }
 
@@ -3537,7 +3707,10 @@ function purgePlayerFromSeason(sd, name) {
     count += before - arr.length;
   };
   const removeKey = (obj) => {
-    if (obj && name in obj) { delete obj[name]; count++; }
+    if (obj && name in obj) {
+      delete obj[name];
+      count++;
+    }
   };
 
   removeFromArr(sd.batters_pool);
@@ -3679,11 +3852,20 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
         if (to !== wmmcName) occurrences = renamePlayerInSeason(sd, wmmcName, to);
         if (mlbId != null) {
           const r = assignId(to, mlbId);
-          if (!r.ok) { needsManual.push({ wmmc_name: wmmcName, reason: r.error }); continue; }
+          if (!r.ok) {
+            needsManual.push({ wmmc_name: wmmcName, reason: r.error });
+            continue;
+          }
           idsAssigned.push({ wmmc_name: to, mlb_id: mlbId, source: 'manual' });
         }
         if (to !== wmmcName || mlbId != null) {
-          applied.push({ from: wmmcName, to, mlb_id: mlbId ?? null, source: 'manual', occurrences_updated: occurrences });
+          applied.push({
+            from: wmmcName,
+            to,
+            mlb_id: mlbId ?? null,
+            source: 'manual',
+            occurrences_updated: occurrences,
+          });
         }
         continue;
       }
@@ -3705,10 +3887,19 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
             finalName = entry.fullName;
           }
           const r = assignId(finalName, entry.id);
-          if (!r.ok) { needsManual.push({ wmmc_name: wmmcName, reason: r.error }); continue; }
+          if (!r.ok) {
+            needsManual.push({ wmmc_name: wmmcName, reason: r.error });
+            continue;
+          }
           idsAssigned.push({ wmmc_name: finalName, mlb_id: entry.id, source: 'normalized_match' });
           if (occurrences > 0) {
-            applied.push({ from: wmmcName, to: finalName, mlb_id: entry.id, source: 'normalized_match', occurrences_updated: occurrences });
+            applied.push({
+              from: wmmcName,
+              to: finalName,
+              mlb_id: entry.id,
+              source: 'normalized_match',
+              occurrences_updated: occurrences,
+            });
           }
           continue;
         }
@@ -3718,7 +3909,12 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
           needsManual.push({
             wmmc_name: wmmcName,
             reason: 'multiple_catalog_entries_share_name',
-            candidates: normMatches.map((e) => ({ mlb_id: e.id, mlb_name: e.fullName, team: e.team, position: e.position })),
+            candidates: normMatches.map((e) => ({
+              mlb_id: e.id,
+              mlb_name: e.fullName,
+              team: e.team,
+              position: e.position,
+            })),
           });
           continue;
         }
@@ -3732,13 +3928,28 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
             const entry = targetMatches[0];
             const occurrences = renamePlayerInSeason(sd, wmmcName, entry.fullName);
             const r = assignId(entry.fullName, entry.id);
-            if (!r.ok) { needsManual.push({ wmmc_name: wmmcName, reason: r.error }); continue; }
+            if (!r.ok) {
+              needsManual.push({ wmmc_name: wmmcName, reason: r.error });
+              continue;
+            }
             idsAssigned.push({ wmmc_name: entry.fullName, mlb_id: entry.id, source: 'fuzzy_auto' });
-            applied.push({ from: wmmcName, to: entry.fullName, mlb_id: entry.id, source: 'fuzzy_auto', score: best.score, occurrences_updated: occurrences });
+            applied.push({
+              from: wmmcName,
+              to: entry.fullName,
+              mlb_id: entry.id,
+              source: 'fuzzy_auto',
+              score: best.score,
+              occurrences_updated: occurrences,
+            });
             continue;
           }
         }
-        needsManual.push({ wmmc_name: wmmcName, best_match: best?.mlb_name ?? null, score: best?.score ?? 0, candidates: fuzzy });
+        needsManual.push({
+          wmmc_name: wmmcName,
+          best_match: best?.mlb_name ?? null,
+          score: best?.score ?? 0,
+          candidates: fuzzy,
+        });
         continue;
       }
 
@@ -3807,13 +4018,23 @@ app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
         if (!rostered.has(name)) continue;
         const manager = findManagerForPlayer(sd, name, 'batting');
         if (!batterLog[name]) batterLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
-        batterLog[name].games.push({ date, game_id: gameId, ...stats, game_score: Math.round(calculateBattingScore(stats) * 100) / 100 });
+        batterLog[name].games.push({
+          date,
+          game_id: gameId,
+          ...stats,
+          game_score: Math.round(calculateBattingScore(stats) * 100) / 100,
+        });
       }
       for (const [name, stats] of Object.entries(pitching)) {
         if (!rostered.has(name)) continue;
         const manager = findManagerForPlayer(sd, name, 'pitching');
         if (!pitcherLog[name]) pitcherLog[name] = { manager: manager || null, team: teamMap[name] || null, games: [] };
-        pitcherLog[name].games.push({ date, game_id: gameId, ...stats, game_score: Math.round(calculatePitchingScore(stats) * 100) / 100 });
+        pitcherLog[name].games.push({
+          date,
+          game_id: gameId,
+          ...stats,
+          game_score: Math.round(calculatePitchingScore(stats) * 100) / 100,
+        });
       }
     }
 
@@ -3964,19 +4185,15 @@ app.get('/api/mlb/live', async (req, res) => {
     const playerRows = [];
     for (const [name, agg] of Object.entries(playerAgg)) {
       const manager =
-        findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) ||
-        findManagerForPlayer(sd, name, agg.type);
+        findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) || findManagerForPlayer(sd, name, agg.type);
       if (!manager) continue;
       const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
-      const score =
-        agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
+      const score = agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
       const hasLive = agg.games.some((g) => g.state === 'Live');
       const hasFinal = agg.games.some((g) => g.state === 'Final');
       // today_score = sum of just today's game contributions, so the standings can show
       // both this week's total and what a manager added in the current day.
-      const todayScore = agg.games
-        .filter((g) => g.date === today)
-        .reduce((s, g) => s + (g.game_score || 0), 0);
+      const todayScore = agg.games.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0);
       playerRows.push({
         name,
         manager,
@@ -3996,7 +4213,7 @@ app.get('/api/mlb/live', async (req, res) => {
     // Build per-manager roster team sets for the active week. Also keep the player lists
     // so we can count Live/Done/Remaining at the player level (today only) below.
     const weekKey = `${weekRound}|${weekName}`;
-    const managerBatters = {};  // manager -> string[]
+    const managerBatters = {}; // manager -> string[]
     const managerPitchers = {}; // manager -> string[]
     for (const [manager, weekRosters] of Object.entries(sd.rosters || {})) {
       const roster = weekRosters?.[weekKey];
@@ -4040,12 +4257,12 @@ app.get('/api/mlb/live', async (req, res) => {
       if (!managerMap[m]) {
         managerMap[m] = {
           name: m,
-          running_score: 0,       // sum of player running scores this week
-          today_score: 0,         // sum of player scores from today's games only
-          round_total: 0,         // see below — fills in after we have running_score
-          players_active: 0,      // rostered players whose team has a Live game today
-          players_finished: 0,    // rostered players whose team's games today are Final-only
-          players_remaining: 0,   // rostered players whose team has a Preview game today
+          running_score: 0, // sum of player running scores this week
+          today_score: 0, // sum of player scores from today's games only
+          round_total: 0, // see below — fills in after we have running_score
+          players_active: 0, // rostered players whose team has a Live game today
+          players_finished: 0, // rostered players whose team's games today are Final-only
+          players_remaining: 0, // rostered players whose team has a Preview game today
         };
       }
       return managerMap[m];
@@ -4114,7 +4331,10 @@ app.get('/api/mlb/live', async (req, res) => {
     const rankByTotals = (totalsMap) =>
       Object.entries(totalsMap)
         .sort((a, b) => b[1] - a[1])
-        .reduce((acc, [name], i) => { acc[name] = i + 1; return acc; }, {});
+        .reduce((acc, [name], i) => {
+          acc[name] = i + 1;
+          return acc;
+        }, {});
 
     const baselineRanks = rankByTotals(certifiedTotals);
     const liveTotalsMap = {};
@@ -4280,14 +4500,7 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   }
 
   const db = readDB();
-
-  // Require commissioner
   const userEmail = req.get('X-User-Email') || '';
-  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === userEmail.toLowerCase());
-  if (!manager || !manager.commissioner) {
-    return res.status(403).json({ error: 'Commissioner access required' });
-  }
-
   const config = db.google_sheets_config || {};
   const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
 
@@ -4309,7 +4522,9 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
 app.post('/api/slack/command', (req, res) => {
   let rawBody = '';
   req.setEncoding('utf8');
-  req.on('data', (chunk) => { rawBody += chunk; });
+  req.on('data', (chunk) => {
+    rawBody += chunk;
+  });
   req.on('error', () => res.status(400).send('Bad request'));
   req.on('end', () => {
     try {
@@ -4423,8 +4638,9 @@ app.post('/api/seasons/:year/player-dates', requireCommissioner, (req, res) => {
   if (!manager || !manager.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const { round, week, player, type, start, end } = req.body;
-  if (!round || !week || !player || !type)
-    {return res.status(400).json({ error: 'round, week, player, and type are required' });}
+  if (!round || !week || !player || !type) {
+    return res.status(400).json({ error: 'round, week, player, and type are required' });
+  }
   if (type !== 'batter' && type !== 'pitcher') return res.status(400).json({ error: 'type must be batter or pitcher' });
   if (start && !DATE_RE.test(start)) return res.status(400).json({ error: 'start must be YYYY-MM-DD' });
   if (end && !DATE_RE.test(end)) return res.status(400).json({ error: 'end must be YYYY-MM-DD' });
@@ -4496,8 +4712,9 @@ app.delete('/api/seasons/:year/player-dates', requireCommissioner, (req, res) =>
   if (!manager || !manager.commissioner) return res.status(403).json({ error: 'Commissioner access required' });
 
   const { round, week, player, type } = req.body;
-  if (!round || !week || !player || !type)
-    {return res.status(400).json({ error: 'round, week, player, and type are required' });}
+  if (!round || !week || !player || !type) {
+    return res.status(400).json({ error: 'round, week, player, and type are required' });
+  }
 
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
@@ -5055,8 +5272,9 @@ function scheduleMLBApiSync() {
           console.log(`[MLB-API] Stats sync skipped — outside season window for ${season}`);
         } else {
           const todayET = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-          const yesterdayET = new Date(now - 24 * 60 * 60 * 1000)
-            .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          const yesterdayET = new Date(now - 24 * 60 * 60 * 1000).toLocaleDateString('en-CA', {
+            timeZone: 'America/New_York',
+          });
           const dayOfWeek = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
 
           // Wednesday: full-week correction for current + prior week (same phase).
@@ -5065,13 +5283,16 @@ function scheduleMLBApiSync() {
             for (const { schedWeek, dates, label } of weekPairs) {
               const r = await performMLBSync(sd, schedWeek, dates);
               addAuditEntry(db, 'mlbapi_auto_sync', {
-                year: season, round: schedWeek.round, week: schedWeek.week,
-                batting_imported: r.batting_imported, pitching_imported: r.pitching_imported,
+                year: season,
+                round: schedWeek.round,
+                week: schedWeek.week,
+                batting_imported: r.batting_imported,
+                pitching_imported: r.pitching_imported,
                 note: `wed-correction:${label}`,
               });
               console.log(
                 `[MLB-API] Wed correction (${label}): ${season} ${schedWeek.round} ${schedWeek.week} — ` +
-                `${r.batting_imported} bat / ${r.pitching_imported} pit (${r.games_fetched} games)`
+                  `${r.batting_imported} bat / ${r.pitching_imported} pit (${r.games_fetched} games)`
               );
             }
             dirty = true;
@@ -5081,13 +5302,16 @@ function scheduleMLBApiSync() {
           const dailyResult = await performMLBDailySync(sd, yesterdayET);
           if (dailyResult) {
             addAuditEntry(db, 'mlbapi_auto_sync', {
-              year: season, round: dailyResult.round, week: dailyResult.week,
-              batting_imported: dailyResult.batting_imported, pitching_imported: dailyResult.pitching_imported,
+              year: season,
+              round: dailyResult.round,
+              week: dailyResult.week,
+              batting_imported: dailyResult.batting_imported,
+              pitching_imported: dailyResult.pitching_imported,
               note: `daily-delta:${yesterdayET}`,
             });
             console.log(
               `[MLB-API] Daily delta (${yesterdayET}): ${season} ${dailyResult.round} ${dailyResult.week} — ` +
-              `${dailyResult.batting_imported} bat / ${dailyResult.pitching_imported} pit (${dailyResult.games_fetched} games)`
+                `${dailyResult.batting_imported} bat / ${dailyResult.pitching_imported} pit (${dailyResult.games_fetched} games)`
             );
             dirty = true;
           } else {
@@ -5112,7 +5336,9 @@ function scheduleMLBApiSync() {
 
   const next = getNextEasternHour(4);
   const delay = next - Date.now();
-  console.log(`[MLB-API] Auto-sync enabled. Next sync at ${next.toISOString()} (4am Eastern, in ${Math.round(delay / 60000)} minutes)`);
+  console.log(
+    `[MLB-API] Auto-sync enabled. Next sync at ${next.toISOString()} (4am Eastern, in ${Math.round(delay / 60000)} minutes)`
+  );
   mlbApiSyncTimer = setTimeout(runAndReschedule, delay);
 }
 
@@ -5227,7 +5453,7 @@ async function main() {
         const r = await bootstrapPlayerPools(sd, season);
         console.log(
           `[Player Pool] Seeded from ${r.catalogSize} active MLB players ` +
-          `(+${r.battersAdded} batters, +${r.pitchersAdded} pitchers).`
+            `(+${r.battersAdded} batters, +${r.pitchersAdded} pitchers).`
         );
         dbForPool.seasons[season] = sd;
         writeDB(dbForPool);

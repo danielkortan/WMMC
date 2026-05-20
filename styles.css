@@ -4137,7 +4137,9 @@ body::before {
   padding: 0.3rem 0;
   border-bottom: 1px solid var(--border);
 }
-.live-game-row:last-child { border-bottom: none; }
+.live-game-row:last-child {
+  border-bottom: none;
+}
 .live-game-line {
   font-variant-numeric: tabular-nums;
   font-size: 0.95rem;
@@ -4147,17 +4149,31 @@ body::before {
   font-style: italic;
   padding: 0.5rem;
 }
-.muted { color: var(--text-muted); font-weight: normal; }
-.num-cell { text-align: right; font-variant-numeric: tabular-nums; }
+.muted {
+  color: var(--text-muted);
+  font-weight: normal;
+}
+.num-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Highlight a manager's name while they still have games in progress or to play today. */
 .live-mgr-active {
   color: var(--success);
   font-weight: 600;
 }
-.rank-delta-up { color: var(--success); font-weight: 600; }
-.rank-delta-down { color: var(--accent); font-weight: 600; }
-.rank-delta-zero { color: var(--text-muted); }
+.rank-delta-up {
+  color: var(--success);
+  font-weight: 600;
+}
+.rank-delta-down {
+  color: var(--accent);
+  font-weight: 600;
+}
+.rank-delta-zero {
+  color: var(--text-muted);
+}
 
 /* Live tab manager-row drop-down: click any row to reveal today's batter +
    pitcher stats for that manager's active rostered players. */
@@ -4195,7 +4211,9 @@ body::before {
   border-bottom: 1px solid var(--border);
   padding: 0.6rem 0 0.8rem;
 }
-.live-game-row:has(+ .live-game-detail) { border-bottom: none; }
+.live-game-row:has(+ .live-game-detail) {
+  border-bottom: none;
+}
 .live-box-loading {
   color: var(--text-muted);
   font-style: italic;
@@ -4207,8 +4225,13 @@ body::before {
   gap: 1rem;
 }
 @media (min-width: 900px) {
-  .live-box-panel { flex-direction: row; }
-  .live-box-side { flex: 1; min-width: 0; }
+  .live-box-panel {
+    flex-direction: row;
+  }
+  .live-box-side {
+    flex: 1;
+    min-width: 0;
+  }
 }
 .live-box-team-header {
   font-weight: 600;
@@ -4232,9 +4255,11 @@ body::before {
   font-size: 0.82rem;
 }
 .live-box-rostered {
-  background: rgba(34, 197, 94, 0.10);
+  background: rgba(34, 197, 94, 0.1);
 }
-.live-box-rostered td:first-child { font-weight: 600; }
+.live-box-rostered td:first-child {
+  font-weight: 600;
+}
 .live-box-mgr-tag {
   display: inline-block;
   margin-left: 0.3rem;

@@ -83,11 +83,13 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 ## Do / Don't
 
 **Do:**
+
 - Run `npm run lint && npm run format:check` before considering any task done
 - Update tests when changing public function signatures in `js/`
 - Add new third-party libraries only if confirmed — list alternatives first
 
 **Don't:**
+
 - Don't add new dependencies without asking.
 - Don't duplicate logic between `app.js` and `js/` — if a function exists in `js/`, call it from there and remove the copy in `app.js`.
 - Don't commit `db.json`.
