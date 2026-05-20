@@ -1,92 +1,102 @@
-# [PROJECT NAME]
-
-> Per-project CLAUDE.md. Lives at the project root. Read at the start of every session.
-> Personal defaults (communication style, scope rules, etc.) live in `~/.claude/CLAUDE.md` — don't duplicate them here. Only put project-specific stuff in this file.
+# Whit Merrifield Memorial Cup (WMMC)
 
 ## What this project is
 
-[1-2 sentences. What does this thing do, and who uses it?]
+WMMC is a full-stack fantasy baseball league management app used by a private league. It manages multi-season scoring, weekly roster swaps with commissioner approval, a playoff bracket, and daily stat syncing from the MLB Stats API (with a Google Sheets fallback). Commissioners run the league through a built-in admin panel; managers view standings, rosters, and trends on the same single-page app.
 
-[Optional: link to a longer README or spec if one exists]
+See README.md for full feature list, API reference, and deployment instructions.
 
 ## Tech stack — use these, do not suggest alternatives
 
 Always use the tools below. If you genuinely think the wrong tool was chosen for a task, flag it once, then proceed with the stack unless I say otherwise.
 
-- **Language:** [e.g. TypeScript 5.x]
-- **Runtime:** [e.g. Node 20]
-- **Frontend framework:** [e.g. Next.js 14 App Router]
-- **Backend / API:** [e.g. Next.js API routes, or FastAPI, etc.]
-- **Database:** [e.g. PostgreSQL via Prisma]
-- **Auth:** [e.g. Clerk, NextAuth, custom]
-- **Styling:** [e.g. Tailwind CSS + shadcn/ui]
-- **Testing:** [e.g. Vitest + Playwright]
-- **Package manager:** [e.g. pnpm — never npm or yarn]
-- **Hosting / deploy:** [e.g. Vercel]
+- **Language:** JavaScript (ES2021) — no TypeScript
+- **Runtime:** Node.js 18+
+- **Frontend:** Vanilla JS — `app.js` monolith being incrementally modularized into `js/`; Chart.js loaded from CDN
+- **Backend / API:** Express 4.x (`server.js`)
+- **Database:** File-backed `db.json` via synchronous `fs`; optional Upstash Redis backup for Render deploys
+- **Auth:** Per-request email/password check against `db.json` (no sessions)
+- **Styling:** Monolithic `styles.css` — no framework
+- **Testing:** Node.js built-in test runner (`node --test`)
+- **Package manager:** npm
+- **Hosting / deploy:** Render.com (`render.yaml`)
+- **Linting/Formatting:** ESLint 8 + Prettier 3
 
 ## Commands
 
-- Install: `[pnpm install]`
-- Dev server: `[pnpm dev]`
-- Test (all): `[pnpm test]`
-- Test (one file): `[pnpm test path/to/file]`
-- Lint: `[pnpm lint]`
-- Typecheck: `[pnpm typecheck]`
-- Build: `[pnpm build]`
-- Run before committing: `[pnpm typecheck && pnpm lint]`
+- Install: `npm install`
+- Start: `npm start`
+- Test (all): `npm test`
+- Test (one file): `node --test tests/scoring.test.js`
+- Lint: `npm run lint`
+- Lint fix: `npm run lint:fix`
+- Format: `npm run format`
+- Format check: `npm run format:check`
+- Run before committing: `npm run lint && npm run format:check`
+
+No watch mode — restart `npm start` manually after backend changes.
+The pre-push hook in `.githooks/pre-push` auto-stamps `version.json` with today's date. Never skip it with `--no-verify`.
 
 ## Architecture in one paragraph
 
-[How does data flow? Where do new things go? Example: "API routes in app/api/ call services in lib/services/, which are the only place that touches the database via lib/db.ts. Components are server components by default; only mark 'use client' when you need state or events. Auth is checked at the route boundary, not inside services."]
+Express backend in `server.js` handles all API routes, the scoring engine, MLB Stats API sync, Google Sheets sync, and Slack notifications. State lives in `db.json` (read and written synchronously on every request) and is mirrored to Upstash Redis on every write. The frontend is a single-page app: `index.html` loads `app.js` (a monolith being incrementally modularized) plus extracted `js/` modules. There is no build step — static files are served directly by Express. Auth is stateless: `X-User-Email` and `X-User-Password` headers are re-validated against `db.json` on every mutating request.
 
 ## Where things live
 
-- `app/` — [routes and pages]
-- `components/` — [reusable UI]
-- `lib/services/` — [business logic]
-- `lib/db.ts` — [DB client, the only file that imports Prisma]
-- [add the folders that matter for this project]
+- `server.js` — Express backend: all API routes, scoring engine, MLB Stats API sync, Google Sheets sync, Slack
+- `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
+- `index.html` — Single-page app shell
+- `styles.css` — All styles (monolithic)
+- `js/` — Extracted frontend modules (`scoring.js`, `csv.js`, `utils.js`, `index.js`)
+- `tests/` — Unit tests for `js/` modules only
+- `db.json` — Runtime database (gitignored); written by server on every mutation
+- `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
+- `data.json` — Historical seed data (read-only)
+- `render.yaml` — Render.com deploy config
+- `.githooks/` — Git hooks (pre-push stamps `version.json`)
 
 ## Permanent project facts
 
 These are always true. Apply to every session. If a task conflicts with one, flag it before proceeding.
 
-- [e.g. "All dates are stored in UTC; conversion happens in the view layer only."]
-- [e.g. "User-facing copy lives in lib/copy.ts — never hardcode strings in components."]
-- [e.g. "Never call the database from a component. Always go through a service in lib/services/."]
-- [e.g. "Public API responses are typed in lib/types/api.ts — update the type when changing the response."]
-- [add things that are specific to this project that I'd want enforced]
+- `SCORING` and `SEASON_SCHEDULE` are hardcoded in **both** `server.js` and `app.js` and must be kept in sync — every edit goes in both files.
+- Never commit `db.json` — it is gitignored and contains passwords.
+- `managers_seed.json` stores manager identities but never passwords — the server strips passwords before writing it.
+- The frontend has no build step — `index.html` loads files directly; there is nothing to compile or bundle.
+- Once a function is moved to `js/`, delete its copy from `app.js` — do not let both coexist.
 
 ## Conventions and patterns
 
-- **Error handling:** [e.g. "Services throw typed errors from lib/errors.ts. Route handlers catch and map to HTTP responses. Never swallow errors silently."]
-- **Logging:** [e.g. "Use logger from lib/log.ts. No console.log in committed code."]
-- **Naming:** [e.g. "camelCase for variables, PascalCase for components and types, kebab-case for filenames."]
-- **Imports:** [e.g. "Absolute imports via @/* alias. No relative imports across top-level folders."]
-- **Testing philosophy:** [e.g. "Unit-test services and lib/. E2E-test critical user flows. Don't test components in isolation unless they have complex logic."]
+- **Error handling:** Route handlers return `{ error: '...' }` JSON with an appropriate HTTP status code. Never swallow errors silently.
+- **Logging:** Plain `console.log` / `console.error` — no abstraction layer.
+- **Naming:** camelCase for variables and functions.
+- **Imports:** CommonJS `require()` in `server.js` and `app.js`; ES module `export`/`import` in `js/` modules. Do not mix the two styles within a file.
+- **Testing philosophy:** Unit-test pure logic in `js/`. There are no e2e tests. Do not write tests for `server.js` or `app.js` directly.
 
 ## Gotchas — things that look wrong but aren't
 
-- [e.g. "The build-time warning about useSearchParams is expected; it's a Next.js quirk we can't suppress."]
-- [e.g. "Don't move file X to folder Y — it's imported by a generated file that the build script writes."]
-- [add traps that have bitten you before]
+- `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `app.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical.
+- `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
+- `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
+- The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.
 
 ## Do / Don't
 
 **Do:**
-- Run `pnpm typecheck` and `pnpm lint` before considering a task done
-- Update tests when changing public function signatures
-- Add new third-party libraries only if I confirm — list the alternatives first
+- Run `npm run lint && npm run format:check` before considering any task done
+- Update tests when changing public function signatures in `js/`
+- Add new third-party libraries only if confirmed — list alternatives first
 
 **Don't:**
-- Don't use `any` in TypeScript. Use `unknown` and narrow, or define a proper type.
 - Don't add new dependencies without asking.
-- Don't introduce new patterns when an existing pattern in this repo already solves the problem. Look for prior art first.
-- [add project-specific don'ts]
+- Don't duplicate logic between `app.js` and `js/` — if a function exists in `js/`, call it from there and remove the copy in `app.js`.
+- Don't commit `db.json`.
+- Don't edit `SCORING` or `SEASON_SCHEDULE` in only one file — both `server.js` and `app.js` must be updated together.
+- Don't skip the pre-push hook (`--no-verify`).
 
 ## Memory files
 
-- `MEMORY.md` — decisions log. Read at session start. Append on meaningful decisions and at session end.
+- `MEMORY.md` — decisions log. Read at session start if it exists. Append on meaningful decisions and at session end.
 - `ERRORS.md` — what didn't work and what did. Check before proposing approaches to similar problems.
 
-(See `~/.claude/CLAUDE.md` for how I want these maintained.)
+(These files do not exist yet — create them when first needed.)
