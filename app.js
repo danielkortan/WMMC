@@ -5458,15 +5458,21 @@ function renderRosterData(managerName, isCommissioner) {
 
 // Compute cumulative scores for all players within a single scoring period (round),
 // across all managers. Used for period-scoped CUM RANK computation.
-function computePeriodCumulativeScores(seasonData, round) {
+// maxWeek (optional): only include weeks up to and including this week (e.g. "Week 3").
+function computePeriodCumulativeScores(seasonData, round, maxWeek) {
+  const maxWeekNum = maxWeek ? parseInt(maxWeek.split(' ')[1]) || Infinity : Infinity;
   const batCumulative = {},
     pitCumulative = {};
   (seasonData.weekly_batting || []).forEach((b) => {
     if (b.round !== round || !b.batter) return;
+    const weekNum = parseInt((b.week || '').split(' ')[1]) || 0;
+    if (weekNum > maxWeekNum) return;
     batCumulative[b.batter] = (batCumulative[b.batter] || 0) + (b.weekly_score || 0);
   });
   (seasonData.weekly_pitching || []).forEach((p) => {
     if (p.round !== round || !p.pitcher) return;
+    const weekNum = parseInt((p.week || '').split(' ')[1]) || 0;
+    if (weekNum > maxWeekNum) return;
     pitCumulative[p.pitcher] = (pitCumulative[p.pitcher] || 0) + (p.weekly_score || 0);
   });
   for (const k of Object.keys(batCumulative)) batCumulative[k] = Math.round(batCumulative[k] * 100) / 100;
@@ -5536,11 +5542,13 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   const batting = isHistorical ? DATA.batting_weekly || [] : seasonData.weekly_batting || [];
   const pitching = isHistorical ? DATA.pitching_weekly || [] : seasonData.weekly_pitching || [];
 
-  // Per-round cache: CUM PTS = player's total in this round while on this manager's roster.
-  // CUM RANK = league-wide rank within the same period.
+  // Per-round cache: CUM PTS = player's total in this round (up to maxWeek) while on this manager's roster.
+  // CUM RANK = league-wide rank within the same period up to maxWeek.
   const roundDataCache = {};
-  function getRoundData(round) {
-    if (roundDataCache[round]) return roundDataCache[round];
+  function getRoundData(round, maxWeek) {
+    const cacheKey = `${round}|${maxWeek}`;
+    if (roundDataCache[cacheKey]) return roundDataCache[cacheKey];
+    const maxWeekNum = maxWeek ? parseInt(maxWeek.split(' ')[1]) || Infinity : Infinity;
     const sourceData = isActive ? seasonData : { weekly_batting: batting, weekly_pitching: pitching };
     // Use the season's own arrays (not DATA.batting_weekly) to avoid historical bleed.
     const cumBatting = isActive ? seasonData.weekly_batting || [] : batting;
@@ -5569,6 +5577,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       pitCum = {};
     cumBatting.forEach((b) => {
       if (b.round !== round || !b.batter) return;
+      const weekNum = parseInt((b.week || '').split(' ')[1]) || 0;
+      if (weekNum > maxWeekNum) return;
       const weekKey = `${b.round}|${b.week}`;
       if (!wasRosteredThisWeek(b.batter, weekKey, 'bat')) return;
       if (b.manager === managerName || b.manager === null) {
@@ -5577,6 +5587,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     });
     cumPitching.forEach((p) => {
       if (p.round !== round || !p.pitcher) return;
+      const weekNum = parseInt((p.week || '').split(' ')[1]) || 0;
+      if (weekNum > maxWeekNum) return;
       const weekKey = `${p.round}|${p.week}`;
       if (!wasRosteredThisWeek(p.pitcher, weekKey, 'pit')) return;
       if (p.manager === managerName || p.manager === null) {
@@ -5585,11 +5597,11 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     });
     for (const k of Object.keys(batCum)) batCum[k] = Math.round(batCum[k] * 100) / 100;
     for (const k of Object.keys(pitCum)) pitCum[k] = Math.round(pitCum[k] * 100) / 100;
-    // League-wide period cumulative for CUM RANK
-    const periodScores = computePeriodCumulativeScores(sourceData, round);
+    // League-wide period cumulative for CUM RANK (bounded to same maxWeek)
+    const periodScores = computePeriodCumulativeScores(sourceData, round, maxWeek);
     const periodRankings = computeCumulativeRankings(periodScores.batCumulative, periodScores.pitCumulative);
-    roundDataCache[round] = { batCum, pitCum, periodRankings };
-    return roundDataCache[round];
+    roundDataCache[cacheKey] = { batCum, pitCum, periodRankings };
+    return roundDataCache[cacheKey];
   }
 
   // Available players for commissioner add
@@ -5933,7 +5945,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
           const s = batStatMap[batter] || {};
           const onRoster = weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
           const wkRank = weekRanks.batRanks[batter];
-          const { batCum, periodRankings: pRankings } = getRoundData(round);
+          const { batCum, periodRankings: pRankings } = getRoundData(round, week);
           const cumScore = batCum[batter] || 0;
           const cumRank = pRankings.batRanks[batter];
           html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
@@ -5998,7 +6010,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
           const s = pitStatMap[pitcher] || {};
           const onRoster = weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
           const wkRank = weekRanks.pitRanks[pitcher];
-          const { pitCum, periodRankings: pRankingsPit } = getRoundData(round);
+          const { pitCum, periodRankings: pRankingsPit } = getRoundData(round, week);
           const cumScore = pitCum[pitcher] || 0;
           const cumRank = pRankingsPit.pitRanks[pitcher];
           html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
@@ -9846,16 +9858,19 @@ window.updateCommRosterWeekView = function (managerName) {
     if ((type === 'bat' ? wkRoster.batters : wkRoster.pitchers).includes(player)) return true;
     return !!(commMgrRosterDates[wkKey] || {})[player];
   }
+  const maxWeekNum = parseInt((week || '').split(' ')[1]) || Infinity;
   const commBatCum = {},
     commPitCum = {};
   (sd.weekly_batting || []).forEach((b) => {
     if (b.round !== round || !b.batter) return;
+    if ((parseInt((b.week || '').split(' ')[1]) || 0) > maxWeekNum) return;
     if ((b.manager === managerName || b.manager === null) && commWasRostered(b.batter, `${b.round}|${b.week}`, 'bat')) {
       commBatCum[b.batter] = (commBatCum[b.batter] || 0) + (b.weekly_score || 0);
     }
   });
   (sd.weekly_pitching || []).forEach((p) => {
     if (p.round !== round || !p.pitcher) return;
+    if ((parseInt((p.week || '').split(' ')[1]) || 0) > maxWeekNum) return;
     if (
       (p.manager === managerName || p.manager === null) &&
       commWasRostered(p.pitcher, `${p.round}|${p.week}`, 'pit')
@@ -9865,7 +9880,7 @@ window.updateCommRosterWeekView = function (managerName) {
   });
   for (const k of Object.keys(commBatCum)) commBatCum[k] = Math.round(commBatCum[k] * 100) / 100;
   for (const k of Object.keys(commPitCum)) commPitCum[k] = Math.round(commPitCum[k] * 100) / 100;
-  const periodScoresComm = computePeriodCumulativeScores(sd, round);
+  const periodScoresComm = computePeriodCumulativeScores(sd, round, week);
   const cumRankings = computeCumulativeRankings(periodScoresComm.batCumulative, periodScoresComm.pitCumulative);
   const weekRanks = computeWeeklyRankings(sd, round, week);
 
