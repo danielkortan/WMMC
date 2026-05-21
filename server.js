@@ -4147,7 +4147,9 @@ app.get('/api/mlb/live', async (req, res) => {
 
     // Fetch boxscores for Live + Final games. Preview games have no stats yet.
     // Done sequentially to avoid hammering the MLB API; ~15 games/day is fine on a 60s poll.
-    const playerAgg = {}; // wmmcName -> { type, stats, games:[{game_id, date, state, stats}] }
+    // Keyed by `${wmmcName}::${type}` so two-way players (e.g. Ohtani) get separate
+    // batting and pitching entries instead of colliding into one row.
+    const playerAgg = {};
     for (const game of games) {
       if (game.state !== 'Live' && game.state !== 'Final') continue;
       let box;
@@ -4160,14 +4162,15 @@ app.get('/api/mlb/live', async (req, res) => {
 
       const collect = (statsMap, type, scorer) => {
         for (const [name, stats] of Object.entries(statsMap)) {
-          if (!playerAgg[name]) {
-            playerAgg[name] = { type, stats: {}, games: [] };
+          const key = `${name}::${type}`;
+          if (!playerAgg[key]) {
+            playerAgg[key] = { name, type, stats: {}, games: [] };
           }
           // Sum stats across games this week so the weekly running total stays correct.
           for (const k of Object.keys(stats)) {
-            playerAgg[name].stats[k] = (playerAgg[name].stats[k] || 0) + (stats[k] || 0);
+            playerAgg[key].stats[k] = (playerAgg[key].stats[k] || 0) + (stats[k] || 0);
           }
-          playerAgg[name].games.push({
+          playerAgg[key].games.push({
             game_id: game.game_id,
             date: game.date,
             state: game.state,
@@ -4183,7 +4186,8 @@ app.get('/api/mlb/live', async (req, res) => {
     // Resolve manager + team for each player and compute running scores.
     // Only include rostered players in the live view — unrostered names are noise here.
     const playerRows = [];
-    for (const [name, agg] of Object.entries(playerAgg)) {
+    for (const [, agg] of Object.entries(playerAgg)) {
+      const { name } = agg;
       const manager =
         findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) || findManagerForPlayer(sd, name, agg.type);
       if (!manager) continue;
