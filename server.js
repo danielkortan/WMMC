@@ -1217,9 +1217,7 @@ function computeDailyHighLow(sd, date) {
   const attributedPitchers = new Set();
   const addToManager = (playerName, pdType, score, round, week) => {
     const playerType = pdType === 'batter' ? 'batting' : 'pitching';
-    const mgr =
-      findManagerForPlayerWeek(sd, playerName, playerType, round, week) ||
-      findManagerForPlayer(sd, playerName, playerType);
+    const mgr = findManagerForPlayerWeek(sd, playerName, playerType, round, week);
     if (!mgr) return;
 
     const weekKey = `${round}|${week}`;
