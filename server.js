@@ -1223,6 +1223,28 @@ function computeDailyHighLow(sd, date) {
     const weekKey = `${round}|${week}`;
     const weekIdx = getScheduleWeekIndex(round, week);
     const weekDates = weekIdx >= 0 ? (sd.schedule_dates || [])[weekIdx] : null;
+    const weekStart = weekDates ? weekDates.start : null;
+
+    // Exclude players dropped before this week started (roster carry-overs from prior weeks).
+    // Mirrors the wasDroppedBefore guard in managerWeekSubtotal.
+    if (weekStart) {
+      const mgrDates = (sd.roster_dates && sd.roster_dates[mgr]) || {};
+      const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+      const addedThisWeek = new Set([
+        ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+        ...Object.entries(mgrDates[weekKey] || {})
+          .filter(([, d]) => d.add_date)
+          .map(([p]) => p),
+      ]);
+      if (!addedThisWeek.has(playerName)) {
+        for (const [wk, players] of Object.entries(mgrDates)) {
+          if (wk === weekKey) continue;
+          const pd = players[playerName];
+          if (pd && pd.drop_date && pd.drop_date < weekStart) return;
+        }
+      }
+    }
+
     const override = (((sd.player_dates || {})[weekKey] || {})[pdType] || {})[playerName] || {};
     const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
     const effectiveEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
