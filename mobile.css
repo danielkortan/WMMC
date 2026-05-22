@@ -661,10 +661,9 @@
   }
 
   /* ── Detail rows (player list) — full-width ───────────────── */
-  /* Force the <tr> and <td> to be full-width blocks so the
-     detail panel can use the entire screen width */
+  /* The <td> is forced to block/full-width; the <tr> display is
+     left to JS so toggling style="display:none" works correctly */
   #scoreboard-content .data-table .sb-manager-detail-row {
-    display: block !important;
     width: 100% !important;
   }
 
@@ -708,8 +707,10 @@
     margin-bottom: 0.125rem;
   }
 
-  /* Player table — proper table display, all columns, full width */
-  .mgr-detail-section table {
+  /* Player table — proper table display, all columns, full width.
+     Selectors use #scoreboard-content .data-table prefix (specificity [1,2,x])
+     to beat the outer display:block!important rule (specificity [1,1,0]). */
+  #scoreboard-content .data-table .mgr-detail-section table {
     display: table !important;
     width: 100% !important;
     table-layout: fixed;
@@ -717,11 +718,11 @@
     font-size: 0.9rem;
   }
 
-  .mgr-detail-section table thead {
+  #scoreboard-content .data-table .mgr-detail-section table thead {
     display: table-header-group !important;
   }
 
-  .mgr-detail-section table thead th {
+  #scoreboard-content .data-table .mgr-detail-section table thead th {
     display: table-cell !important;
     font-size: 0.65rem !important;
     font-weight: 700;
@@ -734,17 +735,17 @@
     background: none !important;
   }
 
-  .mgr-detail-section table tbody {
+  #scoreboard-content .data-table .mgr-detail-section table tbody {
     display: table-row-group !important;
   }
 
-  .mgr-detail-section table tbody tr {
+  #scoreboard-content .data-table .mgr-detail-section table tbody tr {
     display: table-row !important;
     padding: 0 !important;
   }
 
   /* Show all 3 columns: Player | Pts | Date */
-  .mgr-detail-section table tbody tr td {
+  #scoreboard-content .data-table .mgr-detail-section table tbody tr td {
     display: table-cell !important;
     padding: 0.35rem 0.25rem !important;
     font-size: 0.9rem;
@@ -754,7 +755,7 @@
   }
 
   /* Player name column — fills remaining width */
-  .mgr-detail-section table tbody tr td:first-child {
+  #scoreboard-content .data-table .mgr-detail-section table tbody tr td:first-child {
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -762,14 +763,14 @@
   }
 
   /* Pts column */
-  .mgr-detail-section table tbody tr td:nth-child(2) {
+  #scoreboard-content .data-table .mgr-detail-section table tbody tr td:nth-child(2) {
     font-weight: 700;
     text-align: center;
     width: 20%;
   }
 
   /* Date column */
-  .mgr-detail-section table tbody tr td:nth-child(3) {
+  #scoreboard-content .data-table .mgr-detail-section table tbody tr td:nth-child(3) {
     color: #6c7a9c;
     font-size: 0.75rem;
     text-align: right;
@@ -820,13 +821,11 @@
     border-radius: 0;
   }
 
-  /* Live manager rows — 2-line layout:
-     Line 1: [#]  Manager Name
-     Line 2:      Total  ΔRank  Daily            */
+  /* Live manager rows — single line: [#] Name  ΔRank  Daily  Total */
   #live-managers .card .data-table .live-mgr-row {
     display: flex !important;
-    flex-wrap: wrap;
-    align-items: flex-start;
+    flex-wrap: nowrap;
+    align-items: center;
     padding: 0.4rem 0.5rem !important;
     border-bottom: 1px solid #2a2a45 !important;
     gap: 0;
@@ -845,45 +844,47 @@
     padding: 0 !important;
   }
 
-  /* Rank — left anchor, spans both lines visually */
+  /* Rank — col 1, leftmost */
   #live-managers .card .data-table .live-mgr-row td:first-child {
     display: flex !important;
-    width: 2rem;
+    order: 1;
+    width: 1.75rem;
     flex-shrink: 0;
-    font-size: 1rem;
+    font-size: 0.95rem;
     font-weight: 900;
     color: #5a6690;
     justify-content: center;
-    align-items: flex-start;
-    padding: 0.3rem 0 0 !important;
+    align-items: center;
+    padding: 0 !important;
   }
 
-  /* Name — fills rest of line 1 (rank 2rem + name = 100% → line 2 wraps) */
+  /* Name — col 2, fills available space */
   #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
     display: flex !important;
-    width: calc(100% - 2rem);
-    flex-shrink: 0;
-    font-size: 1.5rem;
+    order: 2;
+    flex: 1;
+    min-width: 0;
+    font-size: 1.15rem;
     font-weight: 800;
     color: #e8eaf6;
     align-items: center;
-    min-width: 0;
     overflow: hidden;
-    padding: 0 0.25rem 0.1rem !important;
+    padding: 0 0.25rem !important;
     line-height: 1.1;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
 
-  /* Line 2: Total (3rd td) */
+  /* Total (live season) — col 3, shown last */
   #live-managers .card .data-table .live-mgr-row td:nth-child(3) {
     display: flex !important;
+    order: 5;
+    flex-shrink: 0;
     font-size: 1.1rem;
     font-weight: 900;
     color: #e8eaf6;
     align-items: center;
-    margin-left: 2rem;
-    padding: 0 0.5rem 0 0 !important;
+    padding: 0 0 0 0.3rem !important;
     letter-spacing: -0.5px;
   }
 
@@ -892,24 +893,28 @@
     font-weight: 900;
   }
 
-  /* Line 2: ΔRank (4th td) */
+  /* ΔRank — col 4 */
   #live-managers .card .data-table .live-mgr-row td:nth-child(4) {
     display: flex !important;
-    font-size: 0.9rem;
+    order: 3;
+    flex-shrink: 0;
+    font-size: 0.85rem;
     font-weight: 700;
     color: #9fa8da;
     align-items: center;
-    padding: 0 0.5rem 0 0 !important;
+    padding: 0 0.3rem 0 0 !important;
   }
 
-  /* Line 2: Daily score (5th td) — with "today" label via ::before */
+  /* Daily score — col 5 */
   #live-managers .card .data-table .live-mgr-row td:nth-child(5) {
     display: flex !important;
-    font-size: 0.9rem;
+    order: 4;
+    flex-shrink: 0;
+    font-size: 0.85rem;
     font-weight: 700;
     color: #9fa8da;
     align-items: center;
-    padding: 0 !important;
+    padding: 0 0.3rem 0 0 !important;
   }
 
   #live-managers .card .data-table .live-mgr-row td:nth-child(5)::before {
