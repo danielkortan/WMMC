@@ -10,7 +10,7 @@
   bottom: 0;
   left: 0;
   right: 0;
-  height: 62px;
+  height: 72px;
   background: #12122a;
   border-top: 1px solid #2a2a45;
   z-index: 1000;
@@ -41,7 +41,7 @@
 }
 
 .mobile-nav-btn .mnb-icon {
-  font-size: 1.65rem;
+  font-size: 2rem;
   line-height: 1;
   transition: transform 0.15s;
 }
@@ -73,7 +73,7 @@
 .mobile-more-sheet {
   display: none;
   position: fixed;
-  bottom: 62px;
+  bottom: 72px;
   left: 0;
   right: 0;
   background: #1a1a2e;
@@ -318,7 +318,7 @@
 
   /* ── Body ──────────────────────────────────────────────────── */
   body {
-    padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
     background: #0f0f1a;
     font-size: 1rem;
   }
@@ -801,17 +801,19 @@
   }
 
   /* ── Live manager table ────────────────────────────────────── */
-  #live-managers .card .data-table {
+  /* Use > child combinators so these block-display rules only target the
+     outer manager table, NOT the nested inner player detail tables */
+  #live-managers .card > .table-wrapper > .data-table {
     display: block !important;
     width: 100%;
     border: none;
   }
 
-  #live-managers .card .data-table thead {
+  #live-managers .card > .table-wrapper > .data-table > thead {
     display: none !important;
   }
 
-  #live-managers .card .data-table tbody {
+  #live-managers .card > .table-wrapper > .data-table > tbody {
     display: block !important;
   }
 
@@ -826,7 +828,7 @@
     display: flex !important;
     flex-wrap: nowrap;
     align-items: center;
-    padding: 0.4rem 0.5rem !important;
+    padding: 0.6rem 0.75rem !important;
     border-bottom: 1px solid #2a2a45 !important;
     gap: 0;
     cursor: pointer;
@@ -848,9 +850,9 @@
   #live-managers .card .data-table .live-mgr-row td:first-child {
     display: flex !important;
     order: 1;
-    width: 1.75rem;
+    width: 2.25rem;
     flex-shrink: 0;
-    font-size: 0.95rem;
+    font-size: 1.3rem;
     font-weight: 900;
     color: #5a6690;
     justify-content: center;
@@ -864,12 +866,12 @@
     order: 2;
     flex: 1;
     min-width: 0;
-    font-size: 1.15rem;
+    font-size: 1.6rem;
     font-weight: 800;
     color: #e8eaf6;
     align-items: center;
     overflow: hidden;
-    padding: 0 0.25rem !important;
+    padding: 0 0.4rem !important;
     line-height: 1.1;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -880,11 +882,11 @@
     display: flex !important;
     order: 5;
     flex-shrink: 0;
-    font-size: 1.1rem;
+    font-size: 1.6rem;
     font-weight: 900;
     color: #e8eaf6;
     align-items: center;
-    padding: 0 0 0 0.3rem !important;
+    padding: 0 0 0 0.4rem !important;
     letter-spacing: -0.5px;
   }
 
@@ -898,11 +900,11 @@
     display: flex !important;
     order: 3;
     flex-shrink: 0;
-    font-size: 0.85rem;
+    font-size: 1.2rem;
     font-weight: 700;
     color: #9fa8da;
     align-items: center;
-    padding: 0 0.3rem 0 0 !important;
+    padding: 0 0.4rem 0 0 !important;
   }
 
   /* Daily score — col 5 */
@@ -910,16 +912,16 @@
     display: flex !important;
     order: 4;
     flex-shrink: 0;
-    font-size: 0.85rem;
+    font-size: 1.2rem;
     font-weight: 700;
     color: #9fa8da;
     align-items: center;
-    padding: 0 0.3rem 0 0 !important;
+    padding: 0 0.4rem 0 0 !important;
   }
 
   #live-managers .card .data-table .live-mgr-row td:nth-child(5)::before {
     content: '+';
-    font-size: 0.7rem;
+    font-size: 0.9rem;
     font-weight: 400;
     color: #6c7a9c;
     margin-right: 1px;
@@ -954,12 +956,12 @@
 
   /* Section label */
   #live-managers .mgr-detail-header {
-    font-size: 0.65rem;
+    font-size: 1rem;
     font-weight: 700;
-    color: #6c7a9c;
+    color: #9fa8da;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 0.2rem 0 0.3rem !important;
+    padding: 0.4rem 0 0.5rem !important;
   }
 
   /* Live detail: allow horizontal scroll if needed */
@@ -989,7 +991,7 @@
 
   #live-managers .live-mgr-detail-section .data-table tbody tr {
     display: table-row !important;
-    border-bottom: 1px solid #1e1e38;
+    border-bottom: 1px solid #2a2a45;
   }
 
   /* Hide all cells by default */
@@ -997,17 +999,17 @@
   #live-managers .live-mgr-detail-section .data-table td {
     display: none !important;
     border: none !important;
-    padding: 0.35rem 0.4rem !important;
+    padding: 0.5rem 0.5rem !important;
   }
 
   /* Header row: shared styles for visible th cells */
   #live-managers .live-mgr-detail-section .data-table thead th {
-    font-size: 0.65rem !important;
+    font-size: 0.8rem !important;
     font-weight: 700;
     color: #6c7a9c !important;
     text-transform: uppercase;
     letter-spacing: 0.3px;
-    padding: 0.2rem 0.4rem 0.3rem !important;
+    padding: 0.3rem 0.5rem 0.4rem !important;
     border-bottom: 1px solid #2a2a45 !important;
     background: none !important;
   }
@@ -1016,34 +1018,36 @@
   #live-managers .live-mgr-detail-section .data-table th:nth-child(1),
   #live-managers .live-mgr-detail-section .data-table td:nth-child(1) {
     display: table-cell !important;
-    font-size: 0.95rem;
+    font-size: 1.25rem;
     font-weight: 600;
     color: #e8eaf6;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    padding-left: 0.5rem !important;
   }
 
   /* Show col 3: Status badge (LIVE / FINAL) */
   #live-managers .live-mgr-detail-section .data-table th:nth-child(3),
   #live-managers .live-mgr-detail-section .data-table td:nth-child(3) {
     display: table-cell !important;
-    font-size: 0.75rem;
+    font-size: 0.9rem;
     text-align: center;
     white-space: nowrap;
-    width: 4.5rem;
+    width: 5rem;
   }
 
   /* Show last col: Pts */
   #live-managers .live-mgr-detail-section .data-table th:last-child,
   #live-managers .live-mgr-detail-section .data-table td:last-child {
     display: table-cell !important;
-    font-size: 1rem;
+    font-size: 1.25rem;
     font-weight: 700;
     color: #e8eaf6;
     text-align: right;
     white-space: nowrap;
-    width: 3rem;
+    width: 3.5rem;
+    padding-right: 0.5rem !important;
   }
 
   /* Empty state messages */
@@ -1367,7 +1371,7 @@
   }
 
   .mobile-nav-btn .mnb-icon {
-    font-size: 1.2rem;
+    font-size: 1.6rem;
   }
 
   main {
@@ -1384,7 +1388,7 @@
   }
 
   #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
-    font-size: 1.55rem;
+    font-size: 1.3rem;
   }
 
   .mwc-total {
