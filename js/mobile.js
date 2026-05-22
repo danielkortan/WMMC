@@ -1,4 +1,5 @@
-// Mobile experience: bottom nav, more sheet, weekly score cards
+// Mobile experience: bottom nav, more sheet, weekly score cards,
+// scoreboard + live table card layout
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -24,7 +25,6 @@ function buildMobileNav() {
 
   const MORE_TAB_IDS = new Set([...moreTabs.map((t) => t.tab), 'commissioner']);
 
-  // Bottom nav bar
   const nav = document.createElement('nav');
   nav.id = 'mobile-bottom-nav';
   nav.className = 'mobile-bottom-nav';
@@ -47,14 +47,12 @@ function buildMobileNav() {
 
   document.body.appendChild(nav);
 
-  // Overlay
   const overlay = document.createElement('div');
   overlay.className = 'mobile-more-overlay';
   overlay.id = 'mobile-more-overlay';
   overlay.addEventListener('click', closeMoreSheet);
   document.body.appendChild(overlay);
 
-  // More sheet
   const sheet = document.createElement('div');
   sheet.className = 'mobile-more-sheet';
   sheet.id = 'mobile-more-sheet';
@@ -72,7 +70,6 @@ function buildMobileNav() {
     sheet.appendChild(btn);
   });
 
-  // Commissioner (shown dynamically once logged in as commissioner)
   const commItem = document.createElement('button');
   commItem.className = 'mobile-more-item';
   commItem.id = 'mobile-more-comm';
@@ -87,18 +84,15 @@ function buildMobileNav() {
 
   document.body.appendChild(sheet);
 
-  // Sync active state whenever a desktop nav button is clicked
   document.querySelectorAll('.nav-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (isMobile()) syncActiveState(btn.dataset.tab, MORE_TAB_IDS);
     });
   });
 
-  // Set initial active state
   const saved = localStorage.getItem('wmmc_active_tab') || 'dashboard';
   syncActiveState(saved, MORE_TAB_IDS);
 
-  // Watch for commissioner login
   watchCommissioner();
 }
 
@@ -134,7 +128,6 @@ function closeMoreSheet() {
   document.getElementById('mobile-more-overlay')?.classList.remove('open');
 }
 
-// Show commissioner entry in more sheet when the commissioner panel becomes visible
 function watchCommissioner() {
   const navBtn = document.getElementById('commissioner-nav-btn');
   if (!navBtn) return;
@@ -154,6 +147,96 @@ function watchCommissioner() {
   update();
 }
 
+// ── Scoreboard table card transformation ────────────────────────
+
+// Attach a score-tap breakdown row to one manager row.
+// Columns are identified by counting from the right:
+//   last = total, last-2 = pitching, last-3 = batting
+// Tables with >7 columns (e.g. the 9-col historical overall) are skipped.
+function attachScoreTap(row) {
+  if (row.dataset.mobScoreTap) return;
+  row.dataset.mobScoreTap = '1';
+
+  const cells = row.querySelectorAll('td');
+  const n = cells.length;
+  if (n < 4 || n > 7) return; // skip trivial or complex tables
+
+  const bat = cells[n - 3]?.textContent.trim() || '—';
+  const pit = cells[n - 2]?.textContent.trim() || '—';
+  const totalCell = cells[n - 1];
+  if (!totalCell) return;
+
+  const breakdownRow = document.createElement('tr');
+  breakdownRow.className = 'mob-score-breakdown-row';
+  breakdownRow.innerHTML = `<td><span>🏏 Bat &nbsp;<strong>${bat}</strong></span><span>⚾ Pit &nbsp;<strong>${pit}</strong></span></td>`;
+
+  // Insert between this row and the detail row (if any)
+  const next = row.nextElementSibling;
+  if (next) {
+    next.before(breakdownRow);
+  } else {
+    row.after(breakdownRow);
+  }
+
+  totalCell.addEventListener('click', (e) => {
+    e.stopPropagation(); // prevent row-level player-list toggle
+    const isOpen = breakdownRow.classList.contains('open');
+    breakdownRow.classList.toggle('open', !isOpen);
+
+    // If player list is open, close it when showing score breakdown
+    if (!isOpen) {
+      const detailRow = breakdownRow.nextElementSibling;
+      if (detailRow?.classList.contains('sb-manager-detail-row') && detailRow.style.display !== 'none') {
+        detailRow.style.display = 'none';
+        const mgrKey = detailRow.id?.replace('mgr-detail-', '');
+        const arrow = mgrKey ? document.getElementById('sb-arrow-' + mgrKey) : null;
+        if (arrow) arrow.innerHTML = '&#9660;';
+      }
+    }
+  });
+}
+
+function transformScoreboardTables() {
+  if (!isMobile()) return;
+
+  // Active season: rows already have sb-manager-row class + onclick handlers
+  document.querySelectorAll('#scoreboard-content .sb-manager-row').forEach((row) => {
+    row.classList.add('mob-sbrow');
+    attachScoreTap(row);
+  });
+
+  // Historical season: plain tbody rows inside pool-card tables
+  document.querySelectorAll('#scoreboard-content .pool-card-body table tbody tr').forEach((row) => {
+    if (row.classList.contains('mob-sbrow')) return;
+    row.classList.add('mob-sbrow');
+    attachScoreTap(row);
+  });
+
+  // Playoff period tables (QF/SF/Finals) inside active scoreboard — plain tbody rows
+  document.querySelectorAll('#scoreboard-content .sb-period table tbody tr').forEach((row) => {
+    if (row.classList.contains('sb-manager-row') || row.classList.contains('mob-sbrow')) return;
+    row.classList.add('mob-sbrow');
+    attachScoreTap(row);
+  });
+
+  // Color rank cells for top 3 by reading the text content
+  document.querySelectorAll('#scoreboard-content .mob-sbrow td:first-child').forEach((rankCell) => {
+    const n = parseInt(rankCell.textContent.trim(), 10);
+    if (n === 1) rankCell.classList.add('rank-1');
+    else if (n === 2) rankCell.classList.add('rank-2');
+    else if (n === 3) rankCell.classList.add('rank-3');
+  });
+}
+
+function watchScoreboard() {
+  const container = document.getElementById('scoreboard-content');
+  if (!container) return;
+
+  new MutationObserver(() => {
+    if (isMobile()) transformScoreboardTables();
+  }).observe(container, { childList: true, subtree: true });
+}
+
 // ── Weekly score cards ──────────────────────────────────────────
 
 function buildWeeklyCards() {
@@ -162,17 +245,15 @@ function buildWeeklyCards() {
   const table = document.getElementById('weekly-table');
   if (!table) return;
 
-  // Remove stale cards
   document.getElementById('mobile-weekly-cards')?.remove();
 
   const rows = Array.from(table.querySelectorAll('tbody tr'));
   if (!rows.length) return;
 
-  // Detect whether the "Dates" column is present by counting <td> in the first data row
   const firstCells = rows[0]?.querySelectorAll('td');
   if (!firstCells || firstCells.length < 10) return;
   const hasDateCol = firstCells.length >= 15;
-  const o = hasDateCol ? 1 : 0; // column offset
+  const o = hasDateCol ? 1 : 0;
 
   const container = document.createElement('div');
   container.className = 'mobile-weekly-cards';
@@ -182,7 +263,6 @@ function buildWeeklyCards() {
     const cells = row.querySelectorAll('td');
     if (cells.length < 10) return;
 
-    // Column indices: Rnd(0) Wk(1) [Dates?] Manager(2+o) Pool(3+o) Bat(4+o) BatRk(5+o) Pit(6+o) PitRk(7+o) Total(8+o) TotRk(9+o) CumBat(10+o) CumPit(11+o) CumTot(12+o) PoolRk(13+o)
     const get = (i) => cells[i]?.textContent.trim() ?? '';
 
     const rnd = get(0);
@@ -202,13 +282,12 @@ function buildWeeklyCards() {
 
     const rank = parseInt(totRk, 10);
     const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : '';
-    const rankDisplay = totRk || '—';
 
     const card = document.createElement('div');
     card.className = 'mobile-weekly-card';
     card.innerHTML = `
       <div class="mwc-summary">
-        <div class="mwc-rank ${rankClass}">${rankDisplay}</div>
+        <div class="mwc-rank ${rankClass}">${totRk || '—'}</div>
         <div class="mwc-info">
           <div class="mwc-name">${manager}</div>
           <div class="mwc-meta">${rnd} · ${wk}${pool ? ' · ' + pool : ''}</div>
@@ -254,7 +333,6 @@ function buildWeeklyCards() {
     container.appendChild(card);
   });
 
-  // Insert after the hidden table wrapper
   const wrapper = table.closest('.table-wrapper') || table;
   wrapper.after(container);
 }
@@ -274,6 +352,7 @@ function init() {
   if (!isMobile()) return;
   buildMobileNav();
   watchWeeklyTable();
+  watchScoreboard();
 }
 
 if (document.readyState === 'loading') {
