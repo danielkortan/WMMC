@@ -1025,20 +1025,15 @@
     background: #0d0d1e !important;
   }
 
-  /* Player name (col 1) — sticky so it stays visible while scrolling */
+  /* Player name (col 1) */
   #live-managers .live-mgr-detail-section .data-table th:nth-child(1),
   #live-managers .live-mgr-detail-section .data-table td:nth-child(1) {
-    position: sticky;
-    left: 0;
-    z-index: 1;
     font-size: 1.8rem;
     font-weight: 700;
     color: #e8eaf6;
     text-align: left;
-    background: #13132a;
-    box-shadow: 3px 0 8px rgba(0, 0, 0, 0.5);
-    min-width: 130px;
-    max-width: 180px;
+    min-width: 120px;
+    max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
   }

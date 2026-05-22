@@ -147,9 +147,9 @@ function watchCommissioner() {
   update();
 }
 
-// ── Live detail: enforce horizontal layout via inline styles ─────
-// CSS flex alone isn't winning against the table layout context,
-// so we patch inline styles directly after expand events.
+// ── Live detail: enforce table structure via inline important styles ──
+// CSS alone cannot reliably beat cascading display:block!important rules
+// on nested tables across all mobile browsers, so we patch directly.
 function watchLiveDetails() {
   const container = document.getElementById('live-managers');
   if (!container) return;
@@ -171,7 +171,23 @@ function watchLiveDetails() {
       s.style.overflow = 'visible';
     });
     row.querySelectorAll('.live-mgr-detail-section .table-wrapper').forEach((w) => {
-      w.style.overflow = 'auto';
+      w.style.setProperty('overflow-x', 'auto', 'important');
+      w.style.setProperty('overflow-y', 'visible', 'important');
+    });
+    // Force proper table rendering — inline !important beats any CSS !important
+    row.querySelectorAll('.live-mgr-detail-section table').forEach((tbl) => {
+      tbl.style.setProperty('display', 'table', 'important');
+      tbl.style.setProperty('width', 'auto', 'important');
+      tbl.style.setProperty('table-layout', 'auto', 'important');
+      const thead = tbl.querySelector('thead');
+      if (thead) thead.style.setProperty('display', 'table-header-group', 'important');
+      const tbody = tbl.querySelector('tbody');
+      if (tbody) {
+        tbody.style.setProperty('display', 'table-row-group', 'important');
+        tbody.querySelectorAll('tr').forEach((tr) => {
+          tr.style.setProperty('display', 'table-row', 'important');
+        });
+      }
     });
   };
 
