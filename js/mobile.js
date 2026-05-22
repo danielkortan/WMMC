@@ -147,7 +147,73 @@ function watchCommissioner() {
   update();
 }
 
-// ── Scoreboard table card transformation ────────────────────────
+// ── Live detail: enforce horizontal layout via inline styles ─────
+// CSS flex alone isn't winning against the table layout context,
+// so we patch inline styles directly after expand events.
+function watchLiveDetails() {
+  const container = document.getElementById('live-managers');
+  if (!container) return;
+
+  const applyFlex = (row) => {
+    if (row.style.display === 'none') return;
+    const panel = row.querySelector('.mgr-detail-panel');
+    if (!panel) return;
+    panel.style.display = 'flex';
+    panel.style.flexDirection = 'row';
+    panel.style.gap = '0.5rem';
+    panel.style.overflow = 'hidden';
+    panel.style.padding = '0.5rem';
+    panel.style.background = '#13132a';
+    row.querySelectorAll('.live-mgr-detail-section').forEach((s) => {
+      s.style.flex = '1';
+      s.style.minWidth = '0';
+      s.style.overflow = 'hidden';
+    });
+    // Constrain inner table wrappers so they don't blow out the flex column
+    row.querySelectorAll('.live-mgr-detail-section .table-wrapper').forEach((w) => {
+      w.style.overflow = 'hidden';
+    });
+  };
+
+  new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === 'attributes' && m.target.classList?.contains('live-mgr-detail-row')) {
+        applyFlex(m.target);
+      } else if (m.type === 'childList') {
+        // Live data re-rendered — patch all currently-expanded detail rows
+        container.querySelectorAll('.live-mgr-detail-row').forEach(applyFlex);
+      }
+    }
+  }).observe(container, {
+    attributes: true,
+    attributeFilter: ['style'],
+    childList: true,
+    subtree: true,
+  });
+}
+
+// ── Pool Play: stack PP1/PP2 below PP-Overall on mobile ──────────
+function stackPoolPlayPeriods() {
+  const overall = document.getElementById('sb-pp-overall');
+  if (!overall || overall.style.display === 'none') return;
+
+  [
+    { id: 'sb-pp1', label: 'Pool Play 1' },
+    { id: 'sb-pp2', label: 'Pool Play 2' },
+  ].forEach(({ id, label }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.style.display === 'none') el.style.display = '';
+    if (!el.querySelector('.mob-section-header')) {
+      const hdr = document.createElement('h3');
+      hdr.className = 'mob-section-header';
+      hdr.textContent = label;
+      el.prepend(hdr);
+    }
+  });
+}
+
+// ── Scoreboard table card transformation ─────────────────────────
 
 // Attach a score-tap breakdown row to one manager row.
 // Columns are identified by counting from the right:
@@ -232,9 +298,18 @@ function watchScoreboard() {
   const container = document.getElementById('scoreboard-content');
   if (!container) return;
 
-  new MutationObserver(() => {
-    if (isMobile()) transformScoreboardTables();
-  }).observe(container, { childList: true, subtree: true });
+  new MutationObserver((mutations) => {
+    if (!isMobile()) return;
+    const hasNewContent = mutations.some((m) => m.type === 'childList');
+    const hasPeriodSwitch = mutations.some((m) => m.type === 'attributes' && m.target.classList?.contains('sb-period'));
+    if (hasNewContent) transformScoreboardTables();
+    if (hasNewContent || hasPeriodSwitch) stackPoolPlayPeriods();
+  }).observe(container, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['style'],
+  });
 }
 
 // ── Weekly score cards ──────────────────────────────────────────
@@ -351,6 +426,7 @@ function watchWeeklyTable() {
 function init() {
   if (!isMobile()) return;
   buildMobileNav();
+  watchLiveDetails();
   watchWeeklyTable();
   watchScoreboard();
 }
