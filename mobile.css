@@ -410,31 +410,40 @@
     font-size: 0.9rem;
   }
 
-  /* ── Champion banner: compact on mobile ───────────────────── */
+  /* ── Champion banner: collapse to just the status footer ─────── */
+  /* background-image is set via inline style — !important overrides it */
   .champion-banner {
-    padding: 0.5rem 0.75rem;
-    border-radius: 8px;
-    background: linear-gradient(135deg, #090918 0%, #12183a 100%);
-    border-bottom-color: #ff4560;
-    margin-bottom: 0.5rem;
+    background-image: none !important;
+    background-color: #0d1220 !important;
+    padding: 0.3rem 0.75rem;
+    border-radius: 0;
+    margin-bottom: 0.25rem;
     min-height: 0;
+    border-bottom: 1px solid #2a2a45 !important;
+    border-bottom-width: 1px !important;
+    overflow: hidden;
   }
 
-  .champion-banner img,
-  .champion-banner .banner-bg,
-  .banner-subtitle,
-  .banner-trophy,
-  .banner-decoration {
+  /* Hide the decorative overlay and the big WMMC + champion block */
+  .champion-banner.has-custom-bg::before,
+  .champion-banner.has-custom-bg::after {
     display: none !important;
   }
 
-  .champion-banner h2 {
-    font-size: 1rem !important;
-    margin: 0 0 0.125rem !important;
+  .champion-banner .banner-main {
+    display: none !important;
   }
 
-  .champion-banner .banner-year {
-    font-size: 0.8rem;
+  /* Show only the footer status line */
+  .champion-banner .banner-footer {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #9fa8da;
+    text-align: center;
+    position: relative;
+    z-index: 1;
+    padding: 0;
+    margin: 0;
   }
 
   /* ── Scoreboard sub-tabs ───────────────────────────────────── */
@@ -472,10 +481,16 @@
     border-bottom: 1px solid #2a2a45;
   }
 
-  /* ── Active season: first scoreboard section fills viewport ─── */
-  #scoreboard-content .scoreboard-section:first-child {
-    min-height: calc(100vh - 175px);
-    min-height: calc(100svh - 175px);
+  /* ── Active season: Pool Play Overall fills viewport ──────────── */
+  /* It is the 2nd child of #sb-poolplay-body (1st is .highlight-legend) */
+  #sb-poolplay-body > .scoreboard-section:nth-child(2) {
+    min-height: calc(100vh - 130px);
+    min-height: calc(100svh - 130px);
+  }
+
+  /* Pool sections (PP1, PP2) below — group visually as one block */
+  #sb-poolplay-body > .scoreboard-section:nth-child(2) ~ .scoreboard-section {
+    border-top: 2px solid #3a3a5a;
   }
 
   /* ── PP-Overall table: last col is Status badge, not total ──── */
@@ -584,7 +599,7 @@
   .mob-sbrow td:nth-child(2) {
     display: flex !important;
     flex: 1;
-    font-size: 1.5rem;
+    font-size: 1.8rem;
     font-weight: 800;
     color: #e8eaf6;
     align-items: center;
@@ -645,90 +660,136 @@
     color: #cd7f32 !important;
   }
 
-  /* ── Detail rows (player list) ─────────────────────────────── */
+  /* ── Detail rows (player list) — full-width ───────────────── */
+  /* Force the <tr> and <td> to be full-width blocks so the
+     detail panel can use the entire screen width */
+  #scoreboard-content .data-table .sb-manager-detail-row {
+    display: block !important;
+    width: 100% !important;
+  }
+
   #scoreboard-content .data-table .sb-manager-detail-row td {
     display: block !important;
+    width: 100% !important;
+    box-sizing: border-box;
     padding: 0 !important;
     border: none !important;
   }
 
-  /* Single-column player detail layout */
-  .mgr-detail-cols {
-    flex-direction: column !important;
-    gap: 0.5rem !important;
-  }
-
+  /* Full-width detail panel chain */
   .mgr-detail-panel {
-    padding: 0.75rem 0.625rem !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    padding: 0.375rem 0.375rem 0.5rem !important;
     background: #13132a;
   }
 
+  /* Override the 2-col grid → single block column */
+  .mgr-detail-cols {
+    display: block !important;
+    width: 100% !important;
+    gap: 0 !important;
+  }
+
+  .mgr-detail-section {
+    width: 100%;
+    margin-bottom: 0.375rem;
+  }
+
   .mgr-detail-header {
-    font-size: 0.75rem !important;
+    font-size: 0.72rem !important;
     font-weight: 700;
     color: #6c7a9c !important;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 0.25rem 0 !important;
+    padding: 0.25rem 0.25rem 0.2rem !important;
+    border-bottom: 1px solid #2a2a45;
+    margin-bottom: 0.125rem;
   }
 
-  /* Player detail table: show only Name and Pts */
+  /* Player table — proper table display, all columns, full width */
   .mgr-detail-section table {
-    display: block;
-    width: 100%;
+    display: table !important;
+    width: 100% !important;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: 0.9rem;
   }
 
   .mgr-detail-section table thead {
-    display: none; /* hide column headers */
+    display: table-header-group !important;
+  }
+
+  .mgr-detail-section table thead th {
+    display: table-cell !important;
+    font-size: 0.65rem !important;
+    font-weight: 700;
+    color: #6c7a9c !important;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding: 0.2rem 0.25rem !important;
+    border-bottom: 1px solid #2a2a45 !important;
+    text-align: left;
+    background: none !important;
   }
 
   .mgr-detail-section table tbody {
-    display: block;
+    display: table-row-group !important;
   }
 
   .mgr-detail-section table tbody tr {
-    display: flex !important;
-    align-items: center;
-    padding: 0.5rem 0.25rem !important;
-    border-bottom: 1px solid #2a2a45;
-    gap: 0;
-  }
-
-  /* All player detail tds hidden by default */
-  .mgr-detail-section table tbody tr td {
-    display: none !important;
-    border: none !important;
+    display: table-row !important;
     padding: 0 !important;
   }
 
-  /* Player name — 1st td */
-  .mgr-detail-section table tbody tr td:first-child {
-    display: flex !important;
-    flex: 1;
-    font-size: 1rem;
-    font-weight: 600;
+  /* Show all 3 columns: Player | Pts | Date */
+  .mgr-detail-section table tbody tr td {
+    display: table-cell !important;
+    padding: 0.35rem 0.25rem !important;
+    font-size: 0.9rem;
     color: #e8eaf6;
-    align-items: center;
-    min-width: 0;
+    border-bottom: 1px solid #1e1e38 !important;
+    vertical-align: middle;
   }
 
-  /* Player score — 2nd td */
+  /* Player name column — fills remaining width */
+  .mgr-detail-section table tbody tr td:first-child {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Pts column */
   .mgr-detail-section table tbody tr td:nth-child(2) {
-    display: flex !important;
-    flex-shrink: 0;
-    font-size: 1rem;
     font-weight: 700;
-    color: #e8eaf6;
-    justify-content: flex-end;
-    align-items: center;
-    min-width: 3.5rem;
+    text-align: center;
+    width: 20%;
+  }
+
+  /* Date column */
+  .mgr-detail-section table tbody tr td:nth-child(3) {
+    color: #6c7a9c;
+    font-size: 0.75rem;
+    text-align: right;
+    white-space: nowrap;
+    width: 25%;
   }
 
   .pqv-pts-btn {
-    font-size: 1rem !important;
+    background: none;
+    border: none;
+    color: #4a9eff;
+    font-size: 0.9rem !important;
+    font-weight: 700;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
   }
 
-  /* Dropped player styling */
+  /* Dropped player: muted + strikethrough */
   .dropped-player td:first-child {
     color: #5a6690 !important;
     text-decoration: line-through;
@@ -1285,11 +1346,11 @@
   }
 
   .mob-sbrow td:nth-child(2) {
-    font-size: 1.3rem;
+    font-size: 1.55rem;
   }
 
   #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
-    font-size: 1.3rem;
+    font-size: 1.55rem;
   }
 
   .mwc-total {
