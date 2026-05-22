@@ -159,19 +159,19 @@ function watchLiveDetails() {
     const panel = row.querySelector('.mgr-detail-panel');
     if (!panel) return;
     panel.style.display = 'flex';
-    panel.style.flexDirection = 'row';
-    panel.style.gap = '0.5rem';
-    panel.style.overflow = 'hidden';
+    panel.style.flexDirection = 'column';
+    panel.style.gap = '0.75rem';
+    panel.style.overflow = 'visible';
     panel.style.padding = '0.5rem';
     panel.style.background = '#13132a';
     row.querySelectorAll('.live-mgr-detail-section').forEach((s) => {
-      s.style.flex = '1';
+      s.style.flex = 'none';
+      s.style.width = '100%';
       s.style.minWidth = '0';
-      s.style.overflow = 'hidden';
+      s.style.overflow = 'visible';
     });
-    // Constrain inner table wrappers so they don't blow out the flex column
     row.querySelectorAll('.live-mgr-detail-section .table-wrapper').forEach((w) => {
-      w.style.overflow = 'hidden';
+      w.style.overflow = 'auto';
     });
   };
 
