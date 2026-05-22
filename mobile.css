@@ -468,10 +468,9 @@
   .mob-sbrow {
     display: flex !important;
     align-items: center;
-    padding: 0.5rem 0.625rem !important;
+    padding: 0.35rem 0.5rem !important;
     border-bottom: 1px solid #2a2a45 !important;
     gap: 0;
-    min-height: 48px;
     cursor: pointer;
     -webkit-tap-highlight-color: rgba(74, 158, 255, 0.06);
   }
@@ -490,7 +489,7 @@
   /* Rank — 1st cell */
   .mob-sbrow td:first-child {
     display: flex !important;
-    width: 2.25rem;
+    width: 2rem;
     flex-shrink: 0;
     font-size: 1rem;
     font-weight: 900;
@@ -504,13 +503,14 @@
   .mob-sbrow td:nth-child(2) {
     display: flex !important;
     flex: 1;
-    font-size: 1.3rem;
-    font-weight: 700;
+    font-size: 1.5rem;
+    font-weight: 800;
     color: #e8eaf6;
     align-items: center;
     min-width: 0;
-    padding: 0 0.5rem 0 0.25rem !important;
+    padding: 0 0.375rem 0 0.2rem !important;
     overflow: hidden;
+    line-height: 1.1;
   }
 
   .mob-sbrow td:nth-child(2) strong {
@@ -522,9 +522,9 @@
 
   /* Expand arrow inside name cell */
   .mob-sbrow .sb-expand-arrow {
-    margin-left: 0.3rem;
+    margin-left: 0.25rem;
     color: #5a6690;
-    font-size: 0.7rem;
+    font-size: 0.65rem;
     flex-shrink: 0;
   }
 
@@ -532,15 +532,15 @@
   .mob-sbrow td:last-child {
     display: flex !important;
     flex-shrink: 0;
-    font-size: 1.5rem;
+    font-size: 1.7rem;
     font-weight: 900;
     color: #e8eaf6;
     justify-content: flex-end;
     align-items: center;
-    min-width: 5rem;
-    padding: 0 0.125rem 0 0 !important;
+    min-width: 4.75rem;
+    padding: 0 !important;
     touch-action: manipulation;
-    letter-spacing: -0.5px;
+    letter-spacing: -1px;
   }
 
   .mob-sbrow td:last-child:active {
@@ -678,14 +678,16 @@
     border-radius: 0;
   }
 
-  /* Live manager rows */
+  /* Live manager rows — 2-line layout:
+     Line 1: [#]  Manager Name
+     Line 2:      Total  ΔRank  Daily            */
   #live-managers .card .data-table .live-mgr-row {
     display: flex !important;
-    align-items: center;
-    padding: 0.5rem 0.625rem !important;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 0.4rem 0.5rem !important;
     border-bottom: 1px solid #2a2a45 !important;
     gap: 0;
-    min-height: 48px;
     cursor: pointer;
     -webkit-tap-highlight-color: rgba(74, 158, 255, 0.06);
   }
@@ -694,50 +696,52 @@
     background: rgba(74, 158, 255, 0.05);
   }
 
-  /* Hide all live row cells */
+  /* Hide ALL live row cells first */
   #live-managers .card .data-table .live-mgr-row td {
     display: none !important;
     border: none !important;
     padding: 0 !important;
   }
 
-  /* Rank */
+  /* Rank — left anchor, spans both lines visually */
   #live-managers .card .data-table .live-mgr-row td:first-child {
     display: flex !important;
-    width: 2.5rem;
+    width: 2rem;
     flex-shrink: 0;
-    font-size: 1.1rem;
+    font-size: 1rem;
     font-weight: 900;
     color: #5a6690;
     justify-content: center;
-    align-items: center;
-    padding: 0 !important;
+    align-items: flex-start;
+    padding: 0.3rem 0 0 !important;
   }
 
-  /* Name */
+  /* Name — fills rest of line 1 (rank 2rem + name = 100% → line 2 wraps) */
   #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
     display: flex !important;
-    flex: 1;
-    font-size: 1.3rem;
-    font-weight: 700;
+    width: calc(100% - 2rem);
+    flex-shrink: 0;
+    font-size: 1.5rem;
+    font-weight: 800;
     color: #e8eaf6;
     align-items: center;
     min-width: 0;
     overflow: hidden;
-    padding: 0 0.375rem !important;
+    padding: 0 0.25rem 0.1rem !important;
+    line-height: 1.1;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
-  /* Round total (3rd td) */
+  /* Line 2: Total (3rd td) */
   #live-managers .card .data-table .live-mgr-row td:nth-child(3) {
     display: flex !important;
-    flex-shrink: 0;
-    font-size: 1.5rem;
+    font-size: 1.1rem;
     font-weight: 900;
     color: #e8eaf6;
-    justify-content: flex-end;
     align-items: center;
-    min-width: 5rem;
-    padding: 0 !important;
+    margin-left: 2rem;
+    padding: 0 0.5rem 0 0 !important;
     letter-spacing: -0.5px;
   }
 
@@ -746,7 +750,35 @@
     font-weight: 900;
   }
 
-  /* Active manager highlight */
+  /* Line 2: ΔRank (4th td) */
+  #live-managers .card .data-table .live-mgr-row td:nth-child(4) {
+    display: flex !important;
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #9fa8da;
+    align-items: center;
+    padding: 0 0.5rem 0 0 !important;
+  }
+
+  /* Line 2: Daily score (5th td) — with "today" label via ::before */
+  #live-managers .card .data-table .live-mgr-row td:nth-child(5) {
+    display: flex !important;
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #9fa8da;
+    align-items: center;
+    padding: 0 !important;
+  }
+
+  #live-managers .card .data-table .live-mgr-row td:nth-child(5)::before {
+    content: '+';
+    font-size: 0.7rem;
+    font-weight: 400;
+    color: #6c7a9c;
+    margin-right: 1px;
+  }
+
+  /* Active manager (has players live today) */
   .live-mgr-active {
     color: #4caf6e !important;
   }
@@ -758,24 +790,83 @@
     border: none !important;
   }
 
-  /* Today's player detail tables — horizontal scroll */
-  .mgr-detail-panel .table-wrapper {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    border: 1px solid #2a2a45;
-    border-radius: 6px;
+  /* Live detail panel: batters + pitchers side by side */
+  #live-managers .mgr-detail-panel {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 0.5rem;
+    padding: 0.5rem !important;
+    background: #13132a;
+    overflow: hidden;
   }
 
-  .live-mgr-detail-section {
-    margin-bottom: 0.75rem;
+  #live-managers .live-mgr-detail-section {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
-  .mgr-detail-header {
-    font-size: 0.75rem;
+  /* Section label */
+  #live-managers .mgr-detail-header {
+    font-size: 0.65rem;
     font-weight: 700;
     color: #6c7a9c;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    padding: 0.2rem 0 0.3rem !important;
+  }
+
+  /* Live detail stat tables: show only Player, Status badge, Pts */
+  #live-managers .live-mgr-detail-section .data-table {
+    display: table !important;
+    width: 100%;
+    table-layout: fixed;
+  }
+
+  #live-managers .live-mgr-detail-section .data-table th,
+  #live-managers .live-mgr-detail-section .data-table td {
+    display: none !important;
+    border: none !important;
+    padding: 0.3rem 0.2rem !important;
+  }
+
+  /* Show col 1: Player name */
+  #live-managers .live-mgr-detail-section .data-table th:nth-child(1),
+  #live-managers .live-mgr-detail-section .data-table td:nth-child(1) {
+    display: table-cell !important;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #e8eaf6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 80px;
+  }
+
+  /* Show col 3: Status badge (LIVE / FINAL) */
+  #live-managers .live-mgr-detail-section .data-table th:nth-child(3),
+  #live-managers .live-mgr-detail-section .data-table td:nth-child(3) {
+    display: table-cell !important;
+    font-size: 0.65rem;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  /* Show last col: Pts */
+  #live-managers .live-mgr-detail-section .data-table th:last-child,
+  #live-managers .live-mgr-detail-section .data-table td:last-child {
+    display: table-cell !important;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #e8eaf6;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  /* Empty state messages */
+  .live-mgr-detail-empty {
+    font-size: 0.75rem;
+    color: #5a6690;
     padding: 0.375rem 0;
   }
 
@@ -1101,12 +1192,16 @@
   }
 
   .mob-sbrow td:last-child {
-    font-size: 1.3rem;
-    min-width: 4.5rem;
+    font-size: 1.45rem;
+    min-width: 4.25rem;
   }
 
   .mob-sbrow td:nth-child(2) {
-    font-size: 1.15rem;
+    font-size: 1.3rem;
+  }
+
+  #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
+    font-size: 1.3rem;
   }
 
   .mwc-total {
