@@ -1,0 +1,664 @@
+/* =================================================================
+   WMMC — Mobile Experience
+   Dark sports-app theme. Activates at ≤ 768 px.
+   ================================================================= */
+
+/* ── Bottom nav (always in DOM, hidden on desktop) ───────────── */
+.mobile-bottom-nav {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 62px;
+  background: #12122a;
+  border-top: 1px solid #2a2a45;
+  z-index: 1000;
+  padding: 0 0.25rem;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.mobile-nav-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  color: #5a6690;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 0.4rem 0.25rem;
+  transition: color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.mobile-nav-btn .mnb-icon {
+  font-size: 1.35rem;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+
+.mobile-nav-btn.active {
+  color: #4a9eff;
+}
+
+.mobile-nav-btn.active .mnb-icon {
+  transform: scale(1.12);
+}
+
+/* ── More overlay ─────────────────────────────────────────────── */
+.mobile-more-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 998;
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.mobile-more-overlay.open {
+  display: block;
+}
+
+/* ── More bottom sheet ────────────────────────────────────────── */
+.mobile-more-sheet {
+  display: none;
+  position: fixed;
+  bottom: 62px;
+  left: 0;
+  right: 0;
+  background: #1a1a2e;
+  border-top: 1px solid #2a2a45;
+  border-radius: 18px 18px 0 0;
+  z-index: 999;
+  padding: 0.625rem 0 0.5rem;
+  transform: translateY(110%);
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5);
+}
+
+.mobile-more-sheet.open {
+  transform: translateY(0);
+}
+
+.mobile-more-sheet-handle {
+  width: 36px;
+  height: 4px;
+  background: #3a3a55;
+  border-radius: 2px;
+  margin: 0 auto 0.875rem;
+}
+
+.mobile-more-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  width: 100%;
+  background: none;
+  border: none;
+  color: #d0d4f0;
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.875rem 1.5rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s;
+  text-align: left;
+}
+
+.mobile-more-item:active {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.mobile-more-item.active {
+  color: #4a9eff;
+}
+
+.mmi-icon {
+  font-size: 1.3rem;
+  width: 2rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* ── Weekly score cards (always defined, shown only on mobile) ── */
+.mobile-weekly-cards {
+  display: none;
+}
+
+.mobile-weekly-card {
+  background: #1a1a2e;
+  border-radius: 12px;
+  margin-bottom: 0.625rem;
+  overflow: hidden;
+  border: 1px solid #2a2a45;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.15s;
+}
+
+.mobile-weekly-card.expanded {
+  border-color: #3a4a70;
+}
+
+.mwc-summary {
+  display: flex;
+  align-items: center;
+  padding: 0.875rem 1rem;
+  gap: 0.75rem;
+}
+
+.mwc-rank {
+  font-size: 1.2rem;
+  font-weight: 900;
+  color: #5a6690;
+  width: 2rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.mwc-rank.rank-1 {
+  color: #ffd700;
+}
+.mwc-rank.rank-2 {
+  color: #c0c0c0;
+}
+.mwc-rank.rank-3 {
+  color: #cd7f32;
+}
+
+.mwc-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.mwc-name {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #e8eaf6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mwc-meta {
+  font-size: 0.72rem;
+  color: #6c7a9c;
+  margin-top: 2px;
+  letter-spacing: 0.2px;
+}
+
+.mwc-score {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.mwc-total {
+  font-size: 1.6rem;
+  font-weight: 900;
+  color: #e8eaf6;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+
+.mwc-bat-pit {
+  font-size: 0.68rem;
+  color: #9fa8da;
+  margin-top: 3px;
+  letter-spacing: 0.2px;
+}
+
+.mwc-chevron {
+  color: #3a3a55;
+  font-size: 0.75rem;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+  margin-left: 0.25rem;
+}
+
+.mobile-weekly-card.expanded .mwc-chevron {
+  transform: rotate(180deg);
+}
+
+.mwc-detail {
+  display: none;
+  padding: 0.75rem 1rem 1rem;
+  border-top: 1px solid #2a2a45;
+  background: #13132a;
+}
+
+.mobile-weekly-card.expanded .mwc-detail {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.625rem 1.5rem;
+}
+
+.mwc-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.mwc-stat-label {
+  font-size: 0.63rem;
+  color: #6c7a9c;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 1px;
+}
+
+.mwc-stat-value {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #e8eaf6;
+}
+
+/* =================================================================
+   MOBILE MEDIA QUERY — activates ≤ 768 px
+   ================================================================= */
+@media (max-width: 768px) {
+  /* ── Dark theme variables ──────────────────────────────────── */
+  :root {
+    --bg: #0f0f1a;
+    --card-bg: #1a1a2e;
+    --primary: #4a9eff;
+    --primary-light: #6ab4ff;
+    --accent: #ff4560;
+    --accent-light: #ff6b80;
+    --text: #e8eaf6;
+    --text-light: #9fa8da;
+    --text-muted: #6c7a9c;
+    --border: #2a2a45;
+    --success: #4caf6e;
+    --danger: #ff4560;
+    --winner: rgba(255, 215, 0, 0.08);
+    --rank1: #ffd700;
+    --rank2: #c0c0c0;
+    --rank3: #cd7f32;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.5), 0 10px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  /* ── Body ──────────────────────────────────────────────────── */
+  body {
+    padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+    background: #0f0f1a;
+  }
+
+  /* ── Header ────────────────────────────────────────────────── */
+  header {
+    background: linear-gradient(135deg, #090918 0%, #10183a 100%);
+    padding: 0.5rem 0.875rem;
+  }
+
+  header::after {
+    height: 3px;
+  }
+
+  header h1 {
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+
+  .header-top {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .season-selector {
+    flex-shrink: 0;
+  }
+
+  .season-selector select {
+    font-size: 0.78rem;
+    padding: 0.25rem 1.6rem 0.25rem 0.5rem;
+  }
+
+  .user-bar {
+    margin-left: 0;
+    flex-shrink: 0;
+  }
+
+  #online-users-bar {
+    display: none;
+  }
+
+  /* ── Hide desktop nav ──────────────────────────────────────── */
+  #main-nav {
+    display: none !important;
+  }
+
+  /* ── Show mobile nav elements ──────────────────────────────── */
+  .mobile-bottom-nav {
+    display: flex;
+  }
+
+  .mobile-more-sheet {
+    display: block;
+  }
+
+  /* ── Main content area ─────────────────────────────────────── */
+  main {
+    max-width: 100%;
+    padding: 0.75rem 0.625rem;
+  }
+
+  /* ── Cards ─────────────────────────────────────────────────── */
+  .card {
+    background: #1a1a2e;
+    border: 1px solid #2a2a45;
+    border-radius: 10px;
+    padding: 0.875rem;
+    box-shadow: none;
+  }
+
+  .card h2 {
+    color: var(--primary);
+    border-bottom-color: #2a2a45;
+    font-size: 1.05rem;
+  }
+
+  .card h3 {
+    color: var(--primary);
+    font-size: 0.9rem;
+  }
+
+  /* ── Champion banner ───────────────────────────────────────── */
+  .champion-banner {
+    padding: 1rem 1.125rem;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #090918 0%, #12183a 100%);
+    border-bottom-color: #ff4560;
+  }
+
+  /* ── Scoreboard sub-tabs ───────────────────────────────────── */
+  .scoreboard-tabs {
+    gap: 0;
+    overflow-x: auto;
+    padding-bottom: 0;
+  }
+
+  .sb-tab {
+    font-size: 0.78rem;
+    padding: 0.5rem 0.75rem;
+    white-space: nowrap;
+  }
+
+  /* ── Weekly table → hidden, cards shown ────────────────────── */
+  #weekly .table-wrapper {
+    display: none;
+  }
+
+  .mobile-weekly-cards {
+    display: block;
+  }
+
+  /* ── Filters ────────────────────────────────────────────────── */
+  .filters {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .filters select {
+    width: 100%;
+    background: #12122a;
+    color: #e8eaf6;
+    border: 1px solid #2a2a45;
+    border-radius: 8px;
+    padding: 0.6rem 0.875rem;
+    font-size: 0.88rem;
+  }
+
+  /* ── Data tables (non-weekly sections) ─────────────────────── */
+  .data-table {
+    font-size: 0.78rem;
+    color: #e8eaf6;
+  }
+
+  .data-table thead th {
+    background: #12122a;
+    color: #9fa8da;
+    border-bottom: 1px solid #2a2a45;
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 0.5rem 0.4rem;
+  }
+
+  .data-table tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .data-table tbody tr:hover {
+    background: rgba(74, 158, 255, 0.06);
+  }
+
+  .data-table tbody td {
+    border-bottom: 1px solid #2a2a45;
+    padding: 0.5rem 0.4rem;
+  }
+
+  .table-wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 8px;
+    border: 1px solid #2a2a45;
+  }
+
+  /* ── Live section ───────────────────────────────────────────── */
+  #live-header.card {
+    background: #12122a;
+  }
+
+  .live-managers-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Roster ─────────────────────────────────────────────────── */
+  .roster-manager-bar-inner {
+    gap: 0.5rem;
+  }
+
+  /* ── Trends charts ──────────────────────────────────────────── */
+  canvas {
+    max-height: 240px;
+  }
+
+  /* ── Forms and inputs ───────────────────────────────────────── */
+  input[type='text'],
+  input[type='email'],
+  input[type='password'],
+  input[type='date'],
+  input[type='datetime-local'],
+  select,
+  textarea {
+    background: #12122a;
+    color: #e8eaf6;
+    border-color: #2a2a45;
+  }
+
+  input::placeholder {
+    color: #5a6690;
+  }
+
+  /* ── Buttons ─────────────────────────────────────────────────── */
+  .btn {
+    padding: 0.625rem 1.125rem;
+    font-size: 0.875rem;
+  }
+
+  /* ── Commissioner sub-tabs ───────────────────────────────────── */
+  .comm-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    background: #12122a;
+    border-radius: 10px;
+    padding: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .comm-tab-btn {
+    flex: 1;
+    min-width: calc(50% - 0.375rem);
+    font-size: 0.78rem;
+    padding: 0.5rem 0.5rem;
+    text-align: center;
+    border-radius: 6px;
+  }
+
+  .comm-tab-btn.active {
+    background: rgba(74, 158, 255, 0.15);
+    color: #4a9eff;
+  }
+
+  /* ── Two-column layouts ──────────────────────────────────────── */
+  .two-col {
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Stats grids ─────────────────────────────────────────────── */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* ── Schedule grid ───────────────────────────────────────────── */
+  .schedule-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* ── Bracket ─────────────────────────────────────────────────── */
+  #scoreboard-bracket {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Login screen ────────────────────────────────────────────── */
+  #login-screen {
+    background: #0f0f1a;
+  }
+
+  .login-screen-inner {
+    background: #0f0f1a;
+    padding: 1.5rem 1rem;
+  }
+
+  .login-card {
+    background: #1a1a2e;
+    border: 1px solid #2a2a45;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  }
+
+  .login-card h2 {
+    color: #e8eaf6;
+  }
+
+  .login-brand h1 {
+    color: #e8eaf6;
+  }
+
+  .login-tagline {
+    color: #9fa8da;
+  }
+
+  .login-fields input {
+    background: #12122a;
+    color: #e8eaf6;
+    border: 1px solid #2a2a45;
+  }
+
+  .login-fields input:focus {
+    border-color: #4a9eff;
+    outline: none;
+  }
+
+  .login-divider span {
+    background: #1a1a2e;
+    color: #6c7a9c;
+  }
+
+  .login-divider::before {
+    background: #2a2a45;
+  }
+
+  /* ── Footer ──────────────────────────────────────────────────── */
+  footer {
+    background: #12122a;
+    border-top: 1px solid #2a2a45;
+    color: #6c7a9c;
+    font-size: 0.78rem;
+    padding: 0.875rem 1rem;
+  }
+
+  /* ── Online users bar ────────────────────────────────────────── */
+  .online-user-dot {
+    border-color: #12122a;
+  }
+
+  /* ── Upload hints ────────────────────────────────────────────── */
+  .upload-hint {
+    color: #9fa8da;
+  }
+
+  /* ── Swap table ──────────────────────────────────────────────── */
+  .swap-table td,
+  .swap-table th {
+    font-size: 0.72rem;
+    padding: 0.4rem 0.35rem;
+  }
+
+  /* ── HOF table ───────────────────────────────────────────────── */
+  .hof-records-table td,
+  .hof-records-table th {
+    font-size: 0.72rem;
+  }
+
+  /* ── Player quick-view ───────────────────────────────────────── */
+  .pqv-table td,
+  .pqv-table th {
+    font-size: 0.72rem;
+  }
+
+  /* ── Matchup cards ───────────────────────────────────────────── */
+  .matchup-card {
+    padding: 0.75rem;
+  }
+}
+
+/* ── Very small phones (≤ 400 px) ─────────────────────────────── */
+@media (max-width: 400px) {
+  header h1 {
+    font-size: 0.8rem;
+    max-width: 160px;
+  }
+
+  .mobile-nav-btn {
+    font-size: 0.52rem;
+  }
+
+  .mobile-nav-btn .mnb-icon {
+    font-size: 1.2rem;
+  }
+
+  main {
+    padding: 0.625rem 0.5rem;
+  }
+
+  .mwc-total {
+    font-size: 1.35rem;
+  }
+}
