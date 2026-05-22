@@ -4480,7 +4480,9 @@ function renderTrends() {
 
   // ---- State ----
   const selectedManagers = new Set(allManagers);
-  let managerMode = 'weekly';
+  let managerMode = hasDailyData ? 'daily' : 'weekly';
+  let showAllOnHover = false;
+  let activePanel = 'managers';
   const mgrsForBatters = new Set(allManagers);
   const mgrsForPitchers = new Set(allManagers);
   let selectedBatters = new Set();
@@ -4504,10 +4506,16 @@ function renderTrends() {
   // ---- Build HTML ----
   container.innerHTML = `
     <div class="card">
-      <div class="player-type-toggle trends-view-toggle">
-        <button class="type-btn active" data-view="managers">Manager Trends</button>
-        <button class="type-btn" data-view="batters">Batters</button>
-        <button class="type-btn" data-view="pitchers">Pitchers</button>
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:1.25rem;">
+        <div class="player-type-toggle trends-view-toggle" style="margin-bottom:0;">
+          <button class="type-btn active" data-view="managers">Manager Trends</button>
+          <button class="type-btn" data-view="batters">Batters</button>
+          <button class="type-btn" data-view="pitchers">Pitchers</button>
+        </div>
+        <div class="player-type-toggle" style="margin-bottom:0;">
+          <button class="type-btn active" id="hover-focus-btn">Focus</button>
+          <button class="type-btn" id="hover-all-btn">All Sorted</button>
+        </div>
       </div>
 
       <!-- Manager Trends -->
@@ -4516,9 +4524,9 @@ function renderTrends() {
           <div class="trends-control-row">
             <span class="trends-label">View Mode</span>
             <div class="player-type-toggle" style="display:inline-flex;">
-              <button class="type-btn active" id="mode-weekly">Weekly</button>
+              ${hasDailyData ? `<button class="type-btn active" id="mode-daily">Daily</button>` : ''}
+              <button class="type-btn ${hasDailyData ? '' : 'active'}" id="mode-weekly">Weekly</button>
               <button class="type-btn" id="mode-cumulative">Cumulative</button>
-              ${hasDailyData ? '<button class="type-btn" id="mode-daily">Daily</button>' : ''}
             </div>
           </div>
           ${poolBtnsHtml}
@@ -4585,20 +4593,29 @@ function renderTrends() {
     }
     const canvas = document.getElementById(canvasId);
     if (!canvas || !window.Chart) return;
+    const tooltipOpts = showAllOnHover
+      ? {
+          itemSort: (a, b) => (b.parsed.y ?? -Infinity) - (a.parsed.y ?? -Infinity),
+          filter: (item) => item.parsed.y != null,
+          callbacks: {
+            label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
+          },
+        }
+      : {
+          callbacks: {
+            label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.y != null ? fmt(ctx.parsed.y) : '—'}`,
+          },
+        };
     _trendsCharts[canvasId] = new Chart(canvas, {
       type: 'line',
       data: { labels: labels || chartLabels, datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        interaction: { mode: 'index', intersect: false },
+        interaction: { mode: showAllOnHover ? 'index' : 'nearest', intersect: false },
         plugins: {
           legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 }, padding: 10 } },
-          tooltip: {
-            callbacks: {
-              label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.y != null ? fmt(ctx.parsed.y) : '—'}`,
-            },
-          },
+          tooltip: tooltipOpts,
         },
         scales: {
           x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 30 } },
@@ -4764,12 +4781,37 @@ function renderTrends() {
   // Initial chart draws
   drawManagerChart();
 
+  // ---- Hover toggle ----
+  function redrawActiveChart() {
+    if (activePanel === 'managers') drawManagerChart();
+    else if (activePanel === 'batters') {
+      refreshBatterPlayerChips();
+      drawBatterChart();
+    } else {
+      refreshPitcherPlayerChips();
+      drawPitcherChart();
+    }
+  }
+  document.getElementById('hover-focus-btn').onclick = () => {
+    showAllOnHover = false;
+    document.getElementById('hover-focus-btn').classList.add('active');
+    document.getElementById('hover-all-btn').classList.remove('active');
+    redrawActiveChart();
+  };
+  document.getElementById('hover-all-btn').onclick = () => {
+    showAllOnHover = true;
+    document.getElementById('hover-all-btn').classList.add('active');
+    document.getElementById('hover-focus-btn').classList.remove('active');
+    redrawActiveChart();
+  };
+
   // ---- View toggle ----
   container.querySelectorAll('.trends-view-toggle .type-btn').forEach((btn) => {
     btn.onclick = () => {
       container.querySelectorAll('.trends-view-toggle .type-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       const view = btn.dataset.view;
+      activePanel = view;
       document.getElementById('trends-managers-panel').style.display = view === 'managers' ? '' : 'none';
       document.getElementById('trends-batters-panel').style.display = view === 'batters' ? '' : 'none';
       document.getElementById('trends-pitchers-panel').style.display = view === 'pitchers' ? '' : 'none';
