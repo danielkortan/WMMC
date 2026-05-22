@@ -4412,6 +4412,30 @@ function renderTrends() {
     return;
   }
 
+  // ---- Daily data (for daily manager view) ----
+  const dailyRosterLookup = buildRosterLookup(seasonData);
+  const dailyManagerScores = {};
+  (seasonData.daily_batting || []).forEach((rec) => {
+    const mgr = rec.manager || dailyRosterLookup[`${esc(rec.batter)}|${rec.round}|${rec.week}`];
+    if (!mgr || !registeredNames.has(mgr)) return;
+    const score = calculateBattingScore(rec.delta || {});
+    if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
+    dailyManagerScores[rec.date][mgr] = (dailyManagerScores[rec.date][mgr] || 0) + score;
+  });
+  (seasonData.daily_pitching || []).forEach((rec) => {
+    const mgr = rec.manager || dailyRosterLookup[`${esc(rec.pitcher)}|${rec.round}|${rec.week}`];
+    if (!mgr || !registeredNames.has(mgr)) return;
+    const score = calculatePitchingScore(rec.delta || {});
+    if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
+    dailyManagerScores[rec.date][mgr] = (dailyManagerScores[rec.date][mgr] || 0) + score;
+  });
+  const orderedDates = Object.keys(dailyManagerScores).sort();
+  const dailyChartLabels = orderedDates.map((d) => {
+    const [, m, day] = d.split('-');
+    return `${parseInt(m)}/${parseInt(day)}`;
+  });
+  const hasDailyData = orderedDates.length > 0;
+
   // ---- Ordered weeks (chronological via SEASON_SCHEDULE) ----
   const allWeekKeys = new Set([
     ...teamWeekly.map((t) => `${t.round}|${t.week}`),
@@ -4494,6 +4518,7 @@ function renderTrends() {
             <div class="player-type-toggle" style="display:inline-flex;">
               <button class="type-btn active" id="mode-weekly">Weekly</button>
               <button class="type-btn" id="mode-cumulative">Cumulative</button>
+              ${hasDailyData ? '<button class="type-btn" id="mode-daily">Daily</button>' : ''}
             </div>
           </div>
           ${poolBtnsHtml}
@@ -4550,7 +4575,7 @@ function renderTrends() {
   `;
 
   // ---- Chart drawing helpers ----
-  function makeChart(canvasId, datasets, yLabel) {
+  function makeChart(canvasId, datasets, yLabel, labels) {
     if (_trendsCharts[canvasId]) {
       try {
         _trendsCharts[canvasId].destroy();
@@ -4562,7 +4587,7 @@ function renderTrends() {
     if (!canvas || !window.Chart) return;
     _trendsCharts[canvasId] = new Chart(canvas, {
       type: 'line',
-      data: { labels: chartLabels, datasets },
+      data: { labels: labels || chartLabels, datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -4612,6 +4637,27 @@ function renderTrends() {
     });
   }
 
+  function buildDailyManagerDatasets() {
+    return [...selectedManagers].map((mgr) => {
+      const colorIdx = allManagers.indexOf(mgr);
+      const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
+      const data = orderedDates.map((date) => {
+        const score = dailyManagerScores[date] && dailyManagerScores[date][mgr];
+        return score != null ? Math.round(score * 100) / 100 : null;
+      });
+      return {
+        label: mgr,
+        data,
+        borderColor: color,
+        backgroundColor: color + '28',
+        tension: 0.3,
+        spanGaps: true,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+      };
+    });
+  }
+
   function buildPlayerDatasets(sourceData, allPlayerList, selectedPlayers) {
     return [...selectedPlayers].map((player) => {
       const colorIdx = allPlayerList.indexOf(player);
@@ -4634,8 +4680,12 @@ function renderTrends() {
   }
 
   function drawManagerChart() {
-    const label = managerMode === 'cumulative' ? 'Cumulative Points' : 'Weekly Points';
-    makeChart('trends-manager-chart', buildManagerDatasets(), label);
+    if (managerMode === 'daily') {
+      makeChart('trends-manager-chart', buildDailyManagerDatasets(), 'Daily Points', dailyChartLabels);
+    } else {
+      const label = managerMode === 'cumulative' ? 'Cumulative Points' : 'Weekly Points';
+      makeChart('trends-manager-chart', buildManagerDatasets(), label);
+    }
   }
 
   function getVisibleBatters() {
@@ -4735,18 +4785,17 @@ function renderTrends() {
   });
 
   // ---- Mode toggle ----
-  document.getElementById('mode-weekly').onclick = () => {
-    managerMode = 'weekly';
-    document.getElementById('mode-weekly').classList.add('active');
-    document.getElementById('mode-cumulative').classList.remove('active');
+  const setManagerMode = (mode) => {
+    managerMode = mode;
+    ['mode-weekly', 'mode-cumulative', 'mode-daily'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('active', id === `mode-${mode}`);
+    });
     drawManagerChart();
   };
-  document.getElementById('mode-cumulative').onclick = () => {
-    managerMode = 'cumulative';
-    document.getElementById('mode-cumulative').classList.add('active');
-    document.getElementById('mode-weekly').classList.remove('active');
-    drawManagerChart();
-  };
+  document.getElementById('mode-weekly').onclick = () => setManagerMode('weekly');
+  document.getElementById('mode-cumulative').onclick = () => setManagerMode('cumulative');
+  if (hasDailyData) document.getElementById('mode-daily').onclick = () => setManagerMode('daily');
 
   // ---- All/None buttons ----
   document.getElementById('mgr-all-btn').onclick = () => {
