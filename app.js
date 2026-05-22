@@ -4429,12 +4429,33 @@ function renderTrends() {
     if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
     dailyManagerScores[rec.date][mgr] = (dailyManagerScores[rec.date][mgr] || 0) + score;
   });
-  const orderedDates = Object.keys(dailyManagerScores).sort();
-  const dailyChartLabels = orderedDates.map((d) => {
-    const [, m, day] = d.split('-');
-    return `${parseInt(m)}/${parseInt(day)}`;
+
+  const dailyPlayerBattingScores = {};
+  (seasonData.daily_batting || []).forEach((rec) => {
+    const score = calculateBattingScore(rec.delta || {});
+    if (!dailyPlayerBattingScores[rec.date]) dailyPlayerBattingScores[rec.date] = {};
+    dailyPlayerBattingScores[rec.date][rec.batter] = (dailyPlayerBattingScores[rec.date][rec.batter] || 0) + score;
   });
-  const hasDailyData = orderedDates.length > 0;
+  const dailyPlayerPitchingScores = {};
+  (seasonData.daily_pitching || []).forEach((rec) => {
+    const score = calculatePitchingScore(rec.delta || {});
+    if (!dailyPlayerPitchingScores[rec.date]) dailyPlayerPitchingScores[rec.date] = {};
+    dailyPlayerPitchingScores[rec.date][rec.pitcher] = (dailyPlayerPitchingScores[rec.date][rec.pitcher] || 0) + score;
+  });
+
+  const orderedDates = Object.keys(dailyManagerScores).sort();
+  const orderedBatterDates = Object.keys(dailyPlayerBattingScores).sort();
+  const orderedPitcherDates = Object.keys(dailyPlayerPitchingScores).sort();
+
+  const makeDailyLabels = (dates) =>
+    dates.map((d) => {
+      const [, m, day] = d.split('-');
+      return `${parseInt(m)}/${parseInt(day)}`;
+    });
+  const dailyChartLabels = makeDailyLabels(orderedDates);
+  const batterDailyLabels = makeDailyLabels(orderedBatterDates);
+  const pitcherDailyLabels = makeDailyLabels(orderedPitcherDates);
+  const hasDailyData = orderedDates.length > 0 || orderedBatterDates.length > 0 || orderedPitcherDates.length > 0;
 
   // ---- Ordered weeks (chronological via SEASON_SCHEDULE) ----
   const allWeekKeys = new Set([
@@ -4481,6 +4502,8 @@ function renderTrends() {
   // ---- State ----
   const selectedManagers = new Set(allManagers);
   let managerMode = hasDailyData ? 'daily' : 'weekly';
+  let batterMode = hasDailyData ? 'daily' : 'weekly';
+  let pitcherMode = hasDailyData ? 'daily' : 'weekly';
   let showAllOnHover = false;
   let activePanel = 'managers';
   const mgrsForBatters = new Set(allManagers);
@@ -4543,6 +4566,14 @@ function renderTrends() {
       <!-- Batters -->
       <div id="trends-batters-panel" class="trends-panel" style="display:none;">
         <div class="trends-controls">
+          <div class="trends-control-row">
+            <span class="trends-label">View Mode</span>
+            <div class="player-type-toggle" style="display:inline-flex;">
+              ${hasDailyData ? `<button class="type-btn active" id="bat-mode-daily">Daily</button>` : ''}
+              <button class="type-btn ${hasDailyData ? '' : 'active'}" id="bat-mode-weekly">Weekly</button>
+              <button class="type-btn" id="bat-mode-cumulative">Cumulative</button>
+            </div>
+          </div>
           ${mgrPoolBtnsHtml('bat')}
           <div class="trends-control-row">
             <span class="trends-label">By Manager</span>
@@ -4563,6 +4594,14 @@ function renderTrends() {
       <!-- Pitchers -->
       <div id="trends-pitchers-panel" class="trends-panel" style="display:none;">
         <div class="trends-controls">
+          <div class="trends-control-row">
+            <span class="trends-label">View Mode</span>
+            <div class="player-type-toggle" style="display:inline-flex;">
+              ${hasDailyData ? `<button class="type-btn active" id="pit-mode-daily">Daily</button>` : ''}
+              <button class="type-btn ${hasDailyData ? '' : 'active'}" id="pit-mode-weekly">Weekly</button>
+              <button class="type-btn" id="pit-mode-cumulative">Cumulative</button>
+            </div>
+          </div>
           ${mgrPoolBtnsHtml('pit')}
           <div class="trends-control-row">
             <span class="trends-label">By Manager</span>
@@ -4675,14 +4714,31 @@ function renderTrends() {
     });
   }
 
-  function buildPlayerDatasets(sourceData, allPlayerList, selectedPlayers) {
+  function buildPlayerDatasets(sourceData, allPlayerList, selectedPlayers, mode, dailyScores, dailyDates) {
     return [...selectedPlayers].map((player) => {
       const colorIdx = allPlayerList.indexOf(player);
       const color = CHART_COLORS[colorIdx % CHART_COLORS.length];
-      const data = orderedWeeks.map((w) => {
-        const rows = sourceData.filter((d) => d.player === player && d.round === w.round && d.week === w.week);
-        return rows.length > 0 ? Math.round(rows.reduce((s, r) => s + r.weekly_score, 0) * 100) / 100 : null;
-      });
+      let data;
+      if (mode === 'daily') {
+        data = (dailyDates || []).map((date) => {
+          const score = dailyScores && dailyScores[date] && dailyScores[date][player];
+          return score != null ? Math.round(score * 100) / 100 : null;
+        });
+      } else {
+        const weekly = orderedWeeks.map((w) => {
+          const rows = sourceData.filter((d) => d.player === player && d.round === w.round && d.week === w.week);
+          return rows.length > 0 ? Math.round(rows.reduce((s, r) => s + r.weekly_score, 0) * 100) / 100 : null;
+        });
+        if (mode === 'cumulative') {
+          let cum = 0;
+          data = weekly.map((v) => {
+            if (v !== null) cum += v;
+            return v !== null ? Math.round(cum * 100) / 100 : null;
+          });
+        } else {
+          data = weekly;
+        }
+      }
       return {
         label: player,
         data,
@@ -4718,7 +4774,22 @@ function renderTrends() {
     const active = new Set([...selectedBatters].filter((p) => visible.includes(p)));
     selectedBatters = active;
     const filtered = battingData.filter((b) => mgrsForBatters.has(b.manager));
-    makeChart('trends-batter-chart', buildPlayerDatasets(filtered, allBatters, selectedBatters), 'Weekly Points');
+    const yLabel =
+      batterMode === 'daily' ? 'Daily Points' : batterMode === 'cumulative' ? 'Cumulative Points' : 'Weekly Points';
+    const labels = batterMode === 'daily' ? batterDailyLabels : undefined;
+    makeChart(
+      'trends-batter-chart',
+      buildPlayerDatasets(
+        filtered,
+        allBatters,
+        selectedBatters,
+        batterMode,
+        dailyPlayerBattingScores,
+        orderedBatterDates
+      ),
+      yLabel,
+      labels
+    );
   }
 
   function drawPitcherChart() {
@@ -4726,7 +4797,22 @@ function renderTrends() {
     const active = new Set([...selectedPitchers].filter((p) => visible.includes(p)));
     selectedPitchers = active;
     const filtered = pitchingData.filter((p) => mgrsForPitchers.has(p.manager));
-    makeChart('trends-pitcher-chart', buildPlayerDatasets(filtered, allPitchers, selectedPitchers), 'Weekly Points');
+    const yLabel =
+      pitcherMode === 'daily' ? 'Daily Points' : pitcherMode === 'cumulative' ? 'Cumulative Points' : 'Weekly Points';
+    const labels = pitcherMode === 'daily' ? pitcherDailyLabels : undefined;
+    makeChart(
+      'trends-pitcher-chart',
+      buildPlayerDatasets(
+        filtered,
+        allPitchers,
+        selectedPitchers,
+        pitcherMode,
+        dailyPlayerPitchingScores,
+        orderedPitcherDates
+      ),
+      yLabel,
+      labels
+    );
   }
 
   // ---- Chip rendering ----
@@ -4838,6 +4924,32 @@ function renderTrends() {
   document.getElementById('mode-weekly').onclick = () => setManagerMode('weekly');
   document.getElementById('mode-cumulative').onclick = () => setManagerMode('cumulative');
   if (hasDailyData) document.getElementById('mode-daily').onclick = () => setManagerMode('daily');
+
+  const setBatterMode = (mode) => {
+    batterMode = mode;
+    ['bat-mode-daily', 'bat-mode-weekly', 'bat-mode-cumulative'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('active', id === `bat-mode-${mode}`);
+    });
+    refreshBatterPlayerChips();
+    drawBatterChart();
+  };
+  if (hasDailyData) document.getElementById('bat-mode-daily').onclick = () => setBatterMode('daily');
+  document.getElementById('bat-mode-weekly').onclick = () => setBatterMode('weekly');
+  document.getElementById('bat-mode-cumulative').onclick = () => setBatterMode('cumulative');
+
+  const setPitcherMode = (mode) => {
+    pitcherMode = mode;
+    ['pit-mode-daily', 'pit-mode-weekly', 'pit-mode-cumulative'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('active', id === `pit-mode-${mode}`);
+    });
+    refreshPitcherPlayerChips();
+    drawPitcherChart();
+  };
+  if (hasDailyData) document.getElementById('pit-mode-daily').onclick = () => setPitcherMode('daily');
+  document.getElementById('pit-mode-weekly').onclick = () => setPitcherMode('weekly');
+  document.getElementById('pit-mode-cumulative').onclick = () => setPitcherMode('cumulative');
 
   // ---- All/None buttons ----
   document.getElementById('mgr-all-btn').onclick = () => {
