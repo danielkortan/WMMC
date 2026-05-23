@@ -1193,6 +1193,7 @@ const LIVE_GRACE_MS = 30 * 60 * 1000; // 30 minutes after last live game
 let _livePollTimer = null;
 let _liveLastFetchedAt = 0;
 let _liveLastSawLiveGame = 0;
+let _liveViewDate = null; // null = today/live, 'YYYY-MM-DD' = historical date view
 // Tracks which manager rows have their today's-stats drop-down expanded so the
 // 2-minute poll re-render doesn't collapse the panel under the user.
 const _liveExpandedManagers = new Set();
@@ -1206,6 +1207,8 @@ const _liveKey = (s) =>
 
 function startLivePolling() {
   stopLivePolling();
+  _liveViewDate = null;
+  updateLiveDateNav();
   // Always do an initial fetch on entering the tab; the response decides whether
   // to schedule a follow-up poll.
   refreshLive();
@@ -1216,6 +1219,211 @@ function stopLivePolling() {
     clearTimeout(_livePollTimer);
     _livePollTimer = null;
   }
+}
+
+function updateLiveDateNav() {
+  const prevBtn = document.getElementById('live-date-prev');
+  const nextBtn = document.getElementById('live-date-next');
+  const labelEl = document.getElementById('live-date-label');
+  if (!prevBtn || !nextBtn || !labelEl) return;
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (_liveViewDate === null) {
+    labelEl.textContent = 'Today';
+    nextBtn.disabled = true;
+  } else {
+    labelEl.textContent = _liveViewDate;
+    nextBtn.disabled = _liveViewDate >= todayET;
+  }
+}
+
+window.liveDatePrev = function () {
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const from = _liveViewDate || todayET;
+  const d = new Date(from + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 1);
+  _liveViewDate = d.toISOString().slice(0, 10);
+  updateLiveDateNav();
+  stopLivePolling();
+  fetchDailyHistory(_liveViewDate);
+};
+
+window.liveDateNext = function () {
+  if (!_liveViewDate) return;
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const d = new Date(_liveViewDate + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  const next = d.toISOString().slice(0, 10);
+  if (next >= todayET) {
+    // Arrived at today — switch back to live polling mode
+    _liveViewDate = null;
+    updateLiveDateNav();
+    startLivePolling();
+  } else {
+    _liveViewDate = next;
+    updateLiveDateNav();
+    stopLivePolling();
+    fetchDailyHistory(_liveViewDate);
+  }
+};
+
+async function fetchDailyHistory(date) {
+  if (!SELECTED_SEASON) return;
+  const statusEl = document.getElementById('live-status');
+  if (statusEl) statusEl.textContent = 'Loading…';
+  try {
+    const resp = await fetch(
+      `/api/mlb/daily?year=${encodeURIComponent(SELECTED_SEASON)}&date=${encodeURIComponent(date)}`
+    );
+    const data = await resp.json();
+    renderDailyContent(data);
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `Error: ${e.message}`;
+  }
+}
+
+function renderDailyContent(d) {
+  const titleEl = document.getElementById('live-week-title');
+  const statusEl = document.getElementById('live-status');
+  const managersEl = document.getElementById('live-managers');
+  const gamesEl = document.getElementById('live-games');
+
+  if (gamesEl) gamesEl.innerHTML = '';
+
+  if (!d.active_week) {
+    if (titleEl) titleEl.textContent = 'Daily Scores';
+    if (statusEl) statusEl.textContent = `No schedule week found for ${d.date}.`;
+    if (managersEl) managersEl.innerHTML = '';
+    return;
+  }
+
+  const aw = d.active_week;
+  if (titleEl) titleEl.textContent = `${aw.round} · ${aw.week}`;
+  if (statusEl) statusEl.textContent = `Daily scores for ${d.date}`;
+
+  if (!managersEl) return;
+
+  const fmtDeltaSpan = (delta) => {
+    if (!delta || delta === 0) return '<span class="rank-delta-zero">—</span>';
+    const sign = delta > 0 ? '+' : '';
+    const cls = delta > 0 ? 'rank-delta-up' : 'rank-delta-down';
+    return `<span class="${cls}">${sign}${delta}</span>`;
+  };
+
+  const playersByMgr = {};
+  for (const p of d.players || []) {
+    if (!playersByMgr[p.manager]) playersByMgr[p.manager] = { batting: [], pitching: [] };
+    playersByMgr[p.manager][p.type].push(p);
+  }
+
+  const renderDailyPanel = (managerName) => {
+    const pl = playersByMgr[managerName] || { batting: [], pitching: [] };
+    const batters = [...pl.batting].sort((a, b) => b.daily_score - a.daily_score);
+    const pitchers = [...pl.pitching].sort((a, b) => b.daily_score - a.daily_score);
+    if (!batters.length && !pitchers.length) {
+      return '<div class="mgr-detail-panel"><div class="live-mgr-detail-empty">No stats recorded for this date.</div></div>';
+    }
+    const batterRow = (p) => `<tr>
+      <td>${escapeHtml(p.name)}</td>
+      <td class="num-cell">${p.stats.abs || 0}</td>
+      <td class="num-cell">${p.stats['1b'] || 0}</td>
+      <td class="num-cell">${p.stats['2b'] || 0}</td>
+      <td class="num-cell">${p.stats['3b'] || 0}</td>
+      <td class="num-cell">${p.stats.hr || 0}</td>
+      <td class="num-cell">${p.stats.r || 0}</td>
+      <td class="num-cell">${p.stats.rbi || 0}</td>
+      <td class="num-cell">${p.stats.sb || 0}</td>
+      <td class="num-cell">${p.stats.bb || 0}</td>
+      <td class="num-cell"><strong>${fmt(p.daily_score)}</strong></td>
+    </tr>`;
+    const pitcherRow = (p) => `<tr>
+      <td>${escapeHtml(p.name)}</td>
+      <td class="num-cell">${p.stats.gs || 0}</td>
+      <td class="num-cell">${p.stats.w || 0}</td>
+      <td class="num-cell">${fmtDec(p.stats.qs || 0)}</td>
+      <td class="num-cell">${p.stats.cg || 0}</td>
+      <td class="num-cell">${p.stats.cgso || 0}</td>
+      <td class="num-cell">${p.stats.nh || 0}</td>
+      <td class="num-cell">${fmtDec(p.stats.ip || 0)}</td>
+      <td class="num-cell">${p.stats.h || 0}</td>
+      <td class="num-cell">${p.stats.er || 0}</td>
+      <td class="num-cell">${p.stats.bb || 0}</td>
+      <td class="num-cell">${p.stats.k || 0}</td>
+      <td class="num-cell"><strong>${fmt(p.daily_score)}</strong></td>
+    </tr>`;
+    const batTable = batters.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table">
+          <thead><tr>
+            <th>Player</th>
+            <th class="num-cell">AB</th><th class="num-cell">1B</th><th class="num-cell">2B</th>
+            <th class="num-cell">3B</th><th class="num-cell">HR</th><th class="num-cell">R</th>
+            <th class="num-cell">RBI</th><th class="num-cell">SB</th><th class="num-cell">BB</th>
+            <th class="num-cell">Pts</th>
+          </tr></thead>
+          <tbody>${batters.map(batterRow).join('')}</tbody>
+        </table></div>`
+      : '<div class="live-mgr-detail-empty">No batter activity this day.</div>';
+    const pitTable = pitchers.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table">
+          <thead><tr>
+            <th>Player</th>
+            <th class="num-cell">GS</th><th class="num-cell">W</th><th class="num-cell">QS</th>
+            <th class="num-cell">CG</th><th class="num-cell">CGSO</th><th class="num-cell">NH</th>
+            <th class="num-cell">IP</th><th class="num-cell">H</th><th class="num-cell">ER</th>
+            <th class="num-cell">BB</th><th class="num-cell">K</th><th class="num-cell">Pts</th>
+          </tr></thead>
+          <tbody>${pitchers.map(pitcherRow).join('')}</tbody>
+        </table></div>`
+      : '<div class="live-mgr-detail-empty">No pitcher activity this day.</div>';
+    return `<div class="mgr-detail-panel">
+      <div class="live-mgr-detail-section">
+        <div class="mgr-detail-header">Batters</div>${batTable}
+      </div>
+      <div class="live-mgr-detail-section">
+        <div class="mgr-detail-header">Pitchers</div>${pitTable}
+      </div>
+    </div>`;
+  };
+
+  const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
+  for (const n of [..._liveExpandedManagers]) {
+    if (!currentMgrNames.has(n)) _liveExpandedManagers.delete(n);
+  }
+
+  const rows = (d.managers || [])
+    .map((m, i) => {
+      const key = _liveKey(m.name);
+      const expanded = _liveExpandedManagers.has(m.name);
+      const arrow = expanded ? '&#9650;' : '&#9660;';
+      const safeMgr = jsStr(m.name);
+      return `
+        <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
+          <td class="rank-cell">${i + 1}</td>
+          <td>${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
+          <td class="num-cell"><strong>${fmt(m.daily_score)}</strong></td>
+          <td class="num-cell">${fmtDeltaSpan(m.rank_delta)}</td>
+          <td class="num-cell">${fmt(m.cumulative_total)}</td>
+        </tr>
+        <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'}">
+          <td colspan="5">${renderDailyPanel(m.name)}</td>
+        </tr>`;
+    })
+    .join('');
+
+  managersEl.innerHTML = `
+    <div class="card">
+      <h3>Daily Scores <span class="muted">(${escapeHtml(d.date)})</span></h3>
+      <div class="table-wrapper">
+        <table class="data-table compact-table">
+          <thead><tr>
+            <th>#</th><th>Manager</th>
+            <th title="Points earned on ${escapeHtml(d.date)}">Daily</th>
+            <th title="Rank change from start to end of this day">&Delta; Rank</th>
+            <th title="Cumulative total through end of ${escapeHtml(d.date)}">Total</th>
+          </tr></thead>
+          <tbody>${rows || '<tr><td colspan="5" class="empty">No data for this date.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 function shouldKeepPolling(data) {
