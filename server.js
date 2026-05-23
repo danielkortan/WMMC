@@ -4514,20 +4514,36 @@ app.get('/api/mlb/daily', (req, res) => {
   const ranksAfter = rankByTotals(totalsAfter);
 
   // Daily score for exactly this date = cumulative through date minus cumulative through prevDate
+  // Weekly running total: sum of daily scores within just the active week through this date
+  const weeklyRunning = {};
+  const processWeekly = (records, playerKey, scoreFunc, playerType) => {
+    for (const r of records) {
+      if (r.date > date || r.round !== weekRound || r.week !== weekName) continue;
+      const name = r[playerKey];
+      const mgr =
+        findManagerForPlayerWeek(sd, name, playerType, r.round, r.week) || findManagerForPlayer(sd, name, playerType);
+      if (!mgr) continue;
+      weeklyRunning[mgr] = (weeklyRunning[mgr] || 0) + scoreFunc(r.delta || {});
+    }
+  };
+  processWeekly(sd.daily_batting || [], 'batter', calculateBattingScore, 'batting');
+  processWeekly(sd.daily_pitching || [], 'pitcher', calculatePitchingScore, 'pitching');
+
   const managers = [...allManagers]
     .map((mgr) => ({
       name: mgr,
-      daily_score: Math.round(((dailyAfter[mgr] || 0) - (dailyBefore[mgr] || 0)) * 100) / 100,
-      cumulative_total: Math.round((totalsAfter[mgr] || 0) * 100) / 100,
+      today_score: Math.round(((dailyAfter[mgr] || 0) - (dailyBefore[mgr] || 0)) * 100) / 100,
+      round_total: Math.round((totalsAfter[mgr] || 0) * 100) / 100,
+      running_score: Math.round((weeklyRunning[mgr] || 0) * 100) / 100,
       baseline_rank: ranksBefore[mgr] ?? null,
       live_rank: ranksAfter[mgr] ?? null,
       rank_delta: (ranksBefore[mgr] ?? 0) - (ranksAfter[mgr] ?? 0),
     }))
-    .sort((a, b) => b.daily_score - a.daily_score || a.name.localeCompare(b.name));
+    .sort((a, b) => b.round_total - a.round_total || a.name.localeCompare(b.name));
 
   // Player-level details for just this date
   const players = [];
-  const pushPlayers = (records, playerKey, scoreFunc, playerType) => {
+  const pushPlayers = (records, playerKey, scoreFunc, playerType, teamMap) => {
     for (const r of records) {
       if (r.date !== date || !inCertifiedRounds(r.round)) continue;
       const name = r[playerKey];
@@ -4537,15 +4553,16 @@ app.get('/api/mlb/daily', (req, res) => {
       players.push({
         name,
         manager: mgr,
+        team: teamMap?.[name] || null,
         type: playerType,
-        daily_score: Math.round(scoreFunc(r.delta || {}) * 100) / 100,
+        score: Math.round(scoreFunc(r.delta || {}) * 100) / 100,
         stats: r.delta || {},
       });
     }
   };
-  pushPlayers(sd.daily_batting || [], 'batter', calculateBattingScore, 'batting');
-  pushPlayers(sd.daily_pitching || [], 'pitcher', calculatePitchingScore, 'pitching');
-  players.sort((a, b) => b.daily_score - a.daily_score);
+  pushPlayers(sd.daily_batting || [], 'batter', calculateBattingScore, 'batting', sd.batters_team);
+  pushPlayers(sd.daily_pitching || [], 'pitcher', calculatePitchingScore, 'pitching', sd.pitchers_team);
+  players.sort((a, b) => b.score - a.score);
 
   res.json({
     season: year,
