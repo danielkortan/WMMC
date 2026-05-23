@@ -7,12 +7,15 @@
 .mobile-bottom-nav {
   display: none;
   position: fixed;
+  top: auto; /* override nav { top: 0 } from styles.css — without this the nav sticks to the top */
   bottom: 0;
   left: 0;
   right: 0;
   height: 80px;
   background: #12122a;
   border-top: 1px solid #2a2a45;
+  border-bottom: none; /* override nav { border-bottom } from styles.css */
+  overflow: hidden; /* override nav { overflow-x: auto } from styles.css */
   z-index: 1000;
   padding: 0 0.25rem;
   padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -453,13 +456,16 @@
     letter-spacing: 0.3px;
   }
 
-  /* ── Scoreboard sub-tabs: always hidden inline, shown only in fixed bar ── */
-  /* JS mirrors them into #mobile-sb-tabs-bar; CSS guarantees original is gone */
-  #scoreboard-content .scoreboard-tabs {
+  /* ── Scoreboard sub-tabs: always hidden inside scoreboard, shown only in fixed bar ── */
+  /* Both container and buttons hidden so no remnant is ever visible on mobile */
+  #scoreboard-content .scoreboard-tabs,
+  #scoreboard-content .sb-tab {
     display: none !important;
   }
 
-  .sb-tab {
+  /* Tabs inside the fixed bar are visible and sized for touch */
+  #mobile-sb-tabs-bar .sb-tab {
+    display: inline-block !important;
     font-size: 0.82rem;
     padding: 0.55rem 0.875rem;
     white-space: nowrap;
