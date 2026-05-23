@@ -4102,6 +4102,45 @@ body::before {
   gap: 1rem;
   flex-wrap: wrap;
 }
+.live-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.live-date-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.live-date-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.9rem;
+  color: var(--text-light);
+  cursor: pointer;
+  line-height: 1.4;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.live-date-btn:hover:not(:disabled) {
+  background: rgba(0, 45, 98, 0.07);
+  color: var(--primary);
+}
+.live-date-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.live-date-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  min-width: 5.75rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 .live-status {
   font-size: 0.85rem;
   color: var(--text-muted);

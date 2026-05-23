@@ -4401,6 +4401,163 @@ app.get('/api/mlb/live', async (req, res) => {
 });
 
 // GET /api/mlb/live/game/:gamePk?year=YYYY
+// GET /api/mlb/daily?year=YYYY&date=YYYY-MM-DD
+// Historical daily scoring snapshot built from synced daily_batting/daily_pitching records.
+// Returns per-manager daily scores, rank deltas, and player details for a past date.
+// Safe to call for any date that falls within the season schedule.
+app.get('/api/mlb/daily', (req, res) => {
+  const { year, date } = req.query;
+  if (!year || !date) return res.status(400).json({ error: 'year and date are required' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const scheduleDates = sd.schedule_dates || [];
+  let weekIdx = -1;
+  for (let i = 0; i < scheduleDates.length; i++) {
+    const wd = scheduleDates[i];
+    if (wd && wd.start && wd.end && date >= wd.start && date <= wd.end) {
+      weekIdx = i;
+      break;
+    }
+  }
+
+  if (weekIdx < 0) return res.json({ season: year, date, active_week: null });
+
+  const schedWeek = SEASON_SCHEDULE[weekIdx];
+  const { start, end } = scheduleDates[weekIdx];
+  const weekRound = schedWeek.round;
+  const weekName = schedWeek.week;
+
+  const isPoolPlayPhase = weekRound === 'PP1' || weekRound === 'PP2';
+  const certifiedRounds = isPoolPlayPhase ? new Set(['PP1', 'PP2']) : new Set([weekRound]);
+
+  // Also include legacy '*P' import-variant rounds (e.g. PP1P, PP2P)
+  const inCertifiedRounds = (r) =>
+    certifiedRounds.has(r) || (r && r.endsWith('P') && certifiedRounds.has(r.slice(0, -1)));
+
+  // Earliest start date among all weeks belonging to the certified round set
+  let certRoundStart = null;
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    if (certifiedRounds.has(SEASON_SCHEDULE[i].round) && scheduleDates[i]?.start) {
+      certRoundStart = scheduleDates[i].start;
+      break;
+    }
+  }
+
+  // Seed allManagers from rosters; getDailyThrough extends it as it resolves player→manager
+  const allManagers = new Set(Object.keys(sd.rosters || {}));
+
+  // Sum daily scores for all certified-round records up to and including cutoffDate.
+  const getDailyThrough = (cutoff) => {
+    const totals = {};
+    const process = (records, playerKey, scoreFunc, playerType) => {
+      for (const r of records) {
+        if (r.date > cutoff || !inCertifiedRounds(r.round)) continue;
+        const name = r[playerKey];
+        const mgr =
+          findManagerForPlayerWeek(sd, name, playerType, r.round, r.week) || findManagerForPlayer(sd, name, playerType);
+        if (!mgr) continue;
+        allManagers.add(mgr);
+        totals[mgr] = (totals[mgr] || 0) + scoreFunc(r.delta || {});
+      }
+    };
+    process(sd.daily_batting || [], 'batter', calculateBattingScore, 'batting');
+    process(sd.daily_pitching || [], 'pitcher', calculatePitchingScore, 'pitching');
+    return totals;
+  };
+
+  // Certified totals from rounds/weeks that fully completed before the current round started.
+  const battingRows = sd.weekly_batting || [];
+  const pitchingRows = sd.weekly_pitching || [];
+  const certBase = {};
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    const sw = SEASON_SCHEDULE[i];
+    const wd = scheduleDates[i];
+    if (!wd || !wd.end) continue;
+    if (inCertifiedRounds(sw.round)) continue; // part of the current phase — skip
+    if (certRoundStart && wd.end >= certRoundStart) continue; // overlaps current phase — skip
+    for (const mgr of allManagers) {
+      const bat = managerWeekSubtotal(sd, mgr, sw, i, battingRows, 'batter', 'batters');
+      const pit = managerWeekSubtotal(sd, mgr, sw, i, pitchingRows, 'pitcher', 'pitchers');
+      if (bat + pit !== 0) certBase[mgr] = (certBase[mgr] || 0) + bat + pit;
+    }
+  }
+
+  // Previous calendar day (UTC) for the "before this date" baseline
+  const prevDate = (() => {
+    const d = new Date(date + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() - 1);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  const dailyBefore = getDailyThrough(prevDate);
+  const dailyAfter = getDailyThrough(date);
+
+  const rankByTotals = (map) =>
+    Object.entries(map)
+      .sort((a, b) => b[1] - a[1])
+      .reduce((acc, [name], i) => {
+        acc[name] = i + 1;
+        return acc;
+      }, {});
+
+  const totalsBefore = {};
+  const totalsAfter = {};
+  for (const mgr of allManagers) {
+    totalsBefore[mgr] = (certBase[mgr] || 0) + (dailyBefore[mgr] || 0);
+    totalsAfter[mgr] = (certBase[mgr] || 0) + (dailyAfter[mgr] || 0);
+  }
+  const ranksBefore = rankByTotals(totalsBefore);
+  const ranksAfter = rankByTotals(totalsAfter);
+
+  // Daily score for exactly this date = cumulative through date minus cumulative through prevDate
+  const managers = [...allManagers]
+    .map((mgr) => ({
+      name: mgr,
+      daily_score: Math.round(((dailyAfter[mgr] || 0) - (dailyBefore[mgr] || 0)) * 100) / 100,
+      cumulative_total: Math.round((totalsAfter[mgr] || 0) * 100) / 100,
+      baseline_rank: ranksBefore[mgr] ?? null,
+      live_rank: ranksAfter[mgr] ?? null,
+      rank_delta: (ranksBefore[mgr] ?? 0) - (ranksAfter[mgr] ?? 0),
+    }))
+    .sort((a, b) => b.daily_score - a.daily_score || a.name.localeCompare(b.name));
+
+  // Player-level details for just this date
+  const players = [];
+  const pushPlayers = (records, playerKey, scoreFunc, playerType) => {
+    for (const r of records) {
+      if (r.date !== date || !inCertifiedRounds(r.round)) continue;
+      const name = r[playerKey];
+      const mgr =
+        findManagerForPlayerWeek(sd, name, playerType, r.round, r.week) || findManagerForPlayer(sd, name, playerType);
+      if (!mgr) continue;
+      players.push({
+        name,
+        manager: mgr,
+        type: playerType,
+        daily_score: Math.round(scoreFunc(r.delta || {}) * 100) / 100,
+        stats: r.delta || {},
+      });
+    }
+  };
+  pushPlayers(sd.daily_batting || [], 'batter', calculateBattingScore, 'batting');
+  pushPlayers(sd.daily_pitching || [], 'pitcher', calculatePitchingScore, 'pitching');
+  players.sort((a, b) => b.daily_score - a.daily_score);
+
+  res.json({
+    season: year,
+    date,
+    active_week: { round: weekRound, week: weekName, start, end, week_index: weekIdx },
+    season_start: scheduleDates[0]?.start ?? null,
+    season_end: scheduleDates[scheduleDates.length - 1]?.end ?? null,
+    managers,
+    players,
+  });
+});
+
 // Full single-game boxscore for the Live tab's per-game expand UI. Returns
 // every batter and pitcher from both teams (not just rostered), with each
 // player flagged `rostered` against the active schedule week and tagged with
