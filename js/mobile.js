@@ -147,57 +147,108 @@ function watchCommissioner() {
   update();
 }
 
-// ── Live detail: enforce table structure via inline important styles ──
-// CSS alone cannot reliably beat cascading display:block!important rules
-// on nested tables across all mobile browsers, so we patch directly.
+// ── Live detail: rebuild player tables as flex rows ──────────────
+// CSS table display rules are unreliable on mobile browsers when nested
+// inside block-display ancestors. Replace the <table> entirely with
+// <div> flex rows — flex layout is immune to CSS table cascade issues.
 function watchLiveDetails() {
   const container = document.getElementById('live-managers');
   if (!container) return;
 
-  const applyFlex = (row) => {
+  const TEAM_COL = 1; // index of Team column (hidden on mobile, saves space)
+
+  const buildFlexTable = (table) => {
+    const ths = Array.from(table.querySelectorAll('thead tr th'));
+    const trs = Array.from(table.querySelectorAll('tbody tr'));
+    if (!ths.length) return null;
+
+    const makeCell = (content, i, colCount, isHeader) => {
+      const isFirst = i === 0;
+      const isLast = i === colCount - 1;
+      const el = document.createElement('div');
+      const w = isFirst ? '130px' : '52px';
+      const color = isHeader ? '#6c7a9c' : isFirst ? '#e8eaf6' : isLast ? '#4a9eff' : '#9fa8da';
+      const size = isHeader ? '12px' : isFirst ? '22px' : '20px';
+      const weight = !isHeader && (isFirst || isLast) ? '700' : isHeader ? '700' : '400';
+      el.style.cssText =
+        `flex:0 0 ${w};padding:9px 7px;font-size:${size};font-weight:${weight};` +
+        `color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;` +
+        `text-align:${isFirst ? 'left' : 'center'};box-sizing:border-box;` +
+        (isHeader ? 'text-transform:uppercase;letter-spacing:0.4px;' : '');
+      if (isHeader) {
+        el.textContent = content.textContent.trim();
+      } else {
+        el.innerHTML = content.innerHTML;
+      }
+      return el;
+    };
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;';
+
+    const inner = document.createElement('div');
+    inner.style.cssText = 'display:inline-flex;flex-direction:column;min-width:100%;';
+
+    // Header
+    const hdr = document.createElement('div');
+    hdr.style.cssText =
+      'display:flex;flex-direction:row;background:#0d0d1e;' + 'border-bottom:2px solid #3a3a5a;position:sticky;top:0;';
+    const visThCols = ths.filter((_, i) => i !== TEAM_COL);
+    visThCols.forEach((th, ci) =>
+      hdr.appendChild(makeCell(th, ci === 0 ? 0 : ci === visThCols.length - 1 ? -1 : ci, visThCols.length, true))
+    );
+    inner.appendChild(hdr);
+
+    // Data rows
+    trs.forEach((tr) => {
+      const tds = Array.from(tr.querySelectorAll('td')).filter((_, i) => i !== TEAM_COL);
+      if (!tds.length) return;
+      const rowEl = document.createElement('div');
+      rowEl.style.cssText = 'display:flex;flex-direction:row;border-bottom:1px solid #2a2a45;';
+      tds.forEach((td, ci) => {
+        rowEl.appendChild(makeCell(td, ci === 0 ? 0 : ci === tds.length - 1 ? -1 : ci, tds.length, false));
+      });
+      inner.appendChild(rowEl);
+    });
+
+    wrap.appendChild(inner);
+    return wrap;
+  };
+
+  const applyDetail = (row) => {
     if (row.style.display === 'none') return;
     const panel = row.querySelector('.mgr-detail-panel');
     if (!panel) return;
-    panel.style.display = 'flex';
-    panel.style.flexDirection = 'column';
-    panel.style.gap = '0.75rem';
-    panel.style.overflow = 'visible';
-    panel.style.padding = '0.5rem';
-    panel.style.background = '#13132a';
+
+    // Panel layout
+    Object.assign(panel.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.75rem',
+      overflow: 'visible',
+      padding: '0.5rem',
+      background: '#13132a',
+    });
+
     row.querySelectorAll('.live-mgr-detail-section').forEach((s) => {
-      s.style.flex = 'none';
-      s.style.width = '100%';
-      s.style.minWidth = '0';
-      s.style.overflow = 'visible';
-    });
-    row.querySelectorAll('.live-mgr-detail-section .table-wrapper').forEach((w) => {
-      w.style.setProperty('overflow-x', 'auto', 'important');
-      w.style.setProperty('overflow-y', 'visible', 'important');
-    });
-    // Force proper table rendering — inline !important beats any CSS !important
-    row.querySelectorAll('.live-mgr-detail-section table').forEach((tbl) => {
-      tbl.style.setProperty('display', 'table', 'important');
-      tbl.style.setProperty('width', 'auto', 'important');
-      tbl.style.setProperty('table-layout', 'auto', 'important');
-      const thead = tbl.querySelector('thead');
-      if (thead) thead.style.setProperty('display', 'table-header-group', 'important');
-      const tbody = tbl.querySelector('tbody');
-      if (tbody) {
-        tbody.style.setProperty('display', 'table-row-group', 'important');
-        tbody.querySelectorAll('tr').forEach((tr) => {
-          tr.style.setProperty('display', 'table-row', 'important');
-        });
-      }
+      Object.assign(s.style, { flex: 'none', width: '100%', overflow: 'visible' });
+
+      // Replace each .table-wrapper with our flex-based table
+      s.querySelectorAll('.table-wrapper').forEach((wrapper) => {
+        const table = wrapper.querySelector('table');
+        if (!table) return;
+        const replacement = buildFlexTable(table);
+        if (replacement) wrapper.replaceWith(replacement);
+      });
     });
   };
 
   new MutationObserver((mutations) => {
     for (const m of mutations) {
       if (m.type === 'attributes' && m.target.classList?.contains('live-mgr-detail-row')) {
-        applyFlex(m.target);
+        applyDetail(m.target);
       } else if (m.type === 'childList') {
-        // Live data re-rendered — patch all currently-expanded detail rows
-        container.querySelectorAll('.live-mgr-detail-row').forEach(applyFlex);
+        container.querySelectorAll('.live-mgr-detail-row').forEach(applyDetail);
       }
     }
   }).observe(container, {
