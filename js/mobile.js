@@ -289,9 +289,9 @@ function buildMobileBanner() {
 }
 
 // ── Scoreboard sub-tabs: mirror in fixed bar above bottom nav ───
-// The original #scoreboard-tabs lives inside #scoreboard-content which
-// re-renders on season/period changes. We clone its buttons into a
-// fixed bar, hide the original, and forward clicks to the originals.
+// CSS hides #scoreboard-content .scoreboard-tabs entirely on mobile.
+// JS clones the buttons into a fixed bar and forwards clicks back to
+// the originals so app.js tab-switching handlers still fire.
 function setupScoreboardTabsBar() {
   const bar = document.createElement('div');
   bar.id = 'mobile-sb-tabs-bar';
@@ -302,16 +302,12 @@ function setupScoreboardTabsBar() {
   if (!scoreboardContent) return;
 
   const syncTabsBar = () => {
-    const origContainer = scoreboardContent.querySelector('.scoreboard-tabs');
-    const origTabs = origContainer ? Array.from(origContainer.querySelectorAll('.sb-tab')) : [];
+    const origTabs = Array.from(scoreboardContent.querySelectorAll('.scoreboard-tabs .sb-tab'));
     if (!origTabs.length) {
       bar.style.display = 'none';
       document.body.classList.remove('mob-sb-tabs-visible');
       return;
     }
-
-    // Hide original tabs — replaced by the fixed bar
-    origContainer.style.display = 'none';
 
     bar.innerHTML = '';
     const wrap = document.createElement('div');
@@ -342,20 +338,27 @@ function setupScoreboardTabsBar() {
     attributeFilter: ['class'],
   });
 
-  // Hide bar when navigating away from the scoreboard main tab
+  // Show bar when navigating back to scoreboard; hide when leaving
   document.addEventListener(
     'click',
     (e) => {
       const btn = e.target.closest('.mobile-nav-btn[data-tab], .nav-btn[data-tab]');
-      if (!btn || btn.dataset.tab === 'dashboard') return;
-      bar.style.display = 'none';
-      document.body.classList.remove('mob-sb-tabs-visible');
+      if (!btn) return;
+      if (btn.dataset.tab === 'dashboard') {
+        // Re-sync after a tick so app.js has time to render
+        setTimeout(syncTabsBar, 50);
+      } else {
+        bar.style.display = 'none';
+        document.body.classList.remove('mob-sb-tabs-visible');
+      }
     },
     { capture: true }
   );
 
-  // Initial sync if scoreboard is already rendered on load
+  // Retry on initial load — app.js may render scoreboard after mobile.js runs
   syncTabsBar();
+  setTimeout(syncTabsBar, 300);
+  setTimeout(syncTabsBar, 1000);
 }
 
 // ── Swipe left/right to navigate primary tabs ───────────────────
