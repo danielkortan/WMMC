@@ -259,6 +259,116 @@ function watchLiveDetails() {
   });
 }
 
+// ── Scoreboard sub-tabs: mirror in fixed bar above bottom nav ───
+// The original #scoreboard-tabs lives inside #scoreboard-content which
+// re-renders on season/period changes. We clone its buttons into a
+// fixed bar so they sit above the bottom nav, and forward clicks to
+// the originals so app.js handlers still fire.
+function setupScoreboardTabsBar() {
+  const bar = document.createElement('div');
+  bar.id = 'mobile-sb-tabs-bar';
+  bar.style.display = 'none';
+  document.body.appendChild(bar);
+
+  const scoreboardContent = document.getElementById('scoreboard-content');
+  if (!scoreboardContent) return;
+
+  const syncTabsBar = () => {
+    const origTabs = Array.from(scoreboardContent.querySelectorAll('.scoreboard-tabs .sb-tab'));
+    if (!origTabs.length) {
+      bar.style.display = 'none';
+      document.body.classList.remove('mob-sb-tabs-visible');
+      return;
+    }
+
+    bar.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'scoreboard-tabs';
+
+    origTabs.forEach((orig) => {
+      const btn = document.createElement('button');
+      btn.className = orig.className;
+      btn.textContent = orig.textContent;
+      btn.addEventListener('click', () => orig.click());
+      wrap.appendChild(btn);
+    });
+
+    bar.appendChild(wrap);
+    bar.style.display = 'block';
+    document.body.classList.add('mob-sb-tabs-visible');
+  };
+
+  new MutationObserver((mutations) => {
+    const relevant = mutations.some(
+      (m) => m.type === 'childList' || (m.type === 'attributes' && m.target.classList?.contains('sb-tab'))
+    );
+    if (relevant) syncTabsBar();
+  }).observe(scoreboardContent, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class'],
+  });
+
+  // Hide bar when navigating away from the scoreboard main tab
+  document.addEventListener(
+    'click',
+    (e) => {
+      const btn = e.target.closest('.mobile-nav-btn[data-tab], .nav-btn[data-tab]');
+      if (!btn || btn.dataset.tab === 'dashboard') return;
+      bar.style.display = 'none';
+      document.body.classList.remove('mob-sb-tabs-visible');
+    },
+    { capture: true }
+  );
+
+  // Initial sync if scoreboard is already rendered on load
+  syncTabsBar();
+}
+
+// ── Swipe left/right to navigate primary tabs ───────────────────
+function setupSwipeNavigation() {
+  const PRIMARY_TABS = ['dashboard', 'live', 'my-roster', 'weekly'];
+  let startX = 0;
+  let startY = 0;
+
+  const getCurrentTab = () => {
+    const active = document.querySelector('#mobile-bottom-nav .mobile-nav-btn.active');
+    return active?.dataset.tab || localStorage.getItem('wmmc_active_tab') || 'dashboard';
+  };
+
+  document.addEventListener(
+    'touchstart',
+    (e) => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    },
+    { passive: true }
+  );
+
+  document.addEventListener(
+    'touchend',
+    (e) => {
+      const dx = e.changedTouches[0].clientX - startX;
+      const dy = e.changedTouches[0].clientY - startY;
+
+      // Require horizontal dominance and minimum travel distance
+      if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx) * 0.8) return;
+
+      const cur = getCurrentTab();
+      const idx = PRIMARY_TABS.indexOf(cur);
+      if (idx === -1) return;
+
+      if (dx < 0 && idx < PRIMARY_TABS.length - 1) {
+        triggerTab(PRIMARY_TABS[idx + 1]); // swipe left → next tab
+      } else if (dx > 0 && idx > 0) {
+        triggerTab(PRIMARY_TABS[idx - 1]); // swipe right → prev tab
+      }
+    },
+    { passive: true }
+  );
+}
+
 // ── Pool Play: stack PP1/PP2 below PP-Overall on mobile ──────────
 function stackPoolPlayPeriods() {
   const overall = document.getElementById('sb-pp-overall');
@@ -496,6 +606,8 @@ function init() {
   watchLiveDetails();
   watchWeeklyTable();
   watchScoreboard();
+  setupScoreboardTabsBar();
+  setupSwipeNavigation();
 }
 
 if (document.readyState === 'loading') {
