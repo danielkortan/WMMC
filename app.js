@@ -1290,7 +1290,7 @@ function renderDailyContent(d) {
   if (gamesEl) gamesEl.innerHTML = '';
 
   if (!d.active_week) {
-    if (titleEl) titleEl.textContent = 'Daily Scores';
+    if (titleEl) titleEl.textContent = 'Live';
     if (statusEl) statusEl.textContent = `No schedule week found for ${d.date}.`;
     if (managersEl) managersEl.innerHTML = '';
     return;
@@ -1298,11 +1298,11 @@ function renderDailyContent(d) {
 
   const aw = d.active_week;
   if (titleEl) titleEl.textContent = `${aw.round} · ${aw.week}`;
-  if (statusEl) statusEl.textContent = `Daily scores for ${d.date}`;
+  if (statusEl) statusEl.textContent = `Showing scores for ${d.date}`;
 
   if (!managersEl) return;
 
-  const fmtDeltaSpan = (delta) => {
+  const fmtDelta = (delta) => {
     if (!delta || delta === 0) return '<span class="rank-delta-zero">—</span>';
     const sign = delta > 0 ? '+' : '';
     const cls = delta > 0 ? 'rank-delta-up' : 'rank-delta-down';
@@ -1316,44 +1316,48 @@ function renderDailyContent(d) {
   }
 
   const renderDailyPanel = (managerName) => {
-    const pl = playersByMgr[managerName] || { batting: [], pitching: [] };
-    const batters = [...pl.batting].sort((a, b) => b.daily_score - a.daily_score);
-    const pitchers = [...pl.pitching].sort((a, b) => b.daily_score - a.daily_score);
+    const data = playersByMgr[managerName] || { batting: [], pitching: [] };
+    const batters = [...data.batting].sort((a, b) => b.score - a.score);
+    const pitchers = [...data.pitching].sort((a, b) => b.score - a.score);
     if (!batters.length && !pitchers.length) {
       return '<div class="mgr-detail-panel"><div class="live-mgr-detail-empty">No stats recorded for this date.</div></div>';
     }
-    const batterRow = (p) => `<tr>
-      <td>${escapeHtml(p.name)}</td>
-      <td class="num-cell">${p.stats.abs || 0}</td>
-      <td class="num-cell">${p.stats['1b'] || 0}</td>
-      <td class="num-cell">${p.stats['2b'] || 0}</td>
-      <td class="num-cell">${p.stats['3b'] || 0}</td>
-      <td class="num-cell">${p.stats.hr || 0}</td>
-      <td class="num-cell">${p.stats.r || 0}</td>
-      <td class="num-cell">${p.stats.rbi || 0}</td>
-      <td class="num-cell">${p.stats.sb || 0}</td>
-      <td class="num-cell">${p.stats.bb || 0}</td>
-      <td class="num-cell"><strong>${fmt(p.daily_score)}</strong></td>
+    const batterRow = (pl) => `<tr>
+      <td>${escapeHtml(pl.name)}</td>
+      <td>${escapeHtml(pl.team || '')}</td>
+      <td>—</td>
+      <td class="num-cell">${pl.stats.abs || 0}</td>
+      <td class="num-cell">${pl.stats['1b'] || 0}</td>
+      <td class="num-cell">${pl.stats['2b'] || 0}</td>
+      <td class="num-cell">${pl.stats['3b'] || 0}</td>
+      <td class="num-cell">${pl.stats.hr || 0}</td>
+      <td class="num-cell">${pl.stats.r || 0}</td>
+      <td class="num-cell">${pl.stats.rbi || 0}</td>
+      <td class="num-cell">${pl.stats.sb || 0}</td>
+      <td class="num-cell">${pl.stats.bb || 0}</td>
+      <td class="num-cell"><strong>${fmt(pl.score)}</strong></td>
     </tr>`;
-    const pitcherRow = (p) => `<tr>
-      <td>${escapeHtml(p.name)}</td>
-      <td class="num-cell">${p.stats.gs || 0}</td>
-      <td class="num-cell">${p.stats.w || 0}</td>
-      <td class="num-cell">${fmtDec(p.stats.qs || 0)}</td>
-      <td class="num-cell">${p.stats.cg || 0}</td>
-      <td class="num-cell">${p.stats.cgso || 0}</td>
-      <td class="num-cell">${p.stats.nh || 0}</td>
-      <td class="num-cell">${fmtDec(p.stats.ip || 0)}</td>
-      <td class="num-cell">${p.stats.h || 0}</td>
-      <td class="num-cell">${p.stats.er || 0}</td>
-      <td class="num-cell">${p.stats.bb || 0}</td>
-      <td class="num-cell">${p.stats.k || 0}</td>
-      <td class="num-cell"><strong>${fmt(p.daily_score)}</strong></td>
+    const pitcherRow = (pl) => `<tr>
+      <td>${escapeHtml(pl.name)}</td>
+      <td>${escapeHtml(pl.team || '')}</td>
+      <td>—</td>
+      <td class="num-cell">${pl.stats.gs || 0}</td>
+      <td class="num-cell">${pl.stats.w || 0}</td>
+      <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
+      <td class="num-cell">${pl.stats.cg || 0}</td>
+      <td class="num-cell">${pl.stats.cgso || 0}</td>
+      <td class="num-cell">${pl.stats.nh || 0}</td>
+      <td class="num-cell">${fmtDec(pl.stats.ip || 0)}</td>
+      <td class="num-cell">${pl.stats.h || 0}</td>
+      <td class="num-cell">${pl.stats.er || 0}</td>
+      <td class="num-cell">${pl.stats.bb || 0}</td>
+      <td class="num-cell">${pl.stats.k || 0}</td>
+      <td class="num-cell"><strong>${fmt(pl.score)}</strong></td>
     </tr>`;
-    const batTable = batters.length
+    const battingTable = batters.length
       ? `<div class="table-wrapper"><table class="data-table compact-table">
           <thead><tr>
-            <th>Player</th>
+            <th>Player</th><th>Team</th><th>State</th>
             <th class="num-cell">AB</th><th class="num-cell">1B</th><th class="num-cell">2B</th>
             <th class="num-cell">3B</th><th class="num-cell">HR</th><th class="num-cell">R</th>
             <th class="num-cell">RBI</th><th class="num-cell">SB</th><th class="num-cell">BB</th>
@@ -1362,10 +1366,10 @@ function renderDailyContent(d) {
           <tbody>${batters.map(batterRow).join('')}</tbody>
         </table></div>`
       : '<div class="live-mgr-detail-empty">No batter activity this day.</div>';
-    const pitTable = pitchers.length
+    const pitchingTable = pitchers.length
       ? `<div class="table-wrapper"><table class="data-table compact-table">
           <thead><tr>
-            <th>Player</th>
+            <th>Player</th><th>Team</th><th>State</th>
             <th class="num-cell">GS</th><th class="num-cell">W</th><th class="num-cell">QS</th>
             <th class="num-cell">CG</th><th class="num-cell">CGSO</th><th class="num-cell">NH</th>
             <th class="num-cell">IP</th><th class="num-cell">H</th><th class="num-cell">ER</th>
@@ -1375,13 +1379,15 @@ function renderDailyContent(d) {
         </table></div>`
       : '<div class="live-mgr-detail-empty">No pitcher activity this day.</div>';
     return `<div class="mgr-detail-panel">
-      <div class="live-mgr-detail-section">
-        <div class="mgr-detail-header">Batters</div>${batTable}
-      </div>
-      <div class="live-mgr-detail-section">
-        <div class="mgr-detail-header">Pitchers</div>${pitTable}
-      </div>
-    </div>`;
+        <div class="live-mgr-detail-section">
+          <div class="mgr-detail-header">Batters Today</div>
+          ${battingTable}
+        </div>
+        <div class="live-mgr-detail-section">
+          <div class="mgr-detail-header">Pitchers Today</div>
+          ${pitchingTable}
+        </div>
+      </div>`;
   };
 
   const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
@@ -1399,28 +1405,37 @@ function renderDailyContent(d) {
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
           <td>${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
-          <td class="num-cell"><strong>${fmt(m.daily_score)}</strong></td>
-          <td class="num-cell">${fmtDeltaSpan(m.rank_delta)}</td>
-          <td class="num-cell">${fmt(m.cumulative_total)}</td>
+          <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
+          <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
+          <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
+          <td class="num-cell">—</td>
+          <td class="num-cell">—</td>
+          <td class="num-cell">—</td>
+          <td class="num-cell">${(m.running_score ?? 0).toFixed(2)}</td>
         </tr>
-        <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'}">
-          <td colspan="5">${renderDailyPanel(m.name)}</td>
+        <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">
+          <td colspan="9">${renderDailyPanel(m.name)}</td>
         </tr>`;
     })
     .join('');
 
+  const roundLabel = aw.round || '';
   managersEl.innerHTML = `
     <div class="card">
-      <h3>Daily Scores <span class="muted">(${escapeHtml(d.date)})</span></h3>
+      <h3>Running Standings <span class="muted">(${escapeHtml(d.date)})</span></h3>
       <div class="table-wrapper">
         <table class="data-table compact-table">
           <thead><tr>
             <th>#</th><th>Manager</th>
-            <th title="Points earned on ${escapeHtml(d.date)}">Daily</th>
-            <th title="Rank change from start to end of this day">&Delta; Rank</th>
-            <th title="Cumulative total through end of ${escapeHtml(d.date)}">Total</th>
+            <th title="Certified ${escapeHtml(roundLabel)} scoreboard total through end of ${escapeHtml(d.date)}">Total</th>
+            <th title="Rank movement from start to end of ${escapeHtml(d.date)}">&Delta; Rank</th>
+            <th title="Points accumulated on ${escapeHtml(d.date)} only">Daily</th>
+            <th title="Not available for historical dates">Live</th>
+            <th title="Not available for historical dates">Done</th>
+            <th title="Not available for historical dates">Left</th>
+            <th title="Running weekly score through ${escapeHtml(d.date)}">Weekly</th>
           </tr></thead>
-          <tbody>${rows || '<tr><td colspan="5" class="empty">No data for this date.</td></tr>'}</tbody>
+          <tbody>${rows || '<tr><td colspan="9" class="empty">No data for this date.</td></tr>'}</tbody>
         </table>
       </div>
     </div>`;
