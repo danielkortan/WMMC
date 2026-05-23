@@ -410,96 +410,47 @@
     font-size: 0.9rem;
   }
 
-  /* ── Champion banner: compact 2-line layout ─────────────────── */
-  /* background-image is set via inline style — !important overrides it */
-  .champion-banner {
-    background-image: none !important;
-    background-color: #0d1220 !important;
-    padding: 0.5rem 0.875rem 0.375rem;
-    border-radius: 0;
-    margin-bottom: 0.25rem;
-    min-height: 0;
-    border-bottom: 1px solid #2a2a45 !important;
-    border-bottom-width: 1px !important;
-    overflow: hidden;
-  }
-
-  /* Hide decorative overlays (custom bg has pseudo-elements) */
-  .champion-banner.has-custom-bg::before,
-  .champion-banner.has-custom-bg::after {
+  /* ── Champion banner: hidden on mobile, replaced by #mobile-banner ── */
+  #champion-banner {
     display: none !important;
   }
 
-  /* Show banner-main in compact horizontal row */
-  .champion-banner .banner-main {
-    display: flex !important;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
+  /* ── Mobile mini-banner (JS-built from champion-banner content) ── */
+  #mobile-banner {
+    background: #0d1220;
+    padding: 0.5rem 0.875rem 0.35rem;
+    border-bottom: 1px solid #2a2a45;
     margin-bottom: 0.25rem;
   }
 
-  .champion-banner .banner-left {
-    display: flex !important;
-    align-items: baseline;
-    gap: 0.3rem;
-    min-width: 0;
+  .mb-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.2rem;
   }
 
-  .champion-banner .banner-title {
-    font-size: 1.05rem !important;
+  .mb-title {
+    font-size: 1.05rem;
     font-weight: 900;
     letter-spacing: 1px;
     color: #e8eaf6;
     white-space: nowrap;
   }
 
-  .champion-banner .banner-season {
-    display: none;
-  }
-
-  /* Right side: compact trophy + name */
-  .champion-banner .banner-right {
-    display: flex !important;
-    align-items: center !important;
-    gap: 0.3rem !important;
-    flex-shrink: 0;
-  }
-
-  /* Trophy emoji rendered at 2.5rem via inline style — override */
-  .champion-banner .banner-right > div:first-child {
-    font-size: 1.1rem !important;
-    line-height: 1 !important;
-  }
-
-  .champion-banner .banner-champ-label {
-    display: none;
-  }
-
-  .champion-banner .banner-champ-name {
-    font-size: 0.88rem !important;
+  .mb-champ {
+    font-size: 0.88rem;
     font-weight: 700;
     color: #ffd700;
     white-space: nowrap;
+    flex-shrink: 0;
   }
 
-  .champion-banner .banner-champ-year {
-    display: none;
-  }
-
-  /* Footer: season/round status line */
-  .champion-banner .banner-footer {
+  .mb-status {
     font-size: 0.7rem;
-    font-weight: 600;
     color: #9fa8da;
-    text-align: center;
-    position: relative;
-    z-index: 1;
-    padding: 0;
-    margin: 0;
-    letter-spacing: 0.4px;
-    border-top: none;
-    opacity: 1;
+    letter-spacing: 0.3px;
   }
 
   /* ── Scoreboard sub-tabs (original location, inside scoreboard card) ── */

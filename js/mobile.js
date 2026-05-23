@@ -259,11 +259,39 @@ function watchLiveDetails() {
   });
 }
 
+// ── Compact mobile banner injected above scoreboard ─────────────
+// The original #champion-banner has complex CSS that is hard to style
+// compactly on mobile. We hide it and build a simple 2-line version
+// by reading its rendered content via MutationObserver.
+function buildMobileBanner() {
+  const source = document.getElementById('champion-banner');
+  if (!source) return;
+
+  const banner = document.createElement('div');
+  banner.id = 'mobile-banner';
+  source.after(banner);
+
+  const sync = () => {
+    const title = source.querySelector('.banner-title')?.textContent.trim() || '';
+    const champName = source.querySelector('.banner-champ-name')?.textContent.trim() || '';
+    const footer = source.querySelector('.banner-footer')?.textContent.trim() || '';
+    if (!title && !footer) return;
+    banner.innerHTML =
+      `<div class="mb-row">` +
+      `<span class="mb-title">${title}</span>` +
+      (champName ? `<span class="mb-champ">🏆 ${champName}</span>` : '') +
+      `</div>` +
+      (footer ? `<div class="mb-status">${footer}</div>` : '');
+  };
+
+  new MutationObserver(sync).observe(source, { childList: true, subtree: true, characterData: true });
+  sync();
+}
+
 // ── Scoreboard sub-tabs: mirror in fixed bar above bottom nav ───
 // The original #scoreboard-tabs lives inside #scoreboard-content which
 // re-renders on season/period changes. We clone its buttons into a
-// fixed bar so they sit above the bottom nav, and forward clicks to
-// the originals so app.js handlers still fire.
+// fixed bar, hide the original, and forward clicks to the originals.
 function setupScoreboardTabsBar() {
   const bar = document.createElement('div');
   bar.id = 'mobile-sb-tabs-bar';
@@ -274,12 +302,16 @@ function setupScoreboardTabsBar() {
   if (!scoreboardContent) return;
 
   const syncTabsBar = () => {
-    const origTabs = Array.from(scoreboardContent.querySelectorAll('.scoreboard-tabs .sb-tab'));
+    const origContainer = scoreboardContent.querySelector('.scoreboard-tabs');
+    const origTabs = origContainer ? Array.from(origContainer.querySelectorAll('.sb-tab')) : [];
     if (!origTabs.length) {
       bar.style.display = 'none';
       document.body.classList.remove('mob-sb-tabs-visible');
       return;
     }
+
+    // Hide original tabs — replaced by the fixed bar
+    origContainer.style.display = 'none';
 
     bar.innerHTML = '';
     const wrap = document.createElement('div');
@@ -603,6 +635,7 @@ function watchWeeklyTable() {
 function init() {
   if (!isMobile()) return;
   buildMobileNav();
+  buildMobileBanner();
   watchLiveDetails();
   watchWeeklyTable();
   watchScoreboard();
