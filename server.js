@@ -4438,29 +4438,37 @@ app.get('/api/mlb/daily', (req, res) => {
   const inCertifiedRounds = (r) =>
     certifiedRounds.has(r) || (r && r.endsWith('P') && certifiedRounds.has(r.slice(0, -1)));
 
-  // Earliest start date among all weeks belonging to the certified round set
-  let certRoundStart = null;
+  const allManagers = new Set(Object.keys(sd.rosters || {}));
+  const battingRows = sd.weekly_batting || [];
+  const pitchingRows = sd.weekly_pitching || [];
+
+  // Step 1: certified weekly totals for all certified-round weeks that fully ended before D's week.
+  // Uses managerWeekSubtotal (roster-validated, reads weekly_batting) — same logic as live scoreboard.
+  const certifiedCompletedWeeks = {};
   for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-    if (certifiedRounds.has(SEASON_SCHEDULE[i].round) && scheduleDates[i]?.start) {
-      certRoundStart = scheduleDates[i].start;
-      break;
+    const sw = SEASON_SCHEDULE[i];
+    const wd = scheduleDates[i];
+    if (!wd || !wd.end) continue;
+    if (!inCertifiedRounds(sw.round)) continue;
+    if (wd.end >= start) continue; // skip D's current week and any overlapping/later weeks
+    for (const mgr of allManagers) {
+      const bat = managerWeekSubtotal(sd, mgr, sw, i, battingRows, 'batter', 'batters');
+      const pit = managerWeekSubtotal(sd, mgr, sw, i, pitchingRows, 'pitcher', 'pitchers');
+      if (bat + pit !== 0) certifiedCompletedWeeks[mgr] = (certifiedCompletedWeeks[mgr] || 0) + bat + pit;
     }
   }
 
-  // Seed allManagers from rosters; getDailyThrough extends it as it resolves player→manager
-  const allManagers = new Set(Object.keys(sd.rosters || {}));
-
-  // Sum daily scores for all certified-round records up to and including cutoffDate.
-  const getDailyThrough = (cutoff) => {
+  // Step 2: sum daily records for ONLY the active week through a cutoff date.
+  // Scoped strictly to current round+week to avoid cross-week contamination.
+  // No findManagerForPlayer fallback — unrostered players are excluded.
+  const weeklyThrough = (cutoff) => {
     const totals = {};
     const process = (records, playerKey, scoreFunc, playerType) => {
       for (const r of records) {
-        if (r.date > cutoff || !inCertifiedRounds(r.round)) continue;
+        if (r.date > cutoff || r.round !== weekRound || r.week !== weekName) continue;
         const name = r[playerKey];
-        const mgr =
-          findManagerForPlayerWeek(sd, name, playerType, r.round, r.week) || findManagerForPlayer(sd, name, playerType);
+        const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
         if (!mgr) continue;
-        allManagers.add(mgr);
         totals[mgr] = (totals[mgr] || 0) + scoreFunc(r.delta || {});
       }
     };
@@ -4469,32 +4477,14 @@ app.get('/api/mlb/daily', (req, res) => {
     return totals;
   };
 
-  // Certified totals from rounds/weeks that fully completed before the current round started.
-  const battingRows = sd.weekly_batting || [];
-  const pitchingRows = sd.weekly_pitching || [];
-  const certBase = {};
-  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-    const sw = SEASON_SCHEDULE[i];
-    const wd = scheduleDates[i];
-    if (!wd || !wd.end) continue;
-    if (inCertifiedRounds(sw.round)) continue; // part of the current phase — skip
-    if (certRoundStart && wd.end >= certRoundStart) continue; // overlaps current phase — skip
-    for (const mgr of allManagers) {
-      const bat = managerWeekSubtotal(sd, mgr, sw, i, battingRows, 'batter', 'batters');
-      const pit = managerWeekSubtotal(sd, mgr, sw, i, pitchingRows, 'pitcher', 'pitchers');
-      if (bat + pit !== 0) certBase[mgr] = (certBase[mgr] || 0) + bat + pit;
-    }
-  }
-
-  // Previous calendar day (UTC) for the "before this date" baseline
   const prevDate = (() => {
     const d = new Date(date + 'T12:00:00Z');
     d.setUTCDate(d.getUTCDate() - 1);
     return d.toISOString().slice(0, 10);
   })();
 
-  const dailyBefore = getDailyThrough(prevDate);
-  const dailyAfter = getDailyThrough(date);
+  const weekBefore = weeklyThrough(prevDate);
+  const weekAfter = weeklyThrough(date);
 
   const rankByTotals = (map) =>
     Object.entries(map)
@@ -4507,34 +4497,18 @@ app.get('/api/mlb/daily', (req, res) => {
   const totalsBefore = {};
   const totalsAfter = {};
   for (const mgr of allManagers) {
-    totalsBefore[mgr] = (certBase[mgr] || 0) + (dailyBefore[mgr] || 0);
-    totalsAfter[mgr] = (certBase[mgr] || 0) + (dailyAfter[mgr] || 0);
+    totalsBefore[mgr] = (certifiedCompletedWeeks[mgr] || 0) + (weekBefore[mgr] || 0);
+    totalsAfter[mgr] = (certifiedCompletedWeeks[mgr] || 0) + (weekAfter[mgr] || 0);
   }
   const ranksBefore = rankByTotals(totalsBefore);
   const ranksAfter = rankByTotals(totalsAfter);
 
-  // Daily score for exactly this date = cumulative through date minus cumulative through prevDate
-  // Weekly running total: sum of daily scores within just the active week through this date
-  const weeklyRunning = {};
-  const processWeekly = (records, playerKey, scoreFunc, playerType) => {
-    for (const r of records) {
-      if (r.date > date || r.round !== weekRound || r.week !== weekName) continue;
-      const name = r[playerKey];
-      const mgr =
-        findManagerForPlayerWeek(sd, name, playerType, r.round, r.week) || findManagerForPlayer(sd, name, playerType);
-      if (!mgr) continue;
-      weeklyRunning[mgr] = (weeklyRunning[mgr] || 0) + scoreFunc(r.delta || {});
-    }
-  };
-  processWeekly(sd.daily_batting || [], 'batter', calculateBattingScore, 'batting');
-  processWeekly(sd.daily_pitching || [], 'pitcher', calculatePitchingScore, 'pitching');
-
   const managers = [...allManagers]
     .map((mgr) => ({
       name: mgr,
-      today_score: Math.round(((dailyAfter[mgr] || 0) - (dailyBefore[mgr] || 0)) * 100) / 100,
+      today_score: Math.round(((weekAfter[mgr] || 0) - (weekBefore[mgr] || 0)) * 100) / 100,
       round_total: Math.round((totalsAfter[mgr] || 0) * 100) / 100,
-      running_score: Math.round((weeklyRunning[mgr] || 0) * 100) / 100,
+      running_score: Math.round((weekAfter[mgr] || 0) * 100) / 100,
       baseline_rank: ranksBefore[mgr] ?? null,
       live_rank: ranksAfter[mgr] ?? null,
       rank_delta: (ranksBefore[mgr] ?? 0) - (ranksAfter[mgr] ?? 0),
@@ -4545,10 +4519,9 @@ app.get('/api/mlb/daily', (req, res) => {
   const players = [];
   const pushPlayers = (records, playerKey, scoreFunc, playerType, teamMap) => {
     for (const r of records) {
-      if (r.date !== date || !inCertifiedRounds(r.round)) continue;
+      if (r.date !== date || r.round !== weekRound || r.week !== weekName) continue;
       const name = r[playerKey];
-      const mgr =
-        findManagerForPlayerWeek(sd, name, playerType, r.round, r.week) || findManagerForPlayer(sd, name, playerType);
+      const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
       if (!mgr) continue;
       players.push({
         name,
