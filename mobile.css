@@ -453,14 +453,10 @@
     letter-spacing: 0.3px;
   }
 
-  /* ── Scoreboard sub-tabs (original location, inside scoreboard card) ── */
-  /* On mobile the tabs are moved to the fixed bar by JS; keep minimal styles */
-  .scoreboard-tabs {
-    gap: 0;
-    overflow-x: auto;
-    padding-bottom: 0;
-    margin-bottom: 0.75rem;
-    -webkit-overflow-scrolling: touch;
+  /* ── Scoreboard sub-tabs: always hidden inline, shown only in fixed bar ── */
+  /* JS mirrors them into #mobile-sb-tabs-bar; CSS guarantees original is gone */
+  #scoreboard-content .scoreboard-tabs {
+    display: none !important;
   }
 
   .sb-tab {
