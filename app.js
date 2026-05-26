@@ -5889,6 +5889,7 @@ function renderRosterData(managerName, isCommissioner) {
   container.innerHTML = html;
   // Initialize type-to-search inputs after DOM is rendered
   setupPlayerSearchInputs();
+  setupSwapPlayerSearch();
   // Initialize commissioner roster management view if present
   if (document.getElementById('comm-roster-week')) {
     window.updateCommRosterWeekView(managerName);
@@ -6351,6 +6352,77 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       return `<td class="num${manual ? ' stat-manual' : ''}">${displayVal}</td>`;
     }
 
+    // Returns batting stats filtered to the player's rostered date window (add_date/drop_date).
+    // Falls back to null when no daily records exist, so callers use the weekly totals instead.
+    const getEffBatStats = (player) => {
+      let addDate = null,
+        dropDate = null;
+      const rd = weekRosterDates[player];
+      if (rd) {
+        addDate = rd.add_date || null;
+        dropDate = rd.drop_date || null;
+      }
+      if (!addDate) {
+        const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
+        if (addSwap && addSwap.swap_date) addDate = addSwap.swap_date;
+      }
+      if (!dropDate) {
+        const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
+        if (dropSwap && dropSwap.swap_date) dropDate = dropSwap.swap_date;
+      }
+      if (!addDate && !dropDate) return null;
+      const daily = (seasonData.daily_batting || []).filter(
+        (r) => r.batter === player && r.round === round && r.week === week
+      );
+      if (!daily.length) return null;
+      const eligible = daily.filter((r) => {
+        if (addDate && r.date < addDate) return false;
+        if (dropDate && r.date > dropDate) return false;
+        return true;
+      });
+      const t = { abs: 0, '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0 };
+      for (const rec of eligible) {
+        const d = rec.delta || {};
+        for (const k of Object.keys(t)) t[k] += d[k] || 0;
+      }
+      return t;
+    };
+
+    // Same as getEffBatStats but for pitchers.
+    const getEffPitStats = (player) => {
+      let addDate = null,
+        dropDate = null;
+      const rd = weekRosterDates[player];
+      if (rd) {
+        addDate = rd.add_date || null;
+        dropDate = rd.drop_date || null;
+      }
+      if (!addDate) {
+        const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
+        if (addSwap && addSwap.swap_date) addDate = addSwap.swap_date;
+      }
+      if (!dropDate) {
+        const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
+        if (dropSwap && dropSwap.swap_date) dropDate = dropSwap.swap_date;
+      }
+      if (!addDate && !dropDate) return null;
+      const daily = (seasonData.daily_pitching || []).filter(
+        (r) => r.pitcher === player && r.round === round && r.week === week
+      );
+      if (!daily.length) return null;
+      const eligible = daily.filter((r) => {
+        if (addDate && r.date < addDate) return false;
+        if (dropDate && r.date > dropDate) return false;
+        return true;
+      });
+      const t = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+      for (const rec of eligible) {
+        const d = rec.delta || {};
+        for (const k of Object.keys(t)) t[k] += d[k] || 0;
+      }
+      return t;
+    };
+
     // ---- Batters for this week ----
     const activeBatCount = weekRoster.batters.filter((p) => !droppedThisWeek.has(p)).length;
     html += `<div class="wrs-group-label">BATTERS (${activeBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
@@ -6390,15 +6462,16 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
           const cumRank = pRankings.batRanks[batter];
           html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
           html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
-          html += batStatCell(s, 'abs', s.abs || 0);
-          html += batStatCell(s, '1b', s['1b'] || 0);
-          html += batStatCell(s, '2b', s['2b'] || 0);
-          html += batStatCell(s, '3b', s['3b'] || 0);
-          html += batStatCell(s, 'hr', s.hr || 0);
-          html += batStatCell(s, 'r', s.r || 0);
-          html += batStatCell(s, 'rbi', s.rbi || 0);
-          html += batStatCell(s, 'sb', s.sb || 0);
-          html += batStatCell(s, 'bb', s.bb || 0);
+          const ds = getEffBatStats(batter) || s;
+          html += batStatCell(s, 'abs', ds.abs || 0);
+          html += batStatCell(s, '1b', ds['1b'] || 0);
+          html += batStatCell(s, '2b', ds['2b'] || 0);
+          html += batStatCell(s, '3b', ds['3b'] || 0);
+          html += batStatCell(s, 'hr', ds.hr || 0);
+          html += batStatCell(s, 'r', ds.r || 0);
+          html += batStatCell(s, 'rbi', ds.rbi || 0);
+          html += batStatCell(s, 'sb', ds.sb || 0);
+          html += batStatCell(s, 'bb', ds.bb || 0);
           html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
           html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
           html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
@@ -6455,17 +6528,18 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
           const cumRank = pRankingsPit.pitRanks[pitcher];
           html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
           html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}</td>`;
-          html += pitStatCell(s, 'gs', s.gs || 0);
-          html += pitStatCell(s, 'w', s.w || 0);
-          html += pitStatCell(s, 'qs', s.qs != null ? fmtDec(s.qs) : 0);
-          html += pitStatCell(s, 'cg', s.cg || 0);
-          html += pitStatCell(s, 'cgso', s.cgso || 0);
-          html += pitStatCell(s, 'nh', s.nh || 0);
-          html += pitStatCell(s, 'ip', fmtDec(s.ip || 0));
-          html += pitStatCell(s, 'h', s.h || 0);
-          html += pitStatCell(s, 'er', s.er || 0);
-          html += pitStatCell(s, 'bb', s.bb || 0);
-          html += pitStatCell(s, 'k', s.k || 0);
+          const ps = getEffPitStats(pitcher) || s;
+          html += pitStatCell(s, 'gs', ps.gs || 0);
+          html += pitStatCell(s, 'w', ps.w || 0);
+          html += pitStatCell(s, 'qs', ps.qs != null ? fmtDec(ps.qs) : 0);
+          html += pitStatCell(s, 'cg', ps.cg || 0);
+          html += pitStatCell(s, 'cgso', ps.cgso || 0);
+          html += pitStatCell(s, 'nh', ps.nh || 0);
+          html += pitStatCell(s, 'ip', fmtDec(ps.ip || 0));
+          html += pitStatCell(s, 'h', ps.h || 0);
+          html += pitStatCell(s, 'er', ps.er || 0);
+          html += pitStatCell(s, 'bb', ps.bb || 0);
+          html += pitStatCell(s, 'k', ps.k || 0);
           html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
           html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
           html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
@@ -6799,14 +6873,18 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     // Use per-week roster model - get union of all weeks for this manager
     const roster = getAllRosteredPlayers(seasonData, managerName);
 
-    // Build available (non-rostered) players from pool - union across all managers and weeks
+    // Build available (non-rostered) players from pool.
+    // Only look at each manager's latest week (in schedule order) so previously
+    // dropped players are not incorrectly treated as still taken.
     const rosteredBatters = new Set();
     const rosteredPitchers = new Set();
+    const orderedWks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
     for (const mgrRoster of Object.values(seasonData.rosters || {})) {
-      for (const weekRoster of Object.values(mgrRoster)) {
-        (weekRoster.batters || []).forEach((b) => rosteredBatters.add(b));
-        (weekRoster.pitchers || []).forEach((p) => rosteredPitchers.add(p));
-      }
+      const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
+      if (!latest) continue;
+      const wr = mgrRoster[latest];
+      (wr.batters || []).forEach((b) => rosteredBatters.add(b));
+      (wr.pitchers || []).forEach((p) => rosteredPitchers.add(p));
     }
     const availBatters = (seasonData.batters_pool || []).filter((b) => !rosteredBatters.has(b)).sort();
     const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !rosteredPitchers.has(p)).sort();
@@ -6832,11 +6910,12 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           </select>
         </div>
         <div class="swap-form-field">
-          <label for="swap-player-in">Player In (available)</label>
-          <select id="swap-player-in" class="form-select">
-            <option value="">Select replacement player...</option>
-            ${availBatters.map((b) => `<option value="${b}">${displayPlayer(b, seasonData)}</option>`).join('')}
-          </select>
+          <label for="swap-player-in-search">Player In (available)</label>
+          <div class="player-search-container">
+            <input type="text" id="swap-player-in-search" class="form-input" placeholder="Type to search available players..." autocomplete="off">
+            <div id="swap-player-in-results" class="player-search-results"></div>
+          </div>
+          <input type="hidden" id="swap-player-in" value="">
         </div>
         <div class="swap-form-field">
           <label for="swap-reason">Transaction Reason</label>
@@ -7366,24 +7445,31 @@ window.swapTypeToggle = function (type) {
     return t ? `${name} (${t})` : name;
   };
 
+  const clearSwapInSearch = () => {
+    const searchEl = document.getElementById('swap-player-in-search');
+    const resultsEl = document.getElementById('swap-player-in-results');
+    if (searchEl) searchEl.value = '';
+    if (inSelect) inSelect.value = '';
+    if (resultsEl) {
+      resultsEl.innerHTML = '';
+      resultsEl.style.display = 'none';
+    }
+  };
+
   if (type === 'batter') {
     batterBtn.classList.add('active');
     pitcherBtn.classList.remove('active');
     outSelect.innerHTML =
       '<option value="">Select player to swap out...</option>' +
       data.batters.map((b) => `<option value="${b}">${dp(b)}</option>`).join('');
-    inSelect.innerHTML =
-      '<option value="">Select replacement player...</option>' +
-      data.availBatters.map((b) => `<option value="${b}">${dp(b)}</option>`).join('');
+    clearSwapInSearch();
   } else {
     pitcherBtn.classList.add('active');
     batterBtn.classList.remove('active');
     outSelect.innerHTML =
       '<option value="">Select player to swap out...</option>' +
       data.pitchers.map((p) => `<option value="${p}">${dp(p)}</option>`).join('');
-    inSelect.innerHTML =
-      '<option value="">Select replacement player...</option>' +
-      data.availPitchers.map((p) => `<option value="${p}">${dp(p)}</option>`).join('');
+    clearSwapInSearch();
   }
 };
 
@@ -9742,6 +9828,70 @@ window.selectPlayerSearchResult = function (inputId, playerName) {
       resultsDiv.innerHTML = '';
       resultsDiv.style.display = 'none';
     }
+  }
+};
+
+function setupSwapPlayerSearch() {
+  const searchInput = document.getElementById('swap-player-in-search');
+  const hiddenInput = document.getElementById('swap-player-in');
+  const resultsDiv = document.getElementById('swap-player-in-results');
+  if (!searchInput || !hiddenInput || !resultsDiv) return;
+  if (searchInput._searchBound) return;
+  searchInput._searchBound = true;
+
+  searchInput.addEventListener('input', () => {
+    hiddenInput.value = '';
+    const query = stripAccents(searchInput.value.trim().toLowerCase());
+    if (!query) {
+      resultsDiv.style.display = 'none';
+      resultsDiv.innerHTML = '';
+      return;
+    }
+    const dataEl = document.getElementById('swap-roster-data');
+    if (!dataEl) return;
+    const data = JSON.parse(dataEl.textContent);
+    const isBatter = document.getElementById('swap-type-batter')?.classList.contains('active');
+    const pool = isBatter ? data.availBatters || [] : data.availPitchers || [];
+    const teamMap = Object.assign({}, data.battersTeam || {}, data.pitchersTeam || {});
+    const matches = pool
+      .filter((p) => {
+        const norm = stripAccents(p.toLowerCase());
+        const parts = norm.split(/\s+/);
+        return parts.some((part) => part.startsWith(query)) || norm.includes(query);
+      })
+      .slice(0, 10);
+    if (!matches.length) {
+      resultsDiv.style.display = 'none';
+      resultsDiv.innerHTML = '';
+      return;
+    }
+    resultsDiv.style.display = 'block';
+    resultsDiv.innerHTML = matches
+      .map((p) => {
+        const t = teamMap[p];
+        const label = t ? `${esc(p)} (${esc(t)})` : esc(p);
+        return `<div class="player-search-item" onmousedown="selectSwapPlayerIn('${jsStr(p)}')">${label}</div>`;
+      })
+      .join('');
+  });
+
+  searchInput.addEventListener('blur', () => {
+    setTimeout(() => {
+      resultsDiv.innerHTML = '';
+      resultsDiv.style.display = 'none';
+    }, 200);
+  });
+}
+
+window.selectSwapPlayerIn = function (playerName) {
+  const searchInput = document.getElementById('swap-player-in-search');
+  const hiddenInput = document.getElementById('swap-player-in');
+  const resultsDiv = document.getElementById('swap-player-in-results');
+  if (searchInput) searchInput.value = playerName;
+  if (hiddenInput) hiddenInput.value = playerName;
+  if (resultsDiv) {
+    resultsDiv.innerHTML = '';
+    resultsDiv.style.display = 'none';
   }
 };
 
