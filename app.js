@@ -5804,6 +5804,9 @@ function renderRosterData(managerName, isCommissioner) {
 
   // Migrate old flat rosters to per-week format if needed
   if (isActive) migrateRostersToWeekly(seasonData);
+  // Ensure roster_dates has drop/add dates for all approved swaps so the
+  // available-player list correctly excludes active rosters and includes dropped ones.
+  if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
 
   // Compute per-period scores for this manager
   const periodScores = computeRosterPeriodScores(managerName, seasonData);
@@ -6874,20 +6877,38 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const roster = getAllRosteredPlayers(seasonData, managerName);
 
     // Build available (non-rostered) players from pool.
-    // Only look at each manager's latest week (in schedule order) so previously
-    // dropped players are not incorrectly treated as still taken.
-    const rosteredBatters = new Set();
-    const rosteredPitchers = new Set();
+    // Uses roster_dates add/drop dates as the primary signal: a player is currently
+    // taken by a manager when their most recent date event was an add (not a drop).
+    // Falls back to latest-week roster array for players with no date entries.
+    // backfillRosterDatesFromSwaps is called before this so old approved swaps
+    // also get their drop_dates populated.
     const orderedWks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
-    for (const mgrRoster of Object.values(seasonData.rosters || {})) {
-      const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
-      if (!latest) continue;
-      const wr = mgrRoster[latest];
-      (wr.batters || []).forEach((b) => rosteredBatters.add(b));
-      (wr.pitchers || []).forEach((p) => rosteredPitchers.add(p));
-    }
-    const availBatters = (seasonData.batters_pool || []).filter((b) => !rosteredBatters.has(b)).sort();
-    const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !rosteredPitchers.has(p)).sort();
+    const isCurrentlyTaken = (player) => {
+      for (const [mgr, mgrRoster] of Object.entries(seasonData.rosters || {})) {
+        const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[mgr]) || {};
+        let latestAdd = null;
+        let latestDrop = null;
+        for (const weekDates of Object.values(mgrDates)) {
+          const entry = weekDates[player];
+          if (!entry) continue;
+          if (entry.add_date && (!latestAdd || entry.add_date > latestAdd)) latestAdd = entry.add_date;
+          if (entry.drop_date && (!latestDrop || entry.drop_date > latestDrop)) latestDrop = entry.drop_date;
+        }
+        if (latestAdd || latestDrop) {
+          // Dates available: active only when most recent action was an add
+          if (!latestDrop || (latestAdd && latestAdd > latestDrop)) return true;
+        } else {
+          // No date entries: fall back to the manager's latest week roster array
+          const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
+          if (!latest) continue;
+          const wr = mgrRoster[latest];
+          if ((wr.batters || []).includes(player) || (wr.pitchers || []).includes(player)) return true;
+        }
+      }
+      return false;
+    };
+    const availBatters = (seasonData.batters_pool || []).filter((b) => !isCurrentlyTaken(b)).sort();
+    const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !isCurrentlyTaken(p)).sort();
 
     html += `<div class="swap-form-card">
       <h3>Request a Swap</h3>
