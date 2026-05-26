@@ -759,8 +759,9 @@ function rebuildWeeklyFromDaily(sd, round, week) {
   const pitMap = {};
   for (const r of dailyPit) {
     const d = r.delta || r.cumulative || {};
-    if (!pitMap[r.pitcher])
+    if (!pitMap[r.pitcher]) {
       pitMap[r.pitcher] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+    }
     const m = pitMap[r.pitcher];
     for (const k of Object.keys(m)) {
       if (k === 'ip') m.ip = Math.round((m.ip + (d.ip || 0)) * 1000) / 1000;
@@ -777,8 +778,9 @@ function rebuildWeeklyFromDaily(sd, round, week) {
           b.batter === name &&
           ((b.manual_fields && b.manual_fields.length > 0) || b.drop_locked)
       )
-    )
+    ) {
       continue;
+    }
     const manager =
       findManagerForPlayerWeek(sd, name, 'batting', round, week) || findManagerForPlayer(sd, name, 'batting');
     const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
@@ -814,8 +816,9 @@ function rebuildWeeklyFromDaily(sd, round, week) {
           p.pitcher === name &&
           ((p.manual_fields && p.manual_fields.length > 0) || p.drop_locked)
       )
-    )
+    ) {
       continue;
+    }
     const manager =
       findManagerForPlayerWeek(sd, name, 'pitching', round, week) || findManagerForPlayer(sd, name, 'pitching');
     const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
@@ -2589,8 +2592,9 @@ function aggregatePerGame(gameRecords) {
     }
 
     for (const [name, stats] of Object.entries(gp)) {
-      if (!pitching[name])
+      if (!pitching[name]) {
         pitching[name] = { gs: 0, w: 0, qs: 0, cg: 0, cgso: 0, nh: 0, ip: 0, h: 0, er: 0, bb: 0, k: 0 };
+      }
       for (const k of Object.keys(pitching[name])) {
         if (k === 'ip') pitching[name].ip = Math.round((pitching[name].ip + (stats.ip || 0)) * 1000) / 1000;
         else pitching[name][k] += stats[k] || 0;

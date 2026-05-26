@@ -2501,8 +2501,9 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
   const detailScheduleDates = getScheduleDates();
   const detailWeekKeyToStart = {};
   SEASON_SCHEDULE.forEach((s, i) => {
-    if (detailScheduleDates && detailScheduleDates[i])
+    if (detailScheduleDates && detailScheduleDates[i]) {
       detailWeekKeyToStart[`${s.round}|${s.week}`] = detailScheduleDates[i].start;
+    }
   });
 
   // Find current (most recent) roster
@@ -10517,8 +10518,9 @@ window.updateCommRosterWeekView = function (managerName) {
   const commScheduleDates = getScheduleDates();
   const commWeekKeyToStart = {};
   SEASON_SCHEDULE.forEach((s, i) => {
-    if (commScheduleDates && commScheduleDates[i])
+    if (commScheduleDates && commScheduleDates[i]) {
       commWeekKeyToStart[`${s.round}|${s.week}`] = commScheduleDates[i].start;
+    }
   });
 
   function commWasRostered(player, wkKey, type) {
