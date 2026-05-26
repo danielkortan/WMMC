@@ -11338,9 +11338,16 @@ function renderWeeklyUploadSections() {
     // Advance Players button (not for the first week)
     if (hasPriorWeek) {
       const alreadyAdvanced = (sd.advanced_weeks || []).includes(i);
+      const autoAdvanced = (sd.auto_advanced_weeks || []).includes(i);
+      const btnDisabled = alreadyAdvanced ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : '';
+      const statusText = autoAdvanced
+        ? 'Auto-advanced on Sunday'
+        : alreadyAdvanced
+          ? 'Players already advanced'
+          : 'Copy rosters from ' + SEASON_SCHEDULE[i - 1].label;
       html += `<div style="margin:0.5rem 0;">
-        <button class="btn btn-sm btn-secondary" onclick="advancePlayers(${i})" ${alreadyAdvanced ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : ''}>Advance Players</button>
-        <span class="text-muted" style="font-size:0.78rem;">${alreadyAdvanced ? 'Players already advanced' : 'Copy rosters from ' + SEASON_SCHEDULE[i - 1].label}</span>
+        <button class="btn btn-sm btn-secondary" onclick="advancePlayers(${i})" ${btnDisabled}>Advance Players</button>
+        <span class="text-muted" style="font-size:0.78rem;">${statusText}</span>
         <span id="advance-status-${i}"></span>
       </div>`;
     }

@@ -381,6 +381,16 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     const wipedAuto = syncPlayerDatesFromRosterDates(sd);
     recomputeMidWeekAddScores(sd, wipedAuto);
   }
+  // Protect server-side auto-advance markers from being overwritten by a stale client save.
+  const existingSd = (db.seasons || {})[req.params.year];
+  if (existingSd && Array.isArray(existingSd.auto_advanced_weeks)) {
+    if (!Array.isArray(sd.auto_advanced_weeks)) sd.auto_advanced_weeks = [];
+    if (!Array.isArray(sd.advanced_weeks)) sd.advanced_weeks = [];
+    for (const w of existingSd.auto_advanced_weeks) {
+      if (!sd.auto_advanced_weeks.includes(w)) sd.auto_advanced_weeks.push(w);
+      if (!sd.advanced_weeks.includes(w)) sd.advanced_weeks.push(w);
+    }
+  }
   db.seasons[req.params.year] = sd;
   writeDB(db);
   res.json({ ok: true });
@@ -5250,6 +5260,231 @@ function isWithinSyncWindow(sd) {
   return todayISO >= syncStartISO && todayISO <= syncEndISO;
 }
 
+// ============================================================
+// Sunday Auto-Advance Scheduler
+// ============================================================
+
+// Returns next occurrence of the given hour on a Sunday in America/New_York as UTC Date.
+function getNextEasternSunday(hour) {
+  const TZ = 'America/New_York';
+  const now = new Date();
+  for (let daysAhead = 0; daysAhead <= 7; daysAhead++) {
+    const candidate = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
+    const dayOfWeek = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'long' }).format(candidate);
+    if (dayOfWeek !== 'Sunday') continue;
+    const dateStr = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(candidate);
+    const [yr, mo, dy] = dateStr.split('-').map(Number);
+    const noonUTC = new Date(Date.UTC(yr, mo - 1, dy, 12, 0, 0));
+    const noonEasternHour = +new Intl.DateTimeFormat('en-US', {
+      timeZone: TZ,
+      hour: '2-digit',
+      hour12: false,
+    }).format(noonUTC);
+    const offsetHours = noonEasternHour - 12;
+    const target = new Date(Date.UTC(yr, mo - 1, dy, hour - offsetHours, 0, 0));
+    if (target > now) return target;
+  }
+  return new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+}
+
+// Determine which week index should be auto-advanced on Sunday at 6am.
+// Prefers the week whose start date is tomorrow (the Monday that begins it).
+// Falls back to the first un-advanced week that has prior-week roster data.
+function findAutoAdvanceWeekIndex(sd) {
+  const TZ = 'America/New_York';
+  const dates = sd.schedule_dates || [];
+  const advanced = sd.advanced_weeks || [];
+
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const tomorrowET = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(tomorrow);
+
+  for (let i = 1; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    const { start } = dates[i] || {};
+    if (start === tomorrowET && !advanced.includes(i)) return i;
+  }
+
+  // Fallback: first un-advanced week where prior week has roster data
+  const rosters = sd.rosters || {};
+  for (let i = 1; i < SEASON_SCHEDULE.length; i++) {
+    if (advanced.includes(i)) continue;
+    const priorSched = SEASON_SCHEDULE[i - 1];
+    const priorKey = `${priorSched.round}|${priorSched.week}`;
+    const hasPriorData = Object.values(rosters).some((r) => r[priorKey] && (r[priorKey].batters || []).length > 0);
+    if (hasPriorData) return i;
+  }
+  return -1;
+}
+
+// Server-side equivalent of the client's advancePlayers() function.
+// Copies prior-week rosters to weekIndex for all active managers, creating
+// zero-stat batting/pitching records. Marks both advanced_weeks and
+// auto_advanced_weeks so the client can display the correct label.
+// Returns the number of manager rosters advanced.
+function serverAutoAdvancePlayers(sd, managers, weekIndex) {
+  if (!sd || weekIndex < 1) return 0;
+  if (!sd.advanced_weeks) sd.advanced_weeks = [];
+  if (!sd.auto_advanced_weeks) sd.auto_advanced_weeks = [];
+  if (sd.advanced_weeks.includes(weekIndex)) return 0;
+
+  const priorSched = SEASON_SCHEDULE[weekIndex - 1];
+  const currentSched = SEASON_SCHEDULE[weekIndex];
+  const priorKey = `${priorSched.round}|${priorSched.week}`;
+  const currentKey = `${currentSched.round}|${currentSched.week}`;
+
+  if (!sd.rosters) sd.rosters = {};
+  if (!sd.weekly_batting) sd.weekly_batting = [];
+  if (!sd.weekly_pitching) sd.weekly_pitching = [];
+
+  const swaps = sd.swaps || [];
+
+  const existingBatTotals = {};
+  (sd.weekly_batting || []).forEach((b) => {
+    if (b.batter) existingBatTotals[b.batter] = (existingBatTotals[b.batter] || 0) + (b.weekly_score || 0);
+  });
+
+  const activeManagers = managers.filter((m) => m.active !== false);
+  let advanced = 0;
+
+  activeManagers.forEach((m) => {
+    if (!sd.rosters[m.name]) sd.rosters[m.name] = {};
+    const priorRoster = sd.rosters[m.name][priorKey];
+    if (!priorRoster || sd.rosters[m.name][currentKey]) return;
+
+    const droppedBatters = new Set();
+    const droppedPitchers = new Set();
+    swaps
+      .filter((s) => s.manager === m.name && s.status === 'approved' && s.player_out && !s.player_in)
+      .forEach((s) => {
+        if (s.week_key === priorKey || s.week_key === currentKey) {
+          droppedBatters.add(s.player_out);
+          droppedPitchers.add(s.player_out);
+        }
+      });
+
+    const batters = (priorRoster.batters || []).filter((p) => !droppedBatters.has(p));
+    const pitchers = (priorRoster.pitchers || []).filter((p) => !droppedPitchers.has(p));
+
+    sd.rosters[m.name][currentKey] = { batters, pitchers };
+
+    batters.forEach((batter) => {
+      const exists = sd.weekly_batting.some(
+        (b) =>
+          b.round === currentSched.round && b.week === currentSched.week && b.batter === batter && b.manager === m.name
+      );
+      if (!exists) {
+        sd.weekly_batting.push({
+          round: currentSched.round,
+          week: currentSched.week,
+          manager: m.name,
+          batter,
+          abs: 0,
+          '1b': 0,
+          '2b': 0,
+          '3b': 0,
+          hr: 0,
+          r: 0,
+          rbi: 0,
+          sb: 0,
+          bb: 0,
+          weekly_score: 0,
+          total_score: existingBatTotals[batter] || 0,
+        });
+      }
+    });
+
+    pitchers.forEach((pitcher) => {
+      const exists = sd.weekly_pitching.some(
+        (p) =>
+          p.round === currentSched.round &&
+          p.week === currentSched.week &&
+          p.pitcher === pitcher &&
+          p.manager === m.name
+      );
+      if (!exists) {
+        sd.weekly_pitching.push({
+          round: currentSched.round,
+          week: currentSched.week,
+          manager: m.name,
+          pitcher,
+          gs: 0,
+          w: 0,
+          qs: 0,
+          cg: 0,
+          cgso: 0,
+          nh: 0,
+          ip: 0,
+          h: 0,
+          er: 0,
+          bb: 0,
+          k: 0,
+          weekly_score: 0,
+        });
+      }
+    });
+
+    advanced++;
+  });
+
+  if (advanced > 0) {
+    sd.advanced_weeks.push(weekIndex);
+    sd.auto_advanced_weeks.push(weekIndex);
+  }
+
+  return advanced;
+}
+
+let weeklyAutoAdvanceTimer = null;
+
+function scheduleWeeklyAutoAdvance() {
+  if (weeklyAutoAdvanceTimer) clearTimeout(weeklyAutoAdvanceTimer);
+
+  async function runAndReschedule() {
+    try {
+      const db = readDB();
+      const config = db.google_sheets_config || {};
+      const season = config.season || new Date().getFullYear().toString();
+      const sd = (db.seasons || {})[season];
+
+      if (!sd) {
+        console.log(`[Auto-Advance] Skipping — no season data for ${season}`);
+      } else {
+        const managers = db.managers || [];
+        const weekIndex = findAutoAdvanceWeekIndex(sd);
+
+        if (weekIndex < 0) {
+          console.log(`[Auto-Advance] No eligible week to advance for ${season}`);
+        } else {
+          const count = serverAutoAdvancePlayers(sd, managers, weekIndex);
+          if (count > 0) {
+            db.seasons[season] = sd;
+            writeDB(db);
+            const sched = SEASON_SCHEDULE[weekIndex];
+            console.log(`[Auto-Advance] Advanced ${count} manager(s) to ${sched.round} ${sched.week} for ${season}`);
+            postSlack(
+              `*Auto-Advance* — ${count} manager roster(s) advanced to ${sched.round} ${sched.week} for ${season} season`
+            ).catch(() => {});
+          } else {
+            console.log(`[Auto-Advance] Nothing to advance for ${season} (week index ${weekIndex})`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[Auto-Advance] Error:', e.message);
+    }
+
+    const next = getNextEasternSunday(6);
+    weeklyAutoAdvanceTimer = setTimeout(runAndReschedule, next - Date.now());
+    console.log(`[Auto-Advance] Next auto-advance scheduled for ${next.toISOString()} (Sunday 6am Eastern)`);
+  }
+
+  const next = getNextEasternSunday(6);
+  const delay = next - Date.now();
+  console.log(
+    `[Auto-Advance] Scheduler started. Next run at ${next.toISOString()} (Sunday 6am Eastern, in ${Math.round(delay / 60000)} minutes)`
+  );
+  weeklyAutoAdvanceTimer = setTimeout(runAndReschedule, delay);
+}
+
 function scheduleGSheetsSync() {
   if (syncTimer) clearTimeout(syncTimer);
 
@@ -5649,6 +5884,8 @@ async function main() {
     scheduleMLBApiSync();
     // Start the daily scoreboard post scheduler (7am)
     scheduleScoreboardPost();
+    // Auto-advance all active players to the next week every Sunday at 6am Eastern.
+    scheduleWeeklyAutoAdvance();
   });
 }
 
