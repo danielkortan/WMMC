@@ -2501,8 +2501,9 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
   const detailScheduleDates = getScheduleDates();
   const detailWeekKeyToStart = {};
   SEASON_SCHEDULE.forEach((s, i) => {
-    if (detailScheduleDates && detailScheduleDates[i])
+    if (detailScheduleDates && detailScheduleDates[i]) {
       detailWeekKeyToStart[`${s.round}|${s.week}`] = detailScheduleDates[i].start;
+    }
   });
 
   // Find current (most recent) roster
@@ -6883,6 +6884,34 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     // backfillRosterDatesFromSwaps is called before this so old approved swaps
     // also get their drop_dates populated.
     const orderedWks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
+
+    // Returns true if `player` is currently on THIS manager's active roster
+    // (most recent roster_dates action was an add, or no dates but in latest week).
+    const isStillActiveForMgr = (player) => {
+      const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[managerName]) || {};
+      let latestAdd = null;
+      let latestDrop = null;
+      for (const weekDates of Object.values(mgrDates)) {
+        const entry = weekDates[player];
+        if (!entry) continue;
+        if (entry.add_date && (!latestAdd || entry.add_date > latestAdd)) latestAdd = entry.add_date;
+        if (entry.drop_date && (!latestDrop || entry.drop_date > latestDrop)) latestDrop = entry.drop_date;
+      }
+      if (latestAdd || latestDrop) {
+        return !latestDrop || (latestAdd && latestAdd > latestDrop);
+      }
+      const mgrRoster = (seasonData.rosters && seasonData.rosters[managerName]) || {};
+      const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
+      if (!latest) return false;
+      const wr = mgrRoster[latest];
+      return (wr.batters || []).includes(player) || (wr.pitchers || []).includes(player);
+    };
+
+    // Filter to currently active players only so previously dropped players
+    // don't appear in the Player Out list.
+    const currentBatters = roster.batters.filter(isStillActiveForMgr);
+    const currentPitchers = roster.pitchers.filter(isStillActiveForMgr);
+
     const isCurrentlyTaken = (player) => {
       for (const [mgr, mgrRoster] of Object.entries(seasonData.rosters || {})) {
         const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[mgr]) || {};
@@ -6924,7 +6953,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           <label for="swap-player-out">Player Out (from your roster)</label>
           <select id="swap-player-out" class="form-select">
             <option value="">Select player to swap out...</option>
-            ${roster.batters
+            ${currentBatters
               .sort()
               .map((b) => `<option value="${b}" data-type="batter">${displayPlayer(b, seasonData)}</option>`)
               .join('')}
@@ -6955,8 +6984,8 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
 
     // Store roster data as data attributes for the type toggle to use
     html += `<script type="application/json" id="swap-roster-data">${JSON.stringify({
-      batters: roster.batters.sort(),
-      pitchers: roster.pitchers.sort(),
+      batters: currentBatters.sort(),
+      pitchers: currentPitchers.sort(),
       availBatters: availBatters,
       availPitchers: availPitchers,
       battersTeam: seasonData.batters_team || {},
@@ -10489,8 +10518,9 @@ window.updateCommRosterWeekView = function (managerName) {
   const commScheduleDates = getScheduleDates();
   const commWeekKeyToStart = {};
   SEASON_SCHEDULE.forEach((s, i) => {
-    if (commScheduleDates && commScheduleDates[i])
+    if (commScheduleDates && commScheduleDates[i]) {
       commWeekKeyToStart[`${s.round}|${s.week}`] = commScheduleDates[i].start;
+    }
   });
 
   function commWasRostered(player, wkKey, type) {
