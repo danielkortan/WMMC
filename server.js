@@ -723,6 +723,23 @@ function computeEffectivePitchingScore(sd, pitcher, round, week) {
   return Math.round(eligible.reduce((sum, r) => sum + calculatePitchingScore(r.delta || {}), 0) * 100) / 100;
 }
 
+// Returns true if gameDate falls within a player's effective scoring window for the week.
+// Reads player_dates overrides first; falls back to the week's calendar start/end.
+// Used by the live tab and /api/mlb/daily to skip stats for dropped/future-add players
+// that are still physically present in the roster object from auto-advance carry-forward.
+function isDateEligibleForPlayer(sd, playerName, playerType, round, week, gameDate) {
+  const weekKey = `${round}|${week}`;
+  const pdType = playerType === 'batting' ? 'batter' : 'pitcher';
+  const override = (((sd.player_dates || {})[weekKey] || {})[pdType] || {})[playerName] || {};
+  const weekIdx = getScheduleWeekIndex(round, week);
+  const weekDates = weekIdx >= 0 ? (sd.schedule_dates || [])[weekIdx] : null;
+  const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
+  const effectiveEnd = 'end' in override ? override.end : (weekDates && weekDates.end) || null;
+  if (effectiveStart && gameDate < effectiveStart) return false;
+  if (effectiveEnd && gameDate > effectiveEnd) return false;
+  return true;
+}
+
 // Recompute all weekly_batting/pitching scores from daily data.
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
@@ -4231,7 +4248,12 @@ app.get('/api/mlb/live', async (req, res) => {
       const hasFinal = agg.games.some((g) => g.state === 'Final');
       // today_score = sum of just today's game contributions, so the standings can show
       // both this week's total and what a manager added in the current day.
-      const todayScore = agg.games.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0);
+      // Respect player_dates: a player dropped before today or not yet effective today
+      // is still in the roster object (auto-advance carry-forward) but must not be credited.
+      const eligibleToday = isDateEligibleForPlayer(sd, name, agg.type, weekRound, weekName, today);
+      const todayScore = eligibleToday
+        ? agg.games.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0)
+        : 0;
       playerRows.push({
         name,
         manager,
@@ -4483,6 +4505,7 @@ app.get('/api/mlb/daily', (req, res) => {
         const name = r[playerKey];
         const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
         if (!mgr) continue;
+        if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
         totals[mgr] = (totals[mgr] || 0) + scoreFunc(r.delta || {});
       }
     };
@@ -4537,6 +4560,7 @@ app.get('/api/mlb/daily', (req, res) => {
       const name = r[playerKey];
       const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
       if (!mgr) continue;
+      if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
       players.push({
         name,
         manager: mgr,
@@ -5357,7 +5381,7 @@ function serverAutoAdvancePlayers(sd, managers, weekIndex) {
     const droppedBatters = new Set();
     const droppedPitchers = new Set();
     swaps
-      .filter((s) => s.manager === m.name && s.status === 'approved' && s.player_out && !s.player_in)
+      .filter((s) => s.manager === m.name && s.status === 'approved' && s.player_out)
       .forEach((s) => {
         if (s.week_key === priorKey || s.week_key === currentKey) {
           droppedBatters.add(s.player_out);
