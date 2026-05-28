@@ -2538,9 +2538,14 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
 
   // Compute total points per player (includes null-manager entries for players rostered that week)
   const detailRosterLookup = buildRosterLookup(sd);
+  const detailApprovedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+  const detailMgrRosterDates = (sd.roster_dates || {})[managerName] || {};
   function playerPts(name, type) {
     const arr = type === 'batting' ? sd.weekly_batting || [] : sd.weekly_pitching || [];
     const playerKey = type === 'batting' ? 'batter' : 'pitcher';
+    const dailyArr = type === 'batting' ? sd.daily_batting || [] : sd.daily_pitching || [];
+    const dailyPlayerKey = type === 'batting' ? 'batter' : 'pitcher';
+    const scoreFn = type === 'batting' ? calculateBattingScore : calculatePitchingScore;
     return (
       Math.round(
         arr
@@ -2551,7 +2556,31 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
             const mgr = r.manager || detailRosterLookup[`${name}|${r.round}|${r.week}`];
             return mgr === managerName;
           })
-          .reduce((s, r) => s + (r.weekly_score || 0), 0) * 100
+          .reduce((total, r) => {
+            const weekKey = `${r.round}|${r.week}`;
+            const rd = detailMgrRosterDates[weekKey] && detailMgrRosterDates[weekKey][name];
+            let addDate = rd ? rd.add_date || null : null;
+            let dropDate = rd ? rd.drop_date || null : null;
+            if (!addDate) {
+              const addSwap = detailApprovedSwaps.find((s) => s.player_in === name && s.week_key === weekKey);
+              if (addSwap && addSwap.swap_date) addDate = addSwap.swap_date;
+            }
+            if (!dropDate) {
+              const dropSwap = detailApprovedSwaps.find((s) => s.player_out === name && s.week_key === weekKey);
+              if (dropSwap && dropSwap.swap_date) dropDate = dropSwap.swap_date;
+            }
+            if (!addDate && !dropDate) return total + (r.weekly_score || 0);
+            const daily = dailyArr.filter(
+              (d) => d[dailyPlayerKey] === name && d.round === r.round && d.week === r.week
+            );
+            if (!daily.length) return total + (r.weekly_score || 0);
+            const eligible = daily.filter((d) => {
+              if (addDate && d.date < addDate) return false;
+              if (dropDate && d.date > dropDate) return false;
+              return true;
+            });
+            return total + Math.round(eligible.reduce((s, d) => s + scoreFn(d.delta || {}), 0) * 100) / 100;
+          }, 0) * 100
       ) / 100
     );
   }
