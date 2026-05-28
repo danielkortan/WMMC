@@ -1584,7 +1584,7 @@ footer {
 
 .pool-play-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 1.25rem;
 }
 
@@ -1592,6 +1592,7 @@ footer {
   background: var(--card-bg);
   border: 2px solid var(--border);
   border-radius: 10px;
+  overflow: hidden;
 }
 
 .pool-card h3 {
@@ -1601,7 +1602,6 @@ footer {
   font-size: 0.9rem;
   font-weight: 700;
   margin: 0;
-  border-radius: 8px 8px 0 0;
 }
 
 /* ============================================================ */
@@ -2849,10 +2849,6 @@ footer {
     grid-template-columns: repeat(3, 1fr);
   }
 
-  .pool-play-grid {
-    grid-template-columns: 1fr;
-  }
-
   .matchup-results-grid,
   .matchup-preview-grid {
     grid-template-columns: 1fr;
@@ -3956,6 +3952,10 @@ body::before {
   .comm-tab-btn {
     padding: 0.55rem 0.8rem;
     font-size: 0.83rem;
+  }
+
+  .pool-play-grid {
+    grid-template-columns: 1fr;
   }
 }
 
