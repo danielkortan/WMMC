@@ -766,6 +766,19 @@ function wasDroppedBeforeWeek(sd, managerName, playerName, weekKey, weekStart) {
   return false;
 }
 
+// True when `name`'s only roster association for this week is a carry-forward of a player the
+// manager already dropped in an earlier week. The sync write paths use this to avoid storing
+// (and to purge) stat records that no scoreboard would ever count — so a one-day add/drop
+// player accumulates stats only for the day they were actually rostered. Resolves the
+// week-specific manager and the week's start internally, then defers to wasDroppedBeforeWeek.
+function isCarriedForwardDrop(sd, name, type, round, week) {
+  const mgr = findManagerForPlayerWeek(sd, name, type, round, week);
+  if (!mgr) return false;
+  const weekIdx = getScheduleWeekIndex(round, week);
+  const weekStart = weekIdx >= 0 ? ((sd.schedule_dates || [])[weekIdx] || {}).start : null;
+  return wasDroppedBeforeWeek(sd, mgr, name, `${round}|${week}`, weekStart);
+}
+
 // Recompute all weekly_batting/pitching scores from daily data.
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
@@ -2007,6 +2020,23 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
     );
     if (lockedDaily) return;
 
+    // Carry-forward of a player dropped in an earlier week — purge any stale snapshot and
+    // skip, so stats only accrue for the days they were actually rostered.
+    if (isCarriedForwardDrop(sd, batter, 'batting', scheduleWeek.round, scheduleWeek.week)) {
+      sd.daily_batting = sd.daily_batting.filter(
+        (r) =>
+          !(
+            r.date === syncDate &&
+            r.round === scheduleWeek.round &&
+            r.week === scheduleWeek.week &&
+            r.batter === batter &&
+            r.source === 'gsheets'
+          )
+      );
+      skipped++;
+      return;
+    }
+
     // Delta = today's cumulative minus the most-recent previous snapshot for this player/week
     const prevSnapshot = sd.daily_batting
       .filter(
@@ -2137,6 +2167,22 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
         ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
     );
     if (lockedDaily) return;
+
+    // Carry-forward of a player dropped in an earlier week — purge any stale snapshot and skip.
+    if (isCarriedForwardDrop(sd, pitcher, 'pitching', scheduleWeek.round, scheduleWeek.week)) {
+      sd.daily_pitching = sd.daily_pitching.filter(
+        (r) =>
+          !(
+            r.date === syncDate &&
+            r.round === scheduleWeek.round &&
+            r.week === scheduleWeek.week &&
+            r.pitcher === pitcher &&
+            r.source === 'gsheets'
+          )
+      );
+      skipped++;
+      return;
+    }
 
     // Delta = today's cumulative minus the most-recent previous snapshot
     const prevSnapshot = sd.daily_pitching
@@ -2882,6 +2928,23 @@ async function performMLBSync(sd, schedWeek, dates) {
         continue;
       }
 
+      // Carry-forward of a player dropped in an earlier week — purge any stale auto record
+      // and don't write a new one, so stats only accrue for the days they were rostered.
+      if (isCarriedForwardDrop(sd, name, 'batting', round, week)) {
+        sd.daily_batting = sd.daily_batting.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.batter === name &&
+              r.source === 'mlbapi'
+            )
+        );
+        batSkipped++;
+        continue;
+      }
+
       // Replace any previous mlbapi record for this game (handles stat corrections)
       sd.daily_batting = sd.daily_batting.filter(
         (r) =>
@@ -2917,6 +2980,21 @@ async function performMLBSync(sd, schedWeek, dates) {
       );
       if (lockedDaily) {
         manager ? pitImported++ : pitSkipped++;
+        continue;
+      }
+
+      if (isCarriedForwardDrop(sd, name, 'pitching', round, week)) {
+        sd.daily_pitching = sd.daily_pitching.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.pitcher === name &&
+              r.source === 'mlbapi'
+            )
+        );
+        pitSkipped++;
         continue;
       }
 
@@ -3009,6 +3087,21 @@ async function performMLBDailySync(sd, dateISO) {
         batImported++;
         continue;
       }
+      // Don't write stats for a player carried forward into this week after being dropped
+      // in an earlier week; purge any stale auto record so the week stays clean.
+      if (isCarriedForwardDrop(sd, name, 'batting', round, week)) {
+        sd.daily_batting = sd.daily_batting.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.batter === name &&
+              r.source === 'mlbapi'
+            )
+        );
+        continue;
+      }
       sd.daily_batting = sd.daily_batting.filter(
         (r) =>
           !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
@@ -3036,6 +3129,19 @@ async function performMLBDailySync(sd, dateISO) {
       );
       if (locked) {
         pitImported++;
+        continue;
+      }
+      if (isCarriedForwardDrop(sd, name, 'pitching', round, week)) {
+        sd.daily_pitching = sd.daily_pitching.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.pitcher === name &&
+              r.source === 'mlbapi'
+            )
+        );
         continue;
       }
       sd.daily_pitching = sd.daily_pitching.filter(
