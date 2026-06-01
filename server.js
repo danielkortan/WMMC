@@ -779,6 +779,49 @@ function isCarriedForwardDrop(sd, name, type, round, week) {
   return wasDroppedBeforeWeek(sd, mgr, name, `${round}|${week}`, weekStart);
 }
 
+// One-shot maintenance backfill: remove daily + weekly stat records that were written for
+// players carried forward into a week after being dropped in an earlier week. These never
+// counted toward any total (the read paths filter them via wasDroppedBeforeWeek), but they
+// lingered in db.json. The sync now skips writing them going forward; this purges the history
+// for weeks the daily sync would never re-touch. Manual edits and drop_locked records are
+// preserved. Idempotent and gated by a db flag, mirroring backfillWmmcQS / applyMLBApiTakeover.
+function purgeCarriedForwardDropRecords(db) {
+  if (!db || db.carried_forward_drop_purge_done) return false;
+
+  let dailyRemoved = 0;
+  let weeklyRemoved = 0;
+  const isOverride = (r) => (r.manual_fields && r.manual_fields.length > 0) || r.drop_locked;
+
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd) continue;
+    // Ensure player_dates reflect the latest roster_dates before judging eligibility.
+    syncPlayerDatesFromRosterDates(sd);
+
+    const purge = (list, playerKey, type, counter) => {
+      if (!Array.isArray(list)) return list;
+      return list.filter((r) => {
+        if (isOverride(r)) return true; // never touch commissioner overrides
+        if (isCarriedForwardDrop(sd, r[playerKey], type, r.round, r.week)) {
+          counter();
+          return false;
+        }
+        return true;
+      });
+    };
+
+    sd.daily_batting = purge(sd.daily_batting, 'batter', 'batting', () => dailyRemoved++);
+    sd.daily_pitching = purge(sd.daily_pitching, 'pitcher', 'pitching', () => dailyRemoved++);
+    sd.weekly_batting = purge(sd.weekly_batting, 'batter', 'batting', () => weeklyRemoved++);
+    sd.weekly_pitching = purge(sd.weekly_pitching, 'pitcher', 'pitching', () => weeklyRemoved++);
+  }
+
+  db.carried_forward_drop_purge_done = true;
+  console.log(
+    `[Carry-forward purge] Removed ${dailyRemoved} daily and ${weeklyRemoved} weekly record(s) for dropped carry-over players.`
+  );
+  return true;
+}
+
 // Recompute all weekly_batting/pitching scores from daily data.
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
@@ -6037,6 +6080,16 @@ async function main() {
       writeDB(dbForBackfill);
     } catch (e) {
       console.error('[WMMC-QS] Backfill error (continuing):', e.message);
+    }
+
+    // One-shot: purge stale stat records for players carried forward into a week after being
+    // dropped in an earlier week (e.g. a one-day add/drop). Gated by a db flag so it runs once.
+    try {
+      const dbForPurge = readDB();
+      const ran = purgeCarriedForwardDropRecords(dbForPurge);
+      if (ran) writeDB(dbForPurge);
+    } catch (e) {
+      console.error('[Carry-forward purge] Error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler (no-op while config.enabled=false,
