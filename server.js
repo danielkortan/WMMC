@@ -740,6 +740,88 @@ function isDateEligibleForPlayer(sd, playerName, playerType, round, week, gameDa
   return true;
 }
 
+// Returns true if `playerName` was dropped from `managerName`'s roster in an EARLIER week
+// (a drop_date before this week's start) and not re-added this week. Such a player is still
+// physically present in this week's roster object via auto-advance carry-forward, so an
+// add/drop in week N leaves a ghost entry in weeks N+1, N+2, ... that must not be credited
+// or displayed. Mirrors the inline wasDroppedBefore guard in managerWeekSubtotal so every
+// score-accumulation view — Scoreboard, Live tab, the /api/mlb/daily breakdown, and the
+// daily high/low — agrees on who counts for the week.
+function wasDroppedBeforeWeek(sd, managerName, playerName, weekKey, weekStart) {
+  if (!sd || !managerName || !weekStart) return false;
+  const mgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || {};
+  const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+  const addedThisWeek = new Set([
+    ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+    ...Object.entries(mgrDates[weekKey] || {})
+      .filter(([, d]) => d.add_date)
+      .map(([p]) => p),
+  ]);
+  if (addedThisWeek.has(playerName)) return false;
+  for (const [wk, players] of Object.entries(mgrDates)) {
+    if (wk === weekKey) continue;
+    const pd = players[playerName];
+    if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+  }
+  return false;
+}
+
+// True when `name`'s only roster association for this week is a carry-forward of a player the
+// manager already dropped in an earlier week. The sync write paths use this to avoid storing
+// (and to purge) stat records that no scoreboard would ever count — so a one-day add/drop
+// player accumulates stats only for the day they were actually rostered. Resolves the
+// week-specific manager and the week's start internally, then defers to wasDroppedBeforeWeek.
+function isCarriedForwardDrop(sd, name, type, round, week) {
+  const mgr = findManagerForPlayerWeek(sd, name, type, round, week);
+  if (!mgr) return false;
+  const weekIdx = getScheduleWeekIndex(round, week);
+  const weekStart = weekIdx >= 0 ? ((sd.schedule_dates || [])[weekIdx] || {}).start : null;
+  return wasDroppedBeforeWeek(sd, mgr, name, `${round}|${week}`, weekStart);
+}
+
+// One-shot maintenance backfill: remove daily + weekly stat records that were written for
+// players carried forward into a week after being dropped in an earlier week. These never
+// counted toward any total (the read paths filter them via wasDroppedBeforeWeek), but they
+// lingered in db.json. The sync now skips writing them going forward; this purges the history
+// for weeks the daily sync would never re-touch. Manual edits and drop_locked records are
+// preserved. Idempotent and gated by a db flag, mirroring backfillWmmcQS / applyMLBApiTakeover.
+function purgeCarriedForwardDropRecords(db) {
+  if (!db || db.carried_forward_drop_purge_done) return false;
+
+  let dailyRemoved = 0;
+  let weeklyRemoved = 0;
+  const isOverride = (r) => (r.manual_fields && r.manual_fields.length > 0) || r.drop_locked;
+
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd) continue;
+    // Ensure player_dates reflect the latest roster_dates before judging eligibility.
+    syncPlayerDatesFromRosterDates(sd);
+
+    const purge = (list, playerKey, type, counter) => {
+      if (!Array.isArray(list)) return list;
+      return list.filter((r) => {
+        if (isOverride(r)) return true; // never touch commissioner overrides
+        if (isCarriedForwardDrop(sd, r[playerKey], type, r.round, r.week)) {
+          counter();
+          return false;
+        }
+        return true;
+      });
+    };
+
+    sd.daily_batting = purge(sd.daily_batting, 'batter', 'batting', () => dailyRemoved++);
+    sd.daily_pitching = purge(sd.daily_pitching, 'pitcher', 'pitching', () => dailyRemoved++);
+    sd.weekly_batting = purge(sd.weekly_batting, 'batter', 'batting', () => weeklyRemoved++);
+    sd.weekly_pitching = purge(sd.weekly_pitching, 'pitcher', 'pitching', () => weeklyRemoved++);
+  }
+
+  db.carried_forward_drop_purge_done = true;
+  console.log(
+    `[Carry-forward purge] Removed ${dailyRemoved} daily and ${weeklyRemoved} weekly record(s) for dropped carry-over players.`
+  );
+  return true;
+}
+
 // Recompute all weekly_batting/pitching scores from daily data.
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
@@ -1256,24 +1338,7 @@ function computeDailyHighLow(sd, date) {
     const weekStart = weekDates ? weekDates.start : null;
 
     // Exclude players dropped before this week started (roster carry-overs from prior weeks).
-    // Mirrors the wasDroppedBefore guard in managerWeekSubtotal.
-    if (weekStart) {
-      const mgrDates = (sd.roster_dates && sd.roster_dates[mgr]) || {};
-      const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
-      const addedThisWeek = new Set([
-        ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
-        ...Object.entries(mgrDates[weekKey] || {})
-          .filter(([, d]) => d.add_date)
-          .map(([p]) => p),
-      ]);
-      if (!addedThisWeek.has(playerName)) {
-        for (const [wk, players] of Object.entries(mgrDates)) {
-          if (wk === weekKey) continue;
-          const pd = players[playerName];
-          if (pd && pd.drop_date && pd.drop_date < weekStart) return;
-        }
-      }
-    }
+    if (wasDroppedBeforeWeek(sd, mgr, playerName, weekKey, weekStart)) return;
 
     const override = (((sd.player_dates || {})[weekKey] || {})[pdType] || {})[playerName] || {};
     const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
@@ -1998,6 +2063,23 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
     );
     if (lockedDaily) return;
 
+    // Carry-forward of a player dropped in an earlier week — purge any stale snapshot and
+    // skip, so stats only accrue for the days they were actually rostered.
+    if (isCarriedForwardDrop(sd, batter, 'batting', scheduleWeek.round, scheduleWeek.week)) {
+      sd.daily_batting = sd.daily_batting.filter(
+        (r) =>
+          !(
+            r.date === syncDate &&
+            r.round === scheduleWeek.round &&
+            r.week === scheduleWeek.week &&
+            r.batter === batter &&
+            r.source === 'gsheets'
+          )
+      );
+      skipped++;
+      return;
+    }
+
     // Delta = today's cumulative minus the most-recent previous snapshot for this player/week
     const prevSnapshot = sd.daily_batting
       .filter(
@@ -2128,6 +2210,22 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
         ((r.manual_fields && r.manual_fields.length > 0) || r.drop_locked)
     );
     if (lockedDaily) return;
+
+    // Carry-forward of a player dropped in an earlier week — purge any stale snapshot and skip.
+    if (isCarriedForwardDrop(sd, pitcher, 'pitching', scheduleWeek.round, scheduleWeek.week)) {
+      sd.daily_pitching = sd.daily_pitching.filter(
+        (r) =>
+          !(
+            r.date === syncDate &&
+            r.round === scheduleWeek.round &&
+            r.week === scheduleWeek.week &&
+            r.pitcher === pitcher &&
+            r.source === 'gsheets'
+          )
+      );
+      skipped++;
+      return;
+    }
 
     // Delta = today's cumulative minus the most-recent previous snapshot
     const prevSnapshot = sd.daily_pitching
@@ -2873,6 +2971,23 @@ async function performMLBSync(sd, schedWeek, dates) {
         continue;
       }
 
+      // Carry-forward of a player dropped in an earlier week — purge any stale auto record
+      // and don't write a new one, so stats only accrue for the days they were rostered.
+      if (isCarriedForwardDrop(sd, name, 'batting', round, week)) {
+        sd.daily_batting = sd.daily_batting.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.batter === name &&
+              r.source === 'mlbapi'
+            )
+        );
+        batSkipped++;
+        continue;
+      }
+
       // Replace any previous mlbapi record for this game (handles stat corrections)
       sd.daily_batting = sd.daily_batting.filter(
         (r) =>
@@ -2908,6 +3023,21 @@ async function performMLBSync(sd, schedWeek, dates) {
       );
       if (lockedDaily) {
         manager ? pitImported++ : pitSkipped++;
+        continue;
+      }
+
+      if (isCarriedForwardDrop(sd, name, 'pitching', round, week)) {
+        sd.daily_pitching = sd.daily_pitching.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.pitcher === name &&
+              r.source === 'mlbapi'
+            )
+        );
+        pitSkipped++;
         continue;
       }
 
@@ -3000,6 +3130,21 @@ async function performMLBDailySync(sd, dateISO) {
         batImported++;
         continue;
       }
+      // Don't write stats for a player carried forward into this week after being dropped
+      // in an earlier week; purge any stale auto record so the week stays clean.
+      if (isCarriedForwardDrop(sd, name, 'batting', round, week)) {
+        sd.daily_batting = sd.daily_batting.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.batter === name &&
+              r.source === 'mlbapi'
+            )
+        );
+        continue;
+      }
       sd.daily_batting = sd.daily_batting.filter(
         (r) =>
           !(r.game_id === gameId && r.round === round && r.week === week && r.batter === name && r.source === 'mlbapi')
@@ -3027,6 +3172,19 @@ async function performMLBDailySync(sd, dateISO) {
       );
       if (locked) {
         pitImported++;
+        continue;
+      }
+      if (isCarriedForwardDrop(sd, name, 'pitching', round, week)) {
+        sd.daily_pitching = sd.daily_pitching.filter(
+          (r) =>
+            !(
+              r.game_id === gameId &&
+              r.round === round &&
+              r.week === week &&
+              r.pitcher === name &&
+              r.source === 'mlbapi'
+            )
+        );
         continue;
       }
       sd.daily_pitching = sd.daily_pitching.filter(
@@ -4242,6 +4400,9 @@ app.get('/api/mlb/live', async (req, res) => {
       const manager =
         findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) || findManagerForPlayer(sd, name, agg.type);
       if (!manager) continue;
+      // Skip players dropped in an earlier week but carried forward into this week's roster
+      // object — they are excluded from the certified total, so they must not appear here either.
+      if (wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, start)) continue;
       const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
       const score = agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
       const hasLive = agg.games.some((g) => g.state === 'Live');
@@ -4505,6 +4666,7 @@ app.get('/api/mlb/daily', (req, res) => {
         const name = r[playerKey];
         const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
         if (!mgr) continue;
+        if (wasDroppedBeforeWeek(sd, mgr, name, `${weekRound}|${weekName}`, start)) continue;
         if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
         totals[mgr] = (totals[mgr] || 0) + scoreFunc(r.delta || {});
       }
@@ -4560,6 +4722,7 @@ app.get('/api/mlb/daily', (req, res) => {
       const name = r[playerKey];
       const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
       if (!mgr) continue;
+      if (wasDroppedBeforeWeek(sd, mgr, name, `${weekRound}|${weekName}`, start)) continue;
       if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
       players.push({
         name,
@@ -4653,10 +4816,18 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 
         const bStats = batting[name];
         if (bStats) {
-          const manager =
+          let manager =
             (weekRound && findManagerForPlayerWeek(sd, name, 'batting', weekRound, weekName)) ||
             findManagerForPlayer(sd, name, 'batting') ||
             null;
+          // A player dropped in an earlier week but carried forward into this week's roster
+          // object isn't really this manager's — don't flag them as rostered.
+          if (
+            manager &&
+            wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, scheduleDates[activeIdx]?.start)
+          ) {
+            manager = null;
+          }
           sidedBatting[side].push({
             name,
             team: abbrev,
@@ -4671,10 +4842,16 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 
         const pStats = pitching[name];
         if (pStats) {
-          const manager =
+          let manager =
             (weekRound && findManagerForPlayerWeek(sd, name, 'pitching', weekRound, weekName)) ||
             findManagerForPlayer(sd, name, 'pitching') ||
             null;
+          if (
+            manager &&
+            wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, scheduleDates[activeIdx]?.start)
+          ) {
+            manager = null;
+          }
           sidedPitching[side].push({
             name,
             team: abbrev,
@@ -5903,6 +6080,16 @@ async function main() {
       writeDB(dbForBackfill);
     } catch (e) {
       console.error('[WMMC-QS] Backfill error (continuing):', e.message);
+    }
+
+    // One-shot: purge stale stat records for players carried forward into a week after being
+    // dropped in an earlier week (e.g. a one-day add/drop). Gated by a db flag so it runs once.
+    try {
+      const dbForPurge = readDB();
+      const ran = purgeCarriedForwardDropRecords(dbForPurge);
+      if (ran) writeDB(dbForPurge);
+    } catch (e) {
+      console.error('[Carry-forward purge] Error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler (no-op while config.enabled=false,
