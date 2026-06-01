@@ -386,8 +386,28 @@ function getCurrentScoringPeriod(seasonData) {
 
   if (latestIdx < 0) return null;
 
-  const scheduleEntry = SEASON_SCHEDULE[latestIdx];
   const dates = getScheduleDates();
+
+  // Cap to the current calendar week (ET). If today falls in a week whose
+  // schedule index is earlier than the latest data week, the banner should
+  // reflect where we actually are on the calendar — not data that may have
+  // been partially written for a future week via live-sync or early import.
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (dates) {
+    for (let i = 0; i < dates.length; i++) {
+      const d = dates[i];
+      if (d && d.start && d.end && todayET >= d.start && todayET <= d.end) {
+        if (i < latestIdx) {
+          latestIdx = i;
+          latestRound = SEASON_SCHEDULE[i].round;
+          latestWeek = SEASON_SCHEDULE[i].week;
+        }
+        break;
+      }
+    }
+  }
+
+  const scheduleEntry = SEASON_SCHEDULE[latestIdx];
   const dateRange = dates && dates[latestIdx] ? dates[latestIdx] : null;
 
   // Round info
