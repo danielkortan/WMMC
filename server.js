@@ -740,6 +740,32 @@ function isDateEligibleForPlayer(sd, playerName, playerType, round, week, gameDa
   return true;
 }
 
+// Returns true if `playerName` was dropped from `managerName`'s roster in an EARLIER week
+// (a drop_date before this week's start) and not re-added this week. Such a player is still
+// physically present in this week's roster object via auto-advance carry-forward, so an
+// add/drop in week N leaves a ghost entry in weeks N+1, N+2, ... that must not be credited
+// or displayed. Mirrors the inline wasDroppedBefore guard in managerWeekSubtotal so every
+// score-accumulation view — Scoreboard, Live tab, the /api/mlb/daily breakdown, and the
+// daily high/low — agrees on who counts for the week.
+function wasDroppedBeforeWeek(sd, managerName, playerName, weekKey, weekStart) {
+  if (!sd || !managerName || !weekStart) return false;
+  const mgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || {};
+  const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+  const addedThisWeek = new Set([
+    ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+    ...Object.entries(mgrDates[weekKey] || {})
+      .filter(([, d]) => d.add_date)
+      .map(([p]) => p),
+  ]);
+  if (addedThisWeek.has(playerName)) return false;
+  for (const [wk, players] of Object.entries(mgrDates)) {
+    if (wk === weekKey) continue;
+    const pd = players[playerName];
+    if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+  }
+  return false;
+}
+
 // Recompute all weekly_batting/pitching scores from daily data.
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
@@ -1256,24 +1282,7 @@ function computeDailyHighLow(sd, date) {
     const weekStart = weekDates ? weekDates.start : null;
 
     // Exclude players dropped before this week started (roster carry-overs from prior weeks).
-    // Mirrors the wasDroppedBefore guard in managerWeekSubtotal.
-    if (weekStart) {
-      const mgrDates = (sd.roster_dates && sd.roster_dates[mgr]) || {};
-      const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
-      const addedThisWeek = new Set([
-        ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
-        ...Object.entries(mgrDates[weekKey] || {})
-          .filter(([, d]) => d.add_date)
-          .map(([p]) => p),
-      ]);
-      if (!addedThisWeek.has(playerName)) {
-        for (const [wk, players] of Object.entries(mgrDates)) {
-          if (wk === weekKey) continue;
-          const pd = players[playerName];
-          if (pd && pd.drop_date && pd.drop_date < weekStart) return;
-        }
-      }
-    }
+    if (wasDroppedBeforeWeek(sd, mgr, playerName, weekKey, weekStart)) return;
 
     const override = (((sd.player_dates || {})[weekKey] || {})[pdType] || {})[playerName] || {};
     const effectiveStart = 'start' in override ? override.start : (weekDates && weekDates.start) || null;
@@ -4242,6 +4251,9 @@ app.get('/api/mlb/live', async (req, res) => {
       const manager =
         findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) || findManagerForPlayer(sd, name, agg.type);
       if (!manager) continue;
+      // Skip players dropped in an earlier week but carried forward into this week's roster
+      // object — they are excluded from the certified total, so they must not appear here either.
+      if (wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, start)) continue;
       const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
       const score = agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
       const hasLive = agg.games.some((g) => g.state === 'Live');
@@ -4505,6 +4517,7 @@ app.get('/api/mlb/daily', (req, res) => {
         const name = r[playerKey];
         const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
         if (!mgr) continue;
+        if (wasDroppedBeforeWeek(sd, mgr, name, `${weekRound}|${weekName}`, start)) continue;
         if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
         totals[mgr] = (totals[mgr] || 0) + scoreFunc(r.delta || {});
       }
@@ -4560,6 +4573,7 @@ app.get('/api/mlb/daily', (req, res) => {
       const name = r[playerKey];
       const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
       if (!mgr) continue;
+      if (wasDroppedBeforeWeek(sd, mgr, name, `${weekRound}|${weekName}`, start)) continue;
       if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
       players.push({
         name,
@@ -4653,10 +4667,18 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 
         const bStats = batting[name];
         if (bStats) {
-          const manager =
+          let manager =
             (weekRound && findManagerForPlayerWeek(sd, name, 'batting', weekRound, weekName)) ||
             findManagerForPlayer(sd, name, 'batting') ||
             null;
+          // A player dropped in an earlier week but carried forward into this week's roster
+          // object isn't really this manager's — don't flag them as rostered.
+          if (
+            manager &&
+            wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, scheduleDates[activeIdx]?.start)
+          ) {
+            manager = null;
+          }
           sidedBatting[side].push({
             name,
             team: abbrev,
@@ -4671,10 +4693,16 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 
         const pStats = pitching[name];
         if (pStats) {
-          const manager =
+          let manager =
             (weekRound && findManagerForPlayerWeek(sd, name, 'pitching', weekRound, weekName)) ||
             findManagerForPlayer(sd, name, 'pitching') ||
             null;
+          if (
+            manager &&
+            wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, scheduleDates[activeIdx]?.start)
+          ) {
+            manager = null;
+          }
           sidedPitching[side].push({
             name,
             team: abbrev,
