@@ -8796,6 +8796,7 @@ function renderMLBSyncLog() {
     `<button class="btn btn-secondary" onclick="backfillMLB()" style="margin-left:0.5rem;">Backfill from MLB</button>` +
     `<button class="btn btn-secondary" onclick="rebuildMLBWeeklies()" style="margin-left:0.5rem;">Rebuild Totals</button>` +
     `<button class="btn btn-sm btn-secondary" onclick="dataCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Data check</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="storageCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Storage</button>` +
     `<span style="display:inline-flex;gap:0.35rem;margin-left:0.75rem;align-items:center;">` +
     `<input id="mlb-debug-name" type="text" placeholder="Player name" ` +
     `style="font-size:0.82rem;padding:0.2rem 0.4rem;" onkeydown="if(event.key==='Enter')debugMLBPlayer()" />` +
@@ -8953,6 +8954,32 @@ window.backfillMLB = function () {
             )}</pre>`;
         }
       });
+    })
+    .catch((e) => {
+      if (out) out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(e.message)}</p>`;
+    });
+};
+
+// Read-only: where db.json is persisted and whether durable storage is actually active.
+window.storageCheckMLB = function () {
+  const out = document.getElementById('mlb-debug-out');
+  if (out) out.innerHTML = '<p class="text-muted" style="font-size:0.82rem;">Loading…</p>';
+  apiFetch('/api/mlb/storage-status')
+    .then((r) => r.json())
+    .then((res) => {
+      if (!out) return;
+      if (res.error) {
+        out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(res.error)}</p>`;
+        return;
+      }
+      const warn = res.warning
+        ? `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">⚠ ${esc(res.warning)}</p>`
+        : '<p style="font-size:0.82rem;color:var(--success,#2e7d32);">✓ Durable storage is active.</p>';
+      out.innerHTML =
+        warn +
+        `<pre style="font-size:0.72rem;max-height:420px;overflow:auto;background:var(--bg-alt,#f5f5f5);padding:0.5rem;border-radius:4px;white-space:pre-wrap;">${esc(
+          JSON.stringify(res, null, 2)
+        )}</pre>`;
     })
     .catch((e) => {
       if (out) out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(e.message)}</p>`;

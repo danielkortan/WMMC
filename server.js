@@ -3327,6 +3327,46 @@ app.post('/api/mlb/backfill', requireCommissioner, async (req, res) => {
   }
 });
 
+// GET /api/mlb/storage-status
+// Read-only: report exactly where the server persists db.json and whether durable storage is
+// actually active. The #1 cause of "data resets on restart" is the app falling back to an
+// ephemeral path because DB_PATH isn't set (so the mounted Render disk is never used) AND
+// Upstash being unconfigured — leaving no durable store at all.
+app.get('/api/mlb/storage-status', requireCommissioner, (req, res) => {
+  let exists = false;
+  let sizeBytes = null;
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      exists = true;
+      sizeBytes = fs.statSync(DB_FILE).size;
+    }
+  } catch {
+    /* ignore stat errors */
+  }
+  let lastSaved = null;
+  try {
+    lastSaved = readDB().last_saved_at || null;
+  } catch {
+    /* ignore */
+  }
+  const onDeclaredDisk = typeof DB_FILE === 'string' && DB_FILE.startsWith('/var/data');
+  const upstashConfigured = !!(UPSTASH_URL && UPSTASH_TOKEN);
+  res.json({
+    db_file: DB_FILE,
+    env_DB_PATH: process.env.DB_PATH || null,
+    on_persistent_disk_path: onDeclaredDisk,
+    db_exists: exists,
+    db_size_bytes: sizeBytes,
+    last_saved_at: lastSaved,
+    upstash_configured: upstashConfigured,
+    durable: onDeclaredDisk || upstashConfigured,
+    warning:
+      onDeclaredDisk || upstashConfigured
+        ? null
+        : 'No durable storage active — db.json is on an ephemeral path and Upstash is not configured. Data will reset on restart/spin-down.',
+  });
+});
+
 // ============================================================
 // MLB Stats API Integration
 // ============================================================
