@@ -5391,6 +5391,64 @@ function backfillRosterDatesFromSwaps(seasonData) {
   return changed;
 }
 
+// Fill empty per-week roster entries by carrying forward the most recent non-empty roster,
+// applying any week-specific approved swaps.  Mirrors the server-side repairCarryForwardRosters
+// so the display is correct immediately, before the next server restart.
+// Returns true if any entries were repaired (caller should saveSeason).
+function repairCarryForwardRosters(seasonData) {
+  if (!seasonData || seasonData.status !== 'active' || !seasonData.rosters) return false;
+
+  const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved');
+  let repaired = false;
+
+  for (const [mgrName, mgrRoster] of Object.entries(seasonData.rosters)) {
+    let prevBatters = null;
+    let prevPitchers = null;
+
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const { round, week } = SEASON_SCHEDULE[i];
+      const weekKey = `${round}|${week}`;
+      const wr = mgrRoster[weekKey];
+      const hasBatters = wr && (wr.batters || []).length > 0;
+      const hasPitchers = wr && (wr.pitchers || []).length > 0;
+
+      if (hasBatters || hasPitchers) {
+        prevBatters = [...(wr.batters || [])];
+        prevPitchers = [...(wr.pitchers || [])];
+      } else if (prevBatters !== null) {
+        let newBatters = [...prevBatters];
+        let newPitchers = [...prevPitchers];
+
+        approvedSwaps
+          .filter((s) => s.manager === mgrName && s.week_key === weekKey)
+          .forEach((s) => {
+            if (s.player_out) {
+              newBatters = newBatters.filter((p) => p !== s.player_out);
+              newPitchers = newPitchers.filter((p) => p !== s.player_out);
+            }
+            if (s.player_in) {
+              const wasBatter = s.player_out ? prevBatters.includes(s.player_out) : false;
+              const wasPitcher = s.player_out ? prevPitchers.includes(s.player_out) : false;
+              const inBatPool = (seasonData.batters_pool || []).includes(s.player_in);
+              const inPitPool = (seasonData.pitchers_pool || []).includes(s.player_in);
+              if (wasBatter && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+              else if (wasPitcher && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+              else if (inBatPool && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+              else if (inPitPool && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+            }
+          });
+
+        mgrRoster[weekKey] = { batters: newBatters, pitchers: newPitchers };
+        repaired = true;
+        prevBatters = newBatters;
+        prevPitchers = newPitchers;
+      }
+    }
+  }
+
+  return repaired;
+}
+
 // Remove players from the Week 1 roster (and their stats/roster_dates) who appear there due
 // to a stale initial-submission approval but are no longer in the manager's current approved
 // initial_submission.  This catches the case where a manager changed their submission and the
@@ -5857,6 +5915,8 @@ function renderRosterData(managerName, isCommissioner) {
   // Ensure roster_dates has drop/add dates for all approved swaps so the
   // available-player list correctly excludes active rosters and includes dropped ones.
   if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  // Fill any empty per-week roster entries by carrying forward the last known roster.
+  if (isActive && repairCarryForwardRosters(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
 
   // Compute per-period scores for this manager
   const periodScores = computeRosterPeriodScores(managerName, seasonData);

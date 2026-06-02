@@ -822,6 +822,72 @@ function purgeCarriedForwardDropRecords(db) {
   return true;
 }
 
+// Fill in empty per-week roster entries by carrying forward the most recent
+// non-empty roster, applying any week-specific approved swaps.  Runs on every
+// startup (idempotent — only touches weeks whose batters AND pitchers are both
+// empty).  Fixes the case where auto-advance ran before the prior week's roster
+// was populated (leaving an empty entry that blocks future weeks) or simply
+// never ran for one or more weeks.
+function repairCarryForwardRosters(db) {
+  let repaired = 0;
+
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd || sd.status !== 'active' || !sd.rosters) continue;
+
+    const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+
+    for (const [mgrName, mgrRoster] of Object.entries(sd.rosters)) {
+      let prevBatters = null;
+      let prevPitchers = null;
+
+      for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+        const { round, week } = SEASON_SCHEDULE[i];
+        const weekKey = `${round}|${week}`;
+        const wr = mgrRoster[weekKey];
+        const hasBatters = wr && (wr.batters || []).length > 0;
+        const hasPitchers = wr && (wr.pitchers || []).length > 0;
+
+        if (hasBatters || hasPitchers) {
+          prevBatters = [...(wr.batters || [])];
+          prevPitchers = [...(wr.pitchers || [])];
+        } else if (prevBatters !== null) {
+          let newBatters = [...prevBatters];
+          let newPitchers = [...prevPitchers];
+
+          approvedSwaps
+            .filter((s) => s.manager === mgrName && s.week_key === weekKey)
+            .forEach((s) => {
+              if (s.player_out) {
+                newBatters = newBatters.filter((p) => p !== s.player_out);
+                newPitchers = newPitchers.filter((p) => p !== s.player_out);
+              }
+              if (s.player_in) {
+                const wasBatter = s.player_out ? prevBatters.includes(s.player_out) : false;
+                const wasPitcher = s.player_out ? prevPitchers.includes(s.player_out) : false;
+                const inBatPool = (sd.batters_pool || []).includes(s.player_in);
+                const inPitPool = (sd.pitchers_pool || []).includes(s.player_in);
+                if (wasBatter && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+                else if (wasPitcher && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+                else if (inBatPool && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+                else if (inPitPool && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+              }
+            });
+
+          mgrRoster[weekKey] = { batters: newBatters, pitchers: newPitchers };
+          repaired++;
+          prevBatters = newBatters;
+          prevPitchers = newPitchers;
+        }
+      }
+    }
+  }
+
+  if (repaired > 0) {
+    console.log(`[Roster Repair] Filled ${repaired} empty week roster entries via carry-forward.`);
+  }
+  return repaired > 0;
+}
+
 // Recompute all weekly_batting/pitching scores from daily data.
 // Called after player_dates changes or manual daily stat edits.
 // Skips records with manual_fields or drop_locked (commissioner overrides stay intact).
@@ -6090,6 +6156,16 @@ async function main() {
       if (ran) writeDB(dbForPurge);
     } catch (e) {
       console.error('[Carry-forward purge] Error (continuing):', e.message);
+    }
+
+    // Fill empty per-week roster entries by carrying forward the last known roster.
+    // Idempotent — only touches weeks where both batters and pitchers arrays are empty.
+    try {
+      const dbForRosterRepair = readDB();
+      const ran = repairCarryForwardRosters(dbForRosterRepair);
+      if (ran) writeDB(dbForRosterRepair);
+    } catch (e) {
+      console.error('[Roster Repair] Error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler (no-op while config.enabled=false,
