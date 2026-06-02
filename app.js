@@ -448,6 +448,22 @@ function getCurrentScoringPeriod(seasonData) {
   };
 }
 
+// Resolves the week a swap is effective in: uses swap_date if it falls
+// within a known schedule window, otherwise falls back to the stored week_key.
+// Used by every scoring and display path that filters swaps by week so all
+// views agree when schedule boundaries shift or swap records are repaired.
+function swapEffectiveWeekKey(swap, scheduleDates) {
+  if (swap.swap_date && scheduleDates) {
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const d = scheduleDates[i];
+      if (d && swap.swap_date >= d.start && swap.swap_date <= d.end) {
+        return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
+      }
+    }
+  }
+  return swap.week_key;
+}
+
 // ============================================================
 // Per-week subtotal for one manager. Single source of truth for the
 // "what stats count toward this manager this week" question used by
@@ -490,7 +506,9 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const weekStart = scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
   if (weekStart && allMgrDates) {
     const addedThisWeek = new Set([
-      ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+      ...approvedSwaps
+        .filter((s) => s.player_in && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
+        .map((s) => s.player_in),
       ...Object.entries(weekRosterDates)
         .filter(([, d]) => d.add_date)
         .map(([p]) => p),
@@ -521,7 +539,7 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
       .filter(
         (s) =>
           s.player_in &&
-          s.week_key === weekKey &&
+          swapEffectiveWeekKey(s, scheduleDates) === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
           (weekRosterDates[s.player_in] || rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
       )
@@ -5460,15 +5478,18 @@ function repairMissingSwapRecords(seasonData) {
 // feature existed) also get their dates populated automatically.
 function backfillRosterDatesFromSwaps(seasonData) {
   if (!seasonData || !seasonData.swaps) return false;
+  const scheduleDates = seasonData.schedule_dates || [];
   let changed = false;
   for (const swap of seasonData.swaps) {
-    if (swap.status !== 'approved' || !swap.week_key || !swap.swap_date || !swap.manager) continue;
+    if (swap.status !== 'approved' || !swap.swap_date || !swap.manager) continue;
+    const effectiveWk = swapEffectiveWeekKey(swap, scheduleDates);
+    if (!effectiveWk) continue;
     if (!seasonData.roster_dates) seasonData.roster_dates = {};
     if (!seasonData.roster_dates[swap.manager]) seasonData.roster_dates[swap.manager] = {};
-    if (!seasonData.roster_dates[swap.manager][swap.week_key]) {
-      seasonData.roster_dates[swap.manager][swap.week_key] = {};
+    if (!seasonData.roster_dates[swap.manager][effectiveWk]) {
+      seasonData.roster_dates[swap.manager][effectiveWk] = {};
     }
-    const wkDates = seasonData.roster_dates[swap.manager][swap.week_key];
+    const wkDates = seasonData.roster_dates[swap.manager][effectiveWk];
     if (swap.player_out) {
       if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
       if (!wkDates[swap.player_out].drop_date) {
@@ -5489,7 +5510,7 @@ function backfillRosterDatesFromSwaps(seasonData) {
 
 // Version stamp — bump whenever the repair logic changes substantially so the
 // full-recompute pass runs again on next load.
-const ROSTER_REPAIR_VERSION = 2;
+const ROSTER_REPAIR_VERSION = 3;
 
 // Fill / recompute per-week roster entries by carrying forward the most recent
 // trusted roster and applying approved swaps in chronological order.
@@ -5514,22 +5535,9 @@ function repairCarryForwardRosters(seasonData) {
   const needsFullRecompute = (seasonData.roster_repair_version || 0) < ROSTER_REPAIR_VERSION;
   let repaired = false;
 
-  // Return the week_key that a swap's swap_date falls in, falling back to the stored week_key.
-  function swapEffectiveWeekKey(swap) {
-    if (swap.swap_date) {
-      for (let j = 0; j < SEASON_SCHEDULE.length; j++) {
-        const d = scheduleDates[j];
-        if (d && swap.swap_date >= d.start && swap.swap_date <= d.end) {
-          return `${SEASON_SCHEDULE[j].round}|${SEASON_SCHEDULE[j].week}`;
-        }
-      }
-    }
-    return swap.week_key;
-  }
-
   function applySwaps(mgrName, weekKey, prevBatters, prevPitchers, newBatters, newPitchers) {
     approvedSwaps
-      .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s) === weekKey)
+      .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
       .forEach((s) => {
         if (s.player_out) {
           newBatters = newBatters.filter((p) => p !== s.player_out);
@@ -6483,7 +6491,9 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     if (weekStart && isActive && seasonData.roster_dates && seasonData.roster_dates[managerName]) {
       const allMgrDates = seasonData.roster_dates[managerName];
       const addedThisWeek = new Set([
-        ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+        ...approvedSwaps
+          .filter((s) => s.player_in && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
+          .map((s) => s.player_in),
         ...Object.entries(weekRosterDates)
           .filter(([, d]) => d.add_date)
           .map(([p]) => p),
@@ -6524,7 +6534,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         .filter(
           (s) =>
             s.player_in &&
-            s.week_key === weekKey &&
+            swapEffectiveWeekKey(s, scheduleDates) === weekKey &&
             (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
             (weekRosterDates[s.player_in] ||
               batting.some((b) => b.batter === s.player_in && b.round === round && b.week === week))
@@ -6540,7 +6550,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         .filter(
           (s) =>
             s.player_in &&
-            s.week_key === weekKey &&
+            swapEffectiveWeekKey(s, scheduleDates) === weekKey &&
             (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
             (weekRosterDates[s.player_in] ||
               pitching.some((p) => p.pitcher === s.player_in && p.round === round && p.week === week))
@@ -10852,7 +10862,9 @@ window.updateCommRosterWeekView = function (managerName) {
   if (weekStart && sd.roster_dates && sd.roster_dates[managerName]) {
     const allMgrDates = sd.roster_dates[managerName];
     const addedThisWeek = new Set([
-      ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
+      ...approvedSwaps
+        .filter((s) => s.player_in && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
+        .map((s) => s.player_in),
       ...Object.entries(rosterDates)
         .filter(([, d]) => d.add_date)
         .map(([p]) => p),
@@ -10885,7 +10897,7 @@ window.updateCommRosterWeekView = function (managerName) {
       .filter(
         (s) =>
           s.player_in &&
-          s.week_key === weekKey &&
+          swapEffectiveWeekKey(s, scheduleDates) === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
           (rosterDates[s.player_in] ||
             batting.some((b) => b.batter === s.player_in && b.round === round && b.week === week))
@@ -10901,7 +10913,7 @@ window.updateCommRosterWeekView = function (managerName) {
       .filter(
         (s) =>
           s.player_in &&
-          s.week_key === weekKey &&
+          swapEffectiveWeekKey(s, scheduleDates) === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
           (rosterDates[s.player_in] ||
             pitching.some((p) => p.pitcher === s.player_in && p.round === round && p.week === week))
