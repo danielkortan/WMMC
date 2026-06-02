@@ -2685,8 +2685,43 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
       const m = mo[mon];
       return m ? `${m}/${String(parseInt(day)).padStart(2, '0')}` : s;
     };
-    return [...names]
+    // Order players so a swapped-in player sits directly below the player he replaced.
+    // "Root" players (originals / un-swapped) keep their alphabetical order; every swap chain
+    // (e.g. Drake Baldwin → Christian Yelich, Max Muncy → Ronald Acuña) is nested directly
+    // beneath its anchor. Applies to all 1-for-1 swaps for the manager, across seasons.
+    const chainSwaps = (sd.swaps || [])
+      .filter((s) => {
+        if (!s.player_out || !s.player_in) return false; // only true 1-for-1 swaps can pair
+        if (s.status && s.status !== 'approved') return false; // skip pending/denied
+        // Older seed swaps may carry only an email; resolve those to a manager name.
+        const swapMgr = s.manager || (findManagerByEmail(s.email) || {}).name;
+        return swapMgr === managerName;
+      })
+      .slice()
+      .sort((a, b) => (a.swap_date || a.timestamp || '').localeCompare(b.swap_date || b.timestamp || ''));
+    const childrenByParent = {}; // player_out -> [player_in, ...] in swap-date order
+    const isSwapIn = new Set();
+    chainSwaps.forEach((s) => {
+      if (!names.has(s.player_out) || !names.has(s.player_in)) return;
+      (childrenByParent[s.player_out] = childrenByParent[s.player_out] || []).push(s.player_in);
+      isSwapIn.add(s.player_in);
+    });
+    const ordered = [];
+    const seen = new Set();
+    const visit = (name) => {
+      if (seen.has(name)) return;
+      seen.add(name);
+      ordered.push(name);
+      (childrenByParent[name] || []).forEach(visit);
+    };
+    // Roots = players that weren't swapped in for someone already in this list, kept alphabetical.
+    [...names]
+      .filter((n) => !isSwapIn.has(n))
       .sort()
+      .forEach(visit);
+    // Safety net: emit any leftovers (e.g. swap cycles) in alphabetical order.
+    [...names].sort().forEach(visit);
+    return ordered
       .map((name) => {
         const pts = playerPts(name, type);
         const isActive = activeSet.has(name);

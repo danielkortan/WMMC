@@ -9,6 +9,7 @@
     "lint:fix": "eslint server.js app.js js/ --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "sanitize:db": "node scripts/sanitize-db.js",
     "test": "node --test 'tests/*.test.js'",
     "prepare": "git config core.hooksPath .githooks"
   },
