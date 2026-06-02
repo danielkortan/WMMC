@@ -10,6 +10,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sanitize:db": "node scripts/sanitize-db.js",
+    "refresh:fixture": "bash scripts/refresh-fixture.sh",
     "test": "node --test 'tests/*.test.js'",
     "prepare": "git config core.hooksPath .githooks"
   },
