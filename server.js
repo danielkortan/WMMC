@@ -251,6 +251,9 @@ function readDB() {
 }
 
 function writeDB(data) {
+  // Stamp every write so startup can tell whether the local disk copy or the
+  // Upstash backup is newer (prevents a stale backup from clobbering good data).
+  data.last_saved_at = new Date().toISOString();
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
   // Async backup to Upstash so data survives Render's ephemeral filesystem
   saveToUpstash(data).catch((e) => console.error('[Upstash] Background save failed:', e.message));
@@ -6277,13 +6280,33 @@ async function main() {
   // Active when UPSTASH_* env vars are set; no-op otherwise.
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
-      console.log('[Upstash] Restoring db...');
+      console.log('[Upstash] Checking backup...');
       const saved = await loadFromUpstash();
-      if (saved) {
+
+      // Read whatever is already on the (persistent) disk so we can compare
+      // freshness instead of blindly overwriting it.
+      let local = null;
+      try {
+        if (fs.existsSync(DB_FILE)) local = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+      } catch (e) {
+        console.error('[Upstash] Could not read local db.json:', e.message);
+      }
+      const hasSeasons = (d) => d && d.seasons && Object.keys(d.seasons).length > 0;
+      const savedAt = (d) => (d && typeof d.last_saved_at === 'string' ? d.last_saved_at : '');
+
+      if (saved && (!hasSeasons(local) || savedAt(saved) > savedAt(local))) {
+        // Upstash is the better copy: the local disk is missing/empty, or the
+        // backup is strictly newer. Safe to restore.
         fs.writeFileSync(DB_FILE, JSON.stringify(saved, null, 2), 'utf8');
-        console.log('[Upstash] db restored successfully');
+        console.log('[Upstash] db restored from backup (local missing or older)');
+      } else if (hasSeasons(local)) {
+        // The local disk copy is current (Render's persistent disk survived the
+        // restart). Keep it and refresh the backup, so a stale Upstash snapshot
+        // can never clobber good data on a later deploy.
+        console.log('[Upstash] Local db is current; keeping it and refreshing the backup');
+        await saveToUpstash(local);
       } else {
-        console.log('[Upstash] No saved db found — starting fresh or using local db.json');
+        console.log('[Upstash] No usable backup or local db — starting fresh');
       }
     } catch (e) {
       console.error('[Upstash] Restore error (continuing with local db.json):', e.message);
