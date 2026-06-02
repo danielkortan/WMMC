@@ -837,7 +837,7 @@ function purgeCarriedForwardDropRecords(db) {
 }
 
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
-const ROSTER_REPAIR_VERSION = 2;
+const ROSTER_REPAIR_VERSION = 4;
 
 // Restore missing approved swap records (confirmed via Slack) and remove a known
 // erroneous duplicate.  Called at startup before repairCarryForwardRosters so the
@@ -1000,7 +1000,12 @@ function repairCarryForwardRosters(db) {
         const hasBatters = wr && (wr.batters || []).length > 0;
         const hasPitchers = wr && (wr.pitchers || []).length > 0;
         const hasData = hasBatters || hasPitchers;
-        const isTrusted = i === 0 || legitimatelyAdvanced.has(i) || prevBatters === null;
+        // Trust week 0 (initial submission) and the first week with data (no prior
+        // context). Auto-advanced weeks are trusted only for INCREMENTAL repairs —
+        // during a full recompute they are rebuilt from carry-forward + swaps too,
+        // otherwise an auto-advanced current week never picks up swaps made during it
+        // (and inherits any staleness from the week it was advanced from).
+        const isTrusted = i === 0 || prevBatters === null || (legitimatelyAdvanced.has(i) && !needsFullRecompute);
 
         if (isTrusted) {
           if (hasData) {
