@@ -6194,9 +6194,11 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   batting.filter((b) => b.manager === managerName).forEach((b) => weeksWithData.add(`${b.round}|${b.week}`));
   pitching.filter((p) => p.manager === managerName).forEach((p) => weeksWithData.add(`${p.round}|${p.week}`));
 
-  // Also include weeks where this manager has a per-week roster
+  // Also include weeks where this manager has a non-empty per-week roster
   if (isActive && seasonData.rosters && seasonData.rosters[managerName]) {
-    Object.keys(seasonData.rosters[managerName]).forEach((wk) => weeksWithData.add(wk));
+    Object.entries(seasonData.rosters[managerName]).forEach(([wk, wr]) => {
+      if ((wr.batters || []).length > 0 || (wr.pitchers || []).length > 0) weeksWithData.add(wk);
+    });
   }
 
   // Build ordered list: SEASON_SCHEDULE order, most recent first
@@ -6205,11 +6207,10 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     scheduleOrder[`${s.round}|${s.week}`] = i;
   });
   const orderedWeeks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
-  // Only show weeks that have data or rosters, plus any schedule weeks for commissioner
-  const weeksToShow =
-    isCommissioner && isActive
-      ? orderedWeeks // show all weeks for commissioner
-      : orderedWeeks.filter((wk) => weeksWithData.has(wk));
+  // Only show weeks that have data or non-empty rosters (same for all users — showing all
+  // schedule weeks for commissioners caused empty "No batters rostered" sections for
+  // future weeks that haven't been advanced yet).
+  const weeksToShow = orderedWeeks.filter((wk) => weeksWithData.has(wk));
 
   if (weeksToShow.length === 0) return '<div class="card"><p class="text-muted">No roster data yet.</p></div>';
 
@@ -9900,7 +9901,7 @@ function setupPlayerSearchInputs() {
       resultsDiv.innerHTML = matches
         .map(
           (m) =>
-            `<div class="player-search-item" onmousedown="selectPlayerSearchResult('${input.id}','${jsStr(m)}')">${displayPlayer(m, sd)}</div>`
+            `<div class="player-search-item" onmousedown="selectPlayerSearchResult('${input.id}','${jsStr(m)}')" ontouchstart="event.preventDefault();selectPlayerSearchResult('${input.id}','${jsStr(m)}')">${displayPlayer(m, sd)}</div>`
         )
         .join('');
     });
@@ -9969,7 +9970,7 @@ function setupSwapPlayerSearch() {
       .map((p) => {
         const t = teamMap[p];
         const label = t ? `${esc(p)} (${esc(t)})` : esc(p);
-        return `<div class="player-search-item" onmousedown="selectSwapPlayerIn('${jsStr(p)}')">${label}</div>`;
+        return `<div class="player-search-item" onmousedown="selectSwapPlayerIn('${jsStr(p)}')" ontouchstart="event.preventDefault();selectSwapPlayerIn('${jsStr(p)}')">${label}</div>`;
       })
       .join('');
   });
