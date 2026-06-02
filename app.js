@@ -2684,12 +2684,19 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
       return m ? `${m}/${String(parseInt(day)).padStart(2, '0')}` : s;
     };
     // Order players so a swapped-in player sits directly below the player he replaced.
-    // "Root" players (originals / un-swapped) keep their alphabetical order; each swap chain
-    // (e.g. Max Muncy → Ronald Acuña) is nested directly beneath its anchor.
+    // "Root" players (originals / un-swapped) keep their alphabetical order; every swap chain
+    // (e.g. Drake Baldwin → Christian Yelich, Max Muncy → Ronald Acuña) is nested directly
+    // beneath its anchor. Applies to all 1-for-1 swaps for the manager, across seasons.
     const chainSwaps = (sd.swaps || [])
-      .filter((s) => s.manager === managerName && s.status === 'approved' && s.player_out && s.player_in)
+      .filter((s) => {
+        if (!s.player_out || !s.player_in) return false; // only true 1-for-1 swaps can pair
+        if (s.status && s.status !== 'approved') return false; // skip pending/denied
+        // Older seed swaps may carry only an email; resolve those to a manager name.
+        const swapMgr = s.manager || (findManagerByEmail(s.email) || {}).name;
+        return swapMgr === managerName;
+      })
       .slice()
-      .sort((a, b) => (a.swap_date || '').localeCompare(b.swap_date || ''));
+      .sort((a, b) => (a.swap_date || a.timestamp || '').localeCompare(b.swap_date || b.timestamp || ''));
     const childrenByParent = {}; // player_out -> [player_in, ...] in swap-date order
     const isSwapIn = new Set();
     chainSwaps.forEach((s) => {
