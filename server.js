@@ -829,12 +829,17 @@ function purgeCarriedForwardDropRecords(db) {
 // was populated (leaving an empty entry that blocks future weeks) or simply
 // never ran for one or more weeks.
 function repairCarryForwardRosters(db) {
-  let repaired = 0;
+  let filled = 0;
+  let purged = 0;
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
   for (const sd of Object.values(db.seasons || {})) {
     if (!sd || sd.status !== 'active' || !sd.rosters) continue;
 
     const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+    const scheduleDates = sd.schedule_dates || [];
+    // Weeks legitimately written by serverAutoAdvancePlayers — keep even if future.
+    const legitimatelyAdvanced = new Set(sd.advanced_weeks || []);
 
     for (const [mgrName, mgrRoster] of Object.entries(sd.rosters)) {
       let prevBatters = null;
@@ -843,6 +848,21 @@ function repairCarryForwardRosters(db) {
       for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
         const { round, week } = SEASON_SCHEDULE[i];
         const weekKey = `${round}|${week}`;
+        const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
+        const isFuture = weekStart && weekStart > todayET;
+
+        if (isFuture) {
+          // Purge erroneously carried-forward entries for unstarted, non-auto-advanced weeks.
+          if (!legitimatelyAdvanced.has(i)) {
+            const wr = mgrRoster[weekKey];
+            if (wr && ((wr.batters || []).length > 0 || (wr.pitchers || []).length > 0)) {
+              delete mgrRoster[weekKey];
+              purged++;
+            }
+          }
+          continue;
+        }
+
         const wr = mgrRoster[weekKey];
         const hasBatters = wr && (wr.batters || []).length > 0;
         const hasPitchers = wr && (wr.pitchers || []).length > 0;
@@ -874,7 +894,7 @@ function repairCarryForwardRosters(db) {
             });
 
           mgrRoster[weekKey] = { batters: newBatters, pitchers: newPitchers };
-          repaired++;
+          filled++;
           prevBatters = newBatters;
           prevPitchers = newPitchers;
         }
@@ -882,10 +902,9 @@ function repairCarryForwardRosters(db) {
     }
   }
 
-  if (repaired > 0) {
-    console.log(`[Roster Repair] Filled ${repaired} empty week roster entries via carry-forward.`);
-  }
-  return repaired > 0;
+  if (filled > 0) console.log(`[Roster Repair] Filled ${filled} empty week roster entries via carry-forward.`);
+  if (purged > 0) console.log(`[Roster Repair] Purged ${purged} erroneously carried-forward future week entries.`);
+  return filled > 0 || purged > 0;
 }
 
 // Recompute all weekly_batting/pitching scores from daily data.
