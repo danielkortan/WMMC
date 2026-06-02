@@ -4504,6 +4504,58 @@ app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
   }
 });
 
+// GET /api/mlb/teams-started?teams=NYY,LAD
+// Lightweight check used at swap-submission time: given a comma-separated list of
+// team abbreviations, returns which of those teams have a game today that has
+// already started (Live/Final, or first-pitch time already passed). The frontend
+// uses this to decide a swap's effective date — you can't swap a player in or out
+// once their team's game has begun.
+//
+// Read-only and unauthenticated like /api/mlb/live; safe for any logged-in manager.
+app.get('/api/mlb/teams-started', async (req, res) => {
+  const teamsParam = (req.query.teams || '').trim();
+  const requested = teamsParam
+    ? teamsParam
+        .split(',')
+        .map((t) => t.trim().toUpperCase())
+        .filter(Boolean)
+    : [];
+
+  // MLB games are dated in Eastern time; use ET so a late-evening UTC rollover
+  // doesn't shift "today" to tomorrow.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+  try {
+    const scheduleData = await mlbApiFetch(
+      `/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&gameType=R,F,D,L,W&hydrate=team`
+    );
+
+    const now = Date.now();
+    const startedSet = new Set();
+    for (const dateEntry of scheduleData.dates || []) {
+      for (const g of dateEntry.games || []) {
+        const state = g.status?.abstractGameState || 'Preview';
+        const firstPitch = g.gameDate ? new Date(g.gameDate).getTime() : null;
+        const hasStarted = state === 'Live' || state === 'Final' || (firstPitch && firstPitch <= now);
+        if (!hasStarted) continue;
+        const away = g.teams?.away?.team?.abbreviation;
+        const home = g.teams?.home?.team?.abbreviation;
+        if (away) startedSet.add(away.toUpperCase());
+        if (home) startedSet.add(home.toUpperCase());
+      }
+    }
+
+    // When teams are requested, only report on those; otherwise return all started teams.
+    const started = requested.length ? requested.filter((t) => startedSet.has(t)) : Array.from(startedSet);
+
+    res.json({ today, started, any_started: started.length > 0 });
+  } catch (e) {
+    // On MLB API failure, report nothing as started — the frontend then treats the
+    // swap as effective today, the same as the no-games-started path. Keeps swaps usable.
+    res.json({ today, started: [], any_started: false, error: e.message });
+  }
+});
+
 // GET /api/mlb/live?year=2026
 // Live scoring snapshot for the schedule week that contains today's date.
 // Combines the in-progress + final games' boxscore stats with the upcoming Preview games

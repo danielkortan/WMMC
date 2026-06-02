@@ -2827,6 +2827,63 @@ footer {
   white-space: nowrap;
 }
 
+/* ---- Swap Log (filterable, expandable) ---- */
+.swap-log-filters {
+  margin-bottom: 1rem;
+}
+
+.swap-log-row {
+  cursor: pointer;
+}
+
+.swap-log-row:hover {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.03));
+}
+
+.swap-log-row-open {
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+}
+
+.swap-log-caret {
+  color: var(--text-muted);
+  text-align: center;
+  user-select: none;
+}
+
+.swap-log-detail-row > td {
+  padding: 0;
+  background: var(--bg-subtle, rgba(0, 0, 0, 0.02));
+}
+
+.swap-detail-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.4rem 1.5rem;
+  padding: 0.85rem 1.1rem;
+}
+
+.swap-detail-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3rem;
+}
+
+.swap-detail-key {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.swap-detail-val {
+  text-align: right;
+  font-weight: 500;
+}
+
 /* ============================================================ */
 /* Responsive additions for new components */
 /* ============================================================ */
