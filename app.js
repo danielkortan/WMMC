@@ -8791,7 +8791,13 @@ function renderMLBSyncLog() {
   const logDiv = document.getElementById('mlb-sync-log');
   if (!controlsDiv) return;
 
-  controlsDiv.innerHTML = `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>`;
+  controlsDiv.innerHTML =
+    `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>` +
+    `<span style="display:inline-flex;gap:0.35rem;margin-left:0.75rem;align-items:center;">` +
+    `<input id="mlb-debug-name" type="text" placeholder="Player name" ` +
+    `style="font-size:0.82rem;padding:0.2rem 0.4rem;" onkeydown="if(event.key==='Enter')debugMLBPlayer()" />` +
+    `<button class="btn btn-sm btn-secondary" onclick="debugMLBPlayer()" style="font-size:0.78rem;">Debug player</button>` +
+    `</span><div id="mlb-debug-out"></div>`;
 
   apiFetch('/api/mlb/sync-status')
     .then((r) => r.json())
@@ -8900,6 +8906,32 @@ window.triggerMLBSync = function () {
         btn.disabled = false;
         btn.textContent = 'Sync Now';
       }
+    });
+};
+
+// Read-only diagnostic: dump everything that determines a player's displayed points.
+window.debugMLBPlayer = function () {
+  const out = document.getElementById('mlb-debug-out');
+  const name = (document.getElementById('mlb-debug-name') || {}).value;
+  if (!name || !name.trim()) {
+    if (out) out.innerHTML = '<p class="text-muted" style="font-size:0.82rem;">Enter a player name first.</p>';
+    return;
+  }
+  if (out) out.innerHTML = '<p class="text-muted" style="font-size:0.82rem;">Loading…</p>';
+  apiFetch(`/api/mlb/player-debug?year=${encodeURIComponent(SELECTED_SEASON)}&name=${encodeURIComponent(name.trim())}`)
+    .then((r) => r.json())
+    .then((res) => {
+      if (!out) return;
+      if (res.error) {
+        out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(res.error)}</p>`;
+        return;
+      }
+      out.innerHTML = `<pre style="font-size:0.72rem;max-height:420px;overflow:auto;background:var(--bg-alt,#f5f5f5);padding:0.5rem;border-radius:4px;white-space:pre-wrap;">${esc(
+        JSON.stringify(res, null, 2)
+      )}</pre>`;
+    })
+    .catch((e) => {
+      if (out) out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(e.message)}</p>`;
     });
 };
 
