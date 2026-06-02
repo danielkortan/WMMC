@@ -5524,9 +5524,182 @@ function backfillRosterDatesFromSwaps(seasonData) {
   return changed;
 }
 
+// Restore two roster slots that were never captured in the initial submission, plus the
+// full transaction chain each went through afterward:
+//   • Austin Johnson's pitcher Tarik Skubal — IL-swapped for Sandy Alcantara on 2026-05-04
+//     (Skubal credited through 5/4, Alcantara from 5/5), Alcantara dropped 2026-05-27 with
+//     no replacement, then Shane Baz added 2026-06-02.
+//   • Anton Capria's batter Kerry Carpenter — Free-swapped for Rafael Devers on 2026-05-09
+//     (Carpenter through 5/8, Devers from 5/9).
+// Mirrors server.js repairMissingRosterChains. Idempotent: injects approved swap records,
+// pre-seeds roster_dates with the exact adjacent effective dates (so no day is double-counted),
+// forces the Week-1 seeds present and the downstream players (who only arrive via later swaps)
+// absent. Runs before backfillRosterDatesFromSwaps so those exact dates are not overwritten
+// with swap_date. The ROSTER_REPAIR_VERSION bump makes repairCarryForwardRosters rebuild every
+// week from these Week-1 seeds + swaps.
+function repairMissingRosterChains(seasonData) {
+  if (!seasonData || seasonData.status !== 'active' || !seasonData.swaps) return false;
+  let changed = false;
+  const WEEK1_KEY = 'PP1|Week 1';
+  const initialSeeds = [
+    {
+      manager: 'Austin Johnson',
+      list: 'pitchers',
+      player: 'Tarik Skubal',
+      downstream: ['Sandy Alcantara', 'Shane Baz'],
+    },
+    { manager: 'Anton Capria', list: 'batters', player: 'Kerry Carpenter', downstream: ['Rafael Devers'] },
+  ];
+  const poolSeeds = [
+    { pool: 'pitchers_pool', players: ['Tarik Skubal', 'Sandy Alcantara', 'Shane Baz'] },
+    { pool: 'batters_pool', players: ['Kerry Carpenter', 'Rafael Devers'] },
+  ];
+  // Adjacent dates: the outgoing player keeps credit through drop_date and the incoming
+  // player starts on add_date, so the swap week never double-counts the slot.
+  const chain = [
+    {
+      manager: 'Austin Johnson',
+      player_out: 'Tarik Skubal',
+      player_in: 'Sandy Alcantara',
+      reason: 'IL Swap',
+      swap_date: '2026-05-04',
+      drop_date: '2026-05-04',
+      add_date: '2026-05-05',
+    },
+    {
+      manager: 'Austin Johnson',
+      player_out: 'Sandy Alcantara',
+      player_in: null,
+      reason: 'Drop Swap',
+      swap_date: '2026-05-27',
+      drop_date: '2026-05-27',
+      add_date: null,
+    },
+    {
+      manager: 'Austin Johnson',
+      player_out: null,
+      player_in: 'Shane Baz',
+      reason: 'Drop Swap',
+      swap_date: '2026-06-02',
+      drop_date: null,
+      add_date: '2026-06-02',
+    },
+    {
+      manager: 'Anton Capria',
+      player_out: 'Kerry Carpenter',
+      player_in: 'Rafael Devers',
+      reason: 'Free Swap (one per round)',
+      swap_date: '2026-05-09',
+      drop_date: '2026-05-08',
+      add_date: '2026-05-09',
+    },
+  ];
+
+  const scheduleDates = seasonData.schedule_dates || [];
+  const dateToWeekKey = (dateStr) => {
+    if (!dateStr) return null;
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const d = scheduleDates[i];
+      if (d && dateStr >= d.start && dateStr <= d.end) return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
+    }
+    return null;
+  };
+
+  // Ensure the involved players exist in the pools so carry-forward can place the pure
+  // add (Shane Baz) and classify swap-ins correctly.
+  for (const { pool, players } of poolSeeds) {
+    if (!Array.isArray(seasonData[pool])) seasonData[pool] = [];
+    for (const p of players) {
+      if (!seasonData[pool].includes(p)) {
+        seasonData[pool].push(p);
+        changed = true;
+      }
+    }
+  }
+
+  // Force the Week-1 initial submission: seed player present, downstream players absent.
+  // Then fold in any chain swap that lands in Week 1 itself, because
+  // repairCarryForwardRosters treats Week 1 as the trusted seed and never applies swaps to
+  // it — so the seed array must already hold the end-of-week-1 state for the carry-forward
+  // of later weeks to be correct. The outgoing player is still credited for Week 1 via its
+  // roster_dates drop_date. (No-op when every swap falls in a later week.)
+  if (!seasonData.rosters) seasonData.rosters = {};
+  for (const { manager, list, player, downstream } of initialSeeds) {
+    if (!seasonData.rosters[manager]) seasonData.rosters[manager] = {};
+    if (!seasonData.rosters[manager][WEEK1_KEY]) seasonData.rosters[manager][WEEK1_KEY] = { batters: [], pitchers: [] };
+    const wr = seasonData.rosters[manager][WEEK1_KEY];
+    if (!Array.isArray(wr[list])) wr[list] = [];
+    const before = JSON.stringify(wr[list]);
+    let arr = wr[list].filter((p) => !downstream.includes(p));
+    if (!arr.includes(player)) arr.push(player);
+    for (const c of chain) {
+      if (c.manager !== manager || dateToWeekKey(c.swap_date) !== WEEK1_KEY) continue;
+      if (c.player_out) arr = arr.filter((p) => p !== c.player_out);
+      if (c.player_in && !arr.includes(c.player_in)) arr.push(c.player_in);
+    }
+    if (JSON.stringify(arr) !== before) {
+      wr[list] = arr;
+      changed = true;
+    }
+  }
+
+  // Inject the approved swap chain and pre-seed roster_dates with the exact dates.
+  if (!seasonData.roster_dates) seasonData.roster_dates = {};
+  for (const c of chain) {
+    const wk = dateToWeekKey(c.swap_date);
+    const exists = seasonData.swaps.some(
+      (s) =>
+        s.manager === c.manager &&
+        (s.player_out || null) === (c.player_out || null) &&
+        (s.player_in || null) === (c.player_in || null) &&
+        s.swap_date === c.swap_date &&
+        s.status === 'approved'
+    );
+    if (!exists) {
+      const slug = (c.player_in || c.player_out || 'move').replace(/\s+/g, '-').toLowerCase();
+      seasonData.swaps.push({
+        id: `repair-${c.manager.replace(/\s+/g, '-').toLowerCase()}-${slug}-${c.swap_date}`,
+        timestamp: `${c.swap_date} 12:00:00`,
+        email: '',
+        manager: c.manager,
+        player_out: c.player_out || null,
+        player_in: c.player_in || null,
+        reason: c.reason,
+        swap_date: c.swap_date,
+        round: wk ? wk.split('|')[0] : 'PP1',
+        week_key: wk,
+        status: 'approved',
+        reviewed_at: `${c.swap_date} 12:00:00`,
+      });
+      changed = true;
+    }
+    if (wk) {
+      if (!seasonData.roster_dates[c.manager]) seasonData.roster_dates[c.manager] = {};
+      if (!seasonData.roster_dates[c.manager][wk]) seasonData.roster_dates[c.manager][wk] = {};
+      const wkd = seasonData.roster_dates[c.manager][wk];
+      if (c.player_out && c.drop_date) {
+        if (!wkd[c.player_out]) wkd[c.player_out] = {};
+        if (wkd[c.player_out].drop_date !== c.drop_date) {
+          wkd[c.player_out].drop_date = c.drop_date;
+          changed = true;
+        }
+      }
+      if (c.player_in && c.add_date) {
+        if (!wkd[c.player_in]) wkd[c.player_in] = {};
+        if (wkd[c.player_in].add_date !== c.add_date) {
+          wkd[c.player_in].add_date = c.add_date;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed;
+}
+
 // Version stamp — bump whenever the repair logic changes substantially so the
 // full-recompute pass runs again on next load.
-const ROSTER_REPAIR_VERSION = 4;
+const ROSTER_REPAIR_VERSION = 5;
 
 // Fill / recompute per-week roster entries by carrying forward the most recent
 // trusted roster and applying approved swaps in chronological order.
@@ -6124,6 +6297,9 @@ function renderRosterData(managerName, isCommissioner) {
   if (isActive) migrateRostersToWeekly(seasonData);
   // Restore missing swap records and remove known duplicates before any roster repair.
   if (isActive && repairMissingSwapRecords(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  // Restore the two missing initial-submission roster slots (Austin's Skubal pitcher chain,
+  // Anton's Carpenter batter chain) before dates are backfilled or rosters carried forward.
+  if (isActive && repairMissingRosterChains(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
   // Ensure roster_dates has drop/add dates for all approved swaps.
   if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
   // Fill / recompute per-week roster entries by carrying forward the last known roster.
