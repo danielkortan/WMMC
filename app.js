@@ -8793,6 +8793,7 @@ function renderMLBSyncLog() {
 
   controlsDiv.innerHTML =
     `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>` +
+    `<button class="btn btn-secondary" onclick="backfillMLB()" style="margin-left:0.5rem;">Backfill from MLB</button>` +
     `<button class="btn btn-secondary" onclick="rebuildMLBWeeklies()" style="margin-left:0.5rem;">Rebuild Totals</button>` +
     `<button class="btn btn-sm btn-secondary" onclick="dataCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Data check</button>` +
     `<span style="display:inline-flex;gap:0.35rem;margin-left:0.75rem;align-items:center;">` +
@@ -8908,6 +8909,53 @@ window.triggerMLBSync = function () {
         btn.disabled = false;
         btn.textContent = 'Sync Now';
       }
+    });
+};
+
+// Re-fetch every elapsed week from the MLB Stats API to restore missing stored stats.
+window.backfillMLB = function () {
+  if (
+    !confirm(
+      'Re-fetch all elapsed weeks from the MLB Stats API? This restores missing stats; it is idempotent and preserves manual edits. May take a minute.'
+    )
+  ) {
+    return;
+  }
+  const out = document.getElementById('mlb-debug-out');
+  if (out) {
+    out.innerHTML =
+      '<p class="text-muted" style="font-size:0.82rem;">Backfilling from MLB… (this can take a minute)</p>';
+  }
+  apiFetch('/api/mlb/backfill', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ year: SELECTED_SEASON }),
+  })
+    .then((r) => r.json())
+    .then((res) => {
+      if (res.error) {
+        if (out) out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(res.error)}</p>`;
+        return;
+      }
+      syncFromServer().then(() => {
+        init();
+        renderMLBSyncLog();
+        const o = document.getElementById('mlb-debug-out');
+        if (o) {
+          const warn =
+            res.backup && res.backup.ok === false && !res.backup.skipped
+              ? `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">⚠ Upstash backup did NOT persist (${res.backup.bytes} bytes, status ${res.backup.status}). Data may be lost on the next restart — likely a backup size limit.</p>`
+              : '';
+          o.innerHTML =
+            warn +
+            `<pre style="font-size:0.72rem;max-height:420px;overflow:auto;background:var(--bg-alt,#f5f5f5);padding:0.5rem;border-radius:4px;white-space:pre-wrap;">${esc(
+              JSON.stringify(res, null, 2)
+            )}</pre>`;
+        }
+      });
+    })
+    .catch((e) => {
+      if (out) out.innerHTML = `<p style="font-size:0.82rem;color:var(--danger,#c0392b);">${esc(e.message)}</p>`;
     });
 };
 
