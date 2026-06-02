@@ -8808,38 +8808,61 @@ function renderMLBSyncLog() {
         return;
       }
 
+      // Badge an entry by how it was triggered (auto vs manual) and what kind of run it was.
+      const autoStyle = 'background:#0ea5e9;color:#fff;';
+      const correctionStyle = 'background:var(--accent,#6c63ff);color:#fff;';
+      const manualStyle = 'background:var(--secondary,#555);color:#fff;';
+      const badgeFor = (l) => {
+        const note = l.note || '';
+        // Older entries pre-date the `trigger` field; fall back to the audit type.
+        const isAuto = l.trigger ? l.trigger === 'auto' : l.type === 'mlbapi_auto_sync';
+        if (note.startsWith('daily-delta')) return { label: 'Daily', style: autoStyle };
+        if (note.startsWith('wed-correction') || note.startsWith('catchup')) {
+          return { label: 'Correction', style: correctionStyle };
+        }
+        if (note.startsWith('startup-backfill')) return { label: 'Backfill', style: correctionStyle };
+        if (isAuto) return { label: 'Auto', style: autoStyle };
+        return { label: 'Manual', style: manualStyle };
+      };
+
+      // Group entries by week, newest week on top (by schedule order), newest run first within a week.
+      const groups = new Map();
+      logs.forEach((l) => {
+        const round = l.round || '';
+        const week = l.week || '';
+        const key = `${round}||${week}`;
+        if (!groups.has(key)) {
+          const idx = SEASON_SCHEDULE.findIndex((sc) => sc.round === round && sc.week === week);
+          groups.set(key, { round, week, idx, entries: [] });
+        }
+        groups.get(key).entries.push(l);
+      });
+      const orderedGroups = [...groups.values()].sort((a, b) => b.idx - a.idx);
+      orderedGroups.forEach((g) => g.entries.sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp))));
+
       let logHtml = `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <h3 style="margin:0;">Sync Log</h3>
         <button class="btn btn-sm btn-secondary" onclick="const e=document.getElementById('mlb-log-entries');e.style.display=e.style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
       </div><div id="mlb-log-entries" style="display:none;" class="gsheets-log-list">`;
 
-      logs.forEach((l) => {
-        const note = l.note || '';
-        let badgeLabel, badgeStyle;
-        if (note.startsWith('daily-delta')) {
-          badgeLabel = 'Daily';
-          badgeStyle = 'background:#0ea5e9;color:#fff;';
-        } else if (note.startsWith('wed-correction') || note.startsWith('catchup')) {
-          badgeLabel = 'Correction';
-          badgeStyle = 'background:var(--accent,#6c63ff);color:#fff;';
-        } else if (l.type === 'mlbapi_auto_sync') {
-          badgeLabel = 'Auto';
-          badgeStyle = 'background:var(--accent,#6c63ff);color:#fff;';
-        } else {
-          badgeLabel = 'Manual';
-          badgeStyle = 'background:var(--secondary,#555);color:#fff;';
-        }
-        const noteLabel = note.startsWith('catchup-')
-          ? ` (${note.slice(8)})`
-          : note.startsWith('wed-correction:')
-            ? ` (${note.slice(15)})`
-            : '';
-        const detail = `${l.batting_imported ?? '?'} batting, ${l.pitching_imported ?? '?'} pitching (${l.games ?? '?'} games) — ${esc(l.round || '')} ${esc(l.week || '')}${noteLabel}`;
-        logHtml += `<div class="gsheets-log-item">
-          <span class="gsheets-log-time">${esc(l.timestamp || '')}</span>
-          <span class="swap-badge" style="${badgeStyle}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${badgeLabel}</span>
-          <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
-        </div>`;
+      orderedGroups.forEach((g) => {
+        const weekLabel = `${esc(g.round)} ${esc(g.week)}`.trim() || 'Unknown week';
+        logHtml += `<div style="margin-top:0.5rem;font-weight:600;font-size:0.8rem;">${weekLabel}</div>`;
+        g.entries.forEach((l) => {
+          const note = l.note || '';
+          const b = badgeFor(l);
+          const noteLabel = note.startsWith('catchup-')
+            ? ` (${note.slice(8)})`
+            : note.startsWith('wed-correction:')
+              ? ` (${note.slice(15)})`
+              : '';
+          const detail = `${l.batting_imported ?? '?'} batting, ${l.pitching_imported ?? '?'} pitching (${l.games ?? '?'} games)${noteLabel}`;
+          logHtml += `<div class="gsheets-log-item">
+            <span class="gsheets-log-time">${esc(l.timestamp || '')}</span>
+            <span class="swap-badge" style="${b.style}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${b.label}</span>
+            <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
+          </div>`;
+        });
       });
       logHtml += '</div>';
       logDiv.innerHTML = logHtml;
