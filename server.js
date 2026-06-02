@@ -391,6 +391,17 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
       if (!sd.advanced_weeks.includes(w)) sd.advanced_weeks.push(w);
     }
   }
+  // Protect swap records added server-side (e.g. by startup repairs) that the client
+  // may not know about because it loaded before the server restarted.  Any swap whose
+  // id exists on the server but is absent from the incoming payload is re-appended so
+  // a stale client cannot silently wipe server-added records.
+  if (existingSd && Array.isArray(existingSd.swaps)) {
+    if (!Array.isArray(sd.swaps)) sd.swaps = [];
+    const incomingIds = new Set(sd.swaps.map((s) => s.id));
+    for (const serverSwap of existingSd.swaps) {
+      if (!incomingIds.has(serverSwap.id)) sd.swaps.push(serverSwap);
+    }
+  }
   db.seasons[req.params.year] = sd;
   writeDB(db);
   res.json({ ok: true });
