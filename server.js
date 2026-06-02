@@ -751,20 +751,6 @@ function isDateEligibleForPlayer(sd, playerName, playerType, round, week, gameDa
   return true;
 }
 
-// Resolves the week a swap is effective in: uses swap_date if it falls
-// within a known schedule window, otherwise falls back to the stored week_key.
-function swapEffectiveWeekKey(swap, scheduleDates) {
-  if (swap.swap_date && scheduleDates) {
-    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-      const d = scheduleDates[i];
-      if (d && swap.swap_date >= d.start && swap.swap_date <= d.end) {
-        return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
-      }
-    }
-  }
-  return swap.week_key;
-}
-
 // Returns true if `playerName` was dropped from `managerName`'s roster in an EARLIER week
 // (a drop_date before this week's start) and not re-added this week. Such a player is still
 // physically present in this week's roster object via auto-advance carry-forward, so an
@@ -774,13 +760,10 @@ function swapEffectiveWeekKey(swap, scheduleDates) {
 // daily high/low — agrees on who counts for the week.
 function wasDroppedBeforeWeek(sd, managerName, playerName, weekKey, weekStart) {
   if (!sd || !managerName || !weekStart) return false;
-  const scheduleDates = (sd && sd.schedule_dates) || [];
   const mgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || {};
   const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
   const addedThisWeek = new Set([
-    ...approvedSwaps
-      .filter((s) => s.player_in && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
-      .map((s) => s.player_in),
+    ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
     ...Object.entries(mgrDates[weekKey] || {})
       .filter(([, d]) => d.add_date)
       .map(([p]) => p),
@@ -851,7 +834,7 @@ function purgeCarriedForwardDropRecords(db) {
 }
 
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
-const ROSTER_REPAIR_VERSION = 3;
+const ROSTER_REPAIR_VERSION = 2;
 
 // Restore missing approved swap records (confirmed via Slack) and remove a known
 // erroneous duplicate.  Called at startup before repairCarryForwardRosters so the
@@ -977,6 +960,18 @@ function repairCarryForwardRosters(db) {
     const legitimatelyAdvanced = new Set(sd.advanced_weeks || []);
     const needsFullRecompute = (sd.roster_repair_version || 0) < ROSTER_REPAIR_VERSION;
 
+    const swapEffectiveWeekKey = (swap) => {
+      if (swap.swap_date) {
+        for (let j = 0; j < SEASON_SCHEDULE.length; j++) {
+          const d = scheduleDates[j];
+          if (d && swap.swap_date >= d.start && swap.swap_date <= d.end) {
+            return `${SEASON_SCHEDULE[j].round}|${SEASON_SCHEDULE[j].week}`;
+          }
+        }
+      }
+      return swap.week_key;
+    };
+
     for (const [mgrName, mgrRoster] of Object.entries(sd.rosters)) {
       let prevBatters = null;
       let prevPitchers = null;
@@ -1014,7 +1009,7 @@ function repairCarryForwardRosters(db) {
           let newPitchers = [...prevPitchers];
 
           approvedSwaps
-            .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
+            .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s) === weekKey)
             .forEach((s) => {
               if (s.player_out) {
                 newBatters = newBatters.filter((p) => p !== s.player_out);
@@ -1424,9 +1419,7 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   const weekStart = scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
   if (weekStart && allMgrDates) {
     const addedThisWeek = new Set([
-      ...approvedSwaps
-        .filter((s) => s.player_in && swapEffectiveWeekKey(s, scheduleDates) === weekKey)
-        .map((s) => s.player_in),
+      ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
       ...Object.entries(weekRosterDates)
         .filter(([, d]) => d.add_date)
         .map(([p]) => p),
@@ -1455,7 +1448,7 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
       .filter(
         (s) =>
           s.player_in &&
-          swapEffectiveWeekKey(s, scheduleDates) === weekKey &&
+          s.week_key === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
           (weekRosterDates[s.player_in] || rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
       )
