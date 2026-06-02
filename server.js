@@ -385,6 +385,47 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
 
   addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
   const sd = req.body;
+  const existingSd = (db.seasons || {})[req.params.year];
+
+  // Stat records (daily_*/weekly_*) and team maps are server-authoritative — populated by the
+  // MLB sync / backfill, never edited through this full-season save. A client that loaded
+  // before a sync holds a stale, smaller copy; without this guard its saveSeason() silently
+  // wipes the weeks the server fetched after the client loaded (the recurring "stats reset"
+  // bug). Re-append any server stat record missing from the incoming payload (keyed per
+  // game/week/player), mirroring the swap protection below; a client record with a matching
+  // key still wins, so legitimate edits propagate.
+  if (existingSd) {
+    const mergeStats = (incoming, existing, keyFn) => {
+      const arr = Array.isArray(incoming) ? incoming : [];
+      if (!Array.isArray(existing) || existing.length === 0) return arr;
+      const have = new Set(arr.map(keyFn));
+      for (const r of existing) if (!have.has(keyFn(r))) arr.push(r);
+      return arr;
+    };
+    sd.daily_batting = mergeStats(
+      sd.daily_batting,
+      existingSd.daily_batting,
+      (r) => `${r.round}|${r.week}|${r.game_id}|${r.batter}`
+    );
+    sd.daily_pitching = mergeStats(
+      sd.daily_pitching,
+      existingSd.daily_pitching,
+      (r) => `${r.round}|${r.week}|${r.game_id}|${r.pitcher}`
+    );
+    sd.weekly_batting = mergeStats(
+      sd.weekly_batting,
+      existingSd.weekly_batting,
+      (r) => `${r.round}|${r.week}|${r.batter}`
+    );
+    sd.weekly_pitching = mergeStats(
+      sd.weekly_pitching,
+      existingSd.weekly_pitching,
+      (r) => `${r.round}|${r.week}|${r.pitcher}`
+    );
+    sd.batters_team = { ...(existingSd.batters_team || {}), ...(sd.batters_team || {}) };
+    sd.pitchers_team = { ...(existingSd.pitchers_team || {}), ...(sd.pitchers_team || {}) };
+  }
+
   // Propagate roster add dates into player_dates for mid-week adds, then zero out
   // any pre-add scores for newly rostered players.  We do NOT call recomputeAllWeeklyScores
   // here because it would zero out dropped players' correctly banked scores when their
@@ -394,7 +435,6 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     recomputeMidWeekAddScores(sd, wipedAuto);
   }
   // Protect server-side auto-advance markers from being overwritten by a stale client save.
-  const existingSd = (db.seasons || {})[req.params.year];
   if (existingSd && Array.isArray(existingSd.auto_advanced_weeks)) {
     if (!Array.isArray(sd.auto_advanced_weeks)) sd.auto_advanced_weeks = [];
     if (!Array.isArray(sd.advanced_weeks)) sd.advanced_weeks = [];
