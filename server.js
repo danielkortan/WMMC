@@ -3179,6 +3179,108 @@ app.get('/api/mlb/player-debug', requireCommissioner, (req, res) => {
   });
 });
 
+// GET /api/mlb/data-debug?year=2026
+// Read-only season-wide ground truth: per schedule week, how many daily and weekly stat
+// records are stored, how many weekly rows are attributed to a manager vs. left null, how
+// many score nonzero, and how many managers have a populated roster. Pinpoints whether a
+// "No stats" week is missing daily data, missing the weekly rollup, or just unattributed.
+app.get('/api/mlb/data-debug', requireCommissioner, (req, res) => {
+  const { year } = req.query;
+  if (!year) return res.status(400).json({ error: 'year is required' });
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const dailyCount = (list) => {
+    const m = {};
+    for (const r of list || []) m[`${r.round}|${r.week}`] = (m[`${r.round}|${r.week}`] || 0) + 1;
+    return m;
+  };
+  const weeklyAgg = (list) => {
+    const m = {};
+    for (const r of list || []) {
+      const k = `${r.round}|${r.week}`;
+      const a = (m[k] = m[k] || { total: 0, with_manager: 0, null_manager: 0, nonzero: 0 });
+      a.total++;
+      if (r.manager) a.with_manager++;
+      else a.null_manager++;
+      if ((r.weekly_score || 0) !== 0) a.nonzero++;
+    }
+    return m;
+  };
+  const dBat = dailyCount(sd.daily_batting);
+  const dPit = dailyCount(sd.daily_pitching);
+  const wBat = weeklyAgg(sd.weekly_batting);
+  const wPit = weeklyAgg(sd.weekly_pitching);
+
+  const rosterPopulated = {};
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const [wk, roster] of Object.entries(weekRosters || {})) {
+      if ((roster.batters || []).length + (roster.pitchers || []).length > 0) {
+        rosterPopulated[wk] = (rosterPopulated[wk] || 0) + 1;
+      }
+    }
+  }
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const perWeek = SEASON_SCHEDULE.map((s, i) => {
+    const k = `${s.round}|${s.week}`;
+    const dates = (sd.schedule_dates || [])[i] || {};
+    return {
+      week: k,
+      dates: { start: dates.start || null, end: dates.end || null },
+      elapsed: dates.start ? dates.start <= todayET : null,
+      managers_with_roster: rosterPopulated[k] || 0,
+      daily_batting: dBat[k] || 0,
+      daily_pitching: dPit[k] || 0,
+      weekly_batting: wBat[k] || { total: 0, with_manager: 0, null_manager: 0, nonzero: 0 },
+      weekly_pitching: wPit[k] || { total: 0, with_manager: 0, null_manager: 0, nonzero: 0 },
+    };
+  }).filter((w) => w.dates.start);
+
+  res.json({ year, today: todayET, per_week: perWeek });
+});
+
+// POST /api/mlb/rebuild-weeklies  { year }
+// Non-destructive repair: for every elapsed week, recompute the weekly_batting/weekly_pitching
+// rollups from the ALREADY-STORED daily records and re-attribute each row's manager from the
+// CURRENT rosters. No MLB re-fetch. Fixes weeks whose weekly rows are missing or carry stale /
+// null attribution after roster corrections (the daily delta only ever rebuilds the current
+// week). Manual overrides and drop-locked rows are preserved by rebuildWeeklyFromDaily.
+app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
+  const year = (req.body.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    syncPlayerDatesFromRosterDates(sd);
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const scheduleDates = sd.schedule_dates || [];
+    const results = [];
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const { round, week } = SEASON_SCHEDULE[i];
+      const dates = scheduleDates[i];
+      if (!dates || !dates.start || dates.start > todayET) continue; // skip future / undated weeks
+      rebuildWeeklyFromDaily(sd, round, week);
+      const wb = (sd.weekly_batting || []).filter((r) => r.round === round && r.week === week);
+      const wp = (sd.weekly_pitching || []).filter((r) => r.round === round && r.week === week);
+      results.push({
+        week: `${round}|${week}`,
+        weekly_batting: wb.length,
+        weekly_pitching: wp.length,
+        attributed: wb.filter((r) => r.manager).length + wp.filter((r) => r.manager).length,
+      });
+    }
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'mlbapi_rebuild_weeklies', { year, weeks: results.length });
+    writeDB(db);
+    res.json({ ok: true, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ============================================================
 // MLB Stats API Integration
 // ============================================================
