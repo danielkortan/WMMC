@@ -1414,7 +1414,10 @@ async function applyMLBApiTakeover(db) {
       if (!start || start > today) continue; // skip future weeks
       const schedWeek = SEASON_SCHEDULE[i];
       try {
-        const result = await performMLBSync(sd, schedWeek, dates[i]);
+        const result = await performMLBSync(sd, schedWeek, dates[i], {
+          trigger: 'auto',
+          note: 'startup-backfill',
+        });
         weeksSynced++;
         console.log(
           `[MLB-API takeover] Synced ${season} ${schedWeek.round} ${schedWeek.week} — ` +
@@ -2977,18 +2980,67 @@ app.get('/api/mlb/sync-status', requireCommissioner, (req, res) => {
   const config = db.google_sheets_config || {};
   const season = config.season || new Date().getFullYear().toString();
   const sd = (db.seasons || {})[season] || {};
-  const recentLogs = (sd.upload_log || [])
+
+  // Sync runs are recorded in two places: the per-season upload_log (rich — includes
+  // game counts, but capped at MAX_SYNC_HISTORY) and the global audit_log (one entry per
+  // automatic AND manual run, capped at MAX_AUDIT_ENTRIES). The UI historically read only
+  // upload_log, so automatic runs that had aged out of (or never reached) it were invisible.
+  // Merge both, de-duplicating the same run by minute + week + note and preferring the
+  // richer upload_log copy, so every auto/manual run shows up.
+  const fmtTs = (ts) => {
+    const d = new Date(String(ts).replace(' ', 'T'));
+    return isNaN(d.getTime()) ? String(ts) : d.toISOString().replace('T', ' ').slice(0, 19);
+  };
+  const minuteKey = (ts) => {
+    const d = new Date(String(ts).replace(' ', 'T'));
+    return isNaN(d.getTime()) ? String(ts) : d.toISOString().slice(0, 16);
+  };
+
+  const uploadEntries = (sd.upload_log || [])
     .filter((l) => l.type === 'mlbapi_sync' || l.type === 'mlbapi_auto_sync')
-    .slice(-30)
-    .reverse();
-  const auditLogs = (db.audit_log || [])
+    .map((l) => ({
+      timestamp: fmtTs(l.timestamp),
+      trigger: l.trigger || (l.type === 'mlbapi_auto_sync' ? 'auto' : 'manual'),
+      round: l.round || '',
+      week: l.week || '',
+      games: l.games,
+      batting_imported: l.batting_imported,
+      pitching_imported: l.pitching_imported,
+      note: l.note || '',
+    }));
+
+  const auditEntries = (db.audit_log || [])
     .filter((l) => l.action === 'mlbapi_sync' || l.action === 'mlbapi_auto_sync')
-    .slice(0, 20);
+    .slice(0, 60)
+    .map((l) => {
+      const d = l.details || {};
+      return {
+        timestamp: fmtTs(l.timestamp),
+        trigger: l.action === 'mlbapi_auto_sync' ? 'auto' : 'manual',
+        round: d.round || '',
+        week: d.week || '',
+        games: undefined,
+        batting_imported: d.batting_imported,
+        pitching_imported: d.pitching_imported,
+        note: d.note || '',
+      };
+    });
+
+  const seen = new Set();
+  const merged = [];
+  // upload_log entries first so their game counts win on duplicate runs.
+  for (const e of [...uploadEntries, ...auditEntries]) {
+    const key = `${minuteKey(e.timestamp)}|${e.round}|${e.week}|${e.note}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(e);
+  }
+  merged.sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+
   const next = getNextEasternHour(4);
   res.json({
     next_sync: next.toISOString(),
-    recent_logs: recentLogs,
-    audit_logs: auditLogs,
+    recent_logs: merged.slice(0, 60),
   });
 });
 
@@ -3339,7 +3391,7 @@ app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
 // Core MLB-API sync logic, shared by the manual /api/mlb/sync endpoint and
 // the daily 4am Eastern auto-sync scheduler. Mutates `sd` in place but does
 // not write the db — the caller decides how to persist and audit.
-async function performMLBSync(sd, schedWeek, dates) {
+async function performMLBSync(sd, schedWeek, dates, opts = {}) {
   const { round, week } = schedWeek;
 
   if (!sd.weekly_batting) sd.weekly_batting = [];
@@ -3486,11 +3538,13 @@ async function performMLBSync(sd, schedWeek, dates) {
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     type: 'mlbapi_sync',
+    trigger: opts.trigger || 'manual',
     round,
     week,
     games: gameRecords.length,
     batting_imported: batImported,
     pitching_imported: pitImported,
+    ...(opts.note ? { note: opts.note } : {}),
   });
   pruneSyncHistory(sd);
 
@@ -3506,7 +3560,7 @@ async function performMLBSync(sd, schedWeek, dates) {
 // Fetch one calendar day's games and add them to the daily records, then
 // rebuild the containing week's summary from all stored daily data.
 // Used for the daily 4am incremental update — doesn't overwrite other days.
-async function performMLBDailySync(sd, dateISO) {
+async function performMLBDailySync(sd, dateISO, opts = {}) {
   const wk = detectScheduleWeekForDate(sd, dateISO);
   if (!wk) return null;
   const { round, week } = wk.schedWeek;
@@ -3628,6 +3682,7 @@ async function performMLBDailySync(sd, dateISO) {
   sd.upload_log.push({
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     type: 'mlbapi_sync',
+    trigger: opts.trigger || 'auto',
     round,
     week,
     games: gameRecords.length,
@@ -6361,7 +6416,10 @@ function scheduleMLBApiSync() {
           if (dayOfWeek === 'Wednesday') {
             const weekPairs = resolveWeeksForCatchUp(sd, todayET);
             for (const { schedWeek, dates, label } of weekPairs) {
-              const r = await performMLBSync(sd, schedWeek, dates);
+              const r = await performMLBSync(sd, schedWeek, dates, {
+                trigger: 'auto',
+                note: `wed-correction:${label}`,
+              });
               addAuditEntry(db, 'mlbapi_auto_sync', {
                 year: season,
                 round: schedWeek.round,
