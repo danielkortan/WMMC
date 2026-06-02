@@ -18,6 +18,7 @@ function buildMobileNav() {
   ];
 
   const moreTabs = [
+    { icon: '🔁', label: 'Swap Log', tab: 'swap-log' },
     { icon: '📈', label: 'Trends', tab: 'trends' },
     { icon: 'ℹ️', label: 'League Info', tab: 'league-info' },
     { icon: '🏆', label: 'Hall of Fame', tab: 'hall-of-fame' },

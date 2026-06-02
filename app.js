@@ -788,6 +788,7 @@ function enterApp(mgr) {
   init();
   // Trigger tab-specific renders for tabs that need them
   if (savedTab === 'trends') renderTrends();
+  if (savedTab === 'swap-log') renderSwapLog('swap-log-public', false);
   if (savedTab === 'hall-of-fame') renderHallOfFame();
   if (savedTab === 'live') startLivePolling();
 
@@ -1193,6 +1194,7 @@ function setupNav() {
       await syncFromServer();
       init();
       if (btn.dataset.tab === 'trends') renderTrends();
+      if (btn.dataset.tab === 'swap-log') renderSwapLog('swap-log-public', false);
       if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
       // Live tab owns its own polling lifecycle — start when entering, stop on leaving.
       if (btn.dataset.tab === 'live') startLivePolling();
@@ -7311,12 +7313,12 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
             <div class="swap-date-fields">
               <div class="swap-date-field">
                 <label>Drop Date (${esc(s.player_out)})</label>
-                <input type="date" id="swap-drop-date-${s.id}" class="form-input swap-date-input" value="${_today}"
+                <input type="date" id="swap-drop-date-${s.id}" class="form-input swap-date-input" value="${s.drop_date || _today}"
                   onchange="syncSwapAddDate('swap-drop-date-${s.id}','swap-add-date-${s.id}')">
               </div>
               <div class="swap-date-field">
                 <label>Add Date (${esc(s.player_in)})</label>
-                <input type="date" id="swap-add-date-${s.id}" class="form-input swap-date-input" value="${_tomorrow}">
+                <input type="date" id="swap-add-date-${s.id}" class="form-input swap-date-input" value="${s.add_date || _tomorrow}">
               </div>
             </div>
           </div>
@@ -7867,8 +7869,54 @@ function checkSwapLimit(sd, managerName, reason) {
   return null;
 }
 
+// Look up a player's MLB team abbreviation from the season's team maps.
+function getPlayerTeam(sd, playerName) {
+  if (!sd || !playerName) return null;
+  return (sd.batters_team && sd.batters_team[playerName]) || (sd.pitchers_team && sd.pitchers_team[playerName]) || null;
+}
+
+// Format a Date as a YYYY-MM-DD string in Eastern time (matches how MLB games are
+// dated and how the server computes "today").
+function isoDateET(d) {
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+// Determine a swap's effective dates by checking whether either player's MLB team
+// has already started playing today. A player whose game has begun can't be swapped
+// in or out, so the swap takes effect the following day; otherwise it takes effect
+// today. The drop date is always one day before the add date (the "Player In" date).
+async function computeSwapEffectiveDates(sd, playerOut, playerIn) {
+  const teams = [getPlayerTeam(sd, playerOut), getPlayerTeam(sd, playerIn)].filter(Boolean);
+
+  const now = new Date();
+  const todayStr = isoDateET(now);
+  const yesterdayStr = isoDateET(new Date(now.getTime() - 86400000));
+  const tomorrowStr = isoDateET(new Date(now.getTime() + 86400000));
+
+  let anyStarted = false;
+  let startedTeams = [];
+  if (teams.length) {
+    try {
+      const resp = await apiFetch(`/api/mlb/teams-started?teams=${encodeURIComponent(teams.join(','))}`);
+      const data = await resp.json();
+      anyStarted = !!data.any_started;
+      startedTeams = data.started || [];
+    } catch (e) {
+      // On failure, fall back to "not started" (effective today) so swaps stay usable.
+      console.error('teams-started check failed:', e);
+    }
+  }
+
+  if (anyStarted) {
+    // A team's game has begun — effective tomorrow (drop today, add tomorrow).
+    return { effective_date: tomorrowStr, drop_date: todayStr, add_date: tomorrowStr, teams_started: startedTeams };
+  }
+  // No games started yet — effective today (drop yesterday, add today).
+  return { effective_date: todayStr, drop_date: yesterdayStr, add_date: todayStr, teams_started: [] };
+}
+
 // Submit a swap request
-window.submitSwapRequest = function (managerName) {
+window.submitSwapRequest = async function (managerName) {
   const errEl = document.getElementById('swap-form-error');
   const succEl = document.getElementById('swap-form-success');
   errEl.style.display = 'none';
@@ -7905,6 +7953,13 @@ window.submitSwapRequest = function (managerName) {
 
   const { round, weekKey } = getCurrentScheduleRound(sd);
 
+  // Determine effective add/drop dates from the live game schedule.
+  const { effective_date, drop_date, add_date, teams_started } = await computeSwapEffectiveDates(
+    sd,
+    playerOut,
+    playerIn
+  );
+
   const swap = {
     id: Date.now().toString(),
     timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
@@ -7914,6 +7969,10 @@ window.submitSwapRequest = function (managerName) {
     player_in: playerIn,
     reason: reason,
     swap_date: swapDate,
+    effective_date: effective_date,
+    drop_date: drop_date,
+    add_date: add_date,
+    teams_started: teams_started,
     round: round,
     week_key: weekKey,
     status: 'pending',
@@ -7995,8 +8054,8 @@ window.approveSwap = function (swapId) {
     document.getElementById(`swap-drop-date-${swapId}`) || document.getElementById(`comm-drop-date-${swapId}`);
   const addDateEl =
     document.getElementById(`swap-add-date-${swapId}`) || document.getElementById(`comm-add-date-${swapId}`);
-  const effectiveDropDate = (dropDateEl && dropDateEl.value) || _fallbackToday;
-  const effectiveAddDate = (addDateEl && addDateEl.value) || _fallbackTomorrow;
+  const effectiveDropDate = (dropDateEl && dropDateEl.value) || swap.drop_date || _fallbackToday;
+  const effectiveAddDate = (addDateEl && addDateEl.value) || swap.add_date || _fallbackTomorrow;
 
   // Write add/drop dates to roster_dates so they appear in the date editor
   const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
@@ -8310,12 +8369,91 @@ function setupCommTabs() {
   });
 }
 
-function renderSwapLog() {
-  const container = document.getElementById('swap-log-list');
+// Per-container filter + row-expansion state, kept across re-renders so background
+// polling and reason edits don't reset the user's filters or close open details.
+const _swapLogState = {};
+function getSwapLogState(containerId) {
+  if (!_swapLogState[containerId]) {
+    _swapLogState[containerId] = { managers: null, types: null, expanded: new Set(), editable: false };
+  }
+  return _swapLogState[containerId];
+}
+
+// Label used in the Type filter for swaps that have no reason recorded.
+const SWAP_NO_REASON_LABEL = '(No reason)';
+
+// Format an ISO-ish timestamp ("YYYY-MM-DD HH:MM:SS" or full ISO) for display.
+function fmtSwapTimestamp(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T'));
+  if (isNaN(d.getTime())) return esc(ts);
+  return (
+    d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+    ' ' +
+    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+  );
+}
+
+function swapStatusBadge(s) {
+  if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
+  if (s.status === 'denied') return '<span class="swap-badge swap-badge-denied">Denied</span>';
+  return '<span class="swap-badge swap-badge-pending">Pending</span>';
+}
+
+// Build the expandable detail panel shown when a swap row is clicked.
+function swapDetailHtml(s, sd) {
+  const row = (label, value) =>
+    `<div class="swap-detail-item"><span class="swap-detail-key">${label}</span><span class="swap-detail-val">${value}</span></div>`;
+
+  let items = '';
+  items += row('Manager', esc(s.manager || '—'));
+  items += row('Player Out', displayPlayer(s.player_out || '—', sd));
+  items += row('Player In', displayPlayer(s.player_in || '—', sd));
+  items += row('Reason', esc(s.reason || '—'));
+  items += row('Status', swapStatusBadge(s));
+  items += row('Submitted', fmtSwapTimestamp(s.timestamp));
+  if (s.reviewed_at) items += row('Reviewed', fmtSwapTimestamp(s.reviewed_at));
+  if (s.email) items += row('Submitted By', esc(s.email));
+  if (s.round) items += row('Round', esc(s.round));
+  if (s.week_key) items += row('Week', esc(s.week_key.replace('|', ' · ')));
+  if (s.swap_date) items += row('Requested', esc(s.swap_date));
+  if (s.drop_date) items += row('Drop Date', esc(s.drop_date));
+  if (s.add_date) items += row('Add Date', esc(s.add_date));
+  if (s.effective_date) items += row('Effective', esc(s.effective_date));
+  if (s.teams_started && s.teams_started.length) {
+    items += row('Teams Already Playing', esc(s.teams_started.join(', ')));
+  }
+  return `<div class="swap-detail-panel">${items}</div>`;
+}
+
+// Render a chip-based filter row (mirrors the Trends filters).
+function swapFilterRowHtml(containerId, label, kind, allValues, selectedSet) {
+  const chips = allValues
+    .map(
+      (v) =>
+        `<button class="chip ${selectedSet.has(v) ? 'chip-active' : ''}" onclick="swapLogToggleFilter('${containerId}','${kind}','${jsStr(v)}')">${esc(v)}</button>`
+    )
+    .join('');
+  return `<div class="trends-control-row">
+    <span class="trends-label">${label}</span>
+    <button class="btn btn-sm btn-secondary" onclick="swapLogSetAll('${containerId}','${kind}',true)">All</button>
+    <button class="btn btn-sm btn-secondary" onclick="swapLogSetAll('${containerId}','${kind}',false)">None</button>
+    <div class="chip-select">${chips}</div>
+  </div>`;
+}
+
+// Render the swap log into `containerId`. When `editable` is true (commissioner),
+// the reason cell becomes an inline dropdown; otherwise it is read-only. The same
+// details are available to everyone via the click-to-expand row.
+function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommissioner()) {
+  const container = document.getElementById(containerId);
   if (!container) return;
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   const allSwaps = sd && sd.swaps ? [...sd.swaps] : [];
+
+  const state = getSwapLogState(containerId);
+  state.editable = editable;
 
   if (allSwaps.length === 0) {
     container.innerHTML = '<p class="text-muted">No swap history yet.</p>';
@@ -8329,44 +8467,108 @@ function renderSwapLog() {
     return tb.localeCompare(ta);
   });
 
-  const isCommissioner = isLoggedInCommissioner();
+  // Available filter values from the full swap set.
+  const allManagers = [...new Set(allSwaps.map((s) => s.manager).filter(Boolean))].sort();
+  const allTypes = [...new Set(allSwaps.map((s) => s.reason || SWAP_NO_REASON_LABEL))].sort();
 
-  const statusBadge = (s) => {
-    if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
-    if (s.status === 'denied') return '<span class="swap-badge swap-badge-denied">Denied</span>';
-    return '<span class="swap-badge swap-badge-pending">Pending</span>';
-  };
+  // Initialise to "all selected" on first render; keep previously-removed selections
+  // valid as new managers/types appear.
+  if (state.managers === null) state.managers = new Set(allManagers);
+  if (state.types === null) state.types = new Set(allTypes);
 
-  let html =
-    '<table class="data-table"><thead><tr><th>Manager</th><th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
-  allSwaps.forEach((s) => {
+  const typeOf = (s) => s.reason || SWAP_NO_REASON_LABEL;
+  const filtered = allSwaps.filter((s) => (!s.manager || state.managers.has(s.manager)) && state.types.has(typeOf(s)));
+
+  let html = '<div class="swap-log-filters trends-controls">';
+  html += swapFilterRowHtml(containerId, 'Manager', 'managers', allManagers, state.managers);
+  html += swapFilterRowHtml(containerId, 'Type', 'types', allTypes, state.types);
+  html += '</div>';
+
+  if (filtered.length === 0) {
+    html += '<p class="text-muted">No swaps match the current filters.</p>';
+    container.innerHTML = html;
+    return;
+  }
+
+  html +=
+    '<table class="data-table swap-log-table"><thead><tr><th style="width:1.5rem;"></th><th>Manager</th><th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
+  filtered.forEach((s) => {
     const date = s.timestamp ? s.timestamp.slice(0, 10) : s.swap_date || '';
-    const outTxt = esc(s.player_out || '—');
-    const inTxt = esc(s.player_in || '—');
-    const reason = esc(s.reason || '');
+    const outTxt = displayPlayer(s.player_out || '—', sd);
+    const inTxt = displayPlayer(s.player_in || '—', sd);
+    const reason = s.reason || '';
+    const isOpen = state.expanded.has(s.id);
     let reasonCell;
-    if (isCommissioner) {
+    if (editable) {
       const opts = COMMISSIONER_SWAP_REASONS.map(
-        (r) => `<option value="${r}"${r === reason ? ' selected' : ''}>${r}</option>`
+        (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(r)}</option>`
       ).join('');
-      reasonCell = `<select onchange="saveSwapLogReason('${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
+      reasonCell = `<select onclick="event.stopPropagation()" onchange="saveSwapLogReason('${containerId}','${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
     } else {
-      reasonCell = reason;
+      reasonCell = esc(reason);
     }
-    html += `<tr>
+    html += `<tr class="swap-log-row${isOpen ? ' swap-log-row-open' : ''}" onclick="toggleSwapDetail('${containerId}','${s.id}')">
+      <td class="swap-log-caret">${isOpen ? '▾' : '▸'}</td>
       <td>${esc(s.manager || '—')}</td>
       <td>${outTxt}</td>
       <td>${inTxt}</td>
       <td style="white-space:nowrap;font-size:0.82rem;">${date}</td>
-      <td>${statusBadge(s)}</td>
+      <td>${swapStatusBadge(s)}</td>
       <td style="font-size:0.82rem;color:var(--text-muted);">${reasonCell}</td>
+    </tr>`;
+    html += `<tr class="swap-log-detail-row" id="swap-detail-${containerId}-${s.id}" style="display:${isOpen ? '' : 'none'};">
+      <td colspan="7">${swapDetailHtml(s, sd)}</td>
     </tr>`;
   });
   html += '</tbody></table>';
   container.innerHTML = html;
 }
 
-window.saveSwapLogReason = function (swapId, newReason) {
+// Toggle the detail panel for a single swap row.
+window.toggleSwapDetail = function (containerId, swapId) {
+  const state = getSwapLogState(containerId);
+  const detailRow = document.getElementById(`swap-detail-${containerId}-${swapId}`);
+  if (!detailRow) return;
+  const open = detailRow.style.display === 'none';
+  detailRow.style.display = open ? '' : 'none';
+  if (open) state.expanded.add(swapId);
+  else state.expanded.delete(swapId);
+  // Update the caret + row highlight on the summary row.
+  const summaryRow = detailRow.previousElementSibling;
+  if (summaryRow) {
+    summaryRow.classList.toggle('swap-log-row-open', open);
+    const caret = summaryRow.querySelector('.swap-log-caret');
+    if (caret) caret.textContent = open ? '▾' : '▸';
+  }
+};
+
+// Toggle a manager/type filter chip, then re-render the affected log.
+window.swapLogToggleFilter = function (containerId, kind, value) {
+  const state = getSwapLogState(containerId);
+  const set = kind === 'managers' ? state.managers : state.types;
+  if (!set) return;
+  if (set.has(value)) set.delete(value);
+  else set.add(value);
+  renderSwapLog(containerId, state.editable);
+};
+
+// Select all or none for a filter group.
+window.swapLogSetAll = function (containerId, kind, on) {
+  const state = getSwapLogState(containerId);
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const allSwaps = (sd && sd.swaps) || [];
+  if (kind === 'managers') {
+    const all = [...new Set(allSwaps.map((s) => s.manager).filter(Boolean))];
+    state.managers = on ? new Set(all) : new Set();
+  } else {
+    const all = [...new Set(allSwaps.map((s) => s.reason || SWAP_NO_REASON_LABEL))];
+    state.types = on ? new Set(all) : new Set();
+  }
+  renderSwapLog(containerId, state.editable);
+};
+
+window.saveSwapLogReason = function (containerId, swapId, newReason) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd || !sd.swaps) return;
@@ -8374,7 +8576,8 @@ window.saveSwapLogReason = function (swapId, newReason) {
   if (!swap) return;
   swap.reason = newReason;
   saveSeason(SELECTED_SEASON, sd);
-  renderSwapLog();
+  const state = getSwapLogState(containerId);
+  renderSwapLog(containerId, state.editable);
 };
 
 // ---- MLB API Sync Log (Commissioner Tab: Stats Data) ----
@@ -8578,12 +8781,12 @@ function renderPendingSwapRequests() {
           <div class="swap-date-fields">
             <div class="swap-date-field">
               <label>Drop Date (${esc(s.player_out || '?')})</label>
-              <input type="date" id="comm-drop-date-${s.id}" class="form-input swap-date-input" value="${_today}"
+              <input type="date" id="comm-drop-date-${s.id}" class="form-input swap-date-input" value="${s.drop_date || _today}"
                 onchange="syncSwapAddDate('comm-drop-date-${s.id}','comm-add-date-${s.id}')">
             </div>
             <div class="swap-date-field">
               <label>Add Date (${esc(s.player_in || '?')})</label>
-              <input type="date" id="comm-add-date-${s.id}" class="form-input swap-date-input" value="${_tomorrow}">
+              <input type="date" id="comm-add-date-${s.id}" class="form-input swap-date-input" value="${s.add_date || _tomorrow}">
             </div>
           </div>
         </div>

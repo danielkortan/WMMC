@@ -66,6 +66,7 @@
       <button class="nav-btn active" data-tab="dashboard">Scoreboard</button>
       <button class="nav-btn" data-tab="live">Live</button>
       <button class="nav-btn" data-tab="my-roster">My Roster</button>
+      <button class="nav-btn" data-tab="swap-log">Swap Log</button>
       <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
       <button class="nav-btn" data-tab="trends">Trends</button>
       <button class="nav-btn" data-tab="league-info">League Info</button>
@@ -174,6 +175,15 @@
         </div>
         <div id="roster-panel">
           <div id="roster-content"></div>
+        </div>
+      </section>
+
+      <!-- Swap Log (view only) -->
+      <section id="swap-log" class="tab-content">
+        <div class="card">
+          <h2>Swap Log</h2>
+          <p class="upload-hint">Click any swap to see its full details. Filter by manager or swap type below.</p>
+          <div id="swap-log-public"></div>
         </div>
       </section>
 
