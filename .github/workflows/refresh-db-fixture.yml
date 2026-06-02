@@ -1,0 +1,61 @@
+name: Refresh sanitized DB fixture
+
+# Keeps tests/fixtures/db.sample.json fresh so Claude (and unit tests) always
+# have a current, password-free, email-pseudonymized snapshot of the league DB.
+#
+# One-time setup (repo Settings -> Secrets and variables -> Actions -> New
+# repository secret), copy the values from your Render env vars:
+#   - UPSTASH_REDIS_REST_URL
+#   - UPSTASH_REDIS_REST_TOKEN   (a read-only Upstash token is enough)
+#
+# Then run it from the Actions tab -> "Refresh sanitized DB fixture" ->
+# "Run workflow". It commits the updated fixture back to the branch it runs on
+# (use main so every session/branch inherits it).
+
+on:
+  workflow_dispatch: # manual "Run workflow" button
+  # Uncomment to also refresh automatically once a day at 11:00 UTC:
+  # schedule:
+  #   - cron: '0 11 * * *'
+
+permissions:
+  contents: write # allow committing the fixture back to the repo
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Fetch live DB from Upstash backup
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+        run: |
+          if [ -z "$UPSTASH_REDIS_REST_URL" ] || [ -z "$UPSTASH_REDIS_REST_TOKEN" ]; then
+            echo "::error::Missing UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN secrets. See the setup notes at the top of this workflow."
+            exit 1
+          fi
+          curl -sf "$UPSTASH_REDIS_REST_URL/get/wmmc_db" \
+            -H "Authorization: Bearer $UPSTASH_REDIS_REST_TOKEN" \
+            | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).result || "")' > db.json
+          test -s db.json || { echo "::error::Upstash returned empty data for key wmmc_db"; exit 1; }
+
+      - name: Sanitize into fixture
+        run: node scripts/sanitize-db.js db.json tests/fixtures/db.sample.json
+
+      - name: Commit fixture if it changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/fixtures/db.sample.json
+          if git diff --cached --quiet; then
+            echo "Fixture already up to date — nothing to commit."
+          else
+            git commit -m "Refresh sanitized DB fixture"
+            git push
+          fi

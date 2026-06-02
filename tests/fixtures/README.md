@@ -1,62 +1,63 @@
 # Test fixtures
 
-Sanitized snapshots of real league data, safe to commit, for troubleshooting
-and unit tests.
+`db.sample.json` is a sanitized snapshot of the live league DB — **all passwords
+removed** and **all emails pseudonymized** (e.g. `cam.mccallum@example.com`,
+with referential integrity kept so a manager's email still matches their swap
+and audit entries). Everything else — rosters, `roster_dates`, swaps,
+weekly/daily stats — is intact.
 
-## Generating `db.sample.json`
+It is committed so every Claude session and every unit test has current league
+data to work with on a fresh clone. It is safe to commit because the repo is
+private and the file contains no secrets.
 
-From a machine that has a real `db.json` (your local server or the Render disk):
+## Easiest way to keep it fresh: the GitHub Action (one-time setup)
+
+A workflow (`.github/workflows/refresh-db-fixture.yml`) pulls the live DB from
+the Upstash backup, sanitizes it, and commits this file for you.
+
+1. **Add two repository secrets** — GitHub repo → **Settings** → **Secrets and
+   variables** → **Actions** → **New repository secret**. Create:
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+
+   Copy both values from your Render service's environment variables. A
+   **read-only** Upstash REST token is enough (create one in the Upstash
+   console if you want to limit it).
+
+2. **Run it** — GitHub repo → **Actions** tab → **Refresh sanitized DB
+   fixture** → **Run workflow** (run it on `main`). It commits the updated
+   fixture if anything changed.
+3. (Optional) Uncomment the `schedule:` block in the workflow to refresh
+   automatically once a day.
+
+> The workflow only appears in the Actions tab once it is on the `main` branch,
+> so merge it first.
+
+## Other ways to generate it
+
+**Locally from the Upstash backup** (same as the Action, run by hand):
 
 ```bash
-npm run sanitize:db
-# or: node scripts/sanitize-db.js [input] [output]
-```
-
-This reads `db.json` and writes `tests/fixtures/db.sample.json` with:
-
-- **all passwords removed**
-- **all emails pseudonymized** (e.g. `cam.mccallum@example.com`), keeping
-  referential integrity so a manager's email still matches the email on their
-  swaps and audit entries
-
-Everything else — rosters, `roster_dates`, swaps, weekly/daily stats — is left
-intact.
-
-## Where the real `db.json` lives
-
-On Render the live data is **not** at the repo root — `render.yaml` sets
-`DB_PATH=/var/data/db.json` on the persistent disk, and `server.js` reads
-`process.env.DB_PATH || ./db.json`. It is also mirrored to Upstash Redis under
-the key `wmmc_db`. Pick whichever route below is easiest.
-
-### Route A (recommended): locally, pulling from the Upstash backup
-
-Works without Render Shell and without deploying — you only need the branch with
-this script plus the two `UPSTASH_*` values from your Render env vars.
-
-```bash
-# pull the live DB from Upstash into a local db.json (gitignored)
 export UPSTASH_REDIS_REST_URL="https://...upstash.io"
 export UPSTASH_REDIS_REST_TOKEN="..."
-curl -s "$UPSTASH_REDIS_REST_URL/get/wmmc_db" \
-  -H "Authorization: Bearer $UPSTASH_REDIS_REST_TOKEN" \
-  | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).result)' > db.json
-
-npm run sanitize:db                       # -> tests/fixtures/db.sample.json
-git add tests/fixtures/db.sample.json
-git commit -m "Update sanitized db fixture" && git push
+npm run refresh:fixture
+git add tests/fixtures/db.sample.json && git commit -m "Refresh fixture" && git push
 ```
 
-### Route B: Render Shell
-
-Needs a paid instance (the Shell tab is not on the free tier), and the script
-must already be on the deployed branch. Point it at the disk path, then copy the
-output into your local repo and commit (Render's shell has no git push creds):
+**From an existing `db.json` file** (e.g. on the Render disk at
+`/var/data/db.json`):
 
 ```bash
-node scripts/sanitize-db.js /var/data/db.json /tmp/db.sample.json
-cat /tmp/db.sample.json   # copy into tests/fixtures/db.sample.json locally, then commit
+npm run sanitize:db                                   # uses ./db.json
+# or: node scripts/sanitize-db.js /var/data/db.json tests/fixtures/db.sample.json
 ```
+
+## Where the live data comes from
+
+On Render the real DB is at `/var/data/db.json` on the persistent disk
+(`render.yaml` sets `DB_PATH`), and `server.js` mirrors it to Upstash Redis
+under the key `wmmc_db` on every write. The Action and `npm run refresh:fixture`
+both read that Upstash mirror, so you never have to touch the Render disk.
 
 ## Rules
 
