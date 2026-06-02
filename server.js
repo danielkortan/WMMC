@@ -193,7 +193,8 @@ async function loadFromUpstash() {
 }
 
 async function saveToUpstash(data) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return { ok: false, skipped: true };
+  const body = JSON.stringify(JSON.stringify(data));
   try {
     const resp = await fetch(`${UPSTASH_URL}/set/${UPSTASH_KEY}`, {
       method: 'POST',
@@ -201,14 +202,17 @@ async function saveToUpstash(data) {
         Authorization: `Bearer ${UPSTASH_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(JSON.stringify(data)),
+      body,
     });
     if (!resp.ok) {
       const text = await resp.text();
-      console.error('[Upstash] Save error:', resp.status, text.slice(0, 200));
+      console.error('[Upstash] Save error:', resp.status, `(${body.length} bytes)`, text.slice(0, 200));
+      return { ok: false, status: resp.status, bytes: body.length, error: text.slice(0, 200) };
     }
+    return { ok: true, status: resp.status, bytes: body.length };
   } catch (e) {
-    console.error('[Upstash] Save failed:', e.message);
+    console.error('[Upstash] Save failed:', `(${body.length} bytes)`, e.message);
+    return { ok: false, bytes: body.length, error: e.message };
   }
 }
 
@@ -250,13 +254,18 @@ function readDB() {
   return { seasons: {}, managers: readManagersSeed(), audit_log: [] };
 }
 
-function writeDB(data) {
+function writeDB(data, opts = {}) {
   // Stamp every write so startup can tell whether the local disk copy or the
   // Upstash backup is newer (prevents a stale backup from clobbering good data).
   data.last_saved_at = new Date().toISOString();
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
-  // Async backup to Upstash so data survives Render's ephemeral filesystem
-  saveToUpstash(data).catch((e) => console.error('[Upstash] Background save failed:', e.message));
+  // Back up to Upstash so data survives Render's ephemeral filesystem. By default this is
+  // fire-and-forget, but unattended/critical writes (the 4am sync, manual backfills) pass
+  // { awaitBackup: true } and await the returned promise so the write can't be lost if the
+  // instance is reclaimed (spin-down) before the backup completes.
+  const backup = saveToUpstash(data);
+  if (opts.awaitBackup) return backup;
+  backup.catch((e) => console.error('[Upstash] Background save failed:', e.message));
 }
 
 // ============================================================
@@ -3276,6 +3285,43 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
     addAuditEntry(db, 'mlbapi_rebuild_weeklies', { year, weeks: results.length });
     writeDB(db);
     res.json({ ok: true, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/mlb/backfill  { year }
+// Re-fetch every elapsed week from the MLB Stats API and store it (performMLBSync is
+// idempotent — replaces mlbapi game records, preserves manual overrides/drop-locks). Use this
+// to restore weeks whose stored stats are missing entirely (not just unattributed). Awaits the
+// Upstash backup and reports its size/status so a silent persistence failure (e.g. payload too
+// large) is visible rather than lost.
+app.post('/api/mlb/backfill', requireCommissioner, async (req, res) => {
+  const year = (req.body.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const scheduleDates = sd.schedule_dates || [];
+    const results = [];
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const schedWeek = SEASON_SCHEDULE[i];
+      const dates = scheduleDates[i];
+      if (!dates || !dates.start || dates.start > todayET) continue; // elapsed/in-progress weeks only
+      const r = await performMLBSync(sd, schedWeek, dates, { trigger: 'manual', note: 'backfill' });
+      results.push({
+        week: `${schedWeek.round}|${schedWeek.week}`,
+        games: r.games_fetched,
+        batting_imported: r.batting_imported,
+        pitching_imported: r.pitching_imported,
+      });
+    }
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'mlbapi_sync', { year, note: 'backfill-all', weeks: results.length });
+    const backup = await writeDB(db, { awaitBackup: true });
+    res.json({ ok: true, results, backup });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -6696,7 +6742,15 @@ function scheduleMLBApiSync() {
 
         if (dirty) {
           db.seasons[season] = sd;
-          writeDB(db);
+          // Await the Upstash backup: the 4am sync runs unattended and the instance may be
+          // reclaimed right after, so a fire-and-forget backup could be lost before it lands.
+          const backup = await writeDB(db, { awaitBackup: true });
+          if (backup && backup.ok === false && !backup.skipped) {
+            console.error(`[MLB-API] Upstash backup did NOT persist (${backup.bytes} bytes, status ${backup.status})`);
+            postSlack(`*MLB sync: Upstash backup failed* (${backup.bytes} bytes, status ${backup.status})`).catch(
+              () => {}
+            );
+          }
         }
       }
     } catch (e) {
