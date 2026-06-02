@@ -5359,6 +5359,102 @@ function renderTrends() {
 // convertIP, calculateBattingScore, calculatePitchingScore live in
 // js/scoring.js (loaded via window globals by js/index.js).
 
+// One-time migration: restore swap records confirmed via Slack that are missing from db,
+// and remove the known erroneous pure-add duplicate for Kyle Harrison.
+// Idempotent — each insertion is guarded by an existence check.
+function repairMissingSwapRecords(seasonData) {
+  if (!seasonData || !seasonData.swaps) return false;
+  const scheduleDates = seasonData.schedule_dates || [];
+  let changed = false;
+
+  function dateToWeekKey(dateStr) {
+    if (!dateStr) return null;
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      const d = scheduleDates[i];
+      if (d && dateStr >= d.start && dateStr <= d.end) return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
+    }
+    return null;
+  }
+
+  // Remove erroneous duplicate: Daniel Kortan pure-add Kyle Harrison on 2026-05-11.
+  // The real swap (Logan Webb → Kyle Harrison) already exists in the log.
+  const before = seasonData.swaps.length;
+  seasonData.swaps = seasonData.swaps.filter(
+    (s) =>
+      !(
+        s.manager === 'Daniel Kortan' &&
+        !s.player_out &&
+        s.player_in === 'Kyle Harrison' &&
+        s.swap_date === '2026-05-11' &&
+        s.status === 'approved'
+      )
+  );
+  if (seasonData.swaps.length < before) changed = true;
+
+  // Missing approved swaps confirmed via Slack notifications.
+  const missing = [
+    {
+      manager: 'Daniel Kortan',
+      player_out: 'Yordan Alvarez',
+      player_in: 'Juan Soto',
+      swap_date: '2026-05-22',
+      reason: 'Free Swap (one per round)',
+    },
+    {
+      manager: 'Austin Johnson',
+      player_out: 'Christian Walker',
+      player_in: 'Jazz Chisholm Jr.',
+      swap_date: '2026-05-25',
+      reason: 'Drop Swap',
+    },
+    {
+      manager: 'Chris Bentivegna',
+      player_out: 'Dylan Cease',
+      player_in: 'Ranger Suarez',
+      swap_date: '2026-05-26',
+      reason: 'IL Swap',
+    },
+  ];
+
+  for (const ms of missing) {
+    const exists = seasonData.swaps.some(
+      (s) =>
+        s.manager === ms.manager &&
+        s.player_out === ms.player_out &&
+        s.player_in === ms.player_in &&
+        s.status === 'approved'
+    );
+    if (exists) continue;
+    const wk = dateToWeekKey(ms.swap_date);
+    seasonData.swaps.push({
+      id: `repair-${ms.manager.replace(/\s+/g, '-').toLowerCase()}-${ms.swap_date}`,
+      timestamp: `${ms.swap_date} 12:00:00`,
+      email: '',
+      manager: ms.manager,
+      player_out: ms.player_out,
+      player_in: ms.player_in,
+      reason: ms.reason,
+      swap_date: ms.swap_date,
+      round: wk ? wk.split('|')[0] : 'PP1',
+      week_key: wk,
+      status: 'approved',
+      reviewed_at: `${ms.swap_date} 12:00:00`,
+    });
+    // Pre-seed roster_dates so wasDroppedBefore works immediately.
+    if (!seasonData.roster_dates) seasonData.roster_dates = {};
+    if (!seasonData.roster_dates[ms.manager]) seasonData.roster_dates[ms.manager] = {};
+    if (wk) {
+      if (!seasonData.roster_dates[ms.manager][wk]) seasonData.roster_dates[ms.manager][wk] = {};
+      const wkd = seasonData.roster_dates[ms.manager][wk];
+      if (ms.player_out && !wkd[ms.player_out]) wkd[ms.player_out] = { drop_date: ms.swap_date };
+      if (ms.player_in && !wkd[ms.player_in]) wkd[ms.player_in] = { add_date: ms.swap_date };
+    }
+    changed = true;
+  }
+
+  return changed;
+}
+
 // Back-fill missing add/drop dates in roster_dates from approved swap records.
 // Runs on every commissioner roster render so existing swaps (approved before this
 // feature existed) also get their dates populated automatically.
@@ -5391,19 +5487,67 @@ function backfillRosterDatesFromSwaps(seasonData) {
   return changed;
 }
 
-// Fill empty per-week roster entries by carrying forward the most recent non-empty roster,
-// applying any week-specific approved swaps.  Mirrors the server-side repairCarryForwardRosters
-// so the display is correct immediately, before the next server restart.
-// Returns true if any entries were repaired (caller should saveSeason).
+// Version stamp — bump whenever the repair logic changes substantially so the
+// full-recompute pass runs again on next load.
+const ROSTER_REPAIR_VERSION = 2;
+
+// Fill / recompute per-week roster entries by carrying forward the most recent
+// trusted roster and applying approved swaps in chronological order.
+//
+// "Trusted" weeks: week 0 (initial submission) and any week in advanced_weeks
+// (written by serverAutoAdvancePlayers).  All other past weeks are recomputed
+// from the previous trusted/computed state + swap records whose swap_date falls
+// in that week.  Using swap_date (rather than the stored week_key) is more
+// reliable because week_key reflects which week was active at submission time,
+// which may differ from the effective week when schedule_dates boundaries shift.
+//
+// On the first run after a version bump (roster_repair_version < ROSTER_REPAIR_VERSION)
+// a full recompute runs to correct any weeks already populated by a previous
+// broken repair pass.
 function repairCarryForwardRosters(seasonData) {
   if (!seasonData || seasonData.status !== 'active' || !seasonData.rosters) return false;
 
   const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved');
   const scheduleDates = seasonData.schedule_dates || [];
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  // Weeks legitimately written by serverAutoAdvancePlayers — keep them even if future.
   const legitimatelyAdvanced = new Set(seasonData.advanced_weeks || []);
+  const needsFullRecompute = (seasonData.roster_repair_version || 0) < ROSTER_REPAIR_VERSION;
   let repaired = false;
+
+  // Return the week_key that a swap's swap_date falls in, falling back to the stored week_key.
+  function swapEffectiveWeekKey(swap) {
+    if (swap.swap_date) {
+      for (let j = 0; j < SEASON_SCHEDULE.length; j++) {
+        const d = scheduleDates[j];
+        if (d && swap.swap_date >= d.start && swap.swap_date <= d.end) {
+          return `${SEASON_SCHEDULE[j].round}|${SEASON_SCHEDULE[j].week}`;
+        }
+      }
+    }
+    return swap.week_key;
+  }
+
+  function applySwaps(mgrName, weekKey, prevBatters, prevPitchers, newBatters, newPitchers) {
+    approvedSwaps
+      .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s) === weekKey)
+      .forEach((s) => {
+        if (s.player_out) {
+          newBatters = newBatters.filter((p) => p !== s.player_out);
+          newPitchers = newPitchers.filter((p) => p !== s.player_out);
+        }
+        if (s.player_in) {
+          const wasBatter = s.player_out ? prevBatters.includes(s.player_out) : false;
+          const wasPitcher = s.player_out ? prevPitchers.includes(s.player_out) : false;
+          const inBatPool = (seasonData.batters_pool || []).includes(s.player_in);
+          const inPitPool = (seasonData.pitchers_pool || []).includes(s.player_in);
+          if (wasBatter && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+          else if (wasPitcher && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+          else if (inBatPool && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+          else if (inPitPool && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+        }
+      });
+    return { newBatters, newPitchers };
+  }
 
   for (const [mgrName, mgrRoster] of Object.entries(seasonData.rosters)) {
     let prevBatters = null;
@@ -5416,8 +5560,7 @@ function repairCarryForwardRosters(seasonData) {
       const isFuture = weekStart && weekStart > todayET;
 
       if (isFuture) {
-        // Purge erroneously carried-forward entries for weeks that haven't started
-        // and weren't written by serverAutoAdvancePlayers.
+        // Purge future weeks not written by the Sunday auto-advance.
         if (!legitimatelyAdvanced.has(i)) {
           const wr = mgrRoster[weekKey];
           if (wr && ((wr.batters || []).length > 0 || (wr.pitchers || []).length > 0)) {
@@ -5431,39 +5574,45 @@ function repairCarryForwardRosters(seasonData) {
       const wr = mgrRoster[weekKey];
       const hasBatters = wr && (wr.batters || []).length > 0;
       const hasPitchers = wr && (wr.pitchers || []).length > 0;
+      const hasData = hasBatters || hasPitchers;
 
-      if (hasBatters || hasPitchers) {
-        prevBatters = [...(wr.batters || [])];
-        prevPitchers = [...(wr.pitchers || [])];
-      } else if (prevBatters !== null) {
+      // Trust week 0 (initial submission), legitimately auto-advanced weeks, and the
+      // very first week with data found (no prior context to recompute from).
+      const isTrusted = i === 0 || legitimatelyAdvanced.has(i) || prevBatters === null;
+
+      if (isTrusted) {
+        if (hasData) {
+          prevBatters = [...(wr.batters || [])];
+          prevPitchers = [...(wr.pitchers || [])];
+        }
+      } else if (!hasData || needsFullRecompute) {
+        // Recompute: either the week is empty, or the full-recompute pass is active
+        // (corrects weeks that a previous broken repair already populated incorrectly).
         let newBatters = [...prevBatters];
         let newPitchers = [...prevPitchers];
-
-        approvedSwaps
-          .filter((s) => s.manager === mgrName && s.week_key === weekKey)
-          .forEach((s) => {
-            if (s.player_out) {
-              newBatters = newBatters.filter((p) => p !== s.player_out);
-              newPitchers = newPitchers.filter((p) => p !== s.player_out);
-            }
-            if (s.player_in) {
-              const wasBatter = s.player_out ? prevBatters.includes(s.player_out) : false;
-              const wasPitcher = s.player_out ? prevPitchers.includes(s.player_out) : false;
-              const inBatPool = (seasonData.batters_pool || []).includes(s.player_in);
-              const inPitPool = (seasonData.pitchers_pool || []).includes(s.player_in);
-              if (wasBatter && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
-              else if (wasPitcher && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
-              else if (inBatPool && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
-              else if (inPitPool && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
-            }
-          });
-
+        ({ newBatters, newPitchers } = applySwaps(
+          mgrName,
+          weekKey,
+          prevBatters,
+          prevPitchers,
+          newBatters,
+          newPitchers
+        ));
         mgrRoster[weekKey] = { batters: newBatters, pitchers: newPitchers };
         repaired = true;
         prevBatters = newBatters;
         prevPitchers = newPitchers;
+      } else {
+        // Week has correct data and no recompute needed — just advance the tracking vars.
+        prevBatters = [...(wr.batters || [])];
+        prevPitchers = [...(wr.pitchers || [])];
       }
     }
+  }
+
+  if (needsFullRecompute) {
+    seasonData.roster_repair_version = ROSTER_REPAIR_VERSION;
+    repaired = true;
   }
 
   return repaired;
@@ -5932,10 +6081,11 @@ function renderRosterData(managerName, isCommissioner) {
 
   // Migrate old flat rosters to per-week format if needed
   if (isActive) migrateRostersToWeekly(seasonData);
-  // Ensure roster_dates has drop/add dates for all approved swaps so the
-  // available-player list correctly excludes active rosters and includes dropped ones.
+  // Restore missing swap records and remove known duplicates before any roster repair.
+  if (isActive && repairMissingSwapRecords(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  // Ensure roster_dates has drop/add dates for all approved swaps.
   if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
-  // Fill any empty per-week roster entries by carrying forward the last known roster.
+  // Fill / recompute per-week roster entries by carrying forward the last known roster.
   if (isActive && repairCarryForwardRosters(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
 
   // Compute per-period scores for this manager
