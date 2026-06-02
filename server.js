@@ -3147,9 +3147,32 @@ app.get('/api/mlb/player-debug', requireCommissioner, (req, res) => {
     perWeek.push(entry);
   }
 
+  // Distinguish "name mismatch" from "genuinely no games": surface stored stat names that
+  // resemble the query. An unmapped player (no mlb_id) only associates by exact name, so a
+  // close-but-different stored spelling means the roster slot and the synced feed disagree.
+  const totalExact = {
+    daily_pitching: (sd.daily_pitching || []).filter((r) => eqi(r.pitcher)).length,
+    daily_batting: (sd.daily_batting || []).filter((r) => eqi(r.batter)).length,
+  };
+  let similarStoredNames = null;
+  if (totalExact.daily_pitching === 0 && totalExact.daily_batting === 0) {
+    const rank = (names) =>
+      uniq(names.filter(Boolean))
+        .map((n) => ({ name: n, score: Math.round(nameSimilarity(name, n) * 1000) / 1000 }))
+        .filter((x) => x.score >= 0.5)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8);
+    similarStoredNames = {
+      pitching: rank((sd.daily_pitching || []).map((r) => r.pitcher)),
+      batting: rank((sd.daily_batting || []).map((r) => r.batter)),
+    };
+  }
+
   res.json({
     query: { year, name },
     mlb_id: (sd.mlb_ids || {})[name] ?? null,
+    total_exact_daily_records: totalExact,
+    similar_stored_names: similarStoredNames,
     roster_membership: rosterMembership,
     roster_dates: rosterDates,
     per_week: perWeek,
