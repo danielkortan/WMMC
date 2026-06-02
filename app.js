@@ -5526,7 +5526,7 @@ function backfillRosterDatesFromSwaps(seasonData) {
 
 // Version stamp — bump whenever the repair logic changes substantially so the
 // full-recompute pass runs again on next load.
-const ROSTER_REPAIR_VERSION = 2;
+const ROSTER_REPAIR_VERSION = 4;
 
 // Fill / recompute per-week roster entries by carrying forward the most recent
 // trusted roster and applying approved swaps in chronological order.
@@ -5613,9 +5613,13 @@ function repairCarryForwardRosters(seasonData) {
       const hasPitchers = wr && (wr.pitchers || []).length > 0;
       const hasData = hasBatters || hasPitchers;
 
-      // Trust week 0 (initial submission), legitimately auto-advanced weeks, and the
-      // very first week with data found (no prior context to recompute from).
-      const isTrusted = i === 0 || legitimatelyAdvanced.has(i) || prevBatters === null;
+      // Trust week 0 (initial submission) and the first week with data (no prior
+      // context to recompute from). Auto-advanced weeks are trusted only for
+      // INCREMENTAL repairs — during a full recompute they are rebuilt from
+      // carry-forward + swaps too, otherwise an auto-advanced current week never
+      // picks up swaps made during it (and inherits staleness from the week it
+      // was advanced from).
+      const isTrusted = i === 0 || prevBatters === null || (legitimatelyAdvanced.has(i) && !needsFullRecompute);
 
       if (isTrusted) {
         if (hasData) {
