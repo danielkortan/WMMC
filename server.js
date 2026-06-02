@@ -3044,6 +3044,118 @@ app.get('/api/mlb/sync-status', requireCommissioner, (req, res) => {
   });
 });
 
+// GET /api/mlb/player-debug?year=2026&name=Casey%20Mize
+// Read-only diagnostic for a "rostered but showing 0 points" player. Dumps, per schedule
+// week, everything that determines the displayed score: stored daily/weekly records and
+// their manager attribution, which managers roster the player that week, the effective
+// scoring window (roster_dates/player_dates), the computed effective score, and whether the
+// carried-forward-drop logic would suppress the player. Changes nothing.
+app.get('/api/mlb/player-debug', requireCommissioner, (req, res) => {
+  const { year, name } = req.query;
+  if (!year || !name) return res.status(400).json({ error: 'year and name are required' });
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  // Refresh eligibility windows from roster_dates (in-memory only — not persisted).
+  syncPlayerDatesFromRosterDates(sd);
+
+  const lc = String(name).toLowerCase();
+  const eqi = (a) => String(a || '').toLowerCase() === lc;
+  const uniq = (arr) => [...new Set(arr)];
+
+  // Which managers roster this player, and in which weeks.
+  const rosterMembership = {};
+  for (const [mgr, weekRosters] of Object.entries(sd.rosters || {})) {
+    for (const [weekKey, roster] of Object.entries(weekRosters || {})) {
+      const inBat = (roster.batters || []).some(eqi);
+      const inPit = (roster.pitchers || []).some(eqi);
+      if (inBat || inPit) {
+        (rosterMembership[weekKey] = rosterMembership[weekKey] || []).push(
+          `${mgr}${inBat ? ' [B]' : ''}${inPit ? ' [P]' : ''}`
+        );
+      }
+    }
+  }
+
+  // roster_dates add/drop windows mentioning this player.
+  const rosterDates = {};
+  for (const [mgr, weeks] of Object.entries(sd.roster_dates || {})) {
+    for (const [weekKey, players] of Object.entries(weeks || {})) {
+      const hit = Object.entries(players || {}).find(([p]) => eqi(p));
+      if (hit) rosterDates[`${mgr} | ${weekKey}`] = hit[1];
+    }
+  }
+
+  const perWeek = [];
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    const { round, week } = SEASON_SCHEDULE[i];
+    const weekKey = `${round}|${week}`;
+    const dBat = (sd.daily_batting || []).filter((r) => eqi(r.batter) && r.round === round && r.week === week);
+    const dPit = (sd.daily_pitching || []).filter((r) => eqi(r.pitcher) && r.round === round && r.week === week);
+    const wBat = (sd.weekly_batting || []).filter((r) => eqi(r.batter) && r.round === round && r.week === week);
+    const wPit = (sd.weekly_pitching || []).filter((r) => eqi(r.pitcher) && r.round === round && r.week === week);
+    if (!dBat.length && !dPit.length && !wBat.length && !wPit.length && !rosterMembership[weekKey]) continue;
+
+    const weekDates = (sd.schedule_dates || [])[i] || {};
+    const entry = { week: weekKey, rostered_by: rosterMembership[weekKey] || [] };
+
+    if (dPit.length || wPit.length) {
+      const storedName = (dPit[0] || wPit[0]).pitcher;
+      const pd = (((sd.player_dates || {})[weekKey] || {}).pitcher || {})[storedName] || {};
+      entry.pitching = {
+        stored_name: storedName,
+        daily_games: dPit.length,
+        daily_dates: dPit.map((r) => r.date),
+        daily_managers: uniq(dPit.map((r) => r.manager)),
+        weekly_rows: wPit.map((r) => ({
+          manager: r.manager,
+          weekly_score: r.weekly_score,
+          source: r.source,
+          override: !!((r.manual_fields && r.manual_fields.length) || r.drop_locked),
+        })),
+        effective_window: {
+          start: 'start' in pd ? pd.start : weekDates.start || null,
+          end: 'end' in pd ? pd.end : weekDates.end || null,
+        },
+        effective_score: dPit.length ? computeEffectivePitchingScore(sd, storedName, round, week) : null,
+        carried_forward_drop: isCarriedForwardDrop(sd, storedName, 'pitching', round, week),
+      };
+    }
+    if (dBat.length || wBat.length) {
+      const storedName = (dBat[0] || wBat[0]).batter;
+      const pd = (((sd.player_dates || {})[weekKey] || {}).batter || {})[storedName] || {};
+      entry.batting = {
+        stored_name: storedName,
+        daily_games: dBat.length,
+        daily_dates: dBat.map((r) => r.date),
+        daily_managers: uniq(dBat.map((r) => r.manager)),
+        weekly_rows: wBat.map((r) => ({
+          manager: r.manager,
+          weekly_score: r.weekly_score,
+          source: r.source,
+          override: !!((r.manual_fields && r.manual_fields.length) || r.drop_locked),
+        })),
+        effective_window: {
+          start: 'start' in pd ? pd.start : weekDates.start || null,
+          end: 'end' in pd ? pd.end : weekDates.end || null,
+        },
+        effective_score: dBat.length ? computeEffectiveBattingScore(sd, storedName, round, week) : null,
+        carried_forward_drop: isCarriedForwardDrop(sd, storedName, 'batting', round, week),
+      };
+    }
+    perWeek.push(entry);
+  }
+
+  res.json({
+    query: { year, name },
+    mlb_id: (sd.mlb_ids || {})[name] ?? null,
+    roster_membership: rosterMembership,
+    roster_dates: rosterDates,
+    per_week: perWeek,
+  });
+});
+
 // ============================================================
 // MLB Stats API Integration
 // ============================================================
