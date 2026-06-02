@@ -5399,6 +5399,10 @@ function repairCarryForwardRosters(seasonData) {
   if (!seasonData || seasonData.status !== 'active' || !seasonData.rosters) return false;
 
   const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved');
+  const scheduleDates = seasonData.schedule_dates || [];
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Weeks legitimately written by serverAutoAdvancePlayers — keep them even if future.
+  const legitimatelyAdvanced = new Set(seasonData.advanced_weeks || []);
   let repaired = false;
 
   for (const [mgrName, mgrRoster] of Object.entries(seasonData.rosters)) {
@@ -5408,6 +5412,22 @@ function repairCarryForwardRosters(seasonData) {
     for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
       const { round, week } = SEASON_SCHEDULE[i];
       const weekKey = `${round}|${week}`;
+      const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
+      const isFuture = weekStart && weekStart > todayET;
+
+      if (isFuture) {
+        // Purge erroneously carried-forward entries for weeks that haven't started
+        // and weren't written by serverAutoAdvancePlayers.
+        if (!legitimatelyAdvanced.has(i)) {
+          const wr = mgrRoster[weekKey];
+          if (wr && ((wr.batters || []).length > 0 || (wr.pitchers || []).length > 0)) {
+            delete mgrRoster[weekKey];
+            repaired = true;
+          }
+        }
+        continue;
+      }
+
       const wr = mgrRoster[weekKey];
       const hasBatters = wr && (wr.batters || []).length > 0;
       const hasPitchers = wr && (wr.pitchers || []).length > 0;
