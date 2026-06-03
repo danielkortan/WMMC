@@ -7,7 +7,8 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Multi-Season Management** — Create, manage, and archive multiple seasons
 - **Configurable Scoring** — Per-stat batting and pitching point rubrics (currently hardcoded; see [Scoring Rubric](#scoring-rubric))
 - **Roster Management** — Per-week rosters with a manager-initiated swap workflow that the commissioner approves
-- **Google Sheets Sync** — Pull weekly stats from a linked spreadsheet on a daily schedule
+- **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
+- **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
@@ -215,4 +216,6 @@ WMMC/
 
 ## Deployment
 
-The app is configured for [Render.com](https://render.com) via `render.yaml`. The disk mount at `/var/data` keeps `db.json` across deploys. Set `LOGIN_PASSWORD`, `SLACK_WEBHOOK_URL`, `UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN` as secret env vars in the Render dashboard.
+The app is configured for [Render.com](https://render.com) via `render.yaml`. The disk mount at `/var/data` keeps `db.json` across deploys. Set `LOGIN_PASSWORD` and `SLACK_WEBHOOK_URL` as secret env vars in the Render dashboard, and verify `DB_PATH=/var/data/db.json` so writes land on the disk (not the ephemeral fallback) — the `Storage` button in the commissioner MLB panel reports the live path and whether durable storage is active.
+
+> **Note on Upstash:** the `UPSTASH_*` backup mirrors the _entire_ `db.json` as one Upstash value, which exceeds Upstash's request-size limit once a full season of per-game stats accumulates (multiple MB). The **persistent disk is the source of truth**; leave `UPSTASH_*` unset unless the backup payload is first slimmed. Enabling it with an oversized db produces silently-failing backups.

@@ -205,19 +205,23 @@ function getQFQualifiers(sd) {
 
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
   const mgrScores = {};
   managers.forEach((m) => {
     mgrScores[m.name] = { pp1: 0, pp2: 0 };
   });
   batting.forEach((b) => {
-    if (!mgrScores[b.manager]) return;
-    if (b.round === 'PP1') mgrScores[b.manager].pp1 += b.weekly_score || 0;
-    if (b.round === 'PP2') mgrScores[b.manager].pp2 += b.weekly_score || 0;
+    const owner = weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter');
+    if (!owner || !mgrScores[owner]) return;
+    if (b.round === 'PP1') mgrScores[owner].pp1 += b.weekly_score || 0;
+    if (b.round === 'PP2') mgrScores[owner].pp2 += b.weekly_score || 0;
   });
   pitching.forEach((p) => {
-    if (!mgrScores[p.manager]) return;
-    if (p.round === 'PP1') mgrScores[p.manager].pp1 += p.weekly_score || 0;
-    if (p.round === 'PP2') mgrScores[p.manager].pp2 += p.weekly_score || 0;
+    const owner = weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher');
+    if (!owner || !mgrScores[owner]) return;
+    if (p.round === 'PP1') mgrScores[owner].pp1 += p.weekly_score || 0;
+    if (p.round === 'PP2') mgrScores[owner].pp2 += p.weekly_score || 0;
   });
 
   const pp1Leaders = new Set();
@@ -263,10 +267,20 @@ function getSFParticipants(sd) {
   if (!(sd.finalized_rounds || []).includes('QF')) return null;
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
   function qfScore(mgr) {
     let t = 0;
-    batting.filter((b) => b.manager === mgr && b.round === 'QF').forEach((b) => (t += b.weekly_score || 0));
-    pitching.filter((p) => p.manager === mgr && p.round === 'QF').forEach((p) => (t += p.weekly_score || 0));
+    batting.forEach((b) => {
+      if (b.round === 'QF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter') === mgr) {
+        t += b.weekly_score || 0;
+      }
+    });
+    pitching.forEach((p) => {
+      if (p.round === 'QF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher') === mgr) {
+        t += p.weekly_score || 0;
+      }
+    });
     return t;
   }
   return [
@@ -284,10 +298,20 @@ function getFinalsParticipants(sd) {
   if (!(sd.finalized_rounds || []).includes('SF')) return null;
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
   function sfScore(mgr) {
     let t = 0;
-    batting.filter((b) => b.manager === mgr && b.round === 'SF').forEach((b) => (t += b.weekly_score || 0));
-    pitching.filter((p) => p.manager === mgr && p.round === 'SF').forEach((p) => (t += p.weekly_score || 0));
+    batting.forEach((b) => {
+      if (b.round === 'SF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter') === mgr) {
+        t += b.weekly_score || 0;
+      }
+    });
+    pitching.forEach((p) => {
+      if (p.round === 'SF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher') === mgr) {
+        t += p.weekly_score || 0;
+      }
+    });
     return t;
   }
   return [
@@ -2573,13 +2597,7 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
         arr
           .filter((r) => {
             if (r[playerKey] !== name) return false;
-            const weekKey = `${r.round}|${r.week}`;
-            if (playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, name, weekKey)) return false;
-            // Authoritative per-week owner is the roster, not the stored weekly-row manager
-            // (which can be stale after a re-sync/backfill and would otherwise credit weeks
-            // before the player was added).
-            const mgr = detailRosterLookup[`${name}|${r.round}|${r.week}`];
-            return mgr === managerName;
+            return weeklyRowOwner(sd, detailRosterLookup, detailWeekKeyToStart, r, playerKey) === managerName;
           })
           .reduce((total, r) => {
             const weekKey = `${r.round}|${r.week}`;
@@ -2771,14 +2789,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
   const records = arr
     .filter((r) => {
       if (r[playerKey] !== playerName) return false;
-      const weekKey = `${r.round}|${r.week}`;
-      // Use the roster as the authoritative per-week owner (not the stored weekly-row
-      // manager, which can be stale after a re-sync and would credit pre-add weeks), and
-      // drop weeks after the player was dropped — mirroring playerPts / computeManagerScores.
-      const mgr = pqvRosterLookup[`${playerName}|${weekKey}`];
-      if (mgr !== managerName) return false;
-      if (playerDroppedBeforeWeek(sd, pqvWeekKeyToStart, mgr, playerName, weekKey)) return false;
-      return true;
+      return weeklyRowOwner(sd, pqvRosterLookup, pqvWeekKeyToStart, r, playerKey) === managerName;
     })
     .sort((a, b) => weekIndexFromKey(a.round, a.week) - weekIndexFromKey(b.round, b.week));
 
@@ -4040,7 +4051,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   const bracketRosterLookup = buildRosterLookup(seasonData);
   batting.forEach((b) => {
-    const mgr = b.manager || bracketRosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+    const mgr = b.manager || bracketRosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
     if (!mgr || !mgrPPScores[mgr]) return;
     const weekKey = `${b.round}|${b.week}`;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
@@ -4054,7 +4065,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     if (b.round === 'PP2') mgrPPScores[mgr].pp2 += b.weekly_score || 0;
   });
   pitching.forEach((p) => {
-    const mgr = p.manager || bracketRosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+    const mgr = p.manager || bracketRosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
     if (!mgr || !mgrPPScores[mgr]) return;
     const weekKey = `${p.round}|${p.week}`;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
@@ -4691,7 +4702,7 @@ function renderTrends() {
     const trendsRosterLookup = buildRosterLookup(seasonData);
     battingData = (seasonData.weekly_batting || [])
       .map((b) => {
-        const mgr = b.manager || trendsRosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+        const mgr = b.manager || trendsRosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
         return mgr
           ? { player: b.batter, manager: mgr, round: b.round, week: b.week, weekly_score: b.weekly_score || 0 }
           : null;
@@ -4699,7 +4710,7 @@ function renderTrends() {
       .filter(Boolean);
     pitchingData = (seasonData.weekly_pitching || [])
       .map((p) => {
-        const mgr = p.manager || trendsRosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+        const mgr = p.manager || trendsRosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
         return mgr
           ? { player: p.pitcher, manager: mgr, round: p.round, week: p.week, weekly_score: p.weekly_score || 0 }
           : null;
@@ -4739,14 +4750,14 @@ function renderTrends() {
   const dailyRosterLookup = buildRosterLookup(seasonData);
   const dailyManagerScores = {};
   (seasonData.daily_batting || []).forEach((rec) => {
-    const mgr = rec.manager || dailyRosterLookup[`${esc(rec.batter)}|${rec.round}|${rec.week}`];
+    const mgr = rec.manager || dailyRosterLookup[rosterLookupKey(rec.batter, rec.round, rec.week)];
     if (!mgr || !registeredNames.has(mgr)) return;
     const score = calculateBattingScore(rec.delta || {});
     if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
     dailyManagerScores[rec.date][mgr] = (dailyManagerScores[rec.date][mgr] || 0) + score;
   });
   (seasonData.daily_pitching || []).forEach((rec) => {
-    const mgr = rec.manager || dailyRosterLookup[`${esc(rec.pitcher)}|${rec.round}|${rec.week}`];
+    const mgr = rec.manager || dailyRosterLookup[rosterLookupKey(rec.pitcher, rec.round, rec.week)];
     if (!mgr || !registeredNames.has(mgr)) return;
     const score = calculatePitchingScore(rec.delta || {});
     if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
@@ -5537,179 +5548,6 @@ function backfillRosterDatesFromSwaps(seasonData) {
   return changed;
 }
 
-// Restore two roster slots that were never captured in the initial submission, plus the
-// full transaction chain each went through afterward:
-//   • Austin Johnson's pitcher Tarik Skubal — IL-swapped for Sandy Alcantara on 2026-05-04
-//     (Skubal credited through 5/4, Alcantara from 5/5), Alcantara dropped 2026-05-27 with
-//     no replacement, then Shane Baz added 2026-06-02.
-//   • Anton Capria's batter Kerry Carpenter — Free-swapped for Rafael Devers on 2026-05-09
-//     (Carpenter through 5/8, Devers from 5/9).
-// Mirrors server.js repairMissingRosterChains. Idempotent: injects approved swap records,
-// pre-seeds roster_dates with the exact adjacent effective dates (so no day is double-counted),
-// forces the Week-1 seeds present and the downstream players (who only arrive via later swaps)
-// absent. Runs before backfillRosterDatesFromSwaps so those exact dates are not overwritten
-// with swap_date. The ROSTER_REPAIR_VERSION bump makes repairCarryForwardRosters rebuild every
-// week from these Week-1 seeds + swaps.
-function repairMissingRosterChains(seasonData) {
-  if (!seasonData || seasonData.status !== 'active' || !seasonData.swaps) return false;
-  let changed = false;
-  const WEEK1_KEY = 'PP1|Week 1';
-  const initialSeeds = [
-    {
-      manager: 'Austin Johnson',
-      list: 'pitchers',
-      player: 'Tarik Skubal',
-      downstream: ['Sandy Alcantara', 'Shane Baz'],
-    },
-    { manager: 'Anton Capria', list: 'batters', player: 'Kerry Carpenter', downstream: ['Rafael Devers'] },
-  ];
-  const poolSeeds = [
-    { pool: 'pitchers_pool', players: ['Tarik Skubal', 'Sandy Alcantara', 'Shane Baz'] },
-    { pool: 'batters_pool', players: ['Kerry Carpenter', 'Rafael Devers'] },
-  ];
-  // Adjacent dates: the outgoing player keeps credit through drop_date and the incoming
-  // player starts on add_date, so the swap week never double-counts the slot.
-  const chain = [
-    {
-      manager: 'Austin Johnson',
-      player_out: 'Tarik Skubal',
-      player_in: 'Sandy Alcantara',
-      reason: 'IL Swap',
-      swap_date: '2026-05-04',
-      drop_date: '2026-05-04',
-      add_date: '2026-05-05',
-    },
-    {
-      manager: 'Austin Johnson',
-      player_out: 'Sandy Alcantara',
-      player_in: null,
-      reason: 'Drop Swap',
-      swap_date: '2026-05-27',
-      drop_date: '2026-05-27',
-      add_date: null,
-    },
-    {
-      manager: 'Austin Johnson',
-      player_out: null,
-      player_in: 'Shane Baz',
-      reason: 'Drop Swap',
-      swap_date: '2026-06-02',
-      drop_date: null,
-      add_date: '2026-06-02',
-    },
-    {
-      manager: 'Anton Capria',
-      player_out: 'Kerry Carpenter',
-      player_in: 'Rafael Devers',
-      reason: 'Free Swap (one per round)',
-      swap_date: '2026-05-09',
-      drop_date: '2026-05-08',
-      add_date: '2026-05-09',
-    },
-  ];
-
-  const scheduleDates = seasonData.schedule_dates || [];
-  const dateToWeekKey = (dateStr) => {
-    if (!dateStr) return null;
-    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-      const d = scheduleDates[i];
-      if (d && dateStr >= d.start && dateStr <= d.end) return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
-    }
-    return null;
-  };
-
-  // Ensure the involved players exist in the pools so carry-forward can place the pure
-  // add (Shane Baz) and classify swap-ins correctly.
-  for (const { pool, players } of poolSeeds) {
-    if (!Array.isArray(seasonData[pool])) seasonData[pool] = [];
-    for (const p of players) {
-      if (!seasonData[pool].includes(p)) {
-        seasonData[pool].push(p);
-        changed = true;
-      }
-    }
-  }
-
-  // Force the Week-1 initial submission: seed player present, downstream players absent.
-  // Then fold in any chain swap that lands in Week 1 itself, because
-  // repairCarryForwardRosters treats Week 1 as the trusted seed and never applies swaps to
-  // it — so the seed array must already hold the end-of-week-1 state for the carry-forward
-  // of later weeks to be correct. The outgoing player is still credited for Week 1 via its
-  // roster_dates drop_date. (No-op when every swap falls in a later week.)
-  if (!seasonData.rosters) seasonData.rosters = {};
-  for (const { manager, list, player, downstream } of initialSeeds) {
-    if (!seasonData.rosters[manager]) seasonData.rosters[manager] = {};
-    if (!seasonData.rosters[manager][WEEK1_KEY]) seasonData.rosters[manager][WEEK1_KEY] = { batters: [], pitchers: [] };
-    const wr = seasonData.rosters[manager][WEEK1_KEY];
-    if (!Array.isArray(wr[list])) wr[list] = [];
-    const before = JSON.stringify(wr[list]);
-    let arr = wr[list].filter((p) => !downstream.includes(p));
-    if (!arr.includes(player)) arr.push(player);
-    for (const c of chain) {
-      if (c.manager !== manager || dateToWeekKey(c.swap_date) !== WEEK1_KEY) continue;
-      if (c.player_out) arr = arr.filter((p) => p !== c.player_out);
-      if (c.player_in && !arr.includes(c.player_in)) arr.push(c.player_in);
-    }
-    if (JSON.stringify(arr) !== before) {
-      wr[list] = arr;
-      changed = true;
-    }
-  }
-
-  // Inject the approved swap chain and pre-seed roster_dates with the exact dates.
-  if (!seasonData.roster_dates) seasonData.roster_dates = {};
-  for (const c of chain) {
-    const wk = dateToWeekKey(c.swap_date);
-    const exists = seasonData.swaps.some(
-      (s) =>
-        s.manager === c.manager &&
-        (s.player_out || null) === (c.player_out || null) &&
-        (s.player_in || null) === (c.player_in || null) &&
-        s.swap_date === c.swap_date &&
-        s.status === 'approved'
-    );
-    if (!exists) {
-      const slug = (c.player_in || c.player_out || 'move').replace(/\s+/g, '-').toLowerCase();
-      seasonData.swaps.push({
-        id: `repair-${c.manager.replace(/\s+/g, '-').toLowerCase()}-${slug}-${c.swap_date}`,
-        timestamp: `${c.swap_date} 12:00:00`,
-        email: '',
-        manager: c.manager,
-        player_out: c.player_out || null,
-        player_in: c.player_in || null,
-        reason: c.reason,
-        swap_date: c.swap_date,
-        round: wk ? wk.split('|')[0] : 'PP1',
-        week_key: wk,
-        status: 'approved',
-        reviewed_at: `${c.swap_date} 12:00:00`,
-      });
-      changed = true;
-    }
-    if (wk) {
-      if (!seasonData.roster_dates[c.manager]) seasonData.roster_dates[c.manager] = {};
-      if (!seasonData.roster_dates[c.manager][wk]) seasonData.roster_dates[c.manager][wk] = {};
-      const wkd = seasonData.roster_dates[c.manager][wk];
-      if (c.player_out && c.drop_date) {
-        if (!wkd[c.player_out]) wkd[c.player_out] = {};
-        if (wkd[c.player_out].drop_date !== c.drop_date) {
-          wkd[c.player_out].drop_date = c.drop_date;
-          changed = true;
-        }
-      }
-      if (c.player_in && c.add_date) {
-        if (!wkd[c.player_in]) wkd[c.player_in] = {};
-        if (wkd[c.player_in].add_date !== c.add_date) {
-          wkd[c.player_in].add_date = c.add_date;
-          changed = true;
-        }
-      }
-    }
-  }
-
-  return changed;
-}
-
 // Version stamp — bump whenever the repair logic changes substantially so the
 // full-recompute pass runs again on next load.
 const ROSTER_REPAIR_VERSION = 5;
@@ -6059,9 +5897,10 @@ function findManagerForPlayerWeek(seasonData, playerName, type, round, week) {
   const rosters = seasonData.rosters || {};
   const rosterKey = type === 'batting' ? 'batters' : 'pitchers';
   const weekKey = `${round}|${week}`;
+  const lc = String(playerName).toLowerCase();
   for (const [managerName, mgrRoster] of Object.entries(rosters)) {
     const weekRoster = mgrRoster[weekKey];
-    if (weekRoster && (weekRoster[rosterKey] || []).includes(playerName)) {
+    if (weekRoster && (weekRoster[rosterKey] || []).some((p) => p.toLowerCase() === lc)) {
       return managerName;
     }
   }
@@ -6070,23 +5909,31 @@ function findManagerForPlayerWeek(seasonData, playerName, type, round, week) {
 
 // Build a lookup of "player|round|week" -> managerName from rosters + roster_dates.
 // Used to attribute null-manager stats (players dropped mid-week) to the correct manager.
+// Case-insensitive lookup key (player|round|week). Roster names are entered by the
+// commissioner and may differ in case from the MLB feed name on a stat row; lowercasing both
+// sides matches the case-insensitive server-side lookups so the web and Slack scoreboards
+// agree. (Earlier this also defeated an esc()-vs-raw key mismatch in several call sites.)
+function rosterLookupKey(name, round, week) {
+  return `${String(name).toLowerCase()}|${round}|${week}`;
+}
+
 function buildRosterLookup(seasonData) {
   const lookup = {};
+  const add = (name, round, week, mgr) => {
+    const k = rosterLookupKey(name, round, week);
+    if (!lookup[k]) lookup[k] = mgr;
+  };
   for (const [mgr, mgrRosters] of Object.entries(seasonData.rosters || {})) {
     for (const [weekKey, weekRoster] of Object.entries(mgrRosters)) {
-      (weekRoster.batters || []).forEach((p) => {
-        if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr;
-      });
-      (weekRoster.pitchers || []).forEach((p) => {
-        if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr;
-      });
+      const [round, week] = weekKey.split('|');
+      (weekRoster.batters || []).forEach((p) => add(p, round, week, mgr));
+      (weekRoster.pitchers || []).forEach((p) => add(p, round, week, mgr));
     }
   }
   for (const [mgr, mgrDates] of Object.entries(seasonData.roster_dates || {})) {
     for (const [weekKey, players] of Object.entries(mgrDates)) {
-      Object.keys(players).forEach((p) => {
-        if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr;
-      });
+      const [round, week] = weekKey.split('|');
+      Object.keys(players).forEach((p) => add(p, round, week, mgr));
     }
   }
   return lookup;
@@ -6109,45 +5956,49 @@ function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKe
   return false;
 }
 
+// Map of `${round}|${week}` -> week start date, used by the drop-eligibility checks.
+function buildWeekKeyToStart() {
+  const scheduleDates = getScheduleDates();
+  const map = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (scheduleDates && scheduleDates[i]) map[`${s.round}|${s.week}`] = scheduleDates[i].start;
+  });
+  return map;
+}
+
+// Authoritative owner of a weekly stat row for scoring/seeding: the manager who actually
+// rosters the player that week, derived from the roster (carry-forward + roster_dates) — NOT
+// the cached `row.manager`, which can go stale after a re-sync and otherwise mis-credit
+// pre-add or post-drop weeks. Because buildRosterLookup is built from the rosters + roster_dates,
+// a lookup hit already implies membership, so this both excludes non-rostered weeks and credits
+// the correct manager immediately after a trade. Returns the manager name, or null when the
+// player isn't on anyone's roster that week. Single source of truth shared by the scoreboard,
+// pool seeding, and playoff bracket math so they can't diverge.
+function weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, row, playerKey) {
+  const player = row[playerKey];
+  const weekKey = `${row.round}|${row.week}`;
+  const mgr = rosterLookup[rosterLookupKey(player, row.round, row.week)];
+  if (!mgr) return null;
+  if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKey)) return null;
+  return mgr;
+}
+
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
   const rosterLookup = buildRosterLookup(seasonData);
-
-  const scheduleDates = getScheduleDates();
-  const weekKeyToStart = {};
-  SEASON_SCHEDULE.forEach((s, i) => {
-    if (scheduleDates && scheduleDates[i]) weekKeyToStart[`${s.round}|${s.week}`] = scheduleDates[i].start;
-  });
+  const weekKeyToStart = buildWeekKeyToStart();
 
   const managerMap = {};
   batting.forEach((b) => {
-    const mgr = b.manager || rosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+    const mgr = weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, b, 'batter');
     if (!mgr) return;
-    const weekKey = `${b.round}|${b.week}`;
-    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, b.batter, weekKey)) return;
-    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
-      batters: [],
-      pitchers: [],
-    };
-    const weekRosterDates =
-      (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
-    if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].batting += b.weekly_score || 0;
   });
   pitching.forEach((p) => {
-    const mgr = p.manager || rosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+    const mgr = weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, p, 'pitcher');
     if (!mgr) return;
-    const weekKey = `${p.round}|${p.week}`;
-    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, p.pitcher, weekKey)) return;
-    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
-      batters: [],
-      pitchers: [],
-    };
-    const weekRosterDates =
-      (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
-    if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].pitching += p.weekly_score || 0;
   });
@@ -6182,7 +6033,7 @@ function buildTeamWeekly(seasonData) {
   const map = {};
 
   batting.forEach((b) => {
-    const mgr = b.manager || rosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+    const mgr = b.manager || rosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
     if (!mgr) return;
     const weekKey = `${b.round}|${b.week}`;
     if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, b.batter, weekKey)) return;
@@ -6209,7 +6060,7 @@ function buildTeamWeekly(seasonData) {
   });
 
   pitching.forEach((p) => {
-    const mgr = p.manager || rosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+    const mgr = p.manager || rosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
     if (!mgr) return;
     const weekKey = `${p.round}|${p.week}`;
     if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, p.pitcher, weekKey)) return;
@@ -6310,9 +6161,8 @@ function renderRosterData(managerName, isCommissioner) {
   if (isActive) migrateRostersToWeekly(seasonData);
   // Restore missing swap records and remove known duplicates before any roster repair.
   if (isActive && repairMissingSwapRecords(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
-  // Restore the two missing initial-submission roster slots (Austin's Skubal pitcher chain,
-  // Anton's Carpenter batter chain) before dates are backfilled or rosters carried forward.
-  if (isActive && repairMissingRosterChains(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  // (The one-time Austin/Anton initial-submission roster-chain repair is applied and gated
+  // server-side in repairMissingRosterChains; the client no longer needs to run it.)
   // Ensure roster_dates has drop/add dates for all approved swaps.
   if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
   // Fill / recompute per-week roster entries by carrying forward the last known roster.
@@ -8569,7 +8419,6 @@ function showCommissionerPanel() {
   setupAutoFillButton();
   setupASGDateInput();
   setupPeriodDeadlineInputs();
-  renderGSheetsConfig();
 }
 
 function setupCommTabs() {
@@ -8804,17 +8653,23 @@ function renderMLBSyncLog() {
   const logDiv = document.getElementById('mlb-sync-log');
   if (!controlsDiv) return;
 
+  // "Sync Now" stays primary; the recovery/diagnostic tools live behind a collapsible
+  // "Diagnostics" toggle so the commissioner page isn't cluttered with rarely-used controls.
   controlsDiv.innerHTML =
     `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>` +
-    `<button class="btn btn-secondary" onclick="backfillMLB()" style="margin-left:0.5rem;">Backfill from MLB</button>` +
-    `<button class="btn btn-secondary" onclick="rebuildMLBWeeklies()" style="margin-left:0.5rem;">Rebuild Totals</button>` +
-    `<button class="btn btn-sm btn-secondary" onclick="dataCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Data check</button>` +
-    `<button class="btn btn-sm btn-secondary" onclick="storageCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Storage</button>` +
-    `<span style="display:inline-flex;gap:0.35rem;margin-left:0.75rem;align-items:center;">` +
+    `<button class="btn btn-sm btn-secondary" style="margin-left:0.5rem;font-size:0.78rem;" ` +
+    `onclick="const d=document.getElementById('mlb-diag-tools');d.style.display=d.style.display==='none'?'flex':'none';">` +
+    `Diagnostics ▾</button>` +
+    `<div id="mlb-diag-tools" style="display:none;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem;">` +
+    `<button class="btn btn-sm btn-secondary" onclick="backfillMLB()">Backfill from MLB</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="rebuildMLBWeeklies()">Rebuild Totals</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="dataCheckMLB()">Data check</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="storageCheckMLB()">Storage</button>` +
+    `<span style="display:inline-flex;gap:0.35rem;align-items:center;">` +
     `<input id="mlb-debug-name" type="text" placeholder="Player name" ` +
     `style="font-size:0.82rem;padding:0.2rem 0.4rem;" onkeydown="if(event.key==='Enter')debugMLBPlayer()" />` +
-    `<button class="btn btn-sm btn-secondary" onclick="debugMLBPlayer()" style="font-size:0.78rem;">Debug player</button>` +
-    `</span><div id="mlb-debug-out"></div>`;
+    `<button class="btn btn-sm btn-secondary" onclick="debugMLBPlayer()">Debug player</button>` +
+    `</span></div><div id="mlb-debug-out"></div>`;
 
   apiFetch('/api/mlb/sync-status')
     .then((r) => r.json())
@@ -9634,568 +9489,6 @@ function renderScheduleDatesPreview() {
   html += '</tbody></table>';
   preview.innerHTML = html;
 }
-
-// ---- Google Sheets Sync (Commissioner) ----
-// Fully client-side: config stored in localStorage, sync calls Google Sheets API directly from browser.
-
-function getGSheetsConfig() {
-  try {
-    return JSON.parse(localStorage.getItem('wmmc_gsheets_config') || '{}');
-  } catch {
-    return {};
-  }
-}
-
-function saveGSheetsConfigLocal(config) {
-  localStorage.setItem('wmmc_gsheets_config', JSON.stringify(config));
-}
-
-function extractSpreadsheetId(input) {
-  if (!input) return null;
-  const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-  if (match) return match[1];
-  if (/^[a-zA-Z0-9_-]{20,}$/.test(input.trim())) return input.trim();
-  return null;
-}
-
-let gsheetsEditMode = false;
-
-function renderGSheetsConfig(savedMsg) {
-  const fieldsDiv = document.getElementById('gsheets-fields');
-  const statusDiv = document.getElementById('gsheets-status');
-  const logDiv = document.getElementById('gsheets-sync-log');
-  if (!fieldsDiv) return;
-
-  const config = getGSheetsConfig();
-  const hasConfig = !!(config.spreadsheet_id && config.api_key);
-  const editing = gsheetsEditMode || !hasConfig;
-  const syncTime = config.sync_time || '05:00';
-  const maskedKey = config.api_key ? config.api_key.slice(0, 8) + '...' + config.api_key.slice(-4) : '';
-  const lockedStyle =
-    'background:var(--surface-2,#f0f0f0);color:var(--text-muted,#888);cursor:default;border-color:var(--border,#ddd);';
-
-  if (editing) {
-    fieldsDiv.innerHTML = `
-      <div class="form-row" style="margin-top:0.75rem;">
-        <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
-        <input type="text" id="gsheets-url" class="form-input"
-          value="${config.spreadsheet_id || ''}"
-          placeholder="https://docs.google.com/spreadsheets/d/...">
-      </div>
-      <div class="form-row">
-        <label class="upload-label">Google API Key</label>
-        <input type="text" id="gsheets-api-key" class="form-input"
-          placeholder="${maskedKey ? maskedKey + ' — leave blank to keep current' : 'AIza...'}">
-        <p class="upload-hint" style="margin-top:0.25rem;">Create at <em>console.cloud.google.com</em> &rarr; APIs &amp; Services &rarr; Credentials. Enable the Google Sheets API.</p>
-      </div>
-      <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;margin-top:0.5rem;">
-        <label class="checkbox-label" style="margin:0;">
-          <input type="checkbox" id="gsheets-enabled" ${config.enabled ? 'checked' : ''}> Enable daily auto-sync
-        </label>
-        <div style="display:flex;align-items:center;gap:0.4rem;">
-          <span style="font-size:0.85rem;white-space:nowrap;">at</span>
-          <input type="time" id="gsheets-sync-time" class="form-input" value="${syncTime}" style="width:9rem;">
-          <span class="upload-hint" style="margin:0;white-space:nowrap;">(server/UTC time)</span>
-        </div>
-      </div>
-      <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap;">
-        <button class="btn btn-primary" onclick="saveGSheetsConfig()">Save</button>
-        ${hasConfig ? '<button class="btn btn-secondary" onclick="cancelGSheetsConfig()">Cancel</button>' : ''}
-        <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
-      </div>`;
-  } else {
-    fieldsDiv.innerHTML = `
-      <div style="display:grid;gap:0.5rem;margin-top:0.75rem;">
-        <div class="form-row">
-          <label class="upload-label">Google Sheet URL or Spreadsheet ID</label>
-          <input type="text" class="form-input" value="${config.spreadsheet_id || ''}" readonly style="${lockedStyle}">
-        </div>
-        <div class="form-row">
-          <label class="upload-label">Google API Key</label>
-          <input type="text" class="form-input" value="${maskedKey}" readonly style="${lockedStyle}">
-        </div>
-        <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap;">
-          <label class="checkbox-label" style="margin:0;color:var(--text-muted,#888);">
-            <input type="checkbox" ${config.enabled ? 'checked' : ''} disabled>
-            ${config.enabled ? 'Auto-sync enabled' : 'Auto-sync disabled'} at ${syncTime} UTC
-          </label>
-        </div>
-        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-          <button class="btn btn-secondary" onclick="editGSheetsConfig()">Edit</button>
-          <button class="btn btn-secondary" onclick="triggerGSheetsSync()">Sync Now</button>
-        </div>
-      </div>`;
-  }
-
-  if (statusDiv) {
-    statusDiv.innerHTML = savedMsg ? `<div class="gsheets-sync-status gsheets-sync-ok">${savedMsg}</div>` : '';
-  }
-
-  // Fetch server status: next scheduled run + full log sourced from server DB
-  fetch('/api/google-sheets/sync-status')
-    .then((r) => r.json())
-    .then((s) => {
-      if (statusDiv) {
-        const nextDate = s.next_sync ? new Date(s.next_sync) : null;
-        let schedHtml = '';
-        if (s.enabled && nextDate) {
-          schedHtml = `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
-            Next auto-sync: ${nextDate.toLocaleString()}
-          </div>`;
-        } else if (!s.enabled) {
-          schedHtml = `<div style="font-size:0.82rem;color:var(--text-muted,#666);margin-top:0.25rem;">
-            Auto-sync is disabled — click Edit to enable it.
-          </div>`;
-        }
-        statusDiv.innerHTML += schedHtml;
-      }
-
-      if (!logDiv) return;
-      const logs = s.recent_logs || [];
-      if (logs.length === 0) {
-        logDiv.innerHTML = '';
-        return;
-      }
-
-      let logHtml = `<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
-        <h3 style="margin:0;">Sync Log</h3>
-        <button class="btn btn-sm btn-secondary" onclick="const e=document.getElementById('gsheets-log-entries');e.style.display=e.style.display==='none'?'block':'none';this.textContent=this.textContent==='Show'?'Hide':'Show';" style="font-size:0.75rem;padding:0.15rem 0.5rem;">Show</button>
-      </div><div id="gsheets-log-entries" style="display:none;" class="gsheets-log-list">`;
-      logs.forEach((l) => {
-        const autoSync = l.sync_type === 'daily';
-        const ok = l.success !== false;
-        const typeBadge = autoSync
-          ? 'background:var(--accent,#6c63ff);color:#fff;'
-          : 'background:var(--secondary,#555);color:#fff;';
-        const okBadge = ok
-          ? 'background:var(--success,#28a745);color:#fff;'
-          : 'background:var(--danger,#dc3545);color:#fff;';
-        let detail = '',
-          errBlock = '';
-        if (ok) {
-          const errs = (l.details || []).filter((r) => r.error);
-          detail = `${l.batting_imported} batting, ${l.pitching_imported} pitching records imported`;
-          if (errs.length) {
-            detail += ` (${errs.length} error${errs.length > 1 ? 's' : ''})`;
-            errBlock = `<div style="color:var(--danger,#dc3545);font-size:0.78rem;margin-top:0.2rem;">${errs.map((r) => `Week ${r.week} ${r.type}: ${r.error}`).join('<br>')}</div>`;
-          }
-        } else {
-          detail = `Error: ${l.error || 'Unknown error'}`;
-        }
-        logHtml += `<div class="gsheets-log-item">
-          <span class="gsheets-log-time">${l.timestamp}</span>
-          <span class="swap-badge" style="${typeBadge}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${autoSync ? 'Auto' : 'Manual'}</span>
-          <span class="swap-badge" style="${okBadge}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${ok ? 'Success' : 'Failed'}</span>
-          <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
-          ${errBlock}
-        </div>`;
-      });
-      logHtml += '</div>';
-      logDiv.innerHTML = logHtml;
-    })
-    .catch(() => {});
-}
-
-window.editGSheetsConfig = function () {
-  gsheetsEditMode = true;
-  renderGSheetsConfig();
-};
-
-window.cancelGSheetsConfig = function () {
-  gsheetsEditMode = false;
-  renderGSheetsConfig();
-};
-
-window.saveGSheetsConfig = async function () {
-  const statusDiv = document.getElementById('gsheets-status');
-  const urlInput = document.getElementById('gsheets-url');
-  const apiKeyInput = document.getElementById('gsheets-api-key');
-  const enabledCheckbox = document.getElementById('gsheets-enabled');
-  const syncTimeInput = document.getElementById('gsheets-sync-time');
-
-  const urlVal = urlInput ? urlInput.value.trim() : '';
-  const spreadsheetId = extractSpreadsheetId(urlVal);
-  if (urlVal && !spreadsheetId) {
-    if (statusDiv) {
-      statusDiv.innerHTML =
-        '<div class="gsheets-sync-status gsheets-sync-err">Could not extract spreadsheet ID from the provided URL.</div>';
-    }
-    return;
-  }
-
-  const config = getGSheetsConfig();
-  if (spreadsheetId) config.spreadsheet_id = spreadsheetId;
-  const newKey = apiKeyInput ? apiKeyInput.value.trim() : '';
-  if (newKey) config.api_key = newKey;
-  config.enabled = enabledCheckbox ? enabledCheckbox.checked : config.enabled || false;
-  config.season = SELECTED_SEASON;
-  config.sync_time = syncTimeInput ? syncTimeInput.value || '05:00' : config.sync_time || '05:00';
-
-  saveGSheetsConfigLocal(config);
-
-  try {
-    const resp = await apiFetch('/api/google-sheets/config', {
-      method: 'POST',
-      body: JSON.stringify({
-        spreadsheet_url: urlVal || config.spreadsheet_id,
-        api_key: config.api_key,
-        enabled: config.enabled,
-        season: config.season,
-        sync_time: config.sync_time,
-      }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      if (statusDiv) {
-        statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Server error: ${err.error || resp.status}</div>`;
-      }
-      return;
-    }
-  } catch (e) {
-    if (statusDiv) {
-      statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Could not reach server: ${e.message}</div>`;
-    }
-    return;
-  }
-
-  gsheetsEditMode = false;
-  const timeLabel = config.enabled ? ` at ${config.sync_time} UTC` : '';
-  renderGSheetsConfig(
-    `Configuration saved. Auto-sync is <strong>${config.enabled ? 'enabled' : 'disabled'}</strong>${timeLabel}.`
-  );
-};
-
-// ---- Client-side Google Sheets Sync ----
-
-async function fetchSheetTab(spreadsheetId, tabName, apiKey) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(tabName)}?key=${encodeURIComponent(apiKey)}`;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const resp = await fetch(url);
-    if (!resp.ok) {
-      if (resp.status === 404 || resp.status === 400) return null;
-      if (resp.status === 429 && attempt < 2) {
-        const waitSec = 65;
-        const statusDiv = document.getElementById('gsheets-status');
-        if (statusDiv) {
-          statusDiv.innerHTML = `<p>Rate limit hit — waiting ${waitSec}s before retrying (attempt ${attempt + 2}/3)...</p>`;
-        }
-        await new Promise((r) => setTimeout(r, waitSec * 1000));
-        if (statusDiv) statusDiv.innerHTML = '<p>Syncing from Google Sheets... this may take a moment.</p>';
-        continue;
-      }
-      const text = await resp.text();
-      if (resp.status === 429) {
-        throw new Error('Google Sheets API rate limit exceeded. Please wait ~60 seconds before syncing again.');
-      }
-      throw new Error(`Google Sheets API error ${resp.status}: ${text.slice(0, 200)}`);
-    }
-    const data = await resp.json();
-    return data.values || [];
-  }
-}
-
-function parseSheetRows(values) {
-  if (!values || values.length < 2) return [];
-  const headers = values[0].map((h) => (h || '').trim());
-  const rows = [];
-  for (let i = 1; i < values.length; i++) {
-    const row = {};
-    headers.forEach((h, j) => {
-      row[h] = (values[i][j] || '').trim();
-    });
-    rows.push(row);
-  }
-  return rows;
-}
-
-function gsFindCol(row, names) {
-  for (const name of names) {
-    for (const key of Object.keys(row)) {
-      if (key.toLowerCase() === name.toLowerCase()) return row[key];
-    }
-  }
-  return null;
-}
-
-function gsFindManagerForPlayer(sd, playerName, type) {
-  if (!sd.rosters || !playerName) return null;
-  const lcName = playerName.toLowerCase();
-  for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
-    for (const roster of Object.values(weekRosters)) {
-      const pool = type === 'batting' ? roster.batters || [] : roster.pitchers || [];
-      if (pool.some((p) => p.toLowerCase() === lcName)) return manager;
-    }
-  }
-  return null;
-}
-
-function gsFindManagerForPlayerWeek(sd, playerName, type, round, week) {
-  if (!sd.rosters || !playerName) return null;
-  const lcName = playerName.toLowerCase();
-  const weekKey = `${round}|${week}`;
-  for (const [manager, weekRosters] of Object.entries(sd.rosters)) {
-    const roster = weekRosters[weekKey];
-    if (!roster) continue;
-    const pool = type === 'batting' ? roster.batters || [] : roster.pitchers || [];
-    if (pool.some((p) => p.toLowerCase() === lcName)) return manager;
-  }
-  return null;
-}
-
-function gsProcessBattingRows(rows, sd, scheduleWeek) {
-  let imported = 0,
-    skipped = 0;
-  rows.forEach((row) => {
-    const batter = gsFindCol(row, ['batter', 'player', 'name']);
-    if (!batter) return;
-    let manager = gsFindManagerForPlayerWeek(sd, batter, 'batting', scheduleWeek.round, scheduleWeek.week);
-    if (!manager) manager = gsFindManagerForPlayer(sd, batter, 'batting');
-    if (!manager) manager = gsFindCol(row, ['manager', 'owner']);
-    const isUnassigned = !manager;
-    const pn = (v) => parseFloat(v) || 0;
-    // Combine BB + IBB + HBP into BB
-    const gsBBVal = pn(gsFindCol(row, ['bb', 'BB', 'walks']));
-    const gsIBBVal = pn(gsFindCol(row, ['ibb', 'IBB']));
-    const gsHBPVal = pn(gsFindCol(row, ['hbp', 'HBP']));
-    const stats = {
-      '1b': pn(gsFindCol(row, ['1b', '1B', 'singles'])),
-      '2b': pn(gsFindCol(row, ['2b', '2B', 'doubles'])),
-      '3b': pn(gsFindCol(row, ['3b', '3B', 'triples'])),
-      hr: pn(gsFindCol(row, ['hr', 'HR', 'home_runs', 'homeRuns'])),
-      r: pn(gsFindCol(row, ['r', 'R', 'runs'])),
-      rbi: pn(gsFindCol(row, ['rbi', 'RBI'])),
-      sb: pn(gsFindCol(row, ['sb', 'SB', 'stolen_bases', 'stolenBases'])),
-      bb: gsBBVal + gsIBBVal + gsHBPVal,
-      abs: pn(gsFindCol(row, ['ab', 'AB', 'abs', 'atBats'])),
-    };
-    const weeklyScore = calculateBattingScore(stats);
-    const existingManual = sd.weekly_batting.find(
-      (b) =>
-        b.round === scheduleWeek.round &&
-        b.week === scheduleWeek.week &&
-        b.batter === batter &&
-        b.manual_fields &&
-        b.manual_fields.length > 0
-    );
-    if (existingManual) return;
-    sd.weekly_batting = sd.weekly_batting.filter(
-      (b) =>
-        !(
-          b.round === scheduleWeek.round &&
-          b.week === scheduleWeek.week &&
-          b.batter === batter &&
-          b.source === 'gsheets'
-        )
-    );
-    sd.weekly_batting.push({
-      round: scheduleWeek.round,
-      week: scheduleWeek.week,
-      manager: manager || null,
-      batter,
-      status: gsFindCol(row, ['status', 'Status']) || null,
-      ...stats,
-      weekly_score: weeklyScore,
-      total_score: weeklyScore,
-      source: 'gsheets',
-    });
-    if (isUnassigned) skipped++;
-    else imported++;
-  });
-  return { imported, skipped };
-}
-
-function gsProcessPitchingRows(rows, sd, scheduleWeek) {
-  let imported = 0,
-    skipped = 0;
-  rows.forEach((row) => {
-    const pitcher = gsFindCol(row, ['pitcher', 'player', 'name']);
-    if (!pitcher) return;
-    let manager = gsFindManagerForPlayerWeek(sd, pitcher, 'pitching', scheduleWeek.round, scheduleWeek.week);
-    if (!manager) manager = gsFindManagerForPlayer(sd, pitcher, 'pitching');
-    if (!manager) manager = gsFindCol(row, ['manager', 'owner']);
-    const isUnassigned = !manager;
-    const pn = (v) => parseFloat(v) || 0;
-    // Convert IP and combine BB+IBB+HBP
-    const gsRawIP = pn(gsFindCol(row, ['ip', 'IP']));
-    const gsConvertedIP = convertIP(gsRawIP);
-    const gsPitBBVal = pn(gsFindCol(row, ['bb', 'BB', 'walks']));
-    const gsPitIBBVal = pn(gsFindCol(row, ['ibb', 'IBB']));
-    const gsPitHBPVal = pn(gsFindCol(row, ['hbp', 'HBP']));
-    const gsGSVal = pn(gsFindCol(row, ['gs', 'GS']));
-    const gsERVal = pn(gsFindCol(row, ['er', 'ER']));
-    // Calculate QS
-    let gsQSVal;
-    if (gsGSVal === 1 && gsConvertedIP >= 5 && gsERVal <= 2) {
-      gsQSVal = 1;
-    } else if (gsGSVal >= 2) {
-      gsQSVal = null;
-    } else {
-      gsQSVal = 0;
-    }
-    const stats = {
-      gs: gsGSVal,
-      w: pn(gsFindCol(row, ['w', 'W', 'wins'])),
-      qs: gsQSVal,
-      cg: pn(gsFindCol(row, ['cg', 'CG'])),
-      cgso: pn(gsFindCol(row, ['cgso', 'CGSO'])),
-      nh: pn(gsFindCol(row, ['nh', 'NH'])),
-      ip: gsConvertedIP,
-      h: pn(gsFindCol(row, ['h', 'H', 'hits'])),
-      er: gsERVal,
-      bb: gsPitBBVal + gsPitIBBVal + gsPitHBPVal,
-      k: pn(gsFindCol(row, ['k', 'K', 'so', 'SO', 'strikeouts'])),
-    };
-    const weeklyScore = calculatePitchingScore(stats);
-    const existingManual = sd.weekly_pitching.find(
-      (p) =>
-        p.round === scheduleWeek.round &&
-        p.week === scheduleWeek.week &&
-        p.pitcher === pitcher &&
-        p.manual_fields &&
-        p.manual_fields.length > 0
-    );
-    if (existingManual) return;
-    sd.weekly_pitching = sd.weekly_pitching.filter(
-      (p) =>
-        !(
-          p.round === scheduleWeek.round &&
-          p.week === scheduleWeek.week &&
-          p.pitcher === pitcher &&
-          p.source === 'gsheets'
-        )
-    );
-    sd.weekly_pitching.push({
-      round: scheduleWeek.round,
-      week: scheduleWeek.week,
-      manager: manager || null,
-      pitcher,
-      status: gsFindCol(row, ['status', 'Status']) || null,
-      ...stats,
-      weekly_score: weeklyScore,
-      source: 'gsheets',
-    });
-    if (isUnassigned) skipped++;
-    else imported++;
-  });
-  return { imported, skipped };
-}
-
-window.triggerGSheetsSync = async function () {
-  const statusDiv = document.getElementById('gsheets-status');
-  const config = getGSheetsConfig();
-
-  if (!config.spreadsheet_id) {
-    statusDiv.innerHTML =
-      '<div class="gsheets-sync-status gsheets-sync-err">No spreadsheet URL configured. Save configuration first.</div>';
-    return;
-  }
-  if (!config.api_key) {
-    statusDiv.innerHTML =
-      '<div class="gsheets-sync-status gsheets-sync-err">No API key configured. Save configuration first.</div>';
-    return;
-  }
-
-  statusDiv.innerHTML = '<p>Syncing from Google Sheets... this may take a moment.</p>';
-
-  try {
-    const seasons = getSeasons();
-    const sd = seasons[SELECTED_SEASON];
-    if (!sd) throw new Error('Season not found');
-    if (!sd.weekly_batting) sd.weekly_batting = [];
-    if (!sd.weekly_pitching) sd.weekly_pitching = [];
-
-    const results = [];
-    let totalBat = 0,
-      totalPit = 0;
-
-    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-      const sched = SEASON_SCHEDULE[i];
-      const weekNum = i + 1;
-
-      try {
-        const batValues = await fetchSheetTab(config.spreadsheet_id, `Week ${weekNum} Batting`, config.api_key);
-        if (batValues && batValues.length > 1) {
-          const r = gsProcessBattingRows(parseSheetRows(batValues), sd, sched);
-          totalBat += r.imported;
-          results.push({ week: weekNum, type: 'batting', imported: r.imported, skipped: r.skipped });
-        }
-      } catch (e) {
-        results.push({ week: weekNum, type: 'batting', error: e.message });
-      }
-
-      try {
-        const pitValues = await fetchSheetTab(config.spreadsheet_id, `Week ${weekNum} Pitching`, config.api_key);
-        if (pitValues && pitValues.length > 1) {
-          const r = gsProcessPitchingRows(parseSheetRows(pitValues), sd, sched);
-          totalPit += r.imported;
-          results.push({ week: weekNum, type: 'pitching', imported: r.imported, skipped: r.skipped });
-        }
-      } catch (e) {
-        results.push({ week: weekNum, type: 'pitching', error: e.message });
-      }
-    }
-
-    // Log the sync
-    if (!sd.upload_log) sd.upload_log = [];
-    sd.upload_log.push({
-      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
-      type: 'gsheets_sync',
-      sync_type: 'manual',
-      success: true,
-      batting_imported: totalBat,
-      pitching_imported: totalPit,
-      details: results,
-    });
-
-    saveSeason(SELECTED_SEASON, sd);
-
-    // Update config with sync status
-    config.last_sync = new Date().toISOString();
-    const errorCount = results.filter((r) => r.error).length;
-    config.last_sync_result = {
-      success: true,
-      batting_imported: totalBat,
-      pitching_imported: totalPit,
-      weeks_with_data: results.filter((r) => !r.error && r.imported > 0).length,
-      errors: errorCount,
-      details: results,
-    };
-    saveGSheetsConfigLocal(config);
-
-    const weeksWithData = config.last_sync_result.weeks_with_data;
-    const errors = config.last_sync_result.errors;
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-ok">
-      Sync complete! ${totalBat} batting, ${totalPit} pitching records imported.
-      ${weeksWithData} weeks with data${errors > 0 ? `, ${errors} errors` : ''}.
-    </div>`;
-
-    init();
-    renderGSheetsConfig();
-  } catch (e) {
-    const config2 = getGSheetsConfig();
-    config2.last_sync = new Date().toISOString();
-    config2.last_sync_result = { success: false, error: e.message };
-    saveGSheetsConfigLocal(config2);
-
-    // Log the failure
-    const seasons2 = getSeasons();
-    const sd2 = seasons2[SELECTED_SEASON];
-    if (sd2) {
-      if (!sd2.upload_log) sd2.upload_log = [];
-      sd2.upload_log.push({
-        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
-        type: 'gsheets_sync',
-        sync_type: 'manual',
-        success: false,
-        error: e.message,
-      });
-      saveSeason(SELECTED_SEASON, sd2);
-      renderGSheetsConfig();
-    }
-
-    statusDiv.innerHTML = `<div class="gsheets-sync-status gsheets-sync-err">Sync error: ${e.message}</div>`;
-  }
-};
 
 // ---- Manager Management ----
 
@@ -12211,9 +11504,10 @@ function assignUnclaimedStats(sd, playerName, managerName, rosterType) {
 function findManagerForPlayer(seasonData, playerName, type) {
   const rosters = seasonData.rosters || {};
   const rosterKey = type === 'batting' ? 'batters' : 'pitchers';
+  const lc = String(playerName).toLowerCase();
   for (const [managerName, mgrRoster] of Object.entries(rosters)) {
     for (const weekRoster of Object.values(mgrRoster)) {
-      if ((weekRoster[rosterKey] || []).includes(playerName)) {
+      if ((weekRoster[rosterKey] || []).some((p) => p.toLowerCase() === lc)) {
         return managerName;
       }
     }
