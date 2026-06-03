@@ -324,12 +324,78 @@ function computePoolPlaySeeding(seasonData, bracketSize = 8) {
   };
 }
 
-// Ordered QF qualifier names (seeds 1..8), or null if pools aren't configured. Thin wrapper
-// over the canonical seeding so every consumer agrees.
-function getQFQualifiers(sd) {
+// Authoritative seeding for a season. Once pool play is finalized the commissioner-confirmed
+// snapshot (taken at "End Pool Play") is locked in — so a later pool-play stat correction can't
+// silently reseed an in-progress playoff. Before finalization it's the live prediction. Falls
+// back to the live computation for any finalized season that predates the snapshot field.
+function getSeeding(sd) {
+  const snap = sd && sd.confirmed_seeding;
+  if (snap && Array.isArray(snap.qualifierNames) && (sd.finalized_rounds || []).includes('PP')) {
+    return {
+      qualifierNames: snap.qualifierNames,
+      pp1Leaders: new Set(snap.pp1Leaders || []),
+      pp2Leaders: new Set(snap.pp2Leaders || []),
+      allLeaders: new Set([...(snap.pp1Leaders || []), ...(snap.pp2Leaders || [])]),
+      wildcardSet: new Set(snap.wildcards || []),
+      seeds: snap.qualifierNames.map((name, i) => ({ manager: name, seed: i + 1 })),
+      fromSnapshot: true,
+    };
+  }
+  return computePoolPlaySeeding(sd);
+}
+
+// Build the JSON-serializable seeding snapshot stored at "End Pool Play".
+function buildSeedingSnapshot(sd) {
   const seeding = computePoolPlaySeeding(sd);
+  if (!seeding) return null;
+  return {
+    qualifierNames: seeding.qualifierNames,
+    pp1Leaders: [...seeding.pp1Leaders],
+    pp2Leaders: [...seeding.pp2Leaders],
+    wildcards: [...seeding.wildcardSet],
+  };
+}
+
+// Ordered QF qualifier names (seeds 1..8), or null if pools aren't configured. Thin wrapper
+// over the authoritative seeding so every consumer agrees.
+function getQFQualifiers(sd) {
+  const seeding = getSeeding(sd);
   if (!seeding || seeding.qualifierNames.length === 0) return null;
   return seeding.qualifierNames;
+}
+
+// Drop-aware round-score breakdown {bat, pit, total} for a manager in a playoff round
+// (QF/SF/Finals), attributed exactly like every other score in the app (via weeklyRowOwner).
+function roundBreakdown(sd, manager, round, rosterLookup, weekKeyToStart) {
+  const rl = rosterLookup || buildRosterLookup(sd);
+  const wk = weekKeyToStart || buildWeekKeyToStart();
+  let bat = 0,
+    pit = 0;
+  (sd.weekly_batting || []).forEach((b) => {
+    if (b.round === round && weeklyRowOwner(sd, rl, wk, b, 'batter') === manager) bat += b.weekly_score || 0;
+  });
+  (sd.weekly_pitching || []).forEach((p) => {
+    if (p.round === round && weeklyRowOwner(sd, rl, wk, p, 'pitcher') === manager) pit += p.weekly_score || 0;
+  });
+  bat = Math.round(bat * 100) / 100;
+  pit = Math.round(pit * 100) / 100;
+  return { bat, pit, total: Math.round((bat + pit) * 100) / 100 };
+}
+
+// Seed rank (1 = best) from the canonical seeding, used to break playoff ties by the same
+// hierarchy that decides seeding (total -> periods won -> batting -> pitching -> PP2 -> PP1).
+function seedRankLookup(sd) {
+  const seeding = getSeeding(sd);
+  const rank = {};
+  if (seeding) seeding.seeds.forEach((s) => (rank[s.manager] = s.seed));
+  return rank;
+}
+
+// Winner of a head-to-head playoff matchup: higher round total wins; a tie goes to the better
+// seed (whose seeding already reflects the tiebreaker hierarchy).
+function roundMatchupWinner(aName, aTotal, bName, bTotal, seedRank) {
+  if (aTotal !== bTotal) return aTotal > bTotal ? aName : bName;
+  return (seedRank[aName] ?? Infinity) <= (seedRank[bName] ?? Infinity) ? aName : bName;
 }
 
 // Returns array of SF participant names (QF winners), or null if QF not finalized
@@ -337,30 +403,23 @@ function getSFParticipants(sd) {
   const qf = getQFQualifiers(sd);
   if (!qf || qf.length < 8) return null;
   if (!(sd.finalized_rounds || []).includes('QF')) return null;
-  const batting = sd.weekly_batting || [];
-  const pitching = sd.weekly_pitching || [];
   const rosterLookup = buildRosterLookup(sd);
   const weekKeyToStart = buildWeekKeyToStart();
-  function qfScore(mgr) {
-    let t = 0;
-    batting.forEach((b) => {
-      if (b.round === 'QF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter') === mgr) {
-        t += b.weekly_score || 0;
-      }
-    });
-    pitching.forEach((p) => {
-      if (p.round === 'QF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher') === mgr) {
-        t += p.weekly_score || 0;
-      }
-    });
-    return t;
-  }
+  const seedRank = seedRankLookup(sd);
+  const win = (a, b) =>
+    roundMatchupWinner(
+      a,
+      roundBreakdown(sd, a, 'QF', rosterLookup, weekKeyToStart).total,
+      b,
+      roundBreakdown(sd, b, 'QF', rosterLookup, weekKeyToStart).total,
+      seedRank
+    );
   return [
     [qf[0], qf[7]],
     [qf[3], qf[4]],
     [qf[2], qf[5]],
     [qf[1], qf[6]],
-  ].map(([a, b]) => (qfScore(a) >= qfScore(b) ? a : b));
+  ].map(([a, b]) => win(a, b));
 }
 
 // Returns array of Finals participant names (SF winners), or null if SF not finalized
@@ -368,28 +427,21 @@ function getFinalsParticipants(sd) {
   const sf = getSFParticipants(sd);
   if (!sf || sf.length < 4) return null;
   if (!(sd.finalized_rounds || []).includes('SF')) return null;
-  const batting = sd.weekly_batting || [];
-  const pitching = sd.weekly_pitching || [];
   const rosterLookup = buildRosterLookup(sd);
   const weekKeyToStart = buildWeekKeyToStart();
-  function sfScore(mgr) {
-    let t = 0;
-    batting.forEach((b) => {
-      if (b.round === 'SF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter') === mgr) {
-        t += b.weekly_score || 0;
-      }
-    });
-    pitching.forEach((p) => {
-      if (p.round === 'SF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher') === mgr) {
-        t += p.weekly_score || 0;
-      }
-    });
-    return t;
-  }
+  const seedRank = seedRankLookup(sd);
+  const win = (a, b) =>
+    roundMatchupWinner(
+      a,
+      roundBreakdown(sd, a, 'SF', rosterLookup, weekKeyToStart).total,
+      b,
+      roundBreakdown(sd, b, 'SF', rosterLookup, weekKeyToStart).total,
+      seedRank
+    );
   return [
     [sf[0], sf[1]],
     [sf[2], sf[3]],
-  ].map(([a, b]) => (sfScore(a) >= sfScore(b) ? a : b));
+  ].map(([a, b]) => win(a, b));
 }
 
 // Returns true if a manager is qualified for a given period (all managers qualify for pp1/pp2)
@@ -4136,10 +4188,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   // Seeding comes entirely from the canonical pool-play computation (single source of truth,
   // drop-aware) — the same function feeds the scoreboard highlights and the qualification
   // gates, so the bracket can't disagree with them and no longer counts dropped players.
-  const seeding = computePoolPlaySeeding(seasonData);
+  const seeding = getSeeding(seasonData);
   const qualifiers = seeding ? seeding.qualifierNames : [];
-  const batting = seasonData.weekly_batting || [];
-  const pitching = seasonData.weekly_pitching || [];
 
   if (qualifiers.length < 8) {
     // Not enough managers to form a bracket
@@ -4157,39 +4207,13 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     { label: 'QF2', s1: { seed: 2, name: seeded[1] }, s2: { seed: 7, name: seeded[6] } },
   ];
 
-  // Compute round scores for matchups (with batting/pitching breakdown)
-  function getRoundBreakdown(manager, round) {
-    let bat = 0,
-      pit = 0;
-    batting
-      .filter((b) => (b.manager === manager || b.manager === null) && b.round === round)
-      .forEach((b) => {
-        const weekKey = `${b.round}|${b.week}`;
-        const wr = (seasonData.rosters && seasonData.rosters[manager] && seasonData.rosters[manager][weekKey]) || {
-          batters: [],
-        };
-        const wrd =
-          (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) ||
-          {};
-        if (wr.batters.includes(b.batter) || wrd[b.batter]) bat += b.weekly_score || 0;
-      });
-    pitching
-      .filter((p) => (p.manager === manager || p.manager === null) && p.round === round)
-      .forEach((p) => {
-        const weekKey = `${p.round}|${p.week}`;
-        const wr = (seasonData.rosters && seasonData.rosters[manager] && seasonData.rosters[manager][weekKey]) || {
-          pitchers: [],
-        };
-        const wrd =
-          (seasonData.roster_dates && seasonData.roster_dates[manager] && seasonData.roster_dates[manager][weekKey]) ||
-          {};
-        if (wr.pitchers.includes(p.pitcher) || wrd[p.pitcher]) pit += p.weekly_score || 0;
-      });
-    bat = Math.round(bat * 100) / 100;
-    pit = Math.round(pit * 100) / 100;
-    const total = Math.round((bat + pit) * 100) / 100;
-    return { bat, pit, total };
-  }
+  // Round scores + matchup winners use the shared, drop-aware helpers so the bracket agrees
+  // with the qualification gates, and ties resolve by the seeding tiebreaker hierarchy.
+  const rosterLookup = buildRosterLookup(seasonData);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const seedRank = seedRankLookup(seasonData);
+  const getRoundBreakdown = (manager, round) =>
+    roundBreakdown(seasonData, manager, round, rosterLookup, weekKeyToStart);
   function bracketScoreHtml(bd) {
     if (bd.total <= 0) return '<span class="bracket-score">-</span>';
     return `<span class="bracket-score-group">
@@ -4212,7 +4236,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const s1Bd = getRoundBreakdown(m.s1.name, 'QF');
     const s2Bd = getRoundBreakdown(m.s2.name, 'QF');
     const qfDone = finalized.includes('QF');
-    const winner = qfDone ? (s1Bd.total >= s2Bd.total ? m.s1.name : m.s2.name) : null;
+    const winner = qfDone ? roundMatchupWinner(m.s1.name, s1Bd.total, m.s2.name, s2Bd.total, seedRank) : null;
     qfWinners.push(winner);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
@@ -4242,8 +4266,11 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const s1Bd = m.t1 !== 'TBD' ? getRoundBreakdown(m.t1, 'SF') : { bat: 0, pit: 0, total: 0 };
     const s2Bd = m.t2 !== 'TBD' ? getRoundBreakdown(m.t2, 'SF') : { bat: 0, pit: 0, total: 0 };
     const sfDone = finalized.includes('SF');
-    const winner = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Bd.total >= s2Bd.total ? m.t1 : m.t2) : null;
-    const loser = sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD' ? (s1Bd.total >= s2Bd.total ? m.t2 : m.t1) : null;
+    const winner =
+      sfDone && m.t1 !== 'TBD' && m.t2 !== 'TBD'
+        ? roundMatchupWinner(m.t1, s1Bd.total, m.t2, s2Bd.total, seedRank)
+        : null;
+    const loser = winner ? (winner === m.t1 ? m.t2 : m.t1) : null;
     sfWinners.push(winner);
     sfLosers.push(loser);
     html += `<div class="bracket-matchup">
@@ -4267,7 +4294,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const f1Bd = f1 !== 'TBD' ? getRoundBreakdown(f1, 'Finals') : { bat: 0, pit: 0, total: 0 };
   const f2Bd = f2 !== 'TBD' ? getRoundBreakdown(f2, 'Finals') : { bat: 0, pit: 0, total: 0 };
   const finalsDone = finalized.includes('Finals');
-  const champion = finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? (f1Bd.total >= f2Bd.total ? f1 : f2) : null;
+  const champion =
+    finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? roundMatchupWinner(f1, f1Bd.total, f2, f2Bd.total, seedRank) : null;
 
   html += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
@@ -4375,7 +4403,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   // The same computation feeds the tentative bracket and the qualification gates, so the
   // scoreboard highlights can't disagree with who actually seeds/qualifies. It also scores via
   // managerWeekSubtotal, so the highlighted leaders match the totals shown in these tables.
-  const seeding = computePoolPlaySeeding(seasonData) || {
+  const seeding = getSeeding(seasonData) || {
     pp1Leaders: new Set(),
     pp2Leaders: new Set(),
     allLeaders: new Set(),
@@ -12024,6 +12052,14 @@ window.finalizeRound = function (roundKey, weekIndex) {
   if (sd.finalized_rounds.includes(roundKey)) return;
 
   sd.finalized_rounds.push(roundKey);
+
+  // Lock in the playoff seeds at the moment pool play is confirmed. From here on the bracket
+  // and qualification read this snapshot, so a later pool-play stat correction can't silently
+  // reseed an in-progress playoff.
+  if (roundKey === 'PP') {
+    const snapshot = buildSeedingSnapshot(sd);
+    if (snapshot) sd.confirmed_seeding = snapshot;
+  }
 
   // Auto-advance players to next round if applicable
   if (roundKey === 'PP' && weekIndex < SEASON_SCHEDULE.length - 1) {
