@@ -266,7 +266,20 @@ function writeDB(data, opts = {}) {
   // Stamp every write so startup can tell whether the local disk copy or the
   // Upstash backup is newer (prevents a stale backup from clobbering good data).
   data.last_saved_at = new Date().toISOString();
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
+  // Atomic write: serialize to a temp file, fsync it to disk, then rename over the live file.
+  // rename(2) is atomic on the same filesystem, so a crash/restart mid-write can never leave a
+  // truncated or corrupt db.json — the previous good file stays intact until the new one is
+  // fully durable. (Plain writeFileSync onto db.json leaves a corruption window.)
+  const json = JSON.stringify(data, null, 2);
+  const tmp = `${DB_FILE}.tmp`;
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeSync(fd, json);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, DB_FILE);
   // Back up to Upstash so data survives Render's ephemeral filesystem. By default this is
   // fire-and-forget, but unattended/critical writes (the 4am sync, manual backfills) pass
   // { awaitBackup: true } and await the returned promise so the write can't be lost if the
@@ -432,6 +445,29 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     );
     sd.batters_team = { ...(existingSd.batters_team || {}), ...(sd.batters_team || {}) };
     sd.pitchers_team = { ...(existingSd.pitchers_team || {}), ...(sd.pitchers_team || {}) };
+
+    // roster_dates (add/drop windows) are written by server-side repairs (e.g. the gated
+    // roster-chain repair, swap-date backfill) as well as the client. Re-append any
+    // manager/week/player entry the incoming payload is missing so a stale client can't
+    // silently revert server-added dates — mirroring the swap/stat protection. A matching
+    // entry in the payload still wins, so legitimate commissioner edits propagate.
+    if (existingSd.roster_dates && typeof existingSd.roster_dates === 'object') {
+      if (!sd.roster_dates || typeof sd.roster_dates !== 'object') sd.roster_dates = {};
+      for (const [mgr, weeks] of Object.entries(existingSd.roster_dates)) {
+        if (!weeks || typeof weeks !== 'object') continue;
+        for (const [weekKey, players] of Object.entries(weeks)) {
+          if (!players || typeof players !== 'object') continue;
+          for (const [player, dates] of Object.entries(players)) {
+            if (sd.roster_dates[mgr] && sd.roster_dates[mgr][weekKey] && player in sd.roster_dates[mgr][weekKey]) {
+              continue; // client has an entry for this slot — its version wins
+            }
+            if (!sd.roster_dates[mgr]) sd.roster_dates[mgr] = {};
+            if (!sd.roster_dates[mgr][weekKey]) sd.roster_dates[mgr][weekKey] = {};
+            sd.roster_dates[mgr][weekKey][player] = dates;
+          }
+        }
+      }
+    }
   }
 
   // Propagate roster add dates into player_dates for mid-week adds, then zero out
@@ -900,6 +936,10 @@ const ROSTER_REPAIR_VERSION = 5;
 // erroneous duplicate.  Called at startup before repairCarryForwardRosters so the
 // carry-forward pass sees the correct swap list.  Idempotent.
 function repairMissingSwapRecords(db) {
+  // One-time data repair (restore specific missing swaps + remove one known duplicate). Once
+  // applied and durably persisted it never needs to run again — gate it so it self-disables
+  // instead of re-scanning every season's swaps on every boot.
+  if (!db || db.swap_records_repair_done) return false;
   let changed = false;
 
   for (const sd of Object.values(db.seasons || {})) {
@@ -998,7 +1038,11 @@ function repairMissingSwapRecords(db) {
     }
   }
 
-  return changed;
+  db.swap_records_repair_done = true;
+  if (changed) console.log('[Swap Repair] Applied one-time missing-swap repairs.');
+  // Return true so the caller persists the flag (and any repair); the gate above then makes
+  // this one-time pass a no-op on every subsequent boot.
+  return true;
 }
 
 // Restore two roster slots that were never captured in the initial submission, plus the

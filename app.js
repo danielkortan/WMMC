@@ -4051,7 +4051,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   const bracketRosterLookup = buildRosterLookup(seasonData);
   batting.forEach((b) => {
-    const mgr = b.manager || bracketRosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+    const mgr = b.manager || bracketRosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
     if (!mgr || !mgrPPScores[mgr]) return;
     const weekKey = `${b.round}|${b.week}`;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
@@ -4065,7 +4065,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     if (b.round === 'PP2') mgrPPScores[mgr].pp2 += b.weekly_score || 0;
   });
   pitching.forEach((p) => {
-    const mgr = p.manager || bracketRosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+    const mgr = p.manager || bracketRosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
     if (!mgr || !mgrPPScores[mgr]) return;
     const weekKey = `${p.round}|${p.week}`;
     const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
@@ -4702,7 +4702,7 @@ function renderTrends() {
     const trendsRosterLookup = buildRosterLookup(seasonData);
     battingData = (seasonData.weekly_batting || [])
       .map((b) => {
-        const mgr = b.manager || trendsRosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+        const mgr = b.manager || trendsRosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
         return mgr
           ? { player: b.batter, manager: mgr, round: b.round, week: b.week, weekly_score: b.weekly_score || 0 }
           : null;
@@ -4710,7 +4710,7 @@ function renderTrends() {
       .filter(Boolean);
     pitchingData = (seasonData.weekly_pitching || [])
       .map((p) => {
-        const mgr = p.manager || trendsRosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+        const mgr = p.manager || trendsRosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
         return mgr
           ? { player: p.pitcher, manager: mgr, round: p.round, week: p.week, weekly_score: p.weekly_score || 0 }
           : null;
@@ -4750,14 +4750,14 @@ function renderTrends() {
   const dailyRosterLookup = buildRosterLookup(seasonData);
   const dailyManagerScores = {};
   (seasonData.daily_batting || []).forEach((rec) => {
-    const mgr = rec.manager || dailyRosterLookup[`${esc(rec.batter)}|${rec.round}|${rec.week}`];
+    const mgr = rec.manager || dailyRosterLookup[rosterLookupKey(rec.batter, rec.round, rec.week)];
     if (!mgr || !registeredNames.has(mgr)) return;
     const score = calculateBattingScore(rec.delta || {});
     if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
     dailyManagerScores[rec.date][mgr] = (dailyManagerScores[rec.date][mgr] || 0) + score;
   });
   (seasonData.daily_pitching || []).forEach((rec) => {
-    const mgr = rec.manager || dailyRosterLookup[`${esc(rec.pitcher)}|${rec.round}|${rec.week}`];
+    const mgr = rec.manager || dailyRosterLookup[rosterLookupKey(rec.pitcher, rec.round, rec.week)];
     if (!mgr || !registeredNames.has(mgr)) return;
     const score = calculatePitchingScore(rec.delta || {});
     if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
@@ -5897,9 +5897,10 @@ function findManagerForPlayerWeek(seasonData, playerName, type, round, week) {
   const rosters = seasonData.rosters || {};
   const rosterKey = type === 'batting' ? 'batters' : 'pitchers';
   const weekKey = `${round}|${week}`;
+  const lc = String(playerName).toLowerCase();
   for (const [managerName, mgrRoster] of Object.entries(rosters)) {
     const weekRoster = mgrRoster[weekKey];
-    if (weekRoster && (weekRoster[rosterKey] || []).includes(playerName)) {
+    if (weekRoster && (weekRoster[rosterKey] || []).some((p) => p.toLowerCase() === lc)) {
       return managerName;
     }
   }
@@ -5908,23 +5909,31 @@ function findManagerForPlayerWeek(seasonData, playerName, type, round, week) {
 
 // Build a lookup of "player|round|week" -> managerName from rosters + roster_dates.
 // Used to attribute null-manager stats (players dropped mid-week) to the correct manager.
+// Case-insensitive lookup key (player|round|week). Roster names are entered by the
+// commissioner and may differ in case from the MLB feed name on a stat row; lowercasing both
+// sides matches the case-insensitive server-side lookups so the web and Slack scoreboards
+// agree. (Earlier this also defeated an esc()-vs-raw key mismatch in several call sites.)
+function rosterLookupKey(name, round, week) {
+  return `${String(name).toLowerCase()}|${round}|${week}`;
+}
+
 function buildRosterLookup(seasonData) {
   const lookup = {};
+  const add = (name, round, week, mgr) => {
+    const k = rosterLookupKey(name, round, week);
+    if (!lookup[k]) lookup[k] = mgr;
+  };
   for (const [mgr, mgrRosters] of Object.entries(seasonData.rosters || {})) {
     for (const [weekKey, weekRoster] of Object.entries(mgrRosters)) {
-      (weekRoster.batters || []).forEach((p) => {
-        if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr;
-      });
-      (weekRoster.pitchers || []).forEach((p) => {
-        if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr;
-      });
+      const [round, week] = weekKey.split('|');
+      (weekRoster.batters || []).forEach((p) => add(p, round, week, mgr));
+      (weekRoster.pitchers || []).forEach((p) => add(p, round, week, mgr));
     }
   }
   for (const [mgr, mgrDates] of Object.entries(seasonData.roster_dates || {})) {
     for (const [weekKey, players] of Object.entries(mgrDates)) {
-      Object.keys(players).forEach((p) => {
-        if (!lookup[`${p}|${weekKey}`]) lookup[`${p}|${weekKey}`] = mgr;
-      });
+      const [round, week] = weekKey.split('|');
+      Object.keys(players).forEach((p) => add(p, round, week, mgr));
     }
   }
   return lookup;
@@ -5968,7 +5977,7 @@ function buildWeekKeyToStart() {
 function weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, row, playerKey) {
   const player = row[playerKey];
   const weekKey = `${row.round}|${row.week}`;
-  const mgr = rosterLookup[`${player}|${weekKey}`];
+  const mgr = rosterLookup[rosterLookupKey(player, row.round, row.week)];
   if (!mgr) return null;
   if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKey)) return null;
   return mgr;
@@ -6024,7 +6033,7 @@ function buildTeamWeekly(seasonData) {
   const map = {};
 
   batting.forEach((b) => {
-    const mgr = b.manager || rosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+    const mgr = b.manager || rosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
     if (!mgr) return;
     const weekKey = `${b.round}|${b.week}`;
     if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, b.batter, weekKey)) return;
@@ -6051,7 +6060,7 @@ function buildTeamWeekly(seasonData) {
   });
 
   pitching.forEach((p) => {
-    const mgr = p.manager || rosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+    const mgr = p.manager || rosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
     if (!mgr) return;
     const weekKey = `${p.round}|${p.week}`;
     if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, p.pitcher, weekKey)) return;
@@ -12058,9 +12067,10 @@ function assignUnclaimedStats(sd, playerName, managerName, rosterType) {
 function findManagerForPlayer(seasonData, playerName, type) {
   const rosters = seasonData.rosters || {};
   const rosterKey = type === 'batting' ? 'batters' : 'pitchers';
+  const lc = String(playerName).toLowerCase();
   for (const [managerName, mgrRoster] of Object.entries(rosters)) {
     for (const weekRoster of Object.values(mgrRoster)) {
-      if ((weekRoster[rosterKey] || []).includes(playerName)) {
+      if ((weekRoster[rosterKey] || []).some((p) => p.toLowerCase() === lc)) {
         return managerName;
       }
     }
