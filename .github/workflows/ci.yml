@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 18 # matches refresh-db-fixture.yml / Node 18+ in CLAUDE.md
+          node-version: 22 # required: js/ tests are ESM in a CJS package, which only runs on Node 22's module syntax detection
           cache: npm
 
       - run: npm install

@@ -11,7 +11,7 @@ See README.md for full feature list, API reference, and deployment instructions.
 Always use the tools below. If you genuinely think the wrong tool was chosen for a task, flag it once, then proceed with the stack unless I say otherwise.
 
 - **Language:** JavaScript (ES2021) — no TypeScript
-- **Runtime:** Node.js 18+
+- **Runtime:** Node.js 22+ (required — the `js/` ESM modules live in a CommonJS package and only load via Node's module syntax detection, which is unflagged from Node ~20.19/22+; older versions cannot run the tests)
 - **Frontend:** Vanilla JS — `app.js` monolith being incrementally modularized into `js/`; Chart.js loaded from CDN
 - **Backend / API:** Express 4.x (`server.js`)
 - **Database:** File-backed `db.json` via synchronous `fs`; optional Upstash Redis backup for Render deploys
