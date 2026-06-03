@@ -1173,15 +1173,17 @@
     border-color: #2a2a45;
   }
 
-  /* .form-select is a deliberately white dropdown — force dark, readable text.
-     !important + the explicit option rule override both the native (iOS/Android)
-     select text color and the generic mobile dark-input styling that otherwise
-     leaves the roster picker light-grey-on-white. */
+  /* .form-select is a deliberately white dropdown. On a dark-mode phone the
+     browser dark-themes native form controls (and their option popups),
+     overriding author color — that's what made the roster picker light-on-white.
+     color-scheme:light forces the control to render light (dark text on white);
+     the explicit color/option rules reinforce it. */
   .form-select,
   .roster-manager-bar-inner .form-select {
-    background-color: #fff !important;
-    color: var(--text) !important;
-    -webkit-text-fill-color: var(--text) !important;
+    color-scheme: light;
+    background-color: #fff;
+    color: var(--text);
+    -webkit-text-fill-color: var(--text);
     opacity: 1;
   }
   .form-select option {
