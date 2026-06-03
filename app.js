@@ -2575,7 +2575,10 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
             if (r[playerKey] !== name) return false;
             const weekKey = `${r.round}|${r.week}`;
             if (playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, name, weekKey)) return false;
-            const mgr = r.manager || detailRosterLookup[`${name}|${r.round}|${r.week}`];
+            // Authoritative per-week owner is the roster, not the stored weekly-row manager
+            // (which can be stale after a re-sync/backfill and would otherwise credit weeks
+            // before the player was added).
+            const mgr = detailRosterLookup[`${name}|${r.round}|${r.week}`];
             return mgr === managerName;
           })
           .reduce((total, r) => {
@@ -2761,11 +2764,21 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
   const playerKey = isBat ? 'batter' : 'pitcher';
 
   const pqvRosterLookup = buildRosterLookup(sd);
+  const pqvWeekKeyToStart = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (dates && dates[i]) pqvWeekKeyToStart[`${s.round}|${s.week}`] = dates[i].start;
+  });
   const records = arr
     .filter((r) => {
       if (r[playerKey] !== playerName) return false;
-      const mgr = r.manager || pqvRosterLookup[`${playerName}|${r.round}|${r.week}`];
-      return mgr === managerName;
+      const weekKey = `${r.round}|${r.week}`;
+      // Use the roster as the authoritative per-week owner (not the stored weekly-row
+      // manager, which can be stale after a re-sync and would credit pre-add weeks), and
+      // drop weeks after the player was dropped — mirroring playerPts / computeManagerScores.
+      const mgr = pqvRosterLookup[`${playerName}|${weekKey}`];
+      if (mgr !== managerName) return false;
+      if (playerDroppedBeforeWeek(sd, pqvWeekKeyToStart, mgr, playerName, weekKey)) return false;
+      return true;
     })
     .sort((a, b) => weekIndexFromKey(a.round, a.week) - weekIndexFromKey(b.round, b.week));
 
