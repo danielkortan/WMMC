@@ -20,6 +20,10 @@
   padding: 0 0.25rem;
   padding-bottom: env(safe-area-inset-bottom, 0px);
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+  /* Force GPU compositing so the nav stays anchored during iOS pinch-zoom */
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 .mobile-nav-btn {
@@ -1142,6 +1146,12 @@
   /* ── Roster ─────────────────────────────────────────────────── */
   .roster-manager-bar-inner {
     gap: 0.5rem;
+  }
+
+  /* When the title is hidden (commissioner view), let the select fill the row */
+  .roster-manager-bar-inner .form-select {
+    width: 100%;
+    max-width: 100%;
   }
 
   /* ── Trends charts ──────────────────────────────────────────── */

@@ -6089,6 +6089,7 @@ function setupMyRoster() {
   // Inactive non-commissioner managers cannot manage rosters
   if (!isActive && !isCommissioner) {
     managerSelect.style.display = 'none';
+    titleEl.style.display = '';
     titleEl.textContent = loggedInMgr.name + "'s Roster";
     document.getElementById('roster-content').innerHTML =
       '<div class="card"><p style="color:var(--text-muted);">Your account is currently inactive. Contact the commissioner to be reactivated.</p></div>';
@@ -6096,29 +6097,41 @@ function setupMyRoster() {
   }
 
   if (isCommissioner) {
-    // Commissioner: show dropdown to switch between any manager's roster
+    // Preserve the roster the commissioner was viewing across re-renders (e.g. auto-poll)
+    const prevSelection = managerSelect.value;
+
+    // Select carries the full "Name's Roster" label so the separate title is redundant
+    titleEl.style.display = 'none';
     managerSelect.style.display = '';
     managerSelect.innerHTML = [...managers]
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((m) => {
-        const label = m.name + (m.commissioner ? ' (Commissioner)' : '') + (m.active === false ? ' (Inactive)' : '');
-        return `<option value="${esc(m.name)}"${m.name === loggedInMgr.name ? ' selected' : ''}>${esc(label)}</option>`;
+        let label = m.name + "'s Roster";
+        if (m.commissioner) label += ' (Commissioner)';
+        if (m.active === false) label += ' (Inactive)';
+        return `<option value="${esc(m.name)}">${esc(label)}</option>`;
       })
       .join('');
 
+    // Restore previous selection if still valid, otherwise default to logged-in user
+    if (prevSelection && [...managerSelect.options].some((o) => o.value === prevSelection)) {
+      managerSelect.value = prevSelection;
+    } else {
+      managerSelect.value = loggedInMgr.name;
+    }
+
     managerSelect.onchange = () => {
-      const selectedName = managerSelect.value;
-      titleEl.textContent = selectedName + "'s Roster";
-      renderRosterData(selectedName, true);
+      renderRosterData(managerSelect.value, true);
     };
   } else {
     // Regular manager: no dropdown needed
     managerSelect.style.display = 'none';
+    titleEl.style.display = '';
+    titleEl.textContent = loggedInMgr.name + "'s Roster";
   }
 
-  // Show the logged-in user's roster by default
-  titleEl.textContent = loggedInMgr.name + "'s Roster";
-  renderRosterData(loggedInMgr.name, isCommissioner);
+  const displayName = isCommissioner ? managerSelect.value : loggedInMgr.name;
+  renderRosterData(displayName, isCommissioner);
 }
 
 function renderRosterData(managerName, isCommissioner) {
