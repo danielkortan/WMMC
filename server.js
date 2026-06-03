@@ -13,8 +13,16 @@ const DB_FILE = process.env.DB_PATH || path.join(__dirname, 'db.json');
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'Welcome2Hell';
 
-// Upstash Redis REST — durable backup for db.json across Render ephemeral deploys.
-// Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Render env vars.
+// Upstash Redis REST — optional durable backup for db.json across Render ephemeral deploys.
+// Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Render env vars to enable.
+//
+// IMPORTANT: this backs up the ENTIRE db.json as a single Upstash value. Upstash's REST /set
+// rejects payloads over its request-size limit (~1 MB on the free tier), and a full season of
+// per-game daily records pushes db.json well past that (multiple MB). So for this league the
+// PRIMARY durable store is the Render persistent disk (render.yaml `disk:` + DB_PATH=/var/data),
+// NOT Upstash — leaving Upstash unset is intentional. Do not enable it expecting a working
+// backup unless the payload is first slimmed (e.g. back up weekly rollups only). saveToUpstash
+// surfaces failures (size/status) rather than swallowing them, and the 4am sync awaits + alerts.
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const UPSTASH_KEY = 'wmmc_db';
@@ -1009,6 +1017,10 @@ function repairMissingSwapRecords(db) {
 // Week-1 seeds + swaps. Called at startup between repairMissingSwapRecords and the
 // carry-forward pass.  Idempotent.
 function repairMissingRosterChains(db) {
+  // One-time data repair: once applied (and durably persisted) it never needs to run again.
+  // Gate it behind a flag — like purgeCarriedForwardDropRecords — so it self-disables instead
+  // of re-scanning every boot forever.
+  if (!db || db.roster_chains_repair_done) return false;
   let changed = false;
   const WEEK1_KEY = 'PP1|Week 1';
   const initialSeeds = [
@@ -1172,7 +1184,11 @@ function repairMissingRosterChains(db) {
     }
   }
 
-  return changed;
+  db.roster_chains_repair_done = true;
+  if (changed) console.log('[Roster Chain Repair] Applied missing Austin/Anton roster chains.');
+  // Return true so the caller persists the flag (and any repair); the gate above then makes
+  // this one-time pass a no-op on every subsequent boot.
+  return true;
 }
 
 // Fill / recompute per-week roster entries by carrying forward the most recent trusted

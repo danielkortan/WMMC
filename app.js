@@ -205,19 +205,23 @@ function getQFQualifiers(sd) {
 
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
   const mgrScores = {};
   managers.forEach((m) => {
     mgrScores[m.name] = { pp1: 0, pp2: 0 };
   });
   batting.forEach((b) => {
-    if (!mgrScores[b.manager]) return;
-    if (b.round === 'PP1') mgrScores[b.manager].pp1 += b.weekly_score || 0;
-    if (b.round === 'PP2') mgrScores[b.manager].pp2 += b.weekly_score || 0;
+    const owner = weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter');
+    if (!owner || !mgrScores[owner]) return;
+    if (b.round === 'PP1') mgrScores[owner].pp1 += b.weekly_score || 0;
+    if (b.round === 'PP2') mgrScores[owner].pp2 += b.weekly_score || 0;
   });
   pitching.forEach((p) => {
-    if (!mgrScores[p.manager]) return;
-    if (p.round === 'PP1') mgrScores[p.manager].pp1 += p.weekly_score || 0;
-    if (p.round === 'PP2') mgrScores[p.manager].pp2 += p.weekly_score || 0;
+    const owner = weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher');
+    if (!owner || !mgrScores[owner]) return;
+    if (p.round === 'PP1') mgrScores[owner].pp1 += p.weekly_score || 0;
+    if (p.round === 'PP2') mgrScores[owner].pp2 += p.weekly_score || 0;
   });
 
   const pp1Leaders = new Set();
@@ -263,10 +267,20 @@ function getSFParticipants(sd) {
   if (!(sd.finalized_rounds || []).includes('QF')) return null;
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
   function qfScore(mgr) {
     let t = 0;
-    batting.filter((b) => b.manager === mgr && b.round === 'QF').forEach((b) => (t += b.weekly_score || 0));
-    pitching.filter((p) => p.manager === mgr && p.round === 'QF').forEach((p) => (t += p.weekly_score || 0));
+    batting.forEach((b) => {
+      if (b.round === 'QF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter') === mgr) {
+        t += b.weekly_score || 0;
+      }
+    });
+    pitching.forEach((p) => {
+      if (p.round === 'QF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher') === mgr) {
+        t += p.weekly_score || 0;
+      }
+    });
     return t;
   }
   return [
@@ -284,10 +298,20 @@ function getFinalsParticipants(sd) {
   if (!(sd.finalized_rounds || []).includes('SF')) return null;
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
   function sfScore(mgr) {
     let t = 0;
-    batting.filter((b) => b.manager === mgr && b.round === 'SF').forEach((b) => (t += b.weekly_score || 0));
-    pitching.filter((p) => p.manager === mgr && p.round === 'SF').forEach((p) => (t += p.weekly_score || 0));
+    batting.forEach((b) => {
+      if (b.round === 'SF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter') === mgr) {
+        t += b.weekly_score || 0;
+      }
+    });
+    pitching.forEach((p) => {
+      if (p.round === 'SF' && weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher') === mgr) {
+        t += p.weekly_score || 0;
+      }
+    });
     return t;
   }
   return [
@@ -2573,13 +2597,7 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
         arr
           .filter((r) => {
             if (r[playerKey] !== name) return false;
-            const weekKey = `${r.round}|${r.week}`;
-            if (playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, name, weekKey)) return false;
-            // Authoritative per-week owner is the roster, not the stored weekly-row manager
-            // (which can be stale after a re-sync/backfill and would otherwise credit weeks
-            // before the player was added).
-            const mgr = detailRosterLookup[`${name}|${r.round}|${r.week}`];
-            return mgr === managerName;
+            return weeklyRowOwner(sd, detailRosterLookup, detailWeekKeyToStart, r, playerKey) === managerName;
           })
           .reduce((total, r) => {
             const weekKey = `${r.round}|${r.week}`;
@@ -2771,14 +2789,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
   const records = arr
     .filter((r) => {
       if (r[playerKey] !== playerName) return false;
-      const weekKey = `${r.round}|${r.week}`;
-      // Use the roster as the authoritative per-week owner (not the stored weekly-row
-      // manager, which can be stale after a re-sync and would credit pre-add weeks), and
-      // drop weeks after the player was dropped — mirroring playerPts / computeManagerScores.
-      const mgr = pqvRosterLookup[`${playerName}|${weekKey}`];
-      if (mgr !== managerName) return false;
-      if (playerDroppedBeforeWeek(sd, pqvWeekKeyToStart, mgr, playerName, weekKey)) return false;
-      return true;
+      return weeklyRowOwner(sd, pqvRosterLookup, pqvWeekKeyToStart, r, playerKey) === managerName;
     })
     .sort((a, b) => weekIndexFromKey(a.round, a.week) - weekIndexFromKey(b.round, b.week));
 
@@ -5537,179 +5548,6 @@ function backfillRosterDatesFromSwaps(seasonData) {
   return changed;
 }
 
-// Restore two roster slots that were never captured in the initial submission, plus the
-// full transaction chain each went through afterward:
-//   • Austin Johnson's pitcher Tarik Skubal — IL-swapped for Sandy Alcantara on 2026-05-04
-//     (Skubal credited through 5/4, Alcantara from 5/5), Alcantara dropped 2026-05-27 with
-//     no replacement, then Shane Baz added 2026-06-02.
-//   • Anton Capria's batter Kerry Carpenter — Free-swapped for Rafael Devers on 2026-05-09
-//     (Carpenter through 5/8, Devers from 5/9).
-// Mirrors server.js repairMissingRosterChains. Idempotent: injects approved swap records,
-// pre-seeds roster_dates with the exact adjacent effective dates (so no day is double-counted),
-// forces the Week-1 seeds present and the downstream players (who only arrive via later swaps)
-// absent. Runs before backfillRosterDatesFromSwaps so those exact dates are not overwritten
-// with swap_date. The ROSTER_REPAIR_VERSION bump makes repairCarryForwardRosters rebuild every
-// week from these Week-1 seeds + swaps.
-function repairMissingRosterChains(seasonData) {
-  if (!seasonData || seasonData.status !== 'active' || !seasonData.swaps) return false;
-  let changed = false;
-  const WEEK1_KEY = 'PP1|Week 1';
-  const initialSeeds = [
-    {
-      manager: 'Austin Johnson',
-      list: 'pitchers',
-      player: 'Tarik Skubal',
-      downstream: ['Sandy Alcantara', 'Shane Baz'],
-    },
-    { manager: 'Anton Capria', list: 'batters', player: 'Kerry Carpenter', downstream: ['Rafael Devers'] },
-  ];
-  const poolSeeds = [
-    { pool: 'pitchers_pool', players: ['Tarik Skubal', 'Sandy Alcantara', 'Shane Baz'] },
-    { pool: 'batters_pool', players: ['Kerry Carpenter', 'Rafael Devers'] },
-  ];
-  // Adjacent dates: the outgoing player keeps credit through drop_date and the incoming
-  // player starts on add_date, so the swap week never double-counts the slot.
-  const chain = [
-    {
-      manager: 'Austin Johnson',
-      player_out: 'Tarik Skubal',
-      player_in: 'Sandy Alcantara',
-      reason: 'IL Swap',
-      swap_date: '2026-05-04',
-      drop_date: '2026-05-04',
-      add_date: '2026-05-05',
-    },
-    {
-      manager: 'Austin Johnson',
-      player_out: 'Sandy Alcantara',
-      player_in: null,
-      reason: 'Drop Swap',
-      swap_date: '2026-05-27',
-      drop_date: '2026-05-27',
-      add_date: null,
-    },
-    {
-      manager: 'Austin Johnson',
-      player_out: null,
-      player_in: 'Shane Baz',
-      reason: 'Drop Swap',
-      swap_date: '2026-06-02',
-      drop_date: null,
-      add_date: '2026-06-02',
-    },
-    {
-      manager: 'Anton Capria',
-      player_out: 'Kerry Carpenter',
-      player_in: 'Rafael Devers',
-      reason: 'Free Swap (one per round)',
-      swap_date: '2026-05-09',
-      drop_date: '2026-05-08',
-      add_date: '2026-05-09',
-    },
-  ];
-
-  const scheduleDates = seasonData.schedule_dates || [];
-  const dateToWeekKey = (dateStr) => {
-    if (!dateStr) return null;
-    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-      const d = scheduleDates[i];
-      if (d && dateStr >= d.start && dateStr <= d.end) return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
-    }
-    return null;
-  };
-
-  // Ensure the involved players exist in the pools so carry-forward can place the pure
-  // add (Shane Baz) and classify swap-ins correctly.
-  for (const { pool, players } of poolSeeds) {
-    if (!Array.isArray(seasonData[pool])) seasonData[pool] = [];
-    for (const p of players) {
-      if (!seasonData[pool].includes(p)) {
-        seasonData[pool].push(p);
-        changed = true;
-      }
-    }
-  }
-
-  // Force the Week-1 initial submission: seed player present, downstream players absent.
-  // Then fold in any chain swap that lands in Week 1 itself, because
-  // repairCarryForwardRosters treats Week 1 as the trusted seed and never applies swaps to
-  // it — so the seed array must already hold the end-of-week-1 state for the carry-forward
-  // of later weeks to be correct. The outgoing player is still credited for Week 1 via its
-  // roster_dates drop_date. (No-op when every swap falls in a later week.)
-  if (!seasonData.rosters) seasonData.rosters = {};
-  for (const { manager, list, player, downstream } of initialSeeds) {
-    if (!seasonData.rosters[manager]) seasonData.rosters[manager] = {};
-    if (!seasonData.rosters[manager][WEEK1_KEY]) seasonData.rosters[manager][WEEK1_KEY] = { batters: [], pitchers: [] };
-    const wr = seasonData.rosters[manager][WEEK1_KEY];
-    if (!Array.isArray(wr[list])) wr[list] = [];
-    const before = JSON.stringify(wr[list]);
-    let arr = wr[list].filter((p) => !downstream.includes(p));
-    if (!arr.includes(player)) arr.push(player);
-    for (const c of chain) {
-      if (c.manager !== manager || dateToWeekKey(c.swap_date) !== WEEK1_KEY) continue;
-      if (c.player_out) arr = arr.filter((p) => p !== c.player_out);
-      if (c.player_in && !arr.includes(c.player_in)) arr.push(c.player_in);
-    }
-    if (JSON.stringify(arr) !== before) {
-      wr[list] = arr;
-      changed = true;
-    }
-  }
-
-  // Inject the approved swap chain and pre-seed roster_dates with the exact dates.
-  if (!seasonData.roster_dates) seasonData.roster_dates = {};
-  for (const c of chain) {
-    const wk = dateToWeekKey(c.swap_date);
-    const exists = seasonData.swaps.some(
-      (s) =>
-        s.manager === c.manager &&
-        (s.player_out || null) === (c.player_out || null) &&
-        (s.player_in || null) === (c.player_in || null) &&
-        s.swap_date === c.swap_date &&
-        s.status === 'approved'
-    );
-    if (!exists) {
-      const slug = (c.player_in || c.player_out || 'move').replace(/\s+/g, '-').toLowerCase();
-      seasonData.swaps.push({
-        id: `repair-${c.manager.replace(/\s+/g, '-').toLowerCase()}-${slug}-${c.swap_date}`,
-        timestamp: `${c.swap_date} 12:00:00`,
-        email: '',
-        manager: c.manager,
-        player_out: c.player_out || null,
-        player_in: c.player_in || null,
-        reason: c.reason,
-        swap_date: c.swap_date,
-        round: wk ? wk.split('|')[0] : 'PP1',
-        week_key: wk,
-        status: 'approved',
-        reviewed_at: `${c.swap_date} 12:00:00`,
-      });
-      changed = true;
-    }
-    if (wk) {
-      if (!seasonData.roster_dates[c.manager]) seasonData.roster_dates[c.manager] = {};
-      if (!seasonData.roster_dates[c.manager][wk]) seasonData.roster_dates[c.manager][wk] = {};
-      const wkd = seasonData.roster_dates[c.manager][wk];
-      if (c.player_out && c.drop_date) {
-        if (!wkd[c.player_out]) wkd[c.player_out] = {};
-        if (wkd[c.player_out].drop_date !== c.drop_date) {
-          wkd[c.player_out].drop_date = c.drop_date;
-          changed = true;
-        }
-      }
-      if (c.player_in && c.add_date) {
-        if (!wkd[c.player_in]) wkd[c.player_in] = {};
-        if (wkd[c.player_in].add_date !== c.add_date) {
-          wkd[c.player_in].add_date = c.add_date;
-          changed = true;
-        }
-      }
-    }
-  }
-
-  return changed;
-}
-
 // Version stamp — bump whenever the repair logic changes substantially so the
 // full-recompute pass runs again on next load.
 const ROSTER_REPAIR_VERSION = 5;
@@ -6109,45 +5947,49 @@ function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKe
   return false;
 }
 
+// Map of `${round}|${week}` -> week start date, used by the drop-eligibility checks.
+function buildWeekKeyToStart() {
+  const scheduleDates = getScheduleDates();
+  const map = {};
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (scheduleDates && scheduleDates[i]) map[`${s.round}|${s.week}`] = scheduleDates[i].start;
+  });
+  return map;
+}
+
+// Authoritative owner of a weekly stat row for scoring/seeding: the manager who actually
+// rosters the player that week, derived from the roster (carry-forward + roster_dates) — NOT
+// the cached `row.manager`, which can go stale after a re-sync and otherwise mis-credit
+// pre-add or post-drop weeks. Because buildRosterLookup is built from the rosters + roster_dates,
+// a lookup hit already implies membership, so this both excludes non-rostered weeks and credits
+// the correct manager immediately after a trade. Returns the manager name, or null when the
+// player isn't on anyone's roster that week. Single source of truth shared by the scoreboard,
+// pool seeding, and playoff bracket math so they can't diverge.
+function weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, row, playerKey) {
+  const player = row[playerKey];
+  const weekKey = `${row.round}|${row.week}`;
+  const mgr = rosterLookup[`${player}|${weekKey}`];
+  if (!mgr) return null;
+  if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKey)) return null;
+  return mgr;
+}
+
 function computeManagerScores(seasonData) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
   const rosterLookup = buildRosterLookup(seasonData);
-
-  const scheduleDates = getScheduleDates();
-  const weekKeyToStart = {};
-  SEASON_SCHEDULE.forEach((s, i) => {
-    if (scheduleDates && scheduleDates[i]) weekKeyToStart[`${s.round}|${s.week}`] = scheduleDates[i].start;
-  });
+  const weekKeyToStart = buildWeekKeyToStart();
 
   const managerMap = {};
   batting.forEach((b) => {
-    const mgr = b.manager || rosterLookup[`${esc(b.batter)}|${b.round}|${b.week}`];
+    const mgr = weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, b, 'batter');
     if (!mgr) return;
-    const weekKey = `${b.round}|${b.week}`;
-    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, b.batter, weekKey)) return;
-    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
-      batters: [],
-      pitchers: [],
-    };
-    const weekRosterDates =
-      (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
-    if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].batting += b.weekly_score || 0;
   });
   pitching.forEach((p) => {
-    const mgr = p.manager || rosterLookup[`${esc(p.pitcher)}|${p.round}|${p.week}`];
+    const mgr = weeklyRowOwner(seasonData, rosterLookup, weekKeyToStart, p, 'pitcher');
     if (!mgr) return;
-    const weekKey = `${p.round}|${p.week}`;
-    if (playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, p.pitcher, weekKey)) return;
-    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
-      batters: [],
-      pitchers: [],
-    };
-    const weekRosterDates =
-      (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
-    if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
     if (!managerMap[mgr]) managerMap[mgr] = { manager: mgr, batting: 0, pitching: 0, total: 0 };
     managerMap[mgr].pitching += p.weekly_score || 0;
   });
@@ -6310,9 +6152,8 @@ function renderRosterData(managerName, isCommissioner) {
   if (isActive) migrateRostersToWeekly(seasonData);
   // Restore missing swap records and remove known duplicates before any roster repair.
   if (isActive && repairMissingSwapRecords(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
-  // Restore the two missing initial-submission roster slots (Austin's Skubal pitcher chain,
-  // Anton's Carpenter batter chain) before dates are backfilled or rosters carried forward.
-  if (isActive && repairMissingRosterChains(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  // (The one-time Austin/Anton initial-submission roster-chain repair is applied and gated
+  // server-side in repairMissingRosterChains; the client no longer needs to run it.)
   // Ensure roster_dates has drop/add dates for all approved swaps.
   if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
   // Fill / recompute per-week roster entries by carrying forward the last known roster.
@@ -8804,17 +8645,23 @@ function renderMLBSyncLog() {
   const logDiv = document.getElementById('mlb-sync-log');
   if (!controlsDiv) return;
 
+  // "Sync Now" stays primary; the recovery/diagnostic tools live behind a collapsible
+  // "Diagnostics" toggle so the commissioner page isn't cluttered with rarely-used controls.
   controlsDiv.innerHTML =
     `<button class="btn btn-secondary" onclick="triggerMLBSync()">Sync Now</button>` +
-    `<button class="btn btn-secondary" onclick="backfillMLB()" style="margin-left:0.5rem;">Backfill from MLB</button>` +
-    `<button class="btn btn-secondary" onclick="rebuildMLBWeeklies()" style="margin-left:0.5rem;">Rebuild Totals</button>` +
-    `<button class="btn btn-sm btn-secondary" onclick="dataCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Data check</button>` +
-    `<button class="btn btn-sm btn-secondary" onclick="storageCheckMLB()" style="margin-left:0.5rem;font-size:0.78rem;">Storage</button>` +
-    `<span style="display:inline-flex;gap:0.35rem;margin-left:0.75rem;align-items:center;">` +
+    `<button class="btn btn-sm btn-secondary" style="margin-left:0.5rem;font-size:0.78rem;" ` +
+    `onclick="const d=document.getElementById('mlb-diag-tools');d.style.display=d.style.display==='none'?'flex':'none';">` +
+    `Diagnostics ▾</button>` +
+    `<div id="mlb-diag-tools" style="display:none;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem;">` +
+    `<button class="btn btn-sm btn-secondary" onclick="backfillMLB()">Backfill from MLB</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="rebuildMLBWeeklies()">Rebuild Totals</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="dataCheckMLB()">Data check</button>` +
+    `<button class="btn btn-sm btn-secondary" onclick="storageCheckMLB()">Storage</button>` +
+    `<span style="display:inline-flex;gap:0.35rem;align-items:center;">` +
     `<input id="mlb-debug-name" type="text" placeholder="Player name" ` +
     `style="font-size:0.82rem;padding:0.2rem 0.4rem;" onkeydown="if(event.key==='Enter')debugMLBPlayer()" />` +
-    `<button class="btn btn-sm btn-secondary" onclick="debugMLBPlayer()" style="font-size:0.78rem;">Debug player</button>` +
-    `</span><div id="mlb-debug-out"></div>`;
+    `<button class="btn btn-sm btn-secondary" onclick="debugMLBPlayer()">Debug player</button>` +
+    `</span></div><div id="mlb-debug-out"></div>`;
 
   apiFetch('/api/mlb/sync-status')
     .then((r) => r.json())

@@ -215,4 +215,6 @@ WMMC/
 
 ## Deployment
 
-The app is configured for [Render.com](https://render.com) via `render.yaml`. The disk mount at `/var/data` keeps `db.json` across deploys. Set `LOGIN_PASSWORD`, `SLACK_WEBHOOK_URL`, `UPSTASH_REDIS_REST_URL`, and `UPSTASH_REDIS_REST_TOKEN` as secret env vars in the Render dashboard.
+The app is configured for [Render.com](https://render.com) via `render.yaml`. The disk mount at `/var/data` keeps `db.json` across deploys. Set `LOGIN_PASSWORD` and `SLACK_WEBHOOK_URL` as secret env vars in the Render dashboard, and verify `DB_PATH=/var/data/db.json` so writes land on the disk (not the ephemeral fallback) — the `Storage` button in the commissioner MLB panel reports the live path and whether durable storage is active.
+
+> **Note on Upstash:** the `UPSTASH_*` backup mirrors the _entire_ `db.json` as one Upstash value, which exceeds Upstash's request-size limit once a full season of per-game stats accumulates (multiple MB). The **persistent disk is the source of truth**; leave `UPSTASH_*` unset unless the backup payload is first slimmed. Enabling it with an oversized db produces silently-failing backups.
