@@ -5,6 +5,8 @@
 }
 
 :root {
+  /* Light-only app; opt out of Chrome's mobile Force Dark auto-inversion. */
+  color-scheme: light;
   --primary: #002d62;
   --primary-light: #0a4a8a;
   --accent: #c41e3a;
