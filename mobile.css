@@ -20,9 +20,10 @@
   padding: 0 0.25rem;
   padding-bottom: env(safe-area-inset-bottom, 0px);
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
-  /* Force GPU compositing so the nav stays anchored during iOS pinch-zoom */
-  -webkit-transform: translateZ(0);
-  transform: translateZ(0);
+  /* During pinch-zoom a position:fixed element anchors to the layout viewport and
+     scrolls/scales away. pinMobileNavToVisualViewport() in app.js counter-transforms
+     this nav (via the VisualViewport API) to keep it pinned to the visual viewport. */
+  transform-origin: left bottom;
   will-change: transform;
 }
 
@@ -1165,11 +1166,21 @@
   input[type='password'],
   input[type='date'],
   input[type='datetime-local'],
-  select,
+  select:not(.form-select),
   textarea {
     background: #12122a;
     color: #e8eaf6;
     border-color: #2a2a45;
+  }
+
+  /* .form-select is a deliberately white dropdown — keep its text dark and
+     readable. -webkit-text-fill-color overrides iOS's grey text on
+     appearance:none selects (the cause of the light-grey-on-white roster picker). */
+  .form-select {
+    background-color: #fff;
+    color: var(--text);
+    -webkit-text-fill-color: var(--text);
+    opacity: 1;
   }
 
   input::placeholder {

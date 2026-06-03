@@ -1284,6 +1284,35 @@ function setupNav() {
       else stopLivePolling();
     });
   });
+  pinMobileNavToVisualViewport();
+}
+
+// Keep the mobile bottom nav pinned to the *visual* viewport during pinch-zoom.
+// A position:fixed element is anchored to the layout viewport, so on pinch-zoom it
+// scrolls/scales out of view until you zoom back out. We counter that: translate the
+// nav to the visual viewport's bottom edge and scale by 1/scale so it stays put at
+// natural size while only the page contents zoom. No-ops where VisualViewport is
+// unsupported (the nav then behaves as a normal fixed element).
+function pinMobileNavToVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const nav = document.querySelector('.mobile-bottom-nav');
+  if (!nav) return;
+  let raf = null;
+  const apply = () => {
+    raf = null;
+    const scale = vv.scale || 1;
+    // Gap between the layout-viewport bottom (where the nav is fixed) and the
+    // visual-viewport bottom; lift the nav by it, align left, and undo the zoom.
+    const bottomGap = window.innerHeight - (vv.height + vv.offsetTop);
+    nav.style.transform = `translate(${vv.offsetLeft}px, ${-bottomGap}px) scale(${1 / scale})`;
+  };
+  const schedule = () => {
+    if (raf == null) raf = requestAnimationFrame(apply);
+  };
+  vv.addEventListener('resize', schedule);
+  vv.addEventListener('scroll', schedule);
+  apply();
 }
 
 // ============================================================
