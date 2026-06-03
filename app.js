@@ -648,7 +648,12 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
       for (const [wk, players] of Object.entries(allMgrDates)) {
         if (wk === weekKey) continue;
         const pd = players[player];
-        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        if (pd && pd.drop_date && pd.drop_date < weekStart) {
+          const reAddedLater = Object.values(allMgrDates).some(
+            (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+          );
+          if (!reAddedLater) return true;
+        }
       }
       return false;
     };
@@ -1331,6 +1336,35 @@ function setupNav() {
       else stopLivePolling();
     });
   });
+  pinMobileNavToVisualViewport();
+}
+
+// Keep the mobile bottom nav pinned to the *visual* viewport during pinch-zoom.
+// A position:fixed element is anchored to the layout viewport, so on pinch-zoom it
+// scrolls/scales out of view until you zoom back out. We counter that: translate the
+// nav to the visual viewport's bottom edge and scale by 1/scale so it stays put at
+// natural size while only the page contents zoom. No-ops where VisualViewport is
+// unsupported (the nav then behaves as a normal fixed element).
+function pinMobileNavToVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const nav = document.querySelector('.mobile-bottom-nav');
+  if (!nav) return;
+  let raf = null;
+  const apply = () => {
+    raf = null;
+    const scale = vv.scale || 1;
+    // Gap between the layout-viewport bottom (where the nav is fixed) and the
+    // visual-viewport bottom; lift the nav by it, align left, and undo the zoom.
+    const bottomGap = window.innerHeight - (vv.height + vv.offsetTop);
+    nav.style.transform = `translate(${vv.offsetLeft}px, ${-bottomGap}px) scale(${1 / scale})`;
+  };
+  const schedule = () => {
+    if (raf == null) raf = requestAnimationFrame(apply);
+  };
+  vv.addEventListener('resize', schedule);
+  vv.addEventListener('scroll', schedule);
+  apply();
 }
 
 // ============================================================
@@ -5949,7 +5983,12 @@ function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKe
   for (const [wk, players] of Object.entries(mgrDates)) {
     if (wk === weekKey) continue;
     const pd = players[player];
-    if (pd && pd.drop_date && pd.drop_date < wkStart) return true;
+    if (pd && pd.drop_date && pd.drop_date < wkStart) {
+      const reAddedLater = Object.values(mgrDates).some(
+        (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < wkStart
+      );
+      if (!reAddedLater) return true;
+    }
   }
   return false;
 }
@@ -6109,14 +6148,15 @@ function setupMyRoster() {
   const isCommissioner = !!loggedInMgr.commissioner;
   const isActive = loggedInMgr.active !== false;
   const managerBar = document.getElementById('roster-manager-bar');
-  const managerSelect = document.getElementById('roster-manager-select');
+  const managerDropdown = document.getElementById('roster-manager-dropdown');
   const titleEl = document.getElementById('roster-title');
 
   managerBar.style.display = 'block';
 
   // Inactive non-commissioner managers cannot manage rosters
   if (!isActive && !isCommissioner) {
-    managerSelect.style.display = 'none';
+    managerDropdown.style.display = 'none';
+    titleEl.style.display = '';
     titleEl.textContent = loggedInMgr.name + "'s Roster";
     document.getElementById('roster-content').innerHTML =
       '<div class="card"><p style="color:var(--text-muted);">Your account is currently inactive. Contact the commissioner to be reactivated.</p></div>';
@@ -6124,29 +6164,126 @@ function setupMyRoster() {
   }
 
   if (isCommissioner) {
-    // Commissioner: show dropdown to switch between any manager's roster
-    managerSelect.style.display = '';
-    managerSelect.innerHTML = [...managers]
+    // Preserve the roster the commissioner was viewing across re-renders (e.g. auto-poll)
+    const prevSelection = managerDropdown._dd ? managerDropdown._dd.getValue() : '';
+
+    // The dropdown button carries the full "Name's Roster" label, so the separate title is redundant
+    titleEl.style.display = 'none';
+    managerDropdown.style.display = '';
+    const options = [...managers]
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((m) => {
-        const label = m.name + (m.commissioner ? ' (Commissioner)' : '') + (m.active === false ? ' (Inactive)' : '');
-        return `<option value="${esc(m.name)}"${m.name === loggedInMgr.name ? ' selected' : ''}>${esc(label)}</option>`;
-      })
-      .join('');
+        let label = m.name + "'s Roster";
+        if (m.commissioner) label += ' (Commissioner)';
+        if (m.active === false) label += ' (Inactive)';
+        return { value: m.name, label };
+      });
 
-    managerSelect.onchange = () => {
-      const selectedName = managerSelect.value;
-      titleEl.textContent = selectedName + "'s Roster";
-      renderRosterData(selectedName, true);
-    };
+    // Restore previous selection if still valid, otherwise default to logged-in user
+    const selected = prevSelection && options.some((o) => o.value === prevSelection) ? prevSelection : loggedInMgr.name;
+    buildCustomDropdown(managerDropdown, options, selected, (value) => renderRosterData(value, true));
   } else {
     // Regular manager: no dropdown needed
-    managerSelect.style.display = 'none';
+    managerDropdown.style.display = 'none';
+    titleEl.style.display = '';
+    titleEl.textContent = loggedInMgr.name + "'s Roster";
   }
 
-  // Show the logged-in user's roster by default
-  titleEl.textContent = loggedInMgr.name + "'s Roster";
-  renderRosterData(loggedInMgr.name, isCommissioner);
+  const displayName = isCommissioner ? managerDropdown._dd.getValue() : loggedInMgr.name;
+  renderRosterData(displayName, isCommissioner);
+}
+
+// Custom dropdown replacing the native <select> roster picker. Android Chrome
+// dark-themes native selects and ignores author text color, leaving the picker
+// unreadable; this renders a styled button + list from regular DOM (which honors
+// our CSS). The control's API is exposed on the container as container._dd:
+// { getValue(), setValue(value, fire) }.
+function buildCustomDropdown(container, options, selectedValue, onChange) {
+  container.innerHTML = '';
+  container.classList.add('custom-dd');
+  let currentValue = options.some((o) => o.value === selectedValue)
+    ? selectedValue
+    : options.length
+      ? options[0].value
+      : '';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'form-select custom-dd-toggle';
+  toggle.setAttribute('aria-haspopup', 'listbox');
+  toggle.setAttribute('aria-expanded', 'false');
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'custom-dd-label';
+  toggle.appendChild(labelSpan);
+
+  const menu = document.createElement('ul');
+  menu.className = 'custom-dd-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+
+  const labelFor = (v) => {
+    const o = options.find((x) => x.value === v);
+    return o ? o.label : '';
+  };
+  const syncSelected = () => {
+    labelSpan.textContent = labelFor(currentValue);
+    [...menu.children].forEach((li) => {
+      if (li.dataset.value === currentValue) li.setAttribute('aria-selected', 'true');
+      else li.removeAttribute('aria-selected');
+    });
+  };
+
+  const onDocClick = (e) => {
+    if (!container.contains(e.target)) close();
+  };
+  function open() {
+    menu.hidden = false;
+    toggle.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', onDocClick);
+  }
+  function close() {
+    menu.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', onDocClick);
+  }
+
+  options.forEach((o) => {
+    const li = document.createElement('li');
+    li.className = 'custom-dd-option';
+    li.setAttribute('role', 'option');
+    li.dataset.value = o.value;
+    li.textContent = o.label;
+    li.addEventListener('click', () => {
+      currentValue = o.value;
+      syncSelected();
+      close();
+      if (onChange) onChange(currentValue);
+    });
+    menu.appendChild(li);
+  });
+
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) open();
+    else close();
+  });
+  toggle.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+
+  container.appendChild(toggle);
+  container.appendChild(menu);
+  syncSelected();
+
+  container._dd = {
+    getValue: () => currentValue,
+    setValue: (v, fire) => {
+      if (!options.some((o) => o.value === v)) return;
+      currentValue = v;
+      syncSelected();
+      if (fire && onChange) onChange(v);
+    },
+  };
 }
 
 function renderRosterData(managerName, isCommissioner) {
@@ -6571,7 +6708,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         for (const [wk, players] of Object.entries(allMgrDates)) {
           if (wk === weekKey) continue;
           const pd = players[player];
-          if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+          if (pd && pd.drop_date && pd.drop_date < weekStart) {
+            const reAddedLater = Object.values(allMgrDates).some(
+              (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+            );
+            if (!reAddedLater) return true;
+          }
         }
         return false;
       };
@@ -9077,11 +9219,10 @@ window.viewSwapManager = function (managerName) {
   document.querySelector('[data-tab="my-roster"]').classList.add('active');
   document.getElementById('my-roster').classList.add('active');
 
-  const select = document.getElementById('roster-manager-select');
-  if (select) {
-    select.value = managerName;
-    select.dispatchEvent(new Event('change'));
-  }
+  // Build/populate the roster dropdown, then switch it to the requested manager.
+  setupMyRoster();
+  const dd = document.getElementById('roster-manager-dropdown');
+  if (dd && dd._dd) dd._dd.setValue(managerName, true);
 };
 
 // ---- Season Setup Toggle ----
@@ -10775,7 +10916,12 @@ window.updateCommRosterWeekView = function (managerName) {
       for (const [wk, players] of Object.entries(allMgrDates)) {
         if (wk === weekKey) continue;
         const pd = players[player];
-        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        if (pd && pd.drop_date && pd.drop_date < weekStart) {
+          const reAddedLater = Object.values(allMgrDates).some(
+            (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+          );
+          if (!reAddedLater) return true;
+        }
       }
       return false;
     };

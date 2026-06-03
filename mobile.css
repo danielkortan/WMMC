@@ -20,6 +20,11 @@
   padding: 0 0.25rem;
   padding-bottom: env(safe-area-inset-bottom, 0px);
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+  /* During pinch-zoom a position:fixed element anchors to the layout viewport and
+     scrolls/scales away. pinMobileNavToVisualViewport() in app.js counter-transforms
+     this nav (via the VisualViewport API) to keep it pinned to the visual viewport. */
+  transform-origin: left bottom;
+  will-change: transform;
 }
 
 .mobile-nav-btn {
@@ -1144,6 +1149,13 @@
     gap: 0.5rem;
   }
 
+  /* When the title is hidden (commissioner view), let the select/dropdown fill the row */
+  .roster-manager-bar-inner .form-select,
+  .roster-manager-bar-inner .custom-dd {
+    width: 100%;
+    max-width: 100%;
+  }
+
   /* ── Trends charts ──────────────────────────────────────────── */
   canvas {
     max-height: 220px;
@@ -1155,11 +1167,36 @@
   input[type='password'],
   input[type='date'],
   input[type='datetime-local'],
-  select,
+  select:not(.form-select),
   textarea {
     background: #12122a;
     color: #e8eaf6;
     border-color: #2a2a45;
+  }
+
+  /* Mobile uses a dark theme, so style the custom roster-picker dropdown dark
+     (light text on dark) to match — otherwise the menu's text reads light on the
+     white background I gave it for desktop. */
+  .custom-dd-toggle.form-select {
+    background: #12122a;
+    color: #e8eaf6;
+    -webkit-text-fill-color: #e8eaf6;
+    border-color: #2a2a45;
+  }
+  .custom-dd-menu {
+    background: #1a1a2e;
+    color: #e8eaf6;
+    border-color: #2a2a45;
+  }
+  .custom-dd-menu .custom-dd-option {
+    color: #e8eaf6;
+  }
+  .custom-dd-menu .custom-dd-option:hover {
+    background: #24243f;
+  }
+  .custom-dd-menu .custom-dd-option[aria-selected='true'] {
+    background: var(--field-green);
+    color: #fff;
   }
 
   input::placeholder {
