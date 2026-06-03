@@ -192,72 +192,144 @@ function isPeriodTimeOpen(sd, period) {
 // ---- Playoff Qualification Helpers ----
 
 // Returns array of up to 8 QF qualifier names based on PP1+PP2 scores (or null if pools not configured)
-function getQFQualifiers(sd) {
-  const managers = getManagers().filter((m) => m.active !== false);
+// ---- Canonical pool-play seeding (single source of truth) ----
+// Scores every manager's PP1/PP2 batting & pitching via managerWeekSubtotal — the same
+// drop-aware path the scoreboard tables and My Roster use — so dropped players never inflate
+// a pool total and the scoreboard, the tentative bracket, and qualification can't disagree.
+//
+// Rules (per the commissioner):
+//   - Per pool: highest PP1 score = PP1 leader, highest PP2 score = PP2 leader (a manager can
+//     win both). Unique leaders auto-qualify.
+//   - Wildcards: highest combined-total non-leaders, filling the bracket to bracketSize (8).
+//   - Seeds: ALL pool winners first (ranked by total), THEN wildcards (ranked by total).
+//   - Tiebreaker when totals are equal: periods won -> batting -> pitching -> PP2 -> PP1.
+//
+// Returns null when no pools are configured. Otherwise an object with seeds (ordered entries),
+// byManager, pp1Leaders, pp2Leaders, allLeaders, wildcardSet, and qualifierNames. Each entry
+// carries manager, pool, pp1/pp2, batting, pitching, total, periodsWon, isPP1Leader,
+// isPP2Leader, isPoolWinner, isWildcard, seed.
+function computePoolPlaySeeding(seasonData, bracketSize = 8) {
+  const managers = getManagers().filter((m) => m.active !== false && m.pool);
+  if (managers.length === 0) return null;
   const poolGroups = {};
   managers.forEach((m) => {
-    if (m.pool) {
-      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
-      poolGroups[m.pool].push(m.name);
-    }
+    (poolGroups[m.pool] = poolGroups[m.pool] || []).push(m.name);
   });
-  if (Object.keys(poolGroups).length === 0) return null;
 
-  const batting = sd.weekly_batting || [];
-  const pitching = sd.weekly_pitching || [];
-  const rosterLookup = buildRosterLookup(sd);
-  const weekKeyToStart = buildWeekKeyToStart();
-  const mgrScores = {};
+  const batting = seasonData.weekly_batting || [];
+  const pitching = seasonData.weekly_pitching || [];
+  const r2 = (x) => Math.round(x * 100) / 100;
+
+  const sc = {};
   managers.forEach((m) => {
-    mgrScores[m.name] = { pp1: 0, pp2: 0 };
+    sc[m.name] = { manager: m.name, pool: m.pool, pp1Bat: 0, pp1Pit: 0, pp2Bat: 0, pp2Pit: 0 };
   });
-  batting.forEach((b) => {
-    const owner = weeklyRowOwner(sd, rosterLookup, weekKeyToStart, b, 'batter');
-    if (!owner || !mgrScores[owner]) return;
-    if (b.round === 'PP1') mgrScores[owner].pp1 += b.weekly_score || 0;
-    if (b.round === 'PP2') mgrScores[owner].pp2 += b.weekly_score || 0;
+
+  // Sum per-period batting/pitching through managerWeekSubtotal (drop-aware eligibility,
+  // identical to the scoreboard tables) so seeding scores match what managers see.
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (schedWeek.round !== 'PP1' && schedWeek.round !== 'PP2') return;
+    managers.forEach((m) => {
+      const bat = managerWeekSubtotal(seasonData, m.name, schedWeek, idx, batting, 'batter', 'batters');
+      const pit = managerWeekSubtotal(seasonData, m.name, schedWeek, idx, pitching, 'pitcher', 'pitchers');
+      if (schedWeek.round === 'PP1') {
+        sc[m.name].pp1Bat += bat;
+        sc[m.name].pp1Pit += pit;
+      } else {
+        sc[m.name].pp2Bat += bat;
+        sc[m.name].pp2Pit += pit;
+      }
+    });
   });
-  pitching.forEach((p) => {
-    const owner = weeklyRowOwner(sd, rosterLookup, weekKeyToStart, p, 'pitcher');
-    if (!owner || !mgrScores[owner]) return;
-    if (p.round === 'PP1') mgrScores[owner].pp1 += p.weekly_score || 0;
-    if (p.round === 'PP2') mgrScores[owner].pp2 += p.weekly_score || 0;
+
+  Object.values(sc).forEach((s) => {
+    s.pp1 = r2(s.pp1Bat + s.pp1Pit);
+    s.pp2 = r2(s.pp2Bat + s.pp2Pit);
+    s.batting = r2(s.pp1Bat + s.pp2Bat);
+    s.pitching = r2(s.pp1Pit + s.pp2Pit);
+    s.total = r2(s.batting + s.pitching);
+    s.isPP1Leader = false;
+    s.isPP2Leader = false;
+    s.isWildcard = false;
   });
 
   const pp1Leaders = new Set();
   const pp2Leaders = new Set();
-  for (const members of Object.values(poolGroups)) {
-    let bestPP1 = null,
-      bPP1 = -Infinity;
-    let bestPP2 = null,
-      bPP2 = -Infinity;
+  Object.values(poolGroups).forEach((members) => {
+    let b1 = -Infinity,
+      w1 = null,
+      b2 = -Infinity,
+      w2 = null;
     members.forEach((n) => {
-      const s = mgrScores[n] || { pp1: 0, pp2: 0 };
-      if (s.pp1 > bPP1) {
-        bestPP1 = n;
-        bPP1 = s.pp1;
+      const s = sc[n];
+      if (!s) return;
+      if (s.pp1 > b1) {
+        b1 = s.pp1;
+        w1 = n;
       }
-      if (s.pp2 > bPP2) {
-        bestPP2 = n;
-        bPP2 = s.pp2;
+      if (s.pp2 > b2) {
+        b2 = s.pp2;
+        w2 = n;
       }
     });
-    if (bestPP1 && bPP1 > 0) pp1Leaders.add(bestPP1);
-    if (bestPP2 && bPP2 > 0) pp2Leaders.add(bestPP2);
-  }
-  const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
-  const ppTotals = {};
-  managers.forEach((m) => {
-    ppTotals[m.name] = (mgrScores[m.name]?.pp1 || 0) + (mgrScores[m.name]?.pp2 || 0);
+    if (w1 && b1 > 0) {
+      pp1Leaders.add(w1);
+      sc[w1].isPP1Leader = true;
+    }
+    if (w2 && b2 > 0) {
+      pp2Leaders.add(w2);
+      sc[w2].isPP2Leader = true;
+    }
   });
-  const wildcardsNeeded = Math.max(0, 8 - allLeaders.size);
-  const wildcards = managers
-    .filter((m) => m.pool && !allLeaders.has(m.name))
-    .map((m) => m.name)
-    .sort((a, b) => ppTotals[b] - ppTotals[a])
+  Object.values(sc).forEach((s) => {
+    s.periodsWon = (s.isPP1Leader ? 1 : 0) + (s.isPP2Leader ? 1 : 0);
+    s.isPoolWinner = s.periodsWon > 0;
+  });
+
+  // Primary = total (desc); tiebreaker = periods won -> batting -> pitching -> PP2 -> PP1.
+  const cmp = (a, b) =>
+    b.total - a.total ||
+    b.periodsWon - a.periodsWon ||
+    b.batting - a.batting ||
+    b.pitching - a.pitching ||
+    b.pp2 - a.pp2 ||
+    b.pp1 - a.pp1;
+
+  const winners = Object.values(sc)
+    .filter((s) => s.isPoolWinner)
+    .sort(cmp);
+  const wildcardsNeeded = Math.max(0, bracketSize - winners.length);
+  const wildcards = Object.values(sc)
+    .filter((s) => !s.isPoolWinner && s.total > 0)
+    .sort(cmp)
     .slice(0, wildcardsNeeded);
-  const qualifiers = [...[...allLeaders].sort((a, b) => ppTotals[b] - ppTotals[a]), ...wildcards];
-  return qualifiers.length > 0 ? qualifiers.slice(0, 8) : null;
+  wildcards.forEach((s) => {
+    s.isWildcard = true;
+  });
+
+  // Winners always seeded above wildcards; each group ordered by total (+ tiebreak).
+  const seeds = [...winners, ...wildcards].slice(0, bracketSize);
+  seeds.forEach((s, i) => {
+    s.seed = i + 1;
+  });
+
+  return {
+    seeds,
+    byManager: sc,
+    pp1Leaders,
+    pp2Leaders,
+    allLeaders: new Set([...pp1Leaders, ...pp2Leaders]),
+    wildcardSet: new Set(wildcards.map((s) => s.manager)),
+    qualifierNames: seeds.map((s) => s.manager),
+  };
+}
+
+// Ordered QF qualifier names (seeds 1..8), or null if pools aren't configured. Thin wrapper
+// over the canonical seeding so every consumer agrees.
+function getQFQualifiers(sd) {
+  const seeding = computePoolPlaySeeding(sd);
+  if (!seeding || seeding.qualifierNames.length === 0) return null;
+  return seeding.qualifierNames;
 }
 
 // Returns array of SF participant names (QF winners), or null if QF not finalized
@@ -4027,104 +4099,14 @@ function showActiveSeason(seasonData) {
 
 // Build an active season playoff bracket (tentative or finalized)
 function buildActivePlayoffBracket(seasonData, ppFinalized) {
-  const managerScores = computeManagerScores(seasonData);
-  if (managerScores.length === 0) return '';
-
-  // Compute seeding from pool play scores (active managers only)
-  const managers = getManagers();
-  const poolGroups = {};
-  managers.forEach((m) => {
-    if (m.pool && m.active !== false) {
-      if (!poolGroups[m.pool]) poolGroups[m.pool] = [];
-      poolGroups[m.pool].push(m.name);
-    }
-  });
-
-  // Compute PP1 and PP2 scores per manager
+  // Seeding comes entirely from the canonical pool-play computation (single source of truth,
+  // drop-aware) — the same function feeds the scoreboard highlights and the qualification
+  // gates, so the bracket can't disagree with them and no longer counts dropped players.
+  const seeding = computePoolPlaySeeding(seasonData);
+  const qualifiers = seeding ? seeding.qualifierNames : [];
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
-  const mgrPPScores = {};
 
-  managerScores.forEach((ms) => {
-    mgrPPScores[ms.manager] = { pp1: 0, pp2: 0, total: ms.total, pool: null };
-  });
-
-  const bracketRosterLookup = buildRosterLookup(seasonData);
-  batting.forEach((b) => {
-    const mgr = b.manager || bracketRosterLookup[rosterLookupKey(b.batter, b.round, b.week)];
-    if (!mgr || !mgrPPScores[mgr]) return;
-    const weekKey = `${b.round}|${b.week}`;
-    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
-      batters: [],
-      pitchers: [],
-    };
-    const weekRosterDates =
-      (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
-    if (!weekRoster.batters.includes(b.batter) && !weekRosterDates[b.batter]) return;
-    if (b.round === 'PP1') mgrPPScores[mgr].pp1 += b.weekly_score || 0;
-    if (b.round === 'PP2') mgrPPScores[mgr].pp2 += b.weekly_score || 0;
-  });
-  pitching.forEach((p) => {
-    const mgr = p.manager || bracketRosterLookup[rosterLookupKey(p.pitcher, p.round, p.week)];
-    if (!mgr || !mgrPPScores[mgr]) return;
-    const weekKey = `${p.round}|${p.week}`;
-    const weekRoster = (seasonData.rosters && seasonData.rosters[mgr] && seasonData.rosters[mgr][weekKey]) || {
-      batters: [],
-      pitchers: [],
-    };
-    const weekRosterDates =
-      (seasonData.roster_dates && seasonData.roster_dates[mgr] && seasonData.roster_dates[mgr][weekKey]) || {};
-    if (!weekRoster.pitchers.includes(p.pitcher) && !weekRosterDates[p.pitcher]) return;
-    if (p.round === 'PP1') mgrPPScores[mgr].pp1 += p.weekly_score || 0;
-    if (p.round === 'PP2') mgrPPScores[mgr].pp2 += p.weekly_score || 0;
-  });
-
-  managers.forEach((m) => {
-    if (mgrPPScores[m.name]) mgrPPScores[m.name].pool = m.pool;
-  });
-
-  // Find pool leaders (PP1 and PP2)
-  const pp1Leaders = new Set();
-  const pp2Leaders = new Set();
-  for (const members of Object.values(poolGroups)) {
-    let bestPP1 = null,
-      bestPP1Score = -Infinity;
-    let bestPP2 = null,
-      bestPP2Score = -Infinity;
-    members.forEach((name) => {
-      const s = mgrPPScores[name];
-      if (s && s.pp1 > bestPP1Score) {
-        bestPP1 = name;
-        bestPP1Score = s.pp1;
-      }
-      if (s && s.pp2 > bestPP2Score) {
-        bestPP2 = name;
-        bestPP2Score = s.pp2;
-      }
-    });
-    if (bestPP1 && bestPP1Score > 0) pp1Leaders.add(bestPP1);
-    if (bestPP2 && bestPP2Score > 0) pp2Leaders.add(bestPP2);
-  }
-
-  const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
-  const wildcardsNeeded = Math.max(0, 8 - allLeaders.size);
-
-  // Get PP totals for seeding
-  const ppTotals = {};
-  Object.entries(mgrPPScores).forEach(([name, s]) => {
-    ppTotals[name] = s.pp1 + s.pp2;
-  });
-
-  // Wildcard candidates must be active managers assigned to a pool
-  const pooledManagers = new Set();
-  Object.values(poolGroups).forEach((members) => members.forEach((n) => pooledManagers.add(n)));
-
-  const nonLeaders = Object.keys(ppTotals)
-    .filter((n) => pooledManagers.has(n) && !allLeaders.has(n))
-    .sort((a, b) => ppTotals[b] - ppTotals[a]);
-  const wildcards = nonLeaders.slice(0, wildcardsNeeded);
-
-  const qualifiers = [...[...allLeaders].sort((a, b) => ppTotals[b] - ppTotals[a]), ...wildcards];
   if (qualifiers.length < 8) {
     // Not enough managers to form a bracket
     return `<div class="card"><h2>Playoff Bracket ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
@@ -4355,32 +4337,20 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     .sort((a, b) => b.total - a.total);
   const overallLastMgr = overallScores.length > 0 ? overallScores[overallScores.length - 1].manager : null;
 
-  // ---- Determine PP1 and PP2 pool winners ----
-  const pp1Winners = {}; // poolNum → manager name
-  const pp2Winners = {};
-  Object.keys(poolGroups).forEach((poolNum) => {
-    const poolMembers = poolGroups[poolNum];
-    const pp1Pool = pp1Scores.filter((s) => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
-    if (pp1Pool.length > 0 && pp1Pool[0].total > 0) pp1Winners[poolNum] = pp1Pool[0].manager;
-    const pp2Pool = pp2Scores.filter((s) => poolMembers.includes(s.manager)).sort((a, b) => b.total - a.total);
-    if (pp2Pool.length > 0 && pp2Pool[0].total > 0) pp2Winners[poolNum] = pp2Pool[0].manager;
-  });
-
-  const pp1WinnerSet = new Set(Object.values(pp1Winners));
-  const pp2WinnerSet = new Set(Object.values(pp2Winners));
-  const allPPWinners = new Set([...pp1WinnerSet, ...pp2WinnerSet]);
-
-  // Wildcards: 8 - unique_pool_play_winners = wildcard spots
-  const numWildcards = Math.max(0, 8 - allPPWinners.size);
-  const wildcardSet = new Set();
-  let wcCount = 0;
-  for (const m of overallScores) {
-    if (wcCount >= numWildcards) break;
-    if (!allPPWinners.has(m.manager) && m.total > 0) {
-      wildcardSet.add(m.manager);
-      wcCount++;
-    }
-  }
+  // ---- Pool winners + wildcards from the canonical seeding (single source of truth) ----
+  // The same computation feeds the tentative bracket and the qualification gates, so the
+  // scoreboard highlights can't disagree with who actually seeds/qualifies. It also scores via
+  // managerWeekSubtotal, so the highlighted leaders match the totals shown in these tables.
+  const seeding = computePoolPlaySeeding(seasonData) || {
+    pp1Leaders: new Set(),
+    pp2Leaders: new Set(),
+    allLeaders: new Set(),
+    wildcardSet: new Set(),
+  };
+  const pp1WinnerSet = seeding.pp1Leaders;
+  const pp2WinnerSet = seeding.pp2Leaders;
+  const allPPWinners = seeding.allLeaders;
+  const wildcardSet = seeding.wildcardSet;
 
   // Highlight class for a manager name in a given section
   function hlClass(name, section) {
@@ -4536,7 +4506,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       <h3>Playoff Advancement</h3>
       <div class="advancement-summary">
         <p><strong>Pool Play Winners (${allPPWinners.size}):</strong> ${[...allPPWinners].sort().join(', ') || 'TBD'}</p>
-        <p><strong>Wild Cards (${numWildcards} spot${numWildcards !== 1 ? 's' : ''}):</strong> ${[...wildcardSet].sort().join(', ') || 'TBD'}</p>
+        <p><strong>Wild Cards (${wildcardSet.size} spot${wildcardSet.size !== 1 ? 's' : ''}):</strong> ${[...wildcardSet].sort().join(', ') || 'TBD'}</p>
         <p><strong>Total Playoff Qualifiers:</strong> ${allPPWinners.size + wildcardSet.size} of 8</p>
       </div>
       <div class="highlight-legend">
