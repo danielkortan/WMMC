@@ -2970,6 +2970,63 @@ footer {
   max-width: 260px;
 }
 
+/* Custom dropdown (roster manager picker) — replaces the native <select> so its
+   text stays readable on Android dark mode, where native selects ignore author
+   color. The toggle reuses .form-select for the white-pill look; its label is a
+   <span> (regular DOM), so the text renders dark like everything else. */
+.custom-dd {
+  position: relative;
+}
+.roster-manager-bar-inner .custom-dd {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+}
+.custom-dd-toggle {
+  text-align: left;
+}
+.custom-dd-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.custom-dd-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 1100;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: #fff;
+  color: var(--text);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.custom-dd-menu[hidden] {
+  display: none;
+}
+.custom-dd-option {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.custom-dd-option:hover {
+  background: #f1f3f5;
+}
+.custom-dd-option[aria-selected='true'] {
+  background: var(--field-green);
+  color: #fff;
+  font-weight: 600;
+}
+
 /* ============================================================ */
 /* Baseball Background Pattern                                   */
 /* ============================================================ */

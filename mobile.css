@@ -1149,8 +1149,9 @@
     gap: 0.5rem;
   }
 
-  /* When the title is hidden (commissioner view), let the select fill the row */
-  .roster-manager-bar-inner .form-select {
+  /* When the title is hidden (commissioner view), let the select/dropdown fill the row */
+  .roster-manager-bar-inner .form-select,
+  .roster-manager-bar-inner .custom-dd {
     width: 100%;
     max-width: 100%;
   }

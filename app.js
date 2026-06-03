@@ -6120,14 +6120,14 @@ function setupMyRoster() {
   const isCommissioner = !!loggedInMgr.commissioner;
   const isActive = loggedInMgr.active !== false;
   const managerBar = document.getElementById('roster-manager-bar');
-  const managerSelect = document.getElementById('roster-manager-select');
+  const managerDropdown = document.getElementById('roster-manager-dropdown');
   const titleEl = document.getElementById('roster-title');
 
   managerBar.style.display = 'block';
 
   // Inactive non-commissioner managers cannot manage rosters
   if (!isActive && !isCommissioner) {
-    managerSelect.style.display = 'none';
+    managerDropdown.style.display = 'none';
     titleEl.style.display = '';
     titleEl.textContent = loggedInMgr.name + "'s Roster";
     document.getElementById('roster-content').innerHTML =
@@ -6137,40 +6137,125 @@ function setupMyRoster() {
 
   if (isCommissioner) {
     // Preserve the roster the commissioner was viewing across re-renders (e.g. auto-poll)
-    const prevSelection = managerSelect.value;
+    const prevSelection = managerDropdown._dd ? managerDropdown._dd.getValue() : '';
 
-    // Select carries the full "Name's Roster" label so the separate title is redundant
+    // The dropdown button carries the full "Name's Roster" label, so the separate title is redundant
     titleEl.style.display = 'none';
-    managerSelect.style.display = '';
-    managerSelect.innerHTML = [...managers]
+    managerDropdown.style.display = '';
+    const options = [...managers]
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((m) => {
         let label = m.name + "'s Roster";
         if (m.commissioner) label += ' (Commissioner)';
         if (m.active === false) label += ' (Inactive)';
-        return `<option value="${esc(m.name)}">${esc(label)}</option>`;
-      })
-      .join('');
+        return { value: m.name, label };
+      });
 
     // Restore previous selection if still valid, otherwise default to logged-in user
-    if (prevSelection && [...managerSelect.options].some((o) => o.value === prevSelection)) {
-      managerSelect.value = prevSelection;
-    } else {
-      managerSelect.value = loggedInMgr.name;
-    }
-
-    managerSelect.onchange = () => {
-      renderRosterData(managerSelect.value, true);
-    };
+    const selected = prevSelection && options.some((o) => o.value === prevSelection) ? prevSelection : loggedInMgr.name;
+    buildCustomDropdown(managerDropdown, options, selected, (value) => renderRosterData(value, true));
   } else {
     // Regular manager: no dropdown needed
-    managerSelect.style.display = 'none';
+    managerDropdown.style.display = 'none';
     titleEl.style.display = '';
     titleEl.textContent = loggedInMgr.name + "'s Roster";
   }
 
-  const displayName = isCommissioner ? managerSelect.value : loggedInMgr.name;
+  const displayName = isCommissioner ? managerDropdown._dd.getValue() : loggedInMgr.name;
   renderRosterData(displayName, isCommissioner);
+}
+
+// Custom dropdown replacing the native <select> roster picker. Android Chrome
+// dark-themes native selects and ignores author text color, leaving the picker
+// unreadable; this renders a styled button + list from regular DOM (which honors
+// our CSS). The control's API is exposed on the container as container._dd:
+// { getValue(), setValue(value, fire) }.
+function buildCustomDropdown(container, options, selectedValue, onChange) {
+  container.innerHTML = '';
+  container.classList.add('custom-dd');
+  let currentValue = options.some((o) => o.value === selectedValue)
+    ? selectedValue
+    : options.length
+      ? options[0].value
+      : '';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'form-select custom-dd-toggle';
+  toggle.setAttribute('aria-haspopup', 'listbox');
+  toggle.setAttribute('aria-expanded', 'false');
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'custom-dd-label';
+  toggle.appendChild(labelSpan);
+
+  const menu = document.createElement('ul');
+  menu.className = 'custom-dd-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+
+  const labelFor = (v) => {
+    const o = options.find((x) => x.value === v);
+    return o ? o.label : '';
+  };
+  const syncSelected = () => {
+    labelSpan.textContent = labelFor(currentValue);
+    [...menu.children].forEach((li) => {
+      if (li.dataset.value === currentValue) li.setAttribute('aria-selected', 'true');
+      else li.removeAttribute('aria-selected');
+    });
+  };
+
+  const onDocClick = (e) => {
+    if (!container.contains(e.target)) close();
+  };
+  function open() {
+    menu.hidden = false;
+    toggle.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', onDocClick);
+  }
+  function close() {
+    menu.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', onDocClick);
+  }
+
+  options.forEach((o) => {
+    const li = document.createElement('li');
+    li.className = 'custom-dd-option';
+    li.setAttribute('role', 'option');
+    li.dataset.value = o.value;
+    li.textContent = o.label;
+    li.addEventListener('click', () => {
+      currentValue = o.value;
+      syncSelected();
+      close();
+      if (onChange) onChange(currentValue);
+    });
+    menu.appendChild(li);
+  });
+
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) open();
+    else close();
+  });
+  toggle.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+
+  container.appendChild(toggle);
+  container.appendChild(menu);
+  syncSelected();
+
+  container._dd = {
+    getValue: () => currentValue,
+    setValue: (v, fire) => {
+      if (!options.some((o) => o.value === v)) return;
+      currentValue = v;
+      syncSelected();
+      if (fire && onChange) onChange(v);
+    },
+  };
 }
 
 function renderRosterData(managerName, isCommissioner) {
@@ -9106,11 +9191,10 @@ window.viewSwapManager = function (managerName) {
   document.querySelector('[data-tab="my-roster"]').classList.add('active');
   document.getElementById('my-roster').classList.add('active');
 
-  const select = document.getElementById('roster-manager-select');
-  if (select) {
-    select.value = managerName;
-    select.dispatchEvent(new Event('change'));
-  }
+  // Build/populate the roster dropdown, then switch it to the requested manager.
+  setupMyRoster();
+  const dd = document.getElementById('roster-manager-dropdown');
+  if (dd && dd._dd) dd._dd.setValue(managerName, true);
 };
 
 // ---- Season Setup Toggle ----
