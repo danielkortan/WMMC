@@ -1356,8 +1356,13 @@ function rebuildWeeklyFromDaily(sd, round, week) {
     ) {
       continue;
     }
-    const manager =
-      findManagerForPlayerWeek(sd, name, 'batting', round, week) || findManagerForPlayer(sd, name, 'batting');
+    // Attribute strictly to the manager who rosters the player THIS week (carry-forward
+    // already respects add/drop windows). The old any-week `findManagerForPlayer` fallback
+    // mis-credited pre-add / post-drop weeks to a manager who only owned the player in other
+    // weeks — e.g. a player swapped in on 5/22 showing points for the prior weeks. A player
+    // not rostered this week stays manager:null (free-agent stats) and is excluded from that
+    // manager's views and totals.
+    const manager = findManagerForPlayerWeek(sd, name, 'batting', round, week);
     const effectiveScore = computeEffectiveBattingScore(sd, name, round, week);
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculateBattingScore(cumulative);
     sd.weekly_batting = sd.weekly_batting.filter(
@@ -1394,8 +1399,8 @@ function rebuildWeeklyFromDaily(sd, round, week) {
     ) {
       continue;
     }
-    const manager =
-      findManagerForPlayerWeek(sd, name, 'pitching', round, week) || findManagerForPlayer(sd, name, 'pitching');
+    // Strictly per-week attribution — see the batting note above.
+    const manager = findManagerForPlayerWeek(sd, name, 'pitching', round, week);
     const effectiveScore = computeEffectivePitchingScore(sd, name, round, week);
     const weeklyScore = effectiveScore !== null ? effectiveScore : calculatePitchingScore(cumulative);
     sd.weekly_pitching = sd.weekly_pitching.filter(
