@@ -324,10 +324,42 @@ function computePoolPlaySeeding(seasonData, bracketSize = 8) {
   };
 }
 
-// Ordered QF qualifier names (seeds 1..8), or null if pools aren't configured. Thin wrapper
-// over the canonical seeding so every consumer agrees.
-function getQFQualifiers(sd) {
+// Authoritative seeding for a season. Once pool play is finalized the commissioner-confirmed
+// snapshot (taken at "End Pool Play") is locked in — so a later pool-play stat correction can't
+// silently reseed an in-progress playoff. Before finalization it's the live prediction. Falls
+// back to the live computation for any finalized season that predates the snapshot field.
+function getSeeding(sd) {
+  const snap = sd && sd.confirmed_seeding;
+  if (snap && Array.isArray(snap.qualifierNames) && (sd.finalized_rounds || []).includes('PP')) {
+    return {
+      qualifierNames: snap.qualifierNames,
+      pp1Leaders: new Set(snap.pp1Leaders || []),
+      pp2Leaders: new Set(snap.pp2Leaders || []),
+      allLeaders: new Set([...(snap.pp1Leaders || []), ...(snap.pp2Leaders || [])]),
+      wildcardSet: new Set(snap.wildcards || []),
+      seeds: snap.qualifierNames.map((name, i) => ({ manager: name, seed: i + 1 })),
+      fromSnapshot: true,
+    };
+  }
+  return computePoolPlaySeeding(sd);
+}
+
+// Build the JSON-serializable seeding snapshot stored at "End Pool Play".
+function buildSeedingSnapshot(sd) {
   const seeding = computePoolPlaySeeding(sd);
+  if (!seeding) return null;
+  return {
+    qualifierNames: seeding.qualifierNames,
+    pp1Leaders: [...seeding.pp1Leaders],
+    pp2Leaders: [...seeding.pp2Leaders],
+    wildcards: [...seeding.wildcardSet],
+  };
+}
+
+// Ordered QF qualifier names (seeds 1..8), or null if pools aren't configured. Thin wrapper
+// over the authoritative seeding so every consumer agrees.
+function getQFQualifiers(sd) {
+  const seeding = getSeeding(sd);
   if (!seeding || seeding.qualifierNames.length === 0) return null;
   return seeding.qualifierNames;
 }
@@ -353,7 +385,7 @@ function roundBreakdown(sd, manager, round, rosterLookup, weekKeyToStart) {
 // Seed rank (1 = best) from the canonical seeding, used to break playoff ties by the same
 // hierarchy that decides seeding (total -> periods won -> batting -> pitching -> PP2 -> PP1).
 function seedRankLookup(sd) {
-  const seeding = computePoolPlaySeeding(sd);
+  const seeding = getSeeding(sd);
   const rank = {};
   if (seeding) seeding.seeds.forEach((s) => (rank[s.manager] = s.seed));
   return rank;
@@ -4122,7 +4154,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   // Seeding comes entirely from the canonical pool-play computation (single source of truth,
   // drop-aware) — the same function feeds the scoreboard highlights and the qualification
   // gates, so the bracket can't disagree with them and no longer counts dropped players.
-  const seeding = computePoolPlaySeeding(seasonData);
+  const seeding = getSeeding(seasonData);
   const qualifiers = seeding ? seeding.qualifierNames : [];
 
   if (qualifiers.length < 8) {
@@ -4337,7 +4369,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   // The same computation feeds the tentative bracket and the qualification gates, so the
   // scoreboard highlights can't disagree with who actually seeds/qualifies. It also scores via
   // managerWeekSubtotal, so the highlighted leaders match the totals shown in these tables.
-  const seeding = computePoolPlaySeeding(seasonData) || {
+  const seeding = getSeeding(seasonData) || {
     pp1Leaders: new Set(),
     pp2Leaders: new Set(),
     allLeaders: new Set(),
@@ -11874,6 +11906,14 @@ window.finalizeRound = function (roundKey, weekIndex) {
   if (sd.finalized_rounds.includes(roundKey)) return;
 
   sd.finalized_rounds.push(roundKey);
+
+  // Lock in the playoff seeds at the moment pool play is confirmed. From here on the bracket
+  // and qualification read this snapshot, so a later pool-play stat correction can't silently
+  // reseed an in-progress playoff.
+  if (roundKey === 'PP') {
+    const snapshot = buildSeedingSnapshot(sd);
+    if (snapshot) sd.confirmed_seeding = snapshot;
+  }
 
   // Auto-advance players to next round if applicable
   if (roundKey === 'PP' && weekIndex < SEASON_SCHEDULE.length - 1) {
