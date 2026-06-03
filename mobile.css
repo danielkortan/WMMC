@@ -1174,22 +1174,29 @@
     border-color: #2a2a45;
   }
 
-  /* .form-select is a deliberately white dropdown. On a dark-mode phone the
-     browser dark-themes native form controls (and their option popups),
-     overriding author color — that's what made the roster picker light-on-white.
-     color-scheme:light forces the control to render light (dark text on white);
-     the explicit color/option rules reinforce it. */
-  .form-select,
-  .roster-manager-bar-inner .form-select {
-    color-scheme: light;
-    background-color: #fff;
-    color: var(--text);
-    -webkit-text-fill-color: var(--text);
-    opacity: 1;
+  /* Mobile uses a dark theme, so style the custom roster-picker dropdown dark
+     (light text on dark) to match — otherwise the menu's text reads light on the
+     white background I gave it for desktop. */
+  .custom-dd-toggle.form-select {
+    background: #12122a;
+    color: #e8eaf6;
+    -webkit-text-fill-color: #e8eaf6;
+    border-color: #2a2a45;
   }
-  .form-select option {
-    color: var(--text);
-    background-color: #fff;
+  .custom-dd-menu {
+    background: #1a1a2e;
+    color: #e8eaf6;
+    border-color: #2a2a45;
+  }
+  .custom-dd-menu .custom-dd-option {
+    color: #e8eaf6;
+  }
+  .custom-dd-menu .custom-dd-option:hover {
+    background: #24243f;
+  }
+  .custom-dd-menu .custom-dd-option[aria-selected='true'] {
+    background: var(--field-green);
+    color: #fff;
   }
 
   input::placeholder {
