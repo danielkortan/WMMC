@@ -1,5 +1,10 @@
 # Test fixtures
 
+`staging-seed.json` is a **fully synthetic** season (invented managers, players, and
+deterministic pseudo-random stats — no real league data) used to seed the staging
+environment so its UI renders. Regenerate it with `node scripts/generate-staging-seed.js`.
+The `wmmc-staging` Render service copies it to `db.json` on boot via its Start Command.
+
 `db.sample.json` is a sanitized snapshot of the live league DB — **all passwords
 removed** and **all emails pseudonymized** (e.g. `cam.mccallum@example.com`,
 with referential integrity kept so a manager's email still matches their swap
