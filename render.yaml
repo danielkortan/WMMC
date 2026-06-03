@@ -1,7 +1,10 @@
 services:
+  # ---- Production ----
+  # Auto-deploys on every push to `main`. Merging a PR to main = deploying to prod.
   - type: web
     name: wmmc
     runtime: node
+    branch: main
     buildCommand: npm install
     startCommand: node server.js
     disk:
@@ -24,4 +27,27 @@ services:
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+
+  # ---- Staging ----
+  # A throwaway copy for verifying a real deploy before it reaches production.
+  # Auto-deploys on every push to the `staging` branch. Deliberately isolated
+  # from production so testing here can never touch live league data or Slack:
+  #   * No persistent disk — the filesystem is ephemeral and reseeds from
+  #     managers_seed.json on each deploy. (Render disks also need a paid plan.)
+  #   * No DB_PATH — falls back to the in-repo ./db.json (ephemeral, fine here).
+  #   * No UPSTASH_* — so staging never mirrors writes to prod's `wmmc_db` Redis
+  #     key and clobbers the production backup.
+  #   * No SLACK_* — so test activity never posts to the real league channels.
+  # Set LOGIN_PASSWORD separately in the staging service's dashboard.
+  - type: web
+    name: wmmc-staging
+    runtime: node
+    branch: staging
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOGIN_PASSWORD
         sync: false
