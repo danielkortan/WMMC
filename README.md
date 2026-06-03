@@ -7,7 +7,8 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Multi-Season Management** — Create, manage, and archive multiple seasons
 - **Configurable Scoring** — Per-stat batting and pitching point rubrics (currently hardcoded; see [Scoring Rubric](#scoring-rubric))
 - **Roster Management** — Per-week rosters with a manager-initiated swap workflow that the commissioner approves
-- **Google Sheets Sync** — Pull weekly stats from a linked spreadsheet on a daily schedule
+- **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
+- **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
