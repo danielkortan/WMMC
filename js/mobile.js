@@ -362,49 +362,6 @@ function setupScoreboardTabsBar() {
   setTimeout(syncTabsBar, 1000);
 }
 
-// ── Swipe left/right to navigate primary tabs ───────────────────
-function setupSwipeNavigation() {
-  const PRIMARY_TABS = ['dashboard', 'live', 'my-roster', 'weekly'];
-  let startX = 0;
-  let startY = 0;
-
-  const getCurrentTab = () => {
-    const active = document.querySelector('#mobile-bottom-nav .mobile-nav-btn.active');
-    return active?.dataset.tab || localStorage.getItem('wmmc_active_tab') || 'dashboard';
-  };
-
-  document.addEventListener(
-    'touchstart',
-    (e) => {
-      startX = e.touches[0].clientX;
-      startY = e.touches[0].clientY;
-    },
-    { passive: true }
-  );
-
-  document.addEventListener(
-    'touchend',
-    (e) => {
-      const dx = e.changedTouches[0].clientX - startX;
-      const dy = e.changedTouches[0].clientY - startY;
-
-      // Require horizontal dominance and minimum travel distance
-      if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx) * 0.8) return;
-
-      const cur = getCurrentTab();
-      const idx = PRIMARY_TABS.indexOf(cur);
-      if (idx === -1) return;
-
-      if (dx < 0 && idx < PRIMARY_TABS.length - 1) {
-        triggerTab(PRIMARY_TABS[idx + 1]); // swipe left → next tab
-      } else if (dx > 0 && idx > 0) {
-        triggerTab(PRIMARY_TABS[idx - 1]); // swipe right → prev tab
-      }
-    },
-    { passive: true }
-  );
-}
-
 // ── Pool Play: stack PP1/PP2 below PP-Overall on mobile ──────────
 function stackPoolPlayPeriods() {
   const overall = document.getElementById('sb-pp-overall');
@@ -644,7 +601,6 @@ function init() {
   watchWeeklyTable();
   watchScoreboard();
   setupScoreboardTabsBar();
-  setupSwipeNavigation();
 }
 
 if (document.readyState === 'loading') {
