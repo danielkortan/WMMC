@@ -212,6 +212,12 @@ for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
 
 const db = {
   seasons: {
+    // Historical 2025 season. MUST be present: on load the client bootstraps a
+    // missing 2025 from data.json and POSTs it (app.js:717) — an auth-required
+    // call that 401s before login and triggers a reload loop. Seeding it here
+    // (exactly as app.js:714 would build it) prevents that. data.json is already
+    // committed to the repo, so this exposes nothing new.
+    2025: { status: 'completed', data: JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data.json'), 'utf8')) },
     [SEASON_YEAR]: {
       name: `${SEASON_YEAR} WMMC Season (STAGING SAMPLE DATA)`,
       year: SEASON_YEAR,
