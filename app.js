@@ -33,9 +33,11 @@ async function apiFetch(url, options = {}) {
     'X-User-Password': password,
   };
   const resp = await fetch(url, { ...options, headers });
-  // 401/403 means our cached creds are stale (commissioner role revoked,
-  // password changed, etc.). Force re-login.
-  if (resp.status === 401) {
+  // A 401 means cached creds are stale (commissioner role revoked, password
+  // changed, etc.) — force re-login. But ONLY when we actually sent credentials:
+  // a 401 on an unauthenticated/background call (e.g. the pre-login bootstrap POST)
+  // must not reload, or it loops indefinitely.
+  if (resp.status === 401 && email && password) {
     localStorage.removeItem('wmmc_logged_in_email');
     localStorage.removeItem('wmmc_logged_in_password');
     window.location.reload();
@@ -6167,13 +6169,13 @@ function setupMyRoster() {
     // Preserve the roster the commissioner was viewing across re-renders (e.g. auto-poll)
     const prevSelection = managerDropdown._dd ? managerDropdown._dd.getValue() : '';
 
-    // The dropdown button carries the full "Name's Roster" label, so the separate title is redundant
+    // The dropdown button shows the manager name, so the separate title is redundant
     titleEl.style.display = 'none';
     managerDropdown.style.display = '';
     const options = [...managers]
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((m) => {
-        let label = m.name + "'s Roster";
+        let label = m.name;
         if (m.commissioner) label += ' (Commissioner)';
         if (m.active === false) label += ' (Inactive)';
         return { value: m.name, label };

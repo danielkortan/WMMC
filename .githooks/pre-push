@@ -1,9 +1,30 @@
 #!/bin/sh
-# Auto-update version.json with today's date before pushing
+# Pre-push hook:
+#  1. Stamp version.json with today's date (busts the cached app shell after deploy).
+#  2. Auto-bump the cache-busting ?v= query strings for static assets in index.html
+#     to a short content hash, so a changed CSS/JS file is always re-fetched by
+#     browsers. version.json does NOT cover these. Hash-based => the version only
+#     changes when the file's content changes (no churn on unrelated pushes).
+
+# 1) version.json date stamp
 DATE=$(date +%Y%m%d)
 CURRENT=$(grep -o '"version": *"[^"]*"' version.json 2>/dev/null | grep -o '[0-9]*')
 if [ "$DATE" != "$CURRENT" ]; then
   printf '{"version": "%s"}\n' "$DATE" > version.json
   git add version.json
-  git commit -m "chore: update version to $DATE"
+fi
+
+# 2) asset cache-busting content hashes (git hash-object is portable; no md5 needed)
+for f in styles.css mobile.css app.js js/index.js js/mobile.js; do
+  [ -f "$f" ] || continue
+  v=$(git hash-object "$f" | cut -c1-8)
+  esc=$(printf '%s' "$f" | sed 's/\./\\./g') # escape dots for the regex
+  sed -i.bak -E "s#(${esc}\?v=)[A-Za-z0-9]+#\1${v}#g" index.html
+  rm -f index.html.bak
+done
+git add index.html
+
+# Commit only if the stamping changed something.
+if ! git diff --cached --quiet -- version.json index.html; then
+  git commit -m "chore: stamp version + asset cache versions"
 fi

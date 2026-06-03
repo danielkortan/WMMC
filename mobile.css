@@ -1174,6 +1174,16 @@
     border-color: #2a2a45;
   }
 
+  /* Native .form-select pills (swap forms, week/season pickers) also go dark on
+     mobile — styles.css makes them white, unreadable in the dark theme. The custom
+     roster-picker toggle has its own (matching) rule below. */
+  .form-select {
+    background: #12122a;
+    color: #e8eaf6;
+    -webkit-text-fill-color: #e8eaf6;
+    border-color: #2a2a45;
+  }
+
   /* Mobile uses a dark theme, so style the custom roster-picker dropdown dark
      (light text on dark) to match — otherwise the menu's text reads light on the
      white background I gave it for desktop. */
