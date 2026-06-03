@@ -868,7 +868,13 @@ function wasDroppedBeforeWeek(sd, managerName, playerName, weekKey, weekStart) {
   for (const [wk, players] of Object.entries(mgrDates)) {
     if (wk === weekKey) continue;
     const pd = players[playerName];
-    if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+    if (pd && pd.drop_date && pd.drop_date < weekStart) {
+      // Only treat as dropped if there is no re-add in a later week before weekStart.
+      const reAddedLater = Object.values(mgrDates).some(
+        (wkp) => wkp[playerName] && wkp[playerName].add_date > pd.drop_date && wkp[playerName].add_date < weekStart
+      );
+      if (!reAddedLater) return true;
+    }
   }
   return false;
 }
@@ -1233,6 +1239,87 @@ function repairMissingRosterChains(db) {
   // Return true so the caller persists the flag (and any repair); the gate above then makes
   // this one-time pass a no-op on every subsequent boot.
   return true;
+}
+
+// One-time targeted repair for Chris Bentivegna's Ranger Suarez pitcher chain.
+// Ranger Suarez was dropped via Free Swap on 2026-05-11 (Week 2) then re-added via IL Swap
+// on 2026-05-26 (Week 4). Because the Week 5 roster was auto-advanced before the re-add, and
+// wasDroppedBeforeWeek only checked for the earlier drop, Ranger Suarez was missing from the
+// Week 5 display and scoring. This repair: removes the duplicate IL Swap entry, ensures
+// Ranger Suarez is in Week 4 and Week 5 pitcher arrays, and adds a Week 5 weekly_pitching
+// placeholder so the next daily sync can credit his actual stats.
+function repairBentivegnaPitcherRoster(db) {
+  if (!db || db.bentivegna_pitcher_repair_done) return false;
+  let changed = false;
+
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd || sd.status !== 'active') continue;
+
+    // Remove the erroneous duplicate IL Swap (Ranger Suarez BOS in / Dylan Cease TOR out, 2026-05-26).
+    if (Array.isArray(sd.swaps)) {
+      const seen = new Set();
+      const before = sd.swaps.length;
+      sd.swaps = sd.swaps.filter((s) => {
+        const k = `${s.manager}|${s.player_in}|${s.player_out}|${s.swap_date}|${s.reason}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      if (sd.swaps.length < before) {
+        changed = true;
+        console.log(`[Bentivegna Repair] Removed ${before - sd.swaps.length} duplicate swap(s).`);
+      }
+    }
+
+    // Ensure Ranger Suarez appears in Week 4 and Week 5 pitcher arrays.
+    if (sd.rosters) {
+      const mgr = 'Chris Bentivegna';
+      const mgrRosters = sd.rosters[mgr];
+      if (mgrRosters) {
+        for (const weekKey of ['PP1|Week 4', 'PP1|Week 5']) {
+          const wr = mgrRosters[weekKey];
+          if (wr && Array.isArray(wr.pitchers) && !wr.pitchers.includes('Ranger Suarez')) {
+            wr.pitchers.push('Ranger Suarez');
+            changed = true;
+            console.log(`[Bentivegna Repair] Added Ranger Suarez to ${weekKey} pitchers.`);
+          }
+        }
+      }
+    }
+
+    // Add a zero-stat weekly_pitching placeholder for Week 5 so the next daily sync can
+    // attribute Ranger Suarez's actual stats to Bentivegna's roster for that week.
+    if (!sd.weekly_pitching) sd.weekly_pitching = [];
+    const week5Exists = sd.weekly_pitching.some(
+      (p) =>
+        p.round === 'PP1' && p.week === 'Week 5' && p.pitcher === 'Ranger Suarez' && p.manager === 'Chris Bentivegna'
+    );
+    if (!week5Exists) {
+      sd.weekly_pitching.push({
+        round: 'PP1',
+        week: 'Week 5',
+        manager: 'Chris Bentivegna',
+        pitcher: 'Ranger Suarez',
+        gs: 0,
+        w: 0,
+        qs: 0,
+        cg: 0,
+        cgso: 0,
+        nh: 0,
+        ip: 0,
+        h: 0,
+        er: 0,
+        bb: 0,
+        k: 0,
+        weekly_score: 0,
+      });
+      changed = true;
+    }
+  }
+
+  db.bentivegna_pitcher_repair_done = true;
+  if (changed) console.log('[Bentivegna Repair] Fixed Ranger Suarez Week 4/5 pitcher roster and duplicate swap.');
+  return changed;
 }
 
 // Fill / recompute per-week roster entries by carrying forward the most recent trusted
@@ -1736,7 +1823,12 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
       for (const [wk, players] of Object.entries(allMgrDates)) {
         if (wk === weekKey) continue;
         const pd = players[player];
-        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        if (pd && pd.drop_date && pd.drop_date < weekStart) {
+          const reAddedLater = Object.values(allMgrDates).some(
+            (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+          );
+          if (!reAddedLater) return true;
+        }
       }
       return false;
     };
@@ -7101,6 +7193,16 @@ async function main() {
       if (ran) writeDB(dbForRosterRepair);
     } catch (e) {
       console.error('[Roster Repair] Error (continuing):', e.message);
+    }
+
+    // One-shot: fix Ranger Suarez missing from Bentivegna's Week 5 roster after being re-added
+    // via IL Swap in Week 4. Also removes a duplicate IL Swap entry.
+    try {
+      const dbForBentivegnaRepair = readDB();
+      const ran = repairBentivegnaPitcherRoster(dbForBentivegnaRepair);
+      if (ran) writeDB(dbForBentivegnaRepair);
+    } catch (e) {
+      console.error('[Bentivegna Repair] Error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler (no-op while config.enabled=false,

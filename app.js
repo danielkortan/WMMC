@@ -596,7 +596,12 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
       for (const [wk, players] of Object.entries(allMgrDates)) {
         if (wk === weekKey) continue;
         const pd = players[player];
-        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        if (pd && pd.drop_date && pd.drop_date < weekStart) {
+          const reAddedLater = Object.values(allMgrDates).some(
+            (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+          );
+          if (!reAddedLater) return true;
+        }
       }
       return false;
     };
@@ -5921,7 +5926,12 @@ function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKe
   for (const [wk, players] of Object.entries(mgrDates)) {
     if (wk === weekKey) continue;
     const pd = players[player];
-    if (pd && pd.drop_date && pd.drop_date < wkStart) return true;
+    if (pd && pd.drop_date && pd.drop_date < wkStart) {
+      const reAddedLater = Object.values(mgrDates).some(
+        (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < wkStart
+      );
+      if (!reAddedLater) return true;
+    }
   }
   return false;
 }
@@ -6543,7 +6553,12 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         for (const [wk, players] of Object.entries(allMgrDates)) {
           if (wk === weekKey) continue;
           const pd = players[player];
-          if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+          if (pd && pd.drop_date && pd.drop_date < weekStart) {
+            const reAddedLater = Object.values(allMgrDates).some(
+              (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+            );
+            if (!reAddedLater) return true;
+          }
         }
         return false;
       };
@@ -10747,7 +10762,12 @@ window.updateCommRosterWeekView = function (managerName) {
       for (const [wk, players] of Object.entries(allMgrDates)) {
         if (wk === weekKey) continue;
         const pd = players[player];
-        if (pd && pd.drop_date && pd.drop_date < weekStart) return true;
+        if (pd && pd.drop_date && pd.drop_date < weekStart) {
+          const reAddedLater = Object.values(allMgrDates).some(
+            (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
+          );
+          if (!reAddedLater) return true;
+        }
       }
       return false;
     };
