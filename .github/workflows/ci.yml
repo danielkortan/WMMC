@@ -1,14 +1,16 @@
 name: CI
 
 # Runs the project's "definition of done" (tests, lint, formatting) on every PR
-# and on pushes to main. Mirrors the local pre-commit checks from CLAUDE.md:
+# and on pushes to main/staging. Mirrors the local pre-commit checks from CLAUDE.md:
 #   npm test && npm run lint && npm run format:check
 # Keep this in sync with those commands if they change.
+# Pushes to staging are included so Render's "After CI Checks Pass" gate has a
+# check to wait on before deploying the staging service.
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, staging]
 
 jobs:
   check:
