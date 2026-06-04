@@ -11,11 +11,12 @@ let LOGGED_IN_EMAIL = null;
 let pendingSwapPollTimer = null;
 let BANNER_BG_CONFIG = null; // Custom banner background config { imageData, posX, posY, scale }
 
-// Google Sign-In Client ID — set this to enable Google login. Note: Google
-// sign-in users currently can't reach commissioner-only endpoints because the
-// server middleware verifies the email/password pair — there's no Google token
-// exchange flow.
-const GOOGLE_CLIENT_ID = '';
+// Google Sign-In Client ID — fetched at startup from GET /api/auth/config, which
+// reads it from the server's GOOGLE_CLIENT_ID env var. When set, the Google button
+// renders; the credential it returns is verified server-side by /api/auth/google,
+// which issues a per-manager auth token that apiFetch then sends like a password —
+// so Google users get full access (swaps, commissioner) just like password users.
+let GOOGLE_CLIENT_ID = '';
 
 // ============================================================
 // Authenticated fetch
@@ -974,27 +975,32 @@ async function handleLogin(email, password) {
   }
 }
 
-function handleGoogleCredential(response) {
+async function handleGoogleCredential(response) {
   const errEl = document.getElementById('google-signin-error');
+  errEl.textContent = '';
   try {
-    // Decode the JWT payload (base64url)
-    const payload = JSON.parse(atob(response.credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-    const email = (payload.email || '').toLowerCase();
+    // Send the raw credential to the server, which verifies Google's signature,
+    // maps the verified email to a manager, and returns a reusable auth token.
+    const resp = await fetch('/api/auth/google', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential: response.credential }),
+    });
+    const data = await resp.json();
 
-    if (!email) {
-      errEl.textContent = 'Could not read email from Google account.';
+    if (!resp.ok) {
+      errEl.textContent = data.error || 'Google sign-in failed. Please try email login.';
       return;
     }
 
-    const mgr = findManagerByEmail(email);
-    if (!mgr) {
-      errEl.textContent = 'This Google account is not registered. Contact the commissioner.';
-      return;
-    }
-
-    errEl.textContent = '';
+    const email = data.manager.email.toLowerCase();
     LOGGED_IN_EMAIL = email;
     localStorage.setItem('wmmc_logged_in_email', email);
+    // Store the server-issued token where apiFetch expects the password — the
+    // server re-verifies it (as a token) on every request, no session store.
+    localStorage.setItem('wmmc_logged_in_password', data.token);
+    // Prefer the locally cached manager (synced from server), fall back to the response.
+    const mgr = findManagerByEmail(email) || data.manager;
     enterApp(mgr);
   } catch (e) {
     errEl.textContent = 'Google sign-in failed. Please try email login.';
@@ -1166,17 +1172,31 @@ function openChangePasswordModal() {
   setTimeout(() => overlay.querySelector('#pw-current').focus(), 50);
 }
 
-function initGoogleSignIn() {
+function hideGoogleSignIn() {
+  const container = document.getElementById('google-signin-container');
+  const divider = container ? container.previousElementSibling : null;
+  if (container) container.style.display = 'none';
+  if (divider && divider.classList.contains('login-divider')) divider.style.display = 'none';
+}
+
+async function initGoogleSignIn() {
+  // Resolve the client ID from the server once (it lives in the GOOGLE_CLIENT_ID
+  // env var). If unset, Google sign-in stays hidden and email/password is used.
   if (!GOOGLE_CLIENT_ID) {
-    // Hide the divider and container if no Google client ID
-    const container = document.getElementById('google-signin-container');
-    const divider = container ? container.previousElementSibling : null;
-    if (container) container.style.display = 'none';
-    if (divider && divider.classList.contains('login-divider')) divider.style.display = 'none';
+    try {
+      const resp = await fetch('/api/auth/config');
+      const cfg = await resp.json();
+      GOOGLE_CLIENT_ID = cfg.googleClientId || '';
+    } catch (e) {
+      GOOGLE_CLIENT_ID = '';
+    }
+  }
+  if (!GOOGLE_CLIENT_ID) {
+    hideGoogleSignIn();
     return;
   }
 
-  // Google GIS may load after this script; retry if not ready
+  // The GIS library loads async; retry until it's ready.
   if (typeof google === 'undefined' || !google.accounts) {
     setTimeout(initGoogleSignIn, 500);
     return;

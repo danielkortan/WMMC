@@ -20,7 +20,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Backend:** Node.js + Express, file-backed JSON store with optional Upstash Redis backup
 - **Frontend:** Vanilla JS (single-file, currently being modularized — see [Project Structure](#project-structure))
 - **Charts:** Chart.js (loaded from CDN)
-- **Auth:** Email/password against `db.json`, with optional Google Sign-In (set `GOOGLE_CLIENT_ID` in `app.js`)
+- **Auth:** Email/password against `db.json`, with optional Google Sign-In (set the `GOOGLE_CLIENT_ID` env var)
 
 ## Getting Started
 
@@ -50,6 +50,7 @@ All configuration is via environment variables (no `.env` loader is bundled — 
 | `SLACK_WEBHOOK_URL`            | _(unset)_                         | General notifications channel (swaps, sync errors).                                      |
 | `SLACK_SCOREBOARD_WEBHOOK_URL` | falls back to `SLACK_WEBHOOK_URL` | Channel for the daily scoreboard post.                                                   |
 | `SLACK_SIGNING_SECRET`         | _(unset)_                         | Required if you wire up the `/api/slack/command` slash command.                          |
+| `GOOGLE_CLIENT_ID`             | _(unset)_                         | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).           |
 
 ### Running
 
@@ -120,10 +121,12 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Auth
 
-| Method | Endpoint                               | Description                                                       |
-| ------ | -------------------------------------- | ----------------------------------------------------------------- |
-| `POST` | `/api/login`                           | Validate `{ email, password }`. Returns `{ ok, manager }` or 401. |
-| `POST` | `/api/managers/:email/change-password` | Manager self-service password change.                             |
+| Method | Endpoint                               | Description                                                                             |
+| ------ | -------------------------------------- | --------------------------------------------------------------------------------------- |
+| `POST` | `/api/login`                           | Validate `{ email, password }`. Returns `{ ok, manager }` or 401.                       |
+| `GET`  | `/api/auth/config`                     | Public. Returns `{ googleClientId }` (empty when Google login is off).                  |
+| `POST` | `/api/auth/google`                     | Verify a Google ID token `{ credential }`. Returns `{ ok, manager, token }` or 401/403. |
+| `POST` | `/api/managers/:email/change-password` | Manager self-service password change.                                                   |
 
 ### Seasons
 
@@ -189,6 +192,25 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 3. Create an API key under **APIs & Services → Credentials**.
 4. In your spreadsheet, create tabs named `Week 1 Batting`, `Week 1 Pitching`, `Week 2 Batting`, etc.
 5. Enter the spreadsheet URL and API key in the Commissioner panel under **Stats Data → Google Sheets Auto-Sync**.
+
+## Google Sign-In Setup
+
+Lets managers log in with their Google account instead of a password. A manager's
+Google account email must **exactly match** their league email in the manager list
+(case-insensitive); there is no separate mapping. Email/password login keeps working
+either way, and the Google button stays hidden until `GOOGLE_CLIENT_ID` is set.
+
+1. Create (or reuse) a Google Cloud project at [console.cloud.google.com](https://console.cloud.google.com).
+2. Under **APIs & Services → OAuth consent screen**, configure the consent screen (External; add yourself as a test user, or publish it).
+3. Under **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application**.
+4. Add **every origin the page loads from** under **Authorized JavaScript origins** — Google matches them exactly (scheme + host, no path or trailing slash, https only except localhost). For this league that's `https://wmmc.live` (and `https://www.wmmc.live` if the `www.` host also resolves), plus `http://localhost:3000` for local dev. Add `https://wmmc.onrender.com` only if anyone reaches the app directly via the Render URL. No redirect URI is needed (Google Identity Services uses the JS callback).
+5. Copy the generated **Client ID** and set it as the `GOOGLE_CLIENT_ID` env var (in your shell locally, or in the Render dashboard for deploys).
+
+**How it works:** the browser obtains a signed Google ID token; the server verifies
+its signature against Google's public keys (built-in `crypto`, no extra dependency),
+confirms the audience matches `GOOGLE_CLIENT_ID`, maps the verified email to a manager,
+and issues a per-manager auth token. The client then sends that token like a password,
+so Google users get the same access (roster swaps, commissioner panel) as password users.
 
 ## Project Structure
 

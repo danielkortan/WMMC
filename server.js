@@ -35,6 +35,12 @@ const SLACK_SCOREBOARD_WEBHOOK_URL = process.env.SLACK_SCOREBOARD_WEBHOOK_URL ||
 // Signing secret from your Slack app — used to verify slash command requests.
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 
+// Google Sign-In — set GOOGLE_CLIENT_ID to the OAuth 2.0 *Web application* client
+// ID from your Google Cloud project to enable "Sign in with Google" on the login
+// page. The client ID is not a secret (it ships to the browser). Leaving it unset
+// keeps Google login hidden; email/password login always works regardless.
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+
 async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
   const body = blocks ? { text, blocks } : { text };
@@ -126,8 +132,12 @@ function loadManagerFromHeaders(req) {
   const db = readDB();
   const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
   if (!manager) return null;
+  // The X-User-Password header carries either the login password OR a per-manager
+  // auth token issued after Google sign-in (see /api/auth/google). Either proves
+  // identity — there is no session store, so both are re-verified on every request.
   const expected = manager.password || LOGIN_PASSWORD;
-  if (password !== expected) return null;
+  const tokenMatch = !!manager.authToken && password === manager.authToken;
+  if (password !== expected && !tokenMatch) return null;
   return manager;
 }
 
@@ -237,8 +247,9 @@ function readManagersSeed() {
 
 function writeManagersSeed(managers) {
   try {
-    // Strip passwords — they belong in db.json only, not in the git-committed seed file.
-    const seedRecords = managers.map(({ password: _password, ...rest }) => rest);
+    // Strip credentials (password + Google auth token) — they belong in db.json
+    // only, never in the git-committed seed file.
+    const seedRecords = managers.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
     fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
@@ -362,6 +373,119 @@ app.post('/api/login', (req, res) => {
   res.json({
     ok: true,
     manager: { name: manager.name, email: manager.email, commissioner: manager.commissioner || false },
+  });
+});
+
+// ============================================================
+// Google Sign-In
+// ============================================================
+// Verifies a Google ID token (JWT) using only Node's built-in crypto — no
+// external dependency. Fetches Google's published RSA public keys (JWKS),
+// caches them per Google's Cache-Control, verifies the RS256 signature, then
+// checks the standard claims (issuer, audience, expiry, email_verified).
+
+let googleCertsCache = { keys: null, expiresAt: 0 };
+
+async function getGoogleCerts() {
+  const now = Date.now();
+  if (googleCertsCache.keys && now < googleCertsCache.expiresAt) {
+    return googleCertsCache.keys;
+  }
+  const resp = await fetch('https://www.googleapis.com/oauth2/v3/certs');
+  if (!resp.ok) throw new Error(`Failed to fetch Google certs: ${resp.status}`);
+  const data = await resp.json();
+  // Honor max-age so we refresh when Google rotates its signing keys.
+  let maxAge = 3600;
+  const m = (resp.headers.get('cache-control') || '').match(/max-age=(\d+)/);
+  if (m) maxAge = parseInt(m[1], 10);
+  googleCertsCache = { keys: data.keys || [], expiresAt: now + maxAge * 1000 };
+  return googleCertsCache.keys;
+}
+
+function base64urlToBuffer(str) {
+  return Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+
+async function verifyGoogleIdToken(idToken) {
+  if (!GOOGLE_CLIENT_ID) throw new Error('Google sign-in is not configured');
+  if (typeof idToken !== 'string' || idToken.split('.').length !== 3) {
+    throw new Error('Malformed token');
+  }
+  const [headerB64, payloadB64, sigB64] = idToken.split('.');
+  const header = JSON.parse(base64urlToBuffer(headerB64).toString('utf8'));
+  if (header.alg !== 'RS256') throw new Error('Unexpected token algorithm');
+
+  const certs = await getGoogleCerts();
+  const jwk = certs.find((k) => k.kid === header.kid);
+  if (!jwk) throw new Error('No matching Google signing key');
+
+  const pubKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${headerB64}.${payloadB64}`);
+  if (!verifier.verify(pubKey, base64urlToBuffer(sigB64))) {
+    throw new Error('Invalid token signature');
+  }
+
+  const payload = JSON.parse(base64urlToBuffer(payloadB64).toString('utf8'));
+  const validIssuers = ['accounts.google.com', 'https://accounts.google.com'];
+  if (!validIssuers.includes(payload.iss)) throw new Error('Invalid token issuer');
+  if (payload.aud !== GOOGLE_CLIENT_ID) throw new Error('Token audience mismatch');
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== 'number' || payload.exp < now) throw new Error('Token expired');
+  if (!payload.email || payload.email_verified !== true) {
+    throw new Error('Google account email is not verified');
+  }
+  return payload;
+}
+
+// GET /api/auth/config — public. Tells the client whether Google sign-in is on,
+// and the (non-secret) client ID needed to render the Google button.
+app.get('/api/auth/config', (req, res) => {
+  res.json({ googleClientId: GOOGLE_CLIENT_ID });
+});
+
+// POST /api/auth/google — verify a Google ID token and log the user in.
+// The Google account's verified email is matched directly to a league manager.
+app.post('/api/auth/google', async (req, res) => {
+  if (!GOOGLE_CLIENT_ID) {
+    return res.status(404).json({ error: 'Google sign-in is not enabled' });
+  }
+  const { credential } = req.body || {};
+  if (!credential) {
+    return res.status(400).json({ error: 'Missing Google credential' });
+  }
+
+  let payload;
+  try {
+    payload = await verifyGoogleIdToken(credential);
+  } catch (e) {
+    console.error('Google token verification failed:', e.message);
+    return res.status(401).json({ error: 'Google sign-in could not be verified' });
+  }
+
+  const email = payload.email.toLowerCase();
+  const db = readDB();
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(403).json({ error: 'This Google account is not registered. Contact the commissioner.' });
+  }
+  if (manager.active === false) {
+    return res.status(403).json({ error: 'Account is inactive' });
+  }
+
+  // Issue (or reuse) a per-manager auth token. The client sends it in the
+  // X-User-Password header on later requests, exactly where the password would
+  // go — keeping the stateless re-validation model intact for Google users.
+  if (!manager.authToken) {
+    manager.authToken = crypto.randomBytes(32).toString('hex');
+  }
+  addAuditEntry(db, 'google_login', { email: manager.email }, manager.email);
+  writeDB(db);
+
+  res.json({
+    ok: true,
+    manager: { name: manager.name, email: manager.email, commissioner: manager.commissioner || false },
+    token: manager.authToken,
   });
 });
 
@@ -523,9 +647,10 @@ app.get('/api/pending-count', (req, res) => {
 // GET /api/managers — return managers list
 app.get('/api/managers', (req, res) => {
   const db = readDB();
-  // Strip passwords from response, but indicate if a custom password is set
+  // Strip credentials from response, but indicate if a custom password is set.
+  // authToken is a login credential and must never reach the client.
   const managers = (db.managers || []).map((m) => {
-    const { password, ...safe } = m;
+    const { password, authToken: _authToken, ...safe } = m;
     safe.hasCustomPassword = !!password;
     return safe;
   });
@@ -538,18 +663,23 @@ app.post('/api/managers', requireCommissioner, (req, res) => {
     return res.status(400).json({ error: 'Request body must be an array' });
   }
   const db = readDB();
-  // Preserve existing passwords — the client never receives them (stripped in GET),
-  // so we must carry them forward from the current db record.
-  const existingPasswords = {};
+  // Preserve existing credentials (password + Google auth token) — the client
+  // never receives them (stripped in GET), so we must carry them forward from
+  // the current db record or a managers save would wipe them.
+  const existingCreds = {};
   (db.managers || []).forEach((m) => {
-    if (m.email && m.password) existingPasswords[m.email.toLowerCase()] = m.password;
+    if (m.email && (m.password || m.authToken)) {
+      existingCreds[m.email.toLowerCase()] = { password: m.password, authToken: m.authToken };
+    }
   });
   db.managers = req.body.map((m) => {
     const emailKey = (m.email || '').toLowerCase();
-    if (!m.password && existingPasswords[emailKey]) {
-      return { ...m, password: existingPasswords[emailKey] };
-    }
-    return m;
+    const prior = existingCreds[emailKey];
+    if (!prior) return m;
+    const merged = { ...m };
+    if (!merged.password && prior.password) merged.password = prior.password;
+    if (!merged.authToken && prior.authToken) merged.authToken = prior.authToken;
+    return merged;
   });
   addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
   writeDB(db);

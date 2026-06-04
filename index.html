@@ -522,10 +522,13 @@
     </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <!-- Google Identity Services — renders the "Sign in with Google" button.
+         Inert unless the server has GOOGLE_CLIENT_ID set (see initGoogleSignIn). -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <!-- Module entry runs first (defer is implicit for type=module) and attaches
          shared helpers to window. app.js then consumes them as bare globals. -->
     <script type="module" src="js/index.js?v=f81753cc"></script>
     <script type="module" src="js/mobile.js?v=47e0a0b8"></script>
-    <script src="app.js?v=2fc1ab4a" defer></script>
+    <script src="app.js?v=f456c74d" defer></script>
   </body>
 </html>
