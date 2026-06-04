@@ -195,10 +195,13 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ## Google Sign-In Setup
 
-Lets managers log in with their Google account instead of a password. A manager's
-Google account email must **exactly match** their league email in the manager list
-(case-insensitive); there is no separate mapping. Email/password login keeps working
-either way, and the Google button stays hidden until `GOOGLE_CLIENT_ID` is set.
+Lets managers log in with their Google account instead of a password. Each manager
+has a **Google Email** field (editable in the Commissioner panel) that the Google
+account's verified email is matched against; it defaults to the manager's league
+email, so it works out of the box and only needs changing when a manager signs in
+with a different Google address than their league email. (If the field is blank,
+the league email is used.) Email/password login keeps working either way, and the
+Google button stays hidden until `GOOGLE_CLIENT_ID` is set.
 
 1. Create (or reuse) a Google Cloud project at [console.cloud.google.com](https://console.cloud.google.com).
 2. Under **APIs & Services → OAuth consent screen**, configure the consent screen (External; add yourself as a test user, or publish it).

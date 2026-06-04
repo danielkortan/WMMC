@@ -3,66 +3,77 @@
     "name": "Daniel Kortan",
     "email": "daniel.kortan@gmail.com",
     "commissioner": true,
-    "active": true
+    "active": true,
+    "googleEmail": "daniel.kortan@gmail.com"
   },
   {
     "name": "Cam McCallum",
     "email": "cammc15@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "cammc15@gmail.com"
   },
   {
     "name": "Marcus Gillespie",
     "email": "marcusgillespie92@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "marcusgillespie92@gmail.com"
   },
   {
     "name": "Ryan Sullivan",
     "email": "rmsullivan323@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "rmsullivan323@gmail.com"
   },
   {
     "name": "Ryan Courville",
     "email": "ryan.courville5@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "ryan.courville5@gmail.com"
   },
   {
     "name": "Chris Bentivegna",
     "email": "cbenti60@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "cbenti60@gmail.com"
   },
   {
     "name": "Joey Auclair",
     "email": "jauclair323@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "jauclair323@gmail.com"
   },
   {
     "name": "Jamie Rogers",
     "email": "jrogersdgmu@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "jrogersdgmu@gmail.com"
   },
   {
     "name": "Anton Capria",
     "email": "anton.t.capria@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "anton.t.capria@gmail.com"
   },
   {
     "name": "Alex Thalacker",
     "email": "athalack23@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "athalack23@gmail.com"
   },
   {
     "name": "Austin Johnson",
     "email": "austinjohns106@gmail.com",
     "commissioner": false,
-    "active": true
+    "active": true,
+    "googleEmail": "austinjohns106@gmail.com"
   }
 ]
