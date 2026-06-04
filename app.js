@@ -1766,9 +1766,8 @@ function renderLiveContent(d) {
           : '';
 
     const batterRow = (pl) => `<tr>
-      <td>${escapeHtml(pl.name)}</td>
+      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
       <td>${escapeHtml(pl.team || '')}</td>
-      <td>${stateBadge(pl)}</td>
       <td class="num-cell">${pl.stats.abs || 0}</td>
       <td class="num-cell">${pl.stats['1b'] || 0}</td>
       <td class="num-cell">${pl.stats['2b'] || 0}</td>
@@ -1782,9 +1781,8 @@ function renderLiveContent(d) {
     </tr>`;
 
     const pitcherRow = (pl) => `<tr>
-      <td>${escapeHtml(pl.name)}</td>
+      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
       <td>${escapeHtml(pl.team || '')}</td>
-      <td>${stateBadge(pl)}</td>
       <td class="num-cell">${pl.stats.gs || 0}</td>
       <td class="num-cell">${pl.stats.w || 0}</td>
       <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
@@ -1809,7 +1807,7 @@ function renderLiveContent(d) {
       const battingTable = batters.length
         ? `<div class="table-wrapper"><table class="data-table compact-table">
             <thead><tr>
-              <th>Player</th><th>Team</th><th>State</th>
+              <th>Player</th><th>Team</th>
               <th class="num-cell">AB</th><th class="num-cell">1B</th><th class="num-cell">2B</th>
               <th class="num-cell">3B</th><th class="num-cell">HR</th><th class="num-cell">R</th>
               <th class="num-cell">RBI</th><th class="num-cell">SB</th><th class="num-cell">BB</th>
@@ -1821,7 +1819,7 @@ function renderLiveContent(d) {
       const pitchingTable = pitchers.length
         ? `<div class="table-wrapper"><table class="data-table compact-table">
             <thead><tr>
-              <th>Player</th><th>Team</th><th>State</th>
+              <th>Player</th><th>Team</th>
               <th class="num-cell">GS</th><th class="num-cell">W</th><th class="num-cell">QS</th>
               <th class="num-cell">CG</th><th class="num-cell">CGSO</th><th class="num-cell">NH</th>
               <th class="num-cell">IP</th><th class="num-cell">H</th><th class="num-cell">ER</th>

@@ -4318,6 +4318,16 @@ body::before {
   color: var(--success);
   font-weight: 600;
 }
+.player-name-live {
+  color: var(--success);
+  font-weight: 600;
+  white-space: normal !important;
+}
+.player-name-final {
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: normal !important;
+}
 .rank-delta-up {
   color: var(--success);
   font-weight: 600;

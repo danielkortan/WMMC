@@ -953,6 +953,22 @@
     color: #4caf6e !important;
   }
 
+  /* Player name color in live detail tables */
+  .player-name-live {
+    color: #4caf6e !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+    word-break: break-word;
+  }
+  .player-name-final {
+    color: #8b8b8b !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: unset !important;
+    word-break: break-word;
+  }
+
   /* Live detail row (today's player activity) */
   #live-managers .card .data-table .live-mgr-detail-row td {
     display: block !important;
