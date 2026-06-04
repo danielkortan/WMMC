@@ -465,7 +465,13 @@ app.post('/api/auth/google', async (req, res) => {
 
   const email = payload.email.toLowerCase();
   const db = readDB();
-  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
+  // Match the Google account to a manager by their configured Google email,
+  // falling back to the league email when none is set. Commissioners can point
+  // this at a different address per manager via the admin panel.
+  const manager = (db.managers || []).find((m) => {
+    const mapped = (m.googleEmail || m.email || '').toLowerCase();
+    return mapped && mapped === email;
+  });
   if (!manager) {
     return res.status(403).json({ error: 'This Google account is not registered. Contact the commissioner.' });
   }
@@ -7242,6 +7248,28 @@ async function main() {
       } catch (e) {
         console.error('Could not seed managers from data.json:', e.message);
       }
+    }
+
+    // One-shot backfill: default each manager's googleEmail to their league
+    // email so Google sign-in works out of the box. Commissioners can change
+    // any of these in the admin panel. Idempotent — only writes when it fills
+    // in a missing value.
+    try {
+      const dbGE = readDB();
+      let changed = false;
+      (dbGE.managers || []).forEach((m) => {
+        if (m.email && m.googleEmail === undefined) {
+          m.googleEmail = m.email.toLowerCase();
+          changed = true;
+        }
+      });
+      if (changed) {
+        writeDB(dbGE);
+        writeManagersSeed(dbGE.managers);
+        console.log('Backfilled googleEmail for managers missing it');
+      }
+    } catch (e) {
+      console.error('Could not backfill manager googleEmail:', e.message);
     }
 
     // One-shot: cut over to the MLB Stats API as the sole stats source.

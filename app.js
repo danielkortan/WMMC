@@ -9668,6 +9668,7 @@ function _mgrNormalRow(m, idx) {
   return `<tr id="mgr-row-${idx}">
     <td><strong>${esc(m.name)}</strong></td>
     <td style="font-size:0.85rem;">${m.email}</td>
+    <td style="font-size:0.82rem;color:var(--text-muted);">${m.googleEmail ? esc(m.googleEmail) : '—'}</td>
     <td>${m.active !== false ? poolLabel : '<span style="color:var(--text-muted)">—</span>'}</td>
     <td style="white-space:nowrap;"><button class="btn btn-sm btn-secondary" onclick="inlineEditManager(${idx})">Edit</button></td>
     <td>${_mgrPwCell(m)}</td>
@@ -9685,7 +9686,7 @@ function renderManagersTable() {
   const inactiveList = managers.map((m, i) => ({ ...m, _idx: i })).filter((m) => m.active === false);
 
   const tableHead = `<thead><tr>
-    <th>Name</th><th>Email</th><th>Pool</th><th></th><th>Password</th><th>Commissioner</th><th></th>
+    <th>Name</th><th>Email</th><th>Google Email</th><th>Pool</th><th></th><th>Password</th><th>Commissioner</th><th></th>
   </tr></thead>`;
 
   let html = `<p class="mgr-section-label">Active Managers <span class="mgr-count">(${activeList.length})</span></p>`;
@@ -9705,6 +9706,7 @@ function renderManagersTable() {
       <div class="add-mgr-fields">
         <input type="text" id="mgr-name" class="form-input" placeholder="Full Name" style="width:130px;">
         <input type="email" id="mgr-email" class="form-input" placeholder="Email" style="width:185px;">
+        <input type="email" id="mgr-gemail" class="form-input" placeholder="Google email (defaults to email)" style="width:185px;">
         <select id="mgr-pool" class="form-select" style="width:90px;">
           <option value="">No Pool</option>
           <option value="1">Pool 1</option>
@@ -9732,6 +9734,7 @@ function renderManagersTable() {
   document.getElementById('save-manager-btn').onclick = () => {
     const name = document.getElementById('mgr-name').value.trim();
     const email = document.getElementById('mgr-email').value.trim().toLowerCase();
+    const googleEmail = document.getElementById('mgr-gemail').value.trim().toLowerCase() || email;
     const isCommissioner = document.getElementById('mgr-commissioner').checked;
     const isActive = document.getElementById('mgr-active').checked;
     const pool = isActive ? parseInt(document.getElementById('mgr-pool').value) || null : null;
@@ -9744,7 +9747,7 @@ function renderManagersTable() {
       alert('A manager with this email already exists.');
       return;
     }
-    mgrs.push({ name, email, commissioner: isCommissioner, active: isActive, pool });
+    mgrs.push({ name, email, googleEmail, commissioner: isCommissioner, active: isActive, pool });
     saveManagers(mgrs);
     renderManagersTable();
   };
@@ -9758,7 +9761,7 @@ window.showAddManagerForm = function () {
 window.hideAddManagerForm = function () {
   document.getElementById('add-mgr-form').style.display = 'none';
   document.getElementById('show-add-mgr-btn').style.display = 'inline-block';
-  ['mgr-name', 'mgr-email'].forEach((id) => (document.getElementById(id).value = ''));
+  ['mgr-name', 'mgr-email', 'mgr-gemail'].forEach((id) => (document.getElementById(id).value = ''));
   document.getElementById('mgr-commissioner').checked = false;
   document.getElementById('mgr-active').checked = true;
   document.getElementById('mgr-pool').value = '';
@@ -9775,6 +9778,7 @@ window.inlineEditManager = function (idx) {
   row.innerHTML = `
     <td><input type="text" id="inline-mgr-name-${idx}" class="form-input" value="${esc(m.name)}" style="min-width:110px;"></td>
     <td><input type="email" id="inline-mgr-email-${idx}" class="form-input" value="${m.email}" style="min-width:130px;font-size:0.83rem;"></td>
+    <td><input type="email" id="inline-mgr-gemail-${idx}" class="form-input" value="${esc(m.googleEmail || '')}" placeholder="Google email" style="min-width:130px;font-size:0.83rem;"></td>
     <td>
       <select id="inline-mgr-pool-${idx}" class="form-select" style="min-width:80px;">
         <option value="">None</option>
@@ -9813,6 +9817,11 @@ window.saveInlineManager = function (idx) {
     .getElementById('inline-mgr-email-' + idx)
     ?.value.trim()
     .toLowerCase();
+  const googleEmail =
+    document
+      .getElementById('inline-mgr-gemail-' + idx)
+      ?.value.trim()
+      .toLowerCase() || '';
   const isCommissioner = document.getElementById('inline-mgr-comm-' + idx)?.checked;
   const isActive = document.getElementById('inline-mgr-active-' + idx)?.checked;
   const pool = isActive ? parseInt(document.getElementById('inline-mgr-pool-' + idx)?.value) || null : null;
@@ -9825,7 +9834,7 @@ window.saveInlineManager = function (idx) {
     alert('A manager with this email already exists.');
     return;
   }
-  mgrs[idx] = { ...mgrs[idx], name, email, commissioner: isCommissioner, active: isActive, pool };
+  mgrs[idx] = { ...mgrs[idx], name, email, googleEmail, commissioner: isCommissioner, active: isActive, pool };
   saveManagers(mgrs);
   renderManagersTable();
 };
