@@ -3,6 +3,7 @@
 ## Deployment workflow (established 2026-06-04)
 
 After completing any feature branch, always:
+
 1. **Squash-merge** the feature branch into `staging` (no confirmation needed unless there are open questions or merge conflicts)
    ```
    git checkout staging && git merge --squash <feature-branch>

@@ -349,10 +349,7 @@
   header h1 {
     font-size: clamp(1rem, 5vw, 1.6rem);
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 0 1 auto;
-    min-width: 0;
+    flex: 0 0 auto;
   }
 
   .header-title-long {
@@ -372,16 +369,27 @@
   }
 
   .season-selector {
-    flex: 0 1 auto;
+    flex: 1 1 auto;
     min-width: 0;
+    overflow: hidden;
     text-align: center;
   }
 
   .season-selector select {
-    font-size: 0.78rem;
-    padding: 0.15rem 1.4rem 0.15rem 0.4rem;
-    max-width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
     background: transparent;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239fa8da'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.35rem center;
+    background-size: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    color: #e8eaf6;
+    font-size: 0.75rem;
+    padding: 0.15rem 1.1rem 0.15rem 0.35rem;
+    max-width: 100%;
+    cursor: pointer;
   }
 
   .user-bar {
@@ -1473,10 +1481,6 @@
   }
 
   .mob-sbrow td:nth-child(2) {
-    font-size: 1.8rem;
-  }
-
-  #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
     font-size: 1.8rem;
   }
 
