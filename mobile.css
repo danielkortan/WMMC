@@ -3,6 +3,11 @@
    Dark sports-app theme. Activates at ≤ 768 px.
    ================================================================= */
 
+/* Header short title hidden on desktop; shown on mobile by media query */
+.header-title-short {
+  display: none;
+}
+
 /* ── Bottom nav (always in DOM, hidden on desktop) ───────────── */
 .mobile-bottom-nav {
   display: none;
@@ -342,11 +347,20 @@
   }
 
   header h1 {
-    font-size: 0.9rem;
+    font-size: clamp(1rem, 5vw, 1.6rem);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 200px;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .header-title-long {
+    display: none !important;
+  }
+
+  .header-title-short {
+    display: inline !important;
   }
 
   .header-top {
@@ -358,17 +372,22 @@
   }
 
   .season-selector {
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+    text-align: center;
   }
 
   .season-selector select {
     font-size: 0.78rem;
-    padding: 0.25rem 1.6rem 0.25rem 0.5rem;
+    padding: 0.15rem 1.4rem 0.15rem 0.4rem;
+    max-width: 100%;
+    background: transparent;
   }
 
   .user-bar {
     margin-left: 0;
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-width: 0;
   }
 
   #online-users-bar {
@@ -887,7 +906,7 @@
     order: 2;
     flex: 1;
     min-width: 0;
-    font-size: 2.2rem;
+    font-size: clamp(1rem, 4.5vw, 2.2rem);
     font-weight: 800;
     color: #e8eaf6;
     align-items: center;
@@ -983,12 +1002,13 @@
     gap: 0.75rem;
     padding: 0.5rem !important;
     background: #13132a;
-    overflow: visible;
+    overflow-x: hidden;
+    overflow-y: visible;
   }
 
   #live-managers .live-mgr-detail-section {
     width: 100%;
-    overflow: visible;
+    overflow-x: hidden;
   }
 
   /* Section label */
@@ -1152,12 +1172,36 @@
     margin-bottom: 0.375rem;
   }
 
+  .live-title-row {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
   #live-week-title {
-    font-size: 1rem !important;
+    font-size: clamp(1.2rem, 5vw, 2.2rem) !important;
+  }
+
+  .live-date-btn {
+    font-size: clamp(1.2rem, 5vw, 2.2rem);
+    padding: 0.25rem 0.75rem;
+  }
+
+  .live-date-label {
+    font-size: clamp(1rem, 4.5vw, 2.2rem);
+    min-width: auto;
   }
 
   .live-status {
     font-size: 0.78rem;
+  }
+
+  .live-game-row {
+    padding: 0.5rem 0;
+    gap: 0.75rem;
+  }
+
+  .live-game-line {
+    font-size: 1.9rem !important;
   }
 
   /* ── Roster ─────────────────────────────────────────────────── */
@@ -1408,8 +1452,7 @@
 /* ── Very small phones (≤ 400 px) ─────────────────────────────── */
 @media (max-width: 400px) {
   header h1 {
-    font-size: 0.8rem;
-    max-width: 160px;
+    font-size: 1rem;
   }
 
   .mobile-nav-btn {
