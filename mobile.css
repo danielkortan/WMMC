@@ -948,11 +948,11 @@
     display: flex !important;
     order: 3;
     flex-shrink: 0;
-    font-size: 1.6rem;
+    font-size: 1rem;
     font-weight: 700;
     color: #9fa8da;
     align-items: center;
-    padding: 0 0.5rem 0 0 !important;
+    padding: 0 0.4rem 0 0 !important;
   }
 
   /* Daily score — col 5 */
@@ -960,19 +960,32 @@
     display: flex !important;
     order: 4;
     flex-shrink: 0;
-    font-size: 1.6rem;
+    font-size: 1rem;
     font-weight: 700;
     color: #9fa8da;
     align-items: center;
-    padding: 0 0.5rem 0 0 !important;
+    padding: 0 0.4rem 0 0 !important;
   }
 
   #live-managers .card .data-table .live-mgr-row td:nth-child(5)::before {
     content: '+';
-    font-size: 1.1rem;
+    font-size: 0.85rem;
     font-weight: 400;
     color: #6c7a9c;
     margin-right: 2px;
+  }
+
+  /* Truncate name text (strong) not the flex container */
+  #live-managers .card .data-table .live-mgr-row td:nth-child(2) strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  #live-managers .card .data-table .live-mgr-row td:nth-child(2) .sb-expand-arrow {
+    flex-shrink: 0;
   }
 
   /* Active manager (has players live today) */
