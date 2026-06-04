@@ -16,6 +16,16 @@ After completing any feature branch, always:
 
 Do NOT ask whether to push to staging — just do it at the end of every session unless there is an explicit reason not to (e.g., the user said "don't push yet").
 
+## Git identity — run at session start (established 2026-06-04)
+
+The pre-push hook stamps `version.json` as a new commit. If `user.email` isn't
+`noreply@anthropic.com` at that moment the commit is unverified. Always run this
+before the first push in any session:
+
+```
+git config user.email noreply@anthropic.com && git config user.name Claude
+```
+
 ## Mobile CSS patterns (established 2026-06-04)
 
 - Manager name font: `clamp(1rem, 4.5vw, 2.2rem)` in live section (5 columns); `2.2rem` fixed in scoreboard (3 columns — more room).
