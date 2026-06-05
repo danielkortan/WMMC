@@ -142,27 +142,27 @@ function getPeriodOpenDate(sd, period) {
       return idx >= 0 && dates[idx] ? new Date(dates[idx].end + 'T00:00:00') : null;
     }
     case 'qf': {
-      // Opens the Thursday before QF Week 1 starts (4 days before Monday)
+      // Opens the Friday before QF Week 1 starts (3 days before Monday)
       const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'QF' && s.week === 'Week 1');
       if (idx < 0 || !dates[idx]) return null;
       const d = new Date(dates[idx].start + 'T00:00:00');
-      d.setDate(d.getDate() - 4);
+      d.setDate(d.getDate() - 3);
       return d;
     }
     case 'sf': {
-      // Opens Monday after QF ends
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'QF' && s.week === 'Week 2');
+      // Opens the Friday before SF Week 1 starts (3 days before Monday)
+      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'SF' && s.week === 'Week 1');
       if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].end + 'T00:00:00');
-      d.setDate(d.getDate() + 1);
+      const d = new Date(dates[idx].start + 'T00:00:00');
+      d.setDate(d.getDate() - 3);
       return d;
     }
     case 'finals': {
-      // Opens Monday after SF ends
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'SF' && s.week === 'Week 2');
+      // Opens the Friday before Finals Week 1 starts (3 days before Monday)
+      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'Finals' && s.week === 'Week 1');
       if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].end + 'T00:00:00');
-      d.setDate(d.getDate() + 1);
+      const d = new Date(dates[idx].start + 'T00:00:00');
+      d.setDate(d.getDate() - 3);
       return d;
     }
     default:
