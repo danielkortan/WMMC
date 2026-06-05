@@ -3771,7 +3771,13 @@ async function fetchMLBGames(startDate, endDate) {
 // two MLB players who share a fullName (e.g. both "Max Muncy") be tracked separately as
 // "Max Muncy (LAD)" and "Max Muncy (OAK)". Unmapped players fall back to their fullName
 // (back-compat with pre-ID-migration data).
-function parseBoxscore(box, idToWmmcName = new Map()) {
+// gameIsFinal gates the CG/CGSO/NH derivation: those can only be credited once the
+// game is over. Mid-game, the starter is typically the only pitcher who has appeared,
+// so his outs equal the team's total outs and the naive check would falsely flag a
+// complete game / shutout / no-hitter. Callers that only ever pass Final games (the
+// scoring sync) pass true; live endpoints pass the per-game state. Defaults to false
+// so a forgotten flag fails safe (no phantom CG) rather than crediting in-progress games.
+function parseBoxscore(box, idToWmmcName = new Map(), gameIsFinal = false) {
   const batting = {};
   const pitching = {};
   const teamMap = {};
@@ -3818,13 +3824,17 @@ function parseBoxscore(box, idToWmmcName = new Map()) {
         const hits = ps.hits || 0;
         const started = ps.gamesStarted || 0;
         const pitcherOuts = ps.outs ?? null;
+        // Only a completed game can yield a CG: mid-game the starter holds all of his
+        // team's outs so far, which is not a complete game until the game is over.
         const isCG =
-          started > 0 && teamTotalOuts !== null && pitcherOuts !== null && pitcherOuts === teamTotalOuts ? 1 : 0;
+          gameIsFinal && started > 0 && teamTotalOuts !== null && pitcherOuts !== null && pitcherOuts === teamTotalOuts
+            ? 1
+            : 0;
         pitching[name] = {
           gs: started,
           w: ps.wins || 0,
           qs: isWmmcQS(started, ipDec, er),
-          // CG/CGSO/NH derived from outs and hit/ER counts
+          // CG/CGSO/NH derived from outs and hit/ER counts (only when the game is final)
           cg: isCG,
           cgso: isCG && er === 0 ? 1 : 0,
           nh: isCG && hits === 0 ? 1 : 0,
@@ -3855,7 +3865,8 @@ async function fetchMLBPerGameStats(startDate, endDate, idToWmmcName = new Map()
     } catch {
       continue;
     }
-    const { batting, pitching, teamMap } = parseBoxscore(box, idToWmmcName);
+    // fetchMLBGames only returns Final games, so CG/CGSO/NH are safe to credit here.
+    const { batting, pitching, teamMap } = parseBoxscore(box, idToWmmcName, true);
     results.push({ gameId, date, batting, pitching, teamMap });
   }
   return results;
@@ -5582,7 +5593,7 @@ app.get('/api/mlb/live', async (req, res) => {
       } catch {
         continue;
       }
-      const { batting, pitching } = parseBoxscore(box, idToWmmcName);
+      const { batting, pitching } = parseBoxscore(box, idToWmmcName, game.state === 'Final');
 
       const collect = (statsMap, type, scorer) => {
         for (const [name, stats] of Object.entries(statsMap)) {
@@ -6001,7 +6012,28 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   try {
     const idToWmmcName = buildIdToWmmcName(sd);
     const box = await mlbApiFetch(`/api/v1/game/${gamePk}/boxscore`);
-    const { batting, pitching } = parseBoxscore(box, idToWmmcName);
+    // Determine whether this game is final so CG/CGSO/NH aren't credited mid-game
+    // (the boxscore alone carries no game state). Look it up from the active week's
+    // schedule; on any miss or failure, default to not-final — the safe direction.
+    let gameIsFinal = false;
+    try {
+      const range = scheduleDates[activeIdx];
+      if (range?.start && range?.end) {
+        const sched = await mlbApiFetch(
+          `/api/v1/schedule?sportId=1&startDate=${range.start}&endDate=${range.end}&gameType=R,F,D,L,W`
+        );
+        for (const dateEntry of sched.dates || []) {
+          for (const g of dateEntry.games || []) {
+            if (String(g.gamePk) === String(gamePk)) {
+              gameIsFinal = g.status?.abstractGameState === 'Final';
+            }
+          }
+        }
+      }
+    } catch {
+      // Leave gameIsFinal = false — better to omit CG than to credit an in-progress game.
+    }
+    const { batting, pitching } = parseBoxscore(box, idToWmmcName, gameIsFinal);
 
     const teams = {};
     for (const side of ['away', 'home']) {
