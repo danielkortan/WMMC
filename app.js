@@ -3531,11 +3531,35 @@ function renderAwardsContent() {
 }
 
 // ---- Weekly Scores ----
+// Render the two small "Pool: x/total" / "OVR: x/total" rank rows beneath a
+// scored value on the Weekly Team Scoring page. `r` is row.rank[field].
+function teamWeeklyRankLines(r) {
+  if (!r) return '';
+  const pool = r.pool ? `Pool: ${r.pool.rank}/${r.pool.total}` : '';
+  const ovr = r.ovr ? `OVR: ${r.ovr.rank}/${r.ovr.total}` : '';
+  return `<div class="metric-rank">${pool}</div><div class="metric-rank">${ovr}</div>`;
+}
+
+// A single scored metric cell: the value on top, pool + overall ranks beneath.
+// `groupStart` marks the left-most metric of a section so it gets a divider.
+function teamWeeklyMetricCell(value, rank, strong, groupStart) {
+  const val = strong ? `<strong>${fmt(value)}</strong>` : fmt(value);
+  const cls = 'metric-cell' + (groupStart ? ' grp-start' : '');
+  return `<td class="${cls}"><div class="metric-val">${val}</div>${teamWeeklyRankLines(rank)}</td>`;
+}
+
 function renderWeekly() {
   if (!DATA || !DATA.team_weekly) {
     document.getElementById('weekly-table').innerHTML =
       '<tbody><tr><td>No weekly data available for this season.</td></tr></tbody>';
     return;
+  }
+
+  // Historical seasons load raw team_weekly rows straight from the season data,
+  // which lack the cumulative + rank fields. Enrich them once (idempotent —
+  // recomputes from the weekly_* values, so already-enriched rows are unchanged).
+  if (DATA.team_weekly.length && !DATA.team_weekly[0].rank) {
+    enrichTeamWeekly(DATA.team_weekly);
   }
 
   const rounds = [...new Set(DATA.team_weekly.map((t) => t.round))];
@@ -3559,15 +3583,19 @@ function renderWeekly() {
     const dates = getScheduleDates();
     const table = document.getElementById('weekly-table');
     table.classList.add('compact-table');
+    table.classList.add('weekly-grouped');
     table.innerHTML = `
       <thead>
-        <tr>
-          <th>Rnd</th><th>Wk</th>${dates ? '<th>Dates</th>' : ''}<th>Manager</th><th>Pool</th>
-          <th>Bat</th><th>Bat Rk</th>
-          <th>Pit</th><th>Pit Rk</th>
-          <th>Total</th><th>Tot Rk</th>
-          <th>Cum Bat</th><th>Cum Pit</th><th>Cum Tot</th>
-          <th>Pool Rk</th>
+        <tr class="group-row">
+          <th rowspan="2">Rnd</th><th rowspan="2">Wk</th>${dates ? '<th rowspan="2">Dates</th>' : ''}<th rowspan="2">Manager</th><th rowspan="2">Pool</th>
+          <th colspan="3" class="group-weekly">Weekly</th>
+          <th colspan="3" class="group-round">Per Round</th>
+          <th colspan="3" class="group-overall">Overall</th>
+        </tr>
+        <tr class="metric-row">
+          <th class="group-weekly grp-start">Batting</th><th class="group-weekly">Pitching</th><th class="group-weekly">Total</th>
+          <th class="group-round grp-start">Batting</th><th class="group-round">Pitching</th><th class="group-round">Total</th>
+          <th class="group-overall grp-start">Batting</th><th class="group-overall">Pitching</th><th class="group-overall">Total</th>
         </tr>
       </thead>
       <tbody>
@@ -3575,6 +3603,7 @@ function renderWeekly() {
           .map((t) => {
             const wi = weekIndexFromKey(t.round, t.week);
             const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+            const rk = t.rank || {};
             return `
           <tr>
             <td>${t.round || ''}</td>
@@ -3582,16 +3611,15 @@ function renderWeekly() {
             ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
             <td><strong>${t.manager}</strong></td>
             <td>${t.pool || ''}</td>
-            <td class="num">${fmt(t.weekly_batting)}</td>
-            <td class="rank">${t.weekly_batting_rank || ''}</td>
-            <td class="num">${fmt(t.weekly_pitching)}</td>
-            <td class="rank">${t.weekly_pitching_rank || ''}</td>
-            <td class="num"><strong>${fmt(t.weekly_total)}</strong></td>
-            <td class="rank">${t.weekly_total_rank || ''}</td>
-            <td class="num">${fmt(t.batting_total_by_round)}</td>
-            <td class="num">${fmt(t.pitching_total_by_round)}</td>
-            <td class="num">${fmt(t.team_score_by_round)}</td>
-            <td class="rank">${t.pool_rank_by_week || ''}</td>
+            ${teamWeeklyMetricCell(t.weekly_batting, rk.weekly_batting, false, true)}
+            ${teamWeeklyMetricCell(t.weekly_pitching, rk.weekly_pitching)}
+            ${teamWeeklyMetricCell(t.weekly_total, rk.weekly_total, true)}
+            ${teamWeeklyMetricCell(t.round_batting, rk.round_batting, false, true)}
+            ${teamWeeklyMetricCell(t.round_pitching, rk.round_pitching)}
+            ${teamWeeklyMetricCell(t.round_total, rk.round_total, true)}
+            ${teamWeeklyMetricCell(t.overall_batting, rk.overall_batting, false, true)}
+            ${teamWeeklyMetricCell(t.overall_pitching, rk.overall_pitching)}
+            ${teamWeeklyMetricCell(t.overall_total, rk.overall_total, true)}
           </tr>
         `;
           })
@@ -6139,12 +6167,16 @@ function buildTeamWeekly(seasonData) {
     map[k].weekly_pitching += p.weekly_score || 0;
   });
 
-  return Object.values(map).map((t) => {
+  const rows = Object.values(map).map((t) => {
     t.weekly_batting = Math.round(t.weekly_batting * 100) / 100;
     t.weekly_pitching = Math.round(t.weekly_pitching * 100) / 100;
     t.weekly_total = Math.round((t.weekly_batting + t.weekly_pitching) * 100) / 100;
     return t;
   });
+
+  // Stamp per-round / whole-season cumulative totals and pool + overall ranks
+  // for all nine metrics (see js/scoring.js).
+  return enrichTeamWeekly(rows);
 }
 
 // ============================================================
