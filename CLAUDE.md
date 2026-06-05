@@ -46,9 +46,9 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `server.js` — Express backend: all API routes, scoring engine, MLB Stats API sync, Google Sheets sync, Slack
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
-- `styles.css` — All styles (monolithic)
-- `js/` — Extracted frontend modules (`scoring.js`, `csv.js`, `utils.js`, `index.js`)
-- `tests/` — Unit tests for `js/` modules only
+- `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
 - `data.json` — Historical seed data (read-only)
@@ -59,7 +59,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 
 These are always true. Apply to every session. If a task conflicts with one, flag it before proceeding.
 
-- `SCORING` and `SEASON_SCHEDULE` are hardcoded in **both** `server.js` and `app.js` and must be kept in sync — every edit goes in both files.
+- `SCORING` and `SEASON_SCHEDULE` are hardcoded in **both** `server.js` and `js/scoring.js` and must be kept in sync — every edit goes in both files. (They were moved out of `app.js` during modularization; `app.js` now reads them from `window`, populated by `js/index.js`.)
 - Never commit `db.json` — it is gitignored and contains passwords.
 - `managers_seed.json` stores manager identities but never passwords — the server strips passwords before writing it.
 - The frontend has no build step — `index.html` loads files directly; there is nothing to compile or bundle.
@@ -83,7 +83,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 ## Gotchas — things that look wrong but aren't
 
-- `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `app.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical.
+- `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.)
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.
@@ -102,7 +102,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - Don't add new dependencies without asking.
 - Don't duplicate logic between `app.js` and `js/` — if a function exists in `js/`, call it from there and remove the copy in `app.js`.
 - Don't commit `db.json`.
-- Don't edit `SCORING` or `SEASON_SCHEDULE` in only one file — both `server.js` and `app.js` must be updated together.
+- Don't edit `SCORING` or `SEASON_SCHEDULE` in only one file — both `server.js` and `js/scoring.js` must be updated together.
 - Don't skip the pre-push hook (`--no-verify`).
 - Don't push directly to `main` or merge without a PR — every change goes through a pull request.
 
