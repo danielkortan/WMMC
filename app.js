@@ -137,9 +137,12 @@ function getPeriodOpenDate(sd, period) {
     case 'pp1':
       return null; // open once pool is ready
     case 'pp2': {
-      // Opens on the final Sunday of PP1 (PP1 Week 5 end date)
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'PP1' && s.week === 'Week 5');
-      return idx >= 0 && dates[idx] ? new Date(dates[idx].end + 'T00:00:00') : null;
+      // Opens the Friday before PP2 Week 1 starts (3 days before Monday)
+      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'PP2' && s.week === 'Week 1');
+      if (idx < 0 || !dates[idx]) return null;
+      const d = new Date(dates[idx].start + 'T00:00:00');
+      d.setDate(d.getDate() - 3);
+      return d;
     }
     case 'qf': {
       // Opens the Friday before QF Week 1 starts (3 days before Monday)
