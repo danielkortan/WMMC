@@ -41,10 +41,6 @@ const projectRules = {
   'no-var': 'error',
   'prefer-const': 'warn',
   curly: ['warn', 'multi-line'],
-  // New in ESLint 9/10's recommended set; kept as a warning so the bump stays
-  // behavior-neutral (doesn't fail CI). Flags 3 pre-existing dead assignments
-  // in app.js that are worth cleaning up separately.
-  'no-useless-assignment': 'warn',
 };
 
 module.exports = [
