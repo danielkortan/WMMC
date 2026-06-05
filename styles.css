@@ -4436,3 +4436,104 @@ body::before {
   font-weight: 500;
   letter-spacing: 0.02em;
 }
+
+/* ============================================================
+   Submission Warning Banner
+   ============================================================ */
+#submission-warning-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  align-items: center;
+  background: #fff3cd;
+  border-bottom: 2px solid #ffc107;
+  padding: 0.6rem 1.25rem;
+  font-size: 0.88rem;
+  color: #856404;
+}
+.sub-warn-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.sub-warn-item a {
+  color: #856404;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+/* ============================================================
+   In-page submission warning (My Roster page)
+   ============================================================ */
+.submission-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 6px;
+  padding: 0.65rem 0.9rem;
+  font-size: 0.88rem;
+  color: #856404;
+  margin-bottom: 1rem;
+}
+.submission-warning-icon {
+  flex-shrink: 0;
+  font-size: 1rem;
+}
+.submission-warning a {
+  color: #856404;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ============================================================
+   Elimination Roast Banner
+   ============================================================ */
+.roast-banner {
+  background: linear-gradient(135deg, #1a1a1a 0%, #2d1a0e 100%);
+  border: 2px solid #ff4500;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+}
+.roast-banner::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 10px,
+    rgba(255, 69, 0, 0.04) 10px,
+    rgba(255, 69, 0, 0.04) 20px
+  );
+  pointer-events: none;
+}
+.roast-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.roast-flame {
+  font-size: 1.25rem;
+}
+.roast-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #ff6b35;
+}
+.roast-text {
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: #f5d5c0;
+  position: relative;
+  z-index: 1;
+}
