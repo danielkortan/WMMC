@@ -5595,8 +5595,10 @@ function backfillRosterDatesFromSwaps(seasonData) {
 }
 
 // Version stamp — bump whenever the repair logic changes substantially so the
-// full-recompute pass runs again on next load.
-const ROSTER_REPAIR_VERSION = 5;
+// full-recompute pass runs again on next load. Mirrors server.js — bump both.
+// v6: carry-forward now folds swaps effective in a trusted seed week into the
+// baseline, so an in-season move made during the first week propagates forward.
+const ROSTER_REPAIR_VERSION = 6;
 
 // Fill / recompute per-week roster entries by carrying forward the most recent
 // trusted roster and applying approved swaps in chronological order.
@@ -5693,8 +5695,22 @@ function repairCarryForwardRosters(seasonData) {
 
       if (isTrusted) {
         if (hasData) {
-          prevBatters = [...(wr.batters || [])];
-          prevPitchers = [...(wr.pitchers || [])];
+          // A swap whose effective week is THIS trusted seed week (an in-season
+          // move made during the first, or an auto-advanced, week) must still
+          // advance the carry-forward baseline, or the swap-in never propagates
+          // to later weeks. We leave mgrRoster[weekKey] untouched — the seed week
+          // still scores the outgoing player for the days it rostered them via
+          // roster_dates — and only advance prevBatters/prevPitchers.
+          const seedBatters = [...(wr.batters || [])];
+          const seedPitchers = [...(wr.pitchers || [])];
+          ({ newBatters: prevBatters, newPitchers: prevPitchers } = applySwaps(
+            mgrName,
+            weekKey,
+            seedBatters,
+            seedPitchers,
+            [...seedBatters],
+            [...seedPitchers]
+          ));
         }
       } else if (!hasData || needsFullRecompute) {
         // Recompute: either the week is empty, or the full-recompute pass is active
