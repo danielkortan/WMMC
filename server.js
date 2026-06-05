@@ -41,6 +41,10 @@ const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 // keeps Google login hidden; email/password login always works regardless.
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 
+// Anthropic API — set ANTHROPIC_API_KEY to enable AI-generated elimination roasts.
+// If unset, roasts fall back to a static message.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+
 async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
   const body = blocks ? { text, blocks } : { text };
@@ -6568,6 +6572,139 @@ app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) 
   db.seasons[year] = sd;
   writeDB(db);
   res.json({ ok: true });
+});
+
+// ============================================================
+// Elimination Roasts
+// ============================================================
+
+// Build a plain-text performance summary for the given manager in the given round.
+function buildManagerPerformanceForRoast(sd, manager, round) {
+  const roundMap = { PP: ['PP1', 'PP2'], QF: ['QF'], SF: ['SF'], Finals: ['Finals'] };
+  const rounds = roundMap[round] || [round];
+
+  const batters = {};
+  const pitchers = {};
+
+  (sd.weekly_batting || []).forEach((b) => {
+    if (!rounds.includes(b.round)) return;
+    if (!b.batter) return;
+    // Simple ownership check: was this player on this manager's roster?
+    const rosters = sd.rosters && sd.rosters[manager];
+    if (!rosters) return;
+    const weekKey = `${b.round}|${b.week}`;
+    const weekRoster = rosters[weekKey] || {};
+    if (!(weekRoster.batters || []).includes(b.batter)) return;
+    batters[b.batter] = (batters[b.batter] || 0) + (b.weekly_score || 0);
+  });
+
+  (sd.weekly_pitching || []).forEach((p) => {
+    if (!rounds.includes(p.round)) return;
+    if (!p.pitcher) return;
+    const rosters = sd.rosters && sd.rosters[manager];
+    if (!rosters) return;
+    const weekKey = `${p.round}|${p.week}`;
+    const weekRoster = rosters[weekKey] || {};
+    if (!(weekRoster.pitchers || []).includes(p.pitcher)) return;
+    pitchers[p.pitcher] = (pitchers[p.pitcher] || 0) + (p.weekly_score || 0);
+  });
+
+  const totalBat = Object.values(batters).reduce((s, v) => s + v, 0);
+  const totalPit = Object.values(pitchers).reduce((s, v) => s + v, 0);
+  const total = Math.round((totalBat + totalPit) * 100) / 100;
+
+  const sortedBatters = Object.entries(batters)
+    .sort((a, b) => a[1] - b[1])
+    .map(([name, score]) => `${name}: ${Math.round(score * 100) / 100} pts`);
+  const sortedPitchers = Object.entries(pitchers)
+    .sort((a, b) => a[1] - b[1])
+    .map(([name, score]) => `${name}: ${Math.round(score * 100) / 100} pts`);
+
+  return {
+    manager,
+    round,
+    total,
+    batting_total: Math.round(totalBat * 100) / 100,
+    pitching_total: Math.round(totalPit * 100) / 100,
+    batters_ranked_worst_first: sortedBatters,
+    pitchers_ranked_worst_first: sortedPitchers,
+  };
+}
+
+// Call the Anthropic Messages API to generate a vulgar, personalized roast.
+async function generateRoastWithClaude(manager, round, perf) {
+  if (!ANTHROPIC_API_KEY) {
+    const worst = perf.batters_ranked_worst_first[0] || perf.pitchers_ranked_worst_first[0] || 'their entire roster';
+    return `${manager} put up a heroic ${perf.total} points in ${round} and somehow managed to make ${worst} look like an all-star by comparison. Absolutely cooked. The league thanks you for your sacrifice.`;
+  }
+
+  const roundLabel =
+    round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
+
+  const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. A manager just got eliminated and deserves a brutal, hilariously vulgar roast. Be savage, specific, and profane. Reference their worst-performing players by name. Keep it to 2-3 sentences max.
+
+Manager eliminated: ${manager}
+Eliminated in: ${roundLabel}
+Total score: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
+Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+Write the roast now. No preamble, no labels — just the roast.`;
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  });
+
+  if (!resp.ok) {
+    console.error('Anthropic API error:', resp.status, await resp.text());
+    return `${manager} scored ${perf.total} pts in ${roundLabel} and got absolutely cooked. No further commentary is needed.`;
+  }
+
+  const data = await resp.json();
+  return (
+    (data.content && data.content[0] && data.content[0].text) ||
+    `${manager} had a historically embarrassing run in ${roundLabel}.`
+  );
+}
+
+// POST /api/seasons/:year/generate-roast — generate and store an elimination roast (commissioner only)
+app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const { manager, round } = req.body || {};
+  if (!manager || !round) return res.status(400).json({ error: 'manager and round are required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  try {
+    const perf = buildManagerPerformanceForRoast(sd, manager, round);
+    const roastText = await generateRoastWithClaude(manager, round, perf);
+
+    if (!sd.roasts) sd.roasts = {};
+    sd.roasts[manager] = { round, text: roastText, generated_at: new Date().toISOString() };
+
+    addAuditEntry(db, 'roast_generated', { year, manager, round }, req.get('X-User-Email'));
+    db.seasons[year] = sd;
+    writeDB(db);
+
+    res.json({ roast: roastText });
+  } catch (err) {
+    console.error('Roast generation error:', err);
+    res.status(500).json({ error: 'Failed to generate roast' });
+  }
 });
 
 // ============================================================
