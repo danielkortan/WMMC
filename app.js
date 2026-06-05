@@ -1774,13 +1774,6 @@ function renderLiveContent(d) {
       });
     }
 
-    const stateBadge = (pl) =>
-      pl.liveToday
-        ? '<span class="live-pill live-pill-live">LIVE</span>'
-        : pl.finalToday
-          ? '<span class="live-pill live-pill-final">FINAL</span>'
-          : '';
-
     const batterRow = (pl) => `<tr>
       <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
       <td>${escapeHtml(pl.team || '')}</td>
@@ -2967,7 +2960,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
     })
     .sort((a, b) => weekIndexFromKey(a.round, a.week) - weekIndexFromKey(b.round, b.week));
 
-  let tableHtml = '';
+  let tableHtml;
   if (records.length === 0) {
     tableHtml = '<p class="text-muted" style="font-size:0.85rem;margin:0;">No stats recorded.</p>';
   } else if (isBat) {
@@ -3332,7 +3325,7 @@ function renderPPOverallContent(leaders, seeding) {
     html += '<div class="seeding-list">';
     seeding.forEach((s) => {
       const pool = getPool(s.manager);
-      let seedType = '';
+      let seedType;
       if (s.isPP1Leader && s.isPP2Leader) seedType = 'PP1 & PP2 Pool Leader';
       else if (s.isPP1Leader) seedType = 'PP1 Pool Leader';
       else if (s.isPP2Leader) seedType = 'PP2 Pool Leader';
@@ -4673,7 +4666,6 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     }
     if (hasFinals) {
       html += `<div class="sb-period" id="sb-finals" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['Finals']))}</div>`;
-      firstPeriod = false;
     }
     html += '</div>';
   }

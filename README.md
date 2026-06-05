@@ -229,7 +229,7 @@ WMMC/
 ├── version.json           # Build version stamp updated by .githooks/pre-push
 ├── render.yaml            # Render.com deployment config
 ├── package.json           # Dependencies & npm scripts
-├── .eslintrc.json         # ESLint configuration
+├── eslint.config.js       # ESLint configuration (flat config)
 ├── .prettierrc.json       # Prettier configuration
 ├── .githooks/
 │   └── pre-push           # Auto-stamps version.json with today's date
