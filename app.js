@@ -130,47 +130,22 @@ const PERIOD_LABELS = {
 };
 
 // Returns a Date for when a period's submission window opens, or null (= open from season start)
+//
+// Each playoff period's window opens the Friday before its Week 1 starts (3 days
+// before the Monday start). PP1 has no gated open — it opens once the pool is
+// ready — so it (and any unknown period) returns null.
+const PERIOD_OPEN_ROUND = { pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+
 function getPeriodOpenDate(sd, period) {
   const dates = sd && sd.schedule_dates;
   if (!dates) return null;
-  switch (period) {
-    case 'pp1':
-      return null; // open once pool is ready
-    case 'pp2': {
-      // Opens the Friday before PP2 Week 1 starts (3 days before Monday)
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'PP2' && s.week === 'Week 1');
-      if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].start + 'T00:00:00');
-      d.setDate(d.getDate() - 3);
-      return d;
-    }
-    case 'qf': {
-      // Opens the Friday before QF Week 1 starts (3 days before Monday)
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'QF' && s.week === 'Week 1');
-      if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].start + 'T00:00:00');
-      d.setDate(d.getDate() - 3);
-      return d;
-    }
-    case 'sf': {
-      // Opens the Friday before SF Week 1 starts (3 days before Monday)
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'SF' && s.week === 'Week 1');
-      if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].start + 'T00:00:00');
-      d.setDate(d.getDate() - 3);
-      return d;
-    }
-    case 'finals': {
-      // Opens the Friday before Finals Week 1 starts (3 days before Monday)
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'Finals' && s.week === 'Week 1');
-      if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].start + 'T00:00:00');
-      d.setDate(d.getDate() - 3);
-      return d;
-    }
-    default:
-      return null;
-  }
+  const round = PERIOD_OPEN_ROUND[period];
+  if (!round) return null; // pp1 / unknown: open from season start
+  const idx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === 'Week 1');
+  if (idx < 0 || !dates[idx]) return null;
+  const d = new Date(dates[idx].start + 'T00:00:00');
+  d.setDate(d.getDate() - 3); // Friday before the Monday start
+  return d;
 }
 
 // Returns a Date for the first MLB game of a period's start date, or null if not configured

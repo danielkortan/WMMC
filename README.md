@@ -63,7 +63,7 @@ Open `http://localhost:3000` in your browser.
 ### Development
 
 ```bash
-npm run lint          # Run ESLint on server.js + app.js
+npm run lint          # Run ESLint on server.js, app.js, and js/
 npm run lint:fix      # Auto-fix what ESLint can fix
 npm run format        # Format the entire repo with Prettier
 npm run format:check  # Verify formatting without writing
@@ -72,7 +72,7 @@ npm test              # Run unit tests for the js/ modules
 
 ## Scoring Rubric
 
-The rubric is hardcoded in **two places that must stay in sync**: `app.js` (`SCORING` constant) and `server.js` (`SCORING` constant). Any edit must be applied to both files.
+The rubric is hardcoded in **two places that must stay in sync**: `js/scoring.js` (`SCORING` constant, consumed by `app.js` via `window`) and `server.js` (`SCORING` constant). Any edit must be applied to both files.
 
 ### Batting
 
@@ -113,7 +113,7 @@ A season is 16 scoring weeks plus a midseason break.
 5. **Semifinals** — 2 weeks (Weeks 13–14)
 6. **Finals + 3rd-Place Game** — 2 weeks (Weeks 15–16)
 
-The schedule is hardcoded in `app.js` (`SEASON_SCHEDULE`) and `server.js` (`SEASON_SCHEDULE`).
+The schedule is hardcoded in `js/scoring.js` (`SEASON_SCHEDULE`, consumed by `app.js` via `window`) and `server.js` (`SEASON_SCHEDULE`).
 
 ## API Reference
 
@@ -222,7 +222,8 @@ WMMC/
 ├── server.js              # Express backend (routes, scoring, sheets sync, slack)
 ├── app.js                 # Frontend monolith — currently being modularized into js/
 ├── index.html             # Single-page app shell
-├── styles.css             # All styles (currently monolithic; will move to css/)
+├── styles.css             # Core styles (monolithic; will move to css/)
+├── mobile.css             # Mobile/responsive style overrides (loaded after styles.css)
 ├── data.json              # Historical 2025 season data (read-only seed)
 ├── managers_seed.json     # Committed manager identities (no passwords)
 ├── db.json                # Runtime database (gitignored, written by server)
@@ -234,7 +235,10 @@ WMMC/
 ├── .githooks/
 │   └── pre-push           # Auto-stamps version.json with today's date
 ├── js/                    # New modular frontend (extracted from app.js — work in progress)
-└── tests/                 # Tests for js/ modules
+│                          #   scoring.js, csv.js, utils.js — pure logic (unit-tested)
+│                          #   index.js — bridges module exports onto window for app.js
+│                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
+└── tests/                 # Tests for pure js/ modules
 ```
 
 > **Note on ongoing modularization:** The frontend has historically been a single `app.js` file. We're incrementally extracting pure logic (scoring, CSV parsing, utilities) into `js/` modules, with matching tests in `tests/`. Until the migration is complete, both layers co-exist: `index.html` still loads `app.js` directly, and the extracted modules are exercised through `tests/`. Do not duplicate logic between layers — once a function is in `js/`, delete its sibling in `app.js` and call into the module via `<script type="module">`.
