@@ -1180,10 +1180,14 @@ async function initGoogleSignIn() {
     callback: handleGoogleCredential,
   });
 
-  google.accounts.id.renderButton(document.getElementById('google-signin-container'), {
+  // GSI requires a numeric pixel width (200-400); it rejects '100%'. Match the
+  // container's width so the button still fills it, clamped to GSI's valid range.
+  const container = document.getElementById('google-signin-container');
+  const containerWidth = container.clientWidth || 400;
+  google.accounts.id.renderButton(container, {
     theme: 'outline',
     size: 'large',
-    width: '100%',
+    width: Math.min(400, Math.max(200, Math.round(containerWidth))),
     text: 'signin_with',
   });
 }
