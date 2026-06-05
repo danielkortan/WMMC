@@ -20,7 +20,7 @@ Always use the tools below. If you genuinely think the wrong tool was chosen for
 - **Testing:** Node.js built-in test runner (`node --test`)
 - **Package manager:** npm
 - **Hosting / deploy:** Render.com (`render.yaml`)
-- **Linting/Formatting:** ESLint 8 + Prettier 3
+- **Linting/Formatting:** ESLint 10 (flat config, `eslint.config.js`) + Prettier 3
 
 ## Commands
 
@@ -65,6 +65,13 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - The frontend has no build step — `index.html` loads files directly; there is nothing to compile or bundle.
 - Once a function is moved to `js/`, delete its copy from `app.js` — do not let both coexist.
 
+## Git workflow
+
+- **Always open a pull request for every change — never push to `main` directly.** This is the standard process for this repo: develop on a feature branch, push it, and open a PR so changes are reviewed and CI runs before they reach production. (`render.yaml` auto-deploys `main` on merge, so a merged PR _is_ a production deploy.)
+- Open the PR as soon as the branch is pushed and the work is ready for review — don't wait to be asked. After opening one, offer to watch it for CI failures and review comments.
+- Keep PRs focused: one logical change per PR, with a clear title and a body summarizing what changed and why.
+- Do not merge your own PR unless explicitly told to — opening it is the deliverable; merging is the maintainer's call.
+
 ## Conventions and patterns
 
 - **Error handling:** Route handlers return `{ error: '...' }` JSON with an appropriate HTTP status code. Never swallow errors silently.
@@ -85,6 +92,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 **Do:**
 
 - Run `npm run lint && npm run format:check` before considering any task done
+- Open a pull request for every change — branch, push, PR; never push to `main` directly (see Git workflow)
 - Update tests when changing public function signatures in `js/`
 - Add new third-party libraries only if confirmed — list alternatives first
 
@@ -95,6 +103,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - Don't commit `db.json`.
 - Don't edit `SCORING` or `SEASON_SCHEDULE` in only one file — both `server.js` and `app.js` must be updated together.
 - Don't skip the pre-push hook (`--no-verify`).
+- Don't push directly to `main` or merge without a PR — every change goes through a pull request.
 
 ## Memory files
 
