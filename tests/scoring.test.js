@@ -7,6 +7,8 @@ import {
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
+  enrichTeamWeekly,
+  TEAM_WEEKLY_METRIC_FIELDS,
 } from '../js/scoring.js';
 
 describe('SCORING constants', () => {
@@ -121,5 +123,102 @@ describe('calculatePitchingScore', () => {
   it('handles negative composites correctly', () => {
     // 10 hits × -0.6 = -6
     assert.equal(calculatePitchingScore({ h: 10 }), -6);
+  });
+});
+
+describe('enrichTeamWeekly', () => {
+  // Build a base team-weekly row (only the three weekly metrics are present
+  // before enrichment, mirroring buildTeamWeekly's output in app.js).
+  const base = (round, week, manager, pool, bat, pit) => ({
+    round,
+    week,
+    manager,
+    pool,
+    weekly_batting: bat,
+    weekly_pitching: pit,
+    weekly_total: Math.round((bat + pit) * 100) / 100,
+  });
+
+  const makeRows = () => [
+    base('PP1', 'Week 1', 'A', 'Pool 1', 100, 50), // tot 150
+    base('PP1', 'Week 1', 'B', 'Pool 1', 90, 40), //  tot 130
+    base('PP1', 'Week 1', 'C', 'Pool 2', 120, 35), // tot 155
+    base('PP1', 'Week 2', 'A', 'Pool 1', 80, 40), //  tot 120
+    base('PP1', 'Week 2', 'B', 'Pool 1', 70, 45), //  tot 115
+    base('PP1', 'Week 2', 'C', 'Pool 2', 60, 20), //  tot 80
+    base('PP2', 'Week 1', 'A', 'Pool 1', 50, 10), //  tot 60
+  ];
+
+  const find = (rows, r, w, m) => rows.find((x) => x.round === r && x.week === w && x.manager === m);
+
+  it('exposes the nine metric field names', () => {
+    assert.equal(TEAM_WEEKLY_METRIC_FIELDS.length, 9);
+    assert.ok(TEAM_WEEKLY_METRIC_FIELDS.includes('overall_total'));
+  });
+
+  it('accumulates per-round totals that reset each round', () => {
+    const rows = enrichTeamWeekly(makeRows());
+    // PP1 Week 2 for A: round = W1 + W2 of PP1
+    const aW2 = find(rows, 'PP1', 'Week 2', 'A');
+    assert.equal(aW2.round_batting, 180); // 100 + 80
+    assert.equal(aW2.round_pitching, 90); // 50 + 40
+    assert.equal(aW2.round_total, 270);
+    // PP2 Week 1 for A: round resets to just this week
+    const aPP2 = find(rows, 'PP2', 'Week 1', 'A');
+    assert.equal(aPP2.round_batting, 50);
+    assert.equal(aPP2.round_pitching, 10);
+    assert.equal(aPP2.round_total, 60);
+  });
+
+  it('accumulates whole-season overall totals across rounds', () => {
+    const rows = enrichTeamWeekly(makeRows());
+    const aPP2 = find(rows, 'PP2', 'Week 1', 'A');
+    assert.equal(aPP2.overall_batting, 230); // 100 + 80 + 50
+    assert.equal(aPP2.overall_pitching, 100); // 50 + 40 + 10
+    assert.equal(aPP2.overall_total, 330);
+  });
+
+  it('ranks weekly totals overall within the same week', () => {
+    const rows = enrichTeamWeekly(makeRows());
+    // Week 1 totals: C 155 (1st), A 150 (2nd), B 130 (3rd)
+    assert.deepEqual(find(rows, 'PP1', 'Week 1', 'C').rank.weekly_total.ovr, { rank: 1, total: 3 });
+    assert.deepEqual(find(rows, 'PP1', 'Week 1', 'A').rank.weekly_total.ovr, { rank: 2, total: 3 });
+    assert.deepEqual(find(rows, 'PP1', 'Week 1', 'B').rank.weekly_total.ovr, { rank: 3, total: 3 });
+  });
+
+  it('ranks weekly totals within pool against only same-pool managers', () => {
+    const rows = enrichTeamWeekly(makeRows());
+    // Pool 1 in Week 1: A 150 (1/2), B 130 (2/2); Pool 2: C alone (1/1)
+    assert.deepEqual(find(rows, 'PP1', 'Week 1', 'A').rank.weekly_total.pool, { rank: 1, total: 2 });
+    assert.deepEqual(find(rows, 'PP1', 'Week 1', 'B').rank.weekly_total.pool, { rank: 2, total: 2 });
+    assert.deepEqual(find(rows, 'PP1', 'Week 1', 'C').rank.weekly_total.pool, { rank: 1, total: 1 });
+  });
+
+  it('ranks a lone manager in a week as 1 of 1', () => {
+    const rows = enrichTeamWeekly(makeRows());
+    const aPP2 = find(rows, 'PP2', 'Week 1', 'A');
+    assert.deepEqual(aPP2.rank.overall_total.ovr, { rank: 1, total: 1 });
+    assert.deepEqual(aPP2.rank.overall_total.pool, { rank: 1, total: 1 });
+  });
+
+  it('orders legacy continuous week numbers chronologically, independent of input order', () => {
+    // Historical seasons number weeks 1..16 continuously across rounds (PP2 weeks
+    // 6-10, QF weeks 11-12, …) rather than resetting per round. Accumulation must
+    // still follow real chronology no matter what order the rows arrive in.
+    const rows = enrichTeamWeekly([
+      base('QF', 'Week 11', 'Z', 'QF1', 30, 0),
+      base('PP1', 'Week 1', 'Z', 'Pool 1', 10, 0),
+      base('PP2', 'Week 6', 'Z', 'Pool 1', 20, 0),
+    ]);
+    const at = (w) => rows.find((x) => x.week === w);
+    assert.equal(at('Week 1').overall_total, 10);
+    assert.equal(at('Week 6').overall_total, 30); // 10 + 20
+    assert.equal(at('Week 11').overall_total, 60); // 10 + 20 + 30
+    // Per-round total resets when the round key changes.
+    assert.equal(at('Week 11').round_total, 30);
+  });
+
+  it('returns the input array untouched when given a non-array', () => {
+    assert.equal(enrichTeamWeekly(null), null);
   });
 });

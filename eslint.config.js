@@ -21,6 +21,7 @@ const projectGlobals = {
   convertIP: 'readonly',
   calculateBattingScore: 'readonly',
   calculatePitchingScore: 'readonly',
+  enrichTeamWeekly: 'readonly',
   esc: 'readonly',
   jsStr: 'readonly',
   parseNum: 'readonly',

@@ -7,7 +7,14 @@
 // app.js into ES modules — once a function is exported here AND deleted
 // from app.js, the live app will use the module version.
 
-import { SCORING, SEASON_SCHEDULE, convertIP, calculateBattingScore, calculatePitchingScore } from './scoring.js';
+import {
+  SCORING,
+  SEASON_SCHEDULE,
+  convertIP,
+  calculateBattingScore,
+  calculatePitchingScore,
+  enrichTeamWeekly,
+} from './scoring.js';
 import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO } from './utils.js';
 import { parseCSVLine, findColumn } from './csv.js';
 
@@ -18,6 +25,7 @@ Object.assign(window, {
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
+  enrichTeamWeekly,
   esc,
   jsStr,
   parseNum,

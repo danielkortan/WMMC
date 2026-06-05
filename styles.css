@@ -1687,6 +1687,47 @@ footer {
   white-space: nowrap;
 }
 
+/* Grouped Weekly Team Scoring table (Weekly / Per Round / Overall) */
+.weekly-grouped thead .group-row th {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.weekly-grouped thead th.group-weekly {
+  background: #1e3a5f;
+}
+.weekly-grouped thead th.group-round {
+  background: #2c5282;
+}
+.weekly-grouped thead th.group-overall {
+  background: #1e4d40;
+}
+
+.weekly-grouped .metric-cell {
+  text-align: center;
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
+}
+
+.weekly-grouped .metric-val {
+  font-weight: 600;
+}
+
+.weekly-grouped .metric-rank {
+  font-size: 0.68rem;
+  line-height: 1.2;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Visual separators between the three metric groups */
+.weekly-grouped thead .group-row th.group-weekly,
+.weekly-grouped thead .group-row th.group-round,
+.weekly-grouped thead .group-row th.group-overall,
+.weekly-grouped .grp-start {
+  border-left: 2px solid var(--border, #ccc);
+}
+
 /* ============================================================ */
 /* Highlight Legend */
 /* ============================================================ */
