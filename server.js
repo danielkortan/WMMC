@@ -1076,7 +1076,9 @@ function purgeCarriedForwardDropRecords(db) {
 }
 
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
-const ROSTER_REPAIR_VERSION = 5;
+// v6: carry-forward now folds swaps effective in a trusted seed week into the
+// baseline, so an in-season move made during the first week propagates forward.
+const ROSTER_REPAIR_VERSION = 6;
 
 // Restore missing approved swap records (confirmed via Slack) and remove a known
 // erroneous duplicate.  Called at startup before repairCarryForwardRosters so the
@@ -1210,7 +1212,11 @@ function repairMissingRosterChains(db) {
   // One-time data repair: once applied (and durably persisted) it never needs to run again.
   // Gate it behind a flag — like purgeCarriedForwardDropRecords — so it self-disables instead
   // of re-scanning every boot forever.
-  if (!db || db.roster_chains_repair_done) return false;
+  // v2: re-run once more. The original pass could be silently undone when a client with a stale
+  // Week-1 roster (missing the swapped-in player) saved its carry-forward back over the server's
+  // seeded arrays. Paired with the ROSTER_REPAIR_VERSION 6 bump (full recompute) and the
+  // trusted-seed swap fold in repairCarryForwardRosters, the re-seed now sticks.
+  if (!db || db.roster_chains_repair_v2_done) return false;
   let changed = false;
   const WEEK1_KEY = 'PP1|Week 1';
   const initialSeeds = [
@@ -1374,7 +1380,7 @@ function repairMissingRosterChains(db) {
     }
   }
 
-  db.roster_chains_repair_done = true;
+  db.roster_chains_repair_v2_done = true;
   if (changed) console.log('[Roster Chain Repair] Applied missing Austin/Anton roster chains.');
   // Return true so the caller persists the flag (and any repair); the gate above then makes
   // this one-time pass a no-op on every subsequent boot.
@@ -1493,6 +1499,34 @@ function repairCarryForwardRosters(db) {
       return swap.week_key;
     };
 
+    // Apply every approved swap whose effective week is `weekKey` to a roster
+    // baseline. Mutates copies passed as newBatters/newPitchers and classifies
+    // swap-ins against prevBatters/prevPitchers (the pre-swap state). Shared by
+    // the non-trusted rebuild and the trusted-seed baseline advance so a swap
+    // made during the first (or an auto-advanced) week still carries forward.
+    // Mirrors app.js' repairCarryForwardRosters applySwaps — keep the two in sync.
+    function applySwaps(mgrName, weekKey, prevBatters, prevPitchers, newBatters, newPitchers) {
+      approvedSwaps
+        .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s) === weekKey)
+        .forEach((s) => {
+          if (s.player_out) {
+            newBatters = newBatters.filter((p) => p !== s.player_out);
+            newPitchers = newPitchers.filter((p) => p !== s.player_out);
+          }
+          if (s.player_in) {
+            const wasBatter = s.player_out ? prevBatters.includes(s.player_out) : false;
+            const wasPitcher = s.player_out ? prevPitchers.includes(s.player_out) : false;
+            const inBatPool = (sd.batters_pool || []).includes(s.player_in);
+            const inPitPool = (sd.pitchers_pool || []).includes(s.player_in);
+            if (wasBatter && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+            else if (wasPitcher && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+            else if (inBatPool && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
+            else if (inPitPool && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
+          }
+        });
+      return { newBatters, newPitchers };
+    }
+
     for (const [mgrName, mgrRoster] of Object.entries(sd.rosters)) {
       let prevBatters = null;
       let prevPitchers = null;
@@ -1527,36 +1561,29 @@ function repairCarryForwardRosters(db) {
 
         if (isTrusted) {
           if (hasData) {
-            prevBatters = [...(wr.batters || [])];
-            prevPitchers = [...(wr.pitchers || [])];
+            // A swap whose effective week is THIS trusted seed week (an in-season
+            // move made during the first, or an auto-advanced, week) must still
+            // advance the carry-forward baseline, or the swap-in never propagates
+            // to later weeks. We leave mgrRoster[weekKey] untouched — the seed week
+            // still scores the outgoing player for the days it rostered them via
+            // roster_dates — and only advance prevBatters/prevPitchers.
+            const seedBatters = [...(wr.batters || [])];
+            const seedPitchers = [...(wr.pitchers || [])];
+            ({ newBatters: prevBatters, newPitchers: prevPitchers } = applySwaps(
+              mgrName,
+              weekKey,
+              seedBatters,
+              seedPitchers,
+              [...seedBatters],
+              [...seedPitchers]
+            ));
           }
         } else if (!hasData || needsFullRecompute) {
-          let newBatters = [...prevBatters];
-          let newPitchers = [...prevPitchers];
-
-          approvedSwaps
-            .filter((s) => s.manager === mgrName && swapEffectiveWeekKey(s) === weekKey)
-            .forEach((s) => {
-              if (s.player_out) {
-                newBatters = newBatters.filter((p) => p !== s.player_out);
-                newPitchers = newPitchers.filter((p) => p !== s.player_out);
-              }
-              if (s.player_in) {
-                const wasBatter = s.player_out ? prevBatters.includes(s.player_out) : false;
-                const wasPitcher = s.player_out ? prevPitchers.includes(s.player_out) : false;
-                const inBatPool = (sd.batters_pool || []).includes(s.player_in);
-                const inPitPool = (sd.pitchers_pool || []).includes(s.player_in);
-                if (wasBatter && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
-                else if (wasPitcher && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
-                else if (inBatPool && !newBatters.includes(s.player_in)) newBatters.push(s.player_in);
-                else if (inPitPool && !newPitchers.includes(s.player_in)) newPitchers.push(s.player_in);
-              }
-            });
-
-          mgrRoster[weekKey] = { batters: newBatters, pitchers: newPitchers };
+          const rebuilt = applySwaps(mgrName, weekKey, prevBatters, prevPitchers, [...prevBatters], [...prevPitchers]);
+          mgrRoster[weekKey] = { batters: rebuilt.newBatters, pitchers: rebuilt.newPitchers };
           filled++;
-          prevBatters = newBatters;
-          prevPitchers = newPitchers;
+          prevBatters = rebuilt.newBatters;
+          prevPitchers = rebuilt.newPitchers;
         } else {
           prevBatters = [...(wr.batters || [])];
           prevPitchers = [...(wr.pitchers || [])];

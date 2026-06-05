@@ -248,6 +248,7 @@ const db = {
   carried_forward_drop_purge_done: true,
   swap_records_repair_done: true,
   roster_chains_repair_done: true,
+  roster_chains_repair_v2_done: true,
   mlb_api_takeover_v1: true,
 };
 
