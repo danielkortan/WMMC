@@ -142,27 +142,27 @@ function getPeriodOpenDate(sd, period) {
       return idx >= 0 && dates[idx] ? new Date(dates[idx].end + 'T00:00:00') : null;
     }
     case 'qf': {
-      // Opens Monday after PP2 ends (PP2 Week 5 end + 1 day)
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'PP2' && s.week === 'Week 5');
+      // Opens the Friday before QF Week 1 starts (3 days before Monday)
+      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'QF' && s.week === 'Week 1');
       if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].end + 'T00:00:00');
-      d.setDate(d.getDate() + 1);
+      const d = new Date(dates[idx].start + 'T00:00:00');
+      d.setDate(d.getDate() - 3);
       return d;
     }
     case 'sf': {
-      // Opens Monday after QF ends
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'QF' && s.week === 'Week 2');
+      // Opens the Friday before SF Week 1 starts (3 days before Monday)
+      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'SF' && s.week === 'Week 1');
       if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].end + 'T00:00:00');
-      d.setDate(d.getDate() + 1);
+      const d = new Date(dates[idx].start + 'T00:00:00');
+      d.setDate(d.getDate() - 3);
       return d;
     }
     case 'finals': {
-      // Opens Monday after SF ends
-      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'SF' && s.week === 'Week 2');
+      // Opens the Friday before Finals Week 1 starts (3 days before Monday)
+      const idx = SEASON_SCHEDULE.findIndex((s) => s.round === 'Finals' && s.week === 'Week 1');
       if (idx < 0 || !dates[idx]) return null;
-      const d = new Date(dates[idx].end + 'T00:00:00');
-      d.setDate(d.getDate() + 1);
+      const d = new Date(dates[idx].start + 'T00:00:00');
+      d.setDate(d.getDate() - 3);
       return d;
     }
     default:
@@ -454,14 +454,9 @@ function isManagerQualifiedForPeriod(managerName, period, sd) {
     const q = getQFQualifiers(sd);
     return q ? q.includes(managerName) : false;
   }
-  if (period === 'sf') {
-    const q = getSFParticipants(sd);
-    return q ? q.includes(managerName) : false;
-  }
-  if (period === 'finals') {
-    const q = getFinalsParticipants(sd);
-    return q ? q.includes(managerName) : false;
-  }
+  // SF and Finals submission cards are shown to all managers; the commissioner's
+  // "dump losers" action removes non-advancing rosters after each round closes.
+  if (period === 'sf' || period === 'finals') return true;
   return false;
 }
 
@@ -1330,6 +1325,7 @@ function init() {
   setupMyRoster();
   renderLeagueInfo();
   renderCommissioner();
+  updateSubmissionWarningBanner();
 }
 
 // ============================================================
@@ -3535,11 +3531,35 @@ function renderAwardsContent() {
 }
 
 // ---- Weekly Scores ----
+// Render the two small "Pool: x/total" / "OVR: x/total" rank rows beneath a
+// scored value on the Weekly Team Scoring page. `r` is row.rank[field].
+function teamWeeklyRankLines(r) {
+  if (!r) return '';
+  const pool = r.pool ? `Pool: ${r.pool.rank}/${r.pool.total}` : '';
+  const ovr = r.ovr ? `OVR: ${r.ovr.rank}/${r.ovr.total}` : '';
+  return `<div class="metric-rank">${pool}</div><div class="metric-rank">${ovr}</div>`;
+}
+
+// A single scored metric cell: the value on top, pool + overall ranks beneath.
+// `groupStart` marks the left-most metric of a section so it gets a divider.
+function teamWeeklyMetricCell(value, rank, strong, groupStart) {
+  const val = strong ? `<strong>${fmt(value)}</strong>` : fmt(value);
+  const cls = 'metric-cell' + (groupStart ? ' grp-start' : '');
+  return `<td class="${cls}"><div class="metric-val">${val}</div>${teamWeeklyRankLines(rank)}</td>`;
+}
+
 function renderWeekly() {
   if (!DATA || !DATA.team_weekly) {
     document.getElementById('weekly-table').innerHTML =
       '<tbody><tr><td>No weekly data available for this season.</td></tr></tbody>';
     return;
+  }
+
+  // Historical seasons load raw team_weekly rows straight from the season data,
+  // which lack the cumulative + rank fields. Enrich them once (idempotent —
+  // recomputes from the weekly_* values, so already-enriched rows are unchanged).
+  if (DATA.team_weekly.length && !DATA.team_weekly[0].rank) {
+    enrichTeamWeekly(DATA.team_weekly);
   }
 
   const rounds = [...new Set(DATA.team_weekly.map((t) => t.round))];
@@ -3563,15 +3583,19 @@ function renderWeekly() {
     const dates = getScheduleDates();
     const table = document.getElementById('weekly-table');
     table.classList.add('compact-table');
+    table.classList.add('weekly-grouped');
     table.innerHTML = `
       <thead>
-        <tr>
-          <th>Rnd</th><th>Wk</th>${dates ? '<th>Dates</th>' : ''}<th>Manager</th><th>Pool</th>
-          <th>Bat</th><th>Bat Rk</th>
-          <th>Pit</th><th>Pit Rk</th>
-          <th>Total</th><th>Tot Rk</th>
-          <th>Cum Bat</th><th>Cum Pit</th><th>Cum Tot</th>
-          <th>Pool Rk</th>
+        <tr class="group-row">
+          <th rowspan="2">Rnd</th><th rowspan="2">Wk</th>${dates ? '<th rowspan="2">Dates</th>' : ''}<th rowspan="2">Manager</th><th rowspan="2">Pool</th>
+          <th colspan="3" class="group-weekly">Weekly</th>
+          <th colspan="3" class="group-round">Per Round</th>
+          <th colspan="3" class="group-overall">Overall</th>
+        </tr>
+        <tr class="metric-row">
+          <th class="group-weekly grp-start">Batting</th><th class="group-weekly">Pitching</th><th class="group-weekly">Total</th>
+          <th class="group-round grp-start">Batting</th><th class="group-round">Pitching</th><th class="group-round">Total</th>
+          <th class="group-overall grp-start">Batting</th><th class="group-overall">Pitching</th><th class="group-overall">Total</th>
         </tr>
       </thead>
       <tbody>
@@ -3579,6 +3603,7 @@ function renderWeekly() {
           .map((t) => {
             const wi = weekIndexFromKey(t.round, t.week);
             const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
+            const rk = t.rank || {};
             return `
           <tr>
             <td>${t.round || ''}</td>
@@ -3586,16 +3611,15 @@ function renderWeekly() {
             ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
             <td><strong>${t.manager}</strong></td>
             <td>${t.pool || ''}</td>
-            <td class="num">${fmt(t.weekly_batting)}</td>
-            <td class="rank">${t.weekly_batting_rank || ''}</td>
-            <td class="num">${fmt(t.weekly_pitching)}</td>
-            <td class="rank">${t.weekly_pitching_rank || ''}</td>
-            <td class="num"><strong>${fmt(t.weekly_total)}</strong></td>
-            <td class="rank">${t.weekly_total_rank || ''}</td>
-            <td class="num">${fmt(t.batting_total_by_round)}</td>
-            <td class="num">${fmt(t.pitching_total_by_round)}</td>
-            <td class="num">${fmt(t.team_score_by_round)}</td>
-            <td class="rank">${t.pool_rank_by_week || ''}</td>
+            ${teamWeeklyMetricCell(t.weekly_batting, rk.weekly_batting, false, true)}
+            ${teamWeeklyMetricCell(t.weekly_pitching, rk.weekly_pitching)}
+            ${teamWeeklyMetricCell(t.weekly_total, rk.weekly_total, true)}
+            ${teamWeeklyMetricCell(t.round_batting, rk.round_batting, false, true)}
+            ${teamWeeklyMetricCell(t.round_pitching, rk.round_pitching)}
+            ${teamWeeklyMetricCell(t.round_total, rk.round_total, true)}
+            ${teamWeeklyMetricCell(t.overall_batting, rk.overall_batting, false, true)}
+            ${teamWeeklyMetricCell(t.overall_pitching, rk.overall_pitching)}
+            ${teamWeeklyMetricCell(t.overall_total, rk.overall_total, true)}
           </tr>
         `;
           })
@@ -6143,12 +6167,16 @@ function buildTeamWeekly(seasonData) {
     map[k].weekly_pitching += p.weekly_score || 0;
   });
 
-  return Object.values(map).map((t) => {
+  const rows = Object.values(map).map((t) => {
     t.weekly_batting = Math.round(t.weekly_batting * 100) / 100;
     t.weekly_pitching = Math.round(t.weekly_pitching * 100) / 100;
     t.weekly_total = Math.round((t.weekly_batting + t.weekly_pitching) * 100) / 100;
     return t;
   });
+
+  // Stamp per-round / whole-season cumulative totals and pool + overall ranks
+  // for all nine metrics (see js/scoring.js).
+  return enrichTeamWeekly(rows);
 }
 
 // ============================================================
@@ -6327,6 +6355,40 @@ function renderRosterData(managerName, isCommissioner) {
   const periodScores = computeRosterPeriodScores(managerName, seasonData);
 
   let html = '';
+
+  // ---- Elimination Roast Banner ----
+  const roast = seasonData && seasonData.roasts && seasonData.roasts[managerName];
+  if (roast) {
+    const roundLabel =
+      roast.round === 'PP'
+        ? 'Pool Play'
+        : roast.round === 'QF'
+          ? 'Quarterfinals'
+          : roast.round === 'SF'
+            ? 'Semifinals'
+            : roast.round === 'Finals'
+              ? 'Finals'
+              : roast.round;
+    html += `<div class="roast-banner">
+      <div class="roast-header">
+        <span class="roast-flame">🔥</span>
+        <span class="roast-label">HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}</span>
+      </div>
+      <div class="roast-text">${esc(roast.text)}</div>
+    </div>`;
+  }
+
+  // ---- PP2 Submission Incomplete Warning ----
+  if (isActive && isPeriodTimeOpen(seasonData, 'pp2')) {
+    const pp2Sub = getPeriodSub(seasonData, 'pp2', managerName);
+    const pp2Done = pp2Sub && (pp2Sub.status === 'pending' || pp2Sub.status === 'approved');
+    if (!pp2Done) {
+      html += `<div class="submission-warning">
+        <span class="submission-warning-icon">⚠️</span>
+        <span>Your <strong>Pool Play 2</strong> lineup has not been submitted. Go to the <a href="#" onclick="switchRosterTab(document.querySelector('[data-rtab=\\'swaps\\']'),'swaps');return false;">Swaps tab</a> to submit.</span>
+      </div>`;
+    }
+  }
 
   // ---- Scoring Summary Cards ----
   // Order: Pool Play Total, Pool Play 1, Pool Play 2, then any playoff rounds with data.
@@ -7861,9 +7923,20 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     </div>
     <p class="text-muted" style="margin-bottom:0.75rem;">Submit your roster for ${periodLabel}: 4 batters and 3 pitchers</p>`;
 
+  const eliminatedInRound = seasonData && seasonData.eliminated && seasonData.eliminated[managerName];
+  const periodIsEliminated =
+    eliminatedInRound &&
+    ((period === 'sf' && ['PP', 'QF'].includes(eliminatedInRound)) ||
+      (period === 'finals' && ['PP', 'QF', 'SF'].includes(eliminatedInRound)));
+
   if (!qualified && !isApproved) {
     html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
       <p class="text-muted" style="font-size:0.85rem;margin:0;">You have not qualified for ${periodLabel}.</p>
+    </div>`;
+  } else if (periodIsEliminated && !isApproved) {
+    const roundLabels = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals' };
+    html += `<div style="padding:0.75rem;background:#fff3cd;border-radius:6px;border:1px solid #ffc107;">
+      <p style="font-size:0.85rem;margin:0;color:#856404;">Season ended in ${roundLabels[eliminatedInRound] || eliminatedInRound}. Better luck next year.</p>
     </div>`;
   } else if (isApproved) {
     html += `<div class="swap-badge swap-badge-approved" style="margin-bottom:0.75rem;">Approved by Commissioner</div>`;
@@ -11804,21 +11877,39 @@ function renderWeeklyUploadSections() {
     } else if (i === 11) {
       // Week 12 (QF Week 2) - End Quarterfinals
       const qfFinalized = finalized.includes('QF');
+      const qfDumped = (sd.losers_dumped || []).includes('QF');
       html += `<div style="margin-top:0.75rem;">
         <button class="btn btn-sm ${qfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('QF', ${i})" ${qfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${qfFinalized ? 'Quarterfinals Ended' : 'End Quarterfinals'}
         </button>
         ${qfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Quarterfinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize quarterfinals and advance winners to semifinals.</span>'}
       </div>`;
+      if (qfFinalized && !qfDumped) {
+        html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('QF')">Advance SF Winners &amp; Dump QF Loser Rosters</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes QF losers from SF submissions, marks them eliminated, and generates roasts.</span>
+        </div>`;
+      } else if (qfDumped) {
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">QF loser rosters dumped. Roasts generated.</span></div>`;
+      }
     } else if (i === 13) {
       // Week 14 (SF Week 2) - End Semifinals
       const sfFinalized = finalized.includes('SF');
+      const sfDumped = (sd.losers_dumped || []).includes('SF');
       html += `<div style="margin-top:0.75rem;">
         <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF', ${i})" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${sfFinalized ? 'Semifinals Ended' : 'End Semifinals'}
         </button>
         ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to finals.</span>'}
       </div>`;
+      if (sfFinalized && !sfDumped) {
+        html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('SF')">Advance Finals Teams &amp; Dump SF Loser Rosters</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, and generates roasts.</span>
+        </div>`;
+      } else if (sfDumped) {
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated.</span></div>`;
+      }
     } else if (i === 15) {
       // Week 16 (Finals Week 2) - End Finals
       const finalsFinalized = finalized.includes('Finals');
@@ -12088,6 +12179,19 @@ window.finalizeRound = function (roundKey, weekIndex) {
   if (roundKey === 'PP') {
     const snapshot = buildSeedingSnapshot(sd);
     if (snapshot) sd.confirmed_seeding = snapshot;
+    // Mark pool-play non-qualifiers as eliminated and queue roasts
+    const qualifiers = getQFQualifiers(sd) || [];
+    const allManagers = getManagers().map((m) => m.name);
+    const nonQualifiers = allManagers.filter((m) => !qualifiers.includes(m));
+    if (!sd.eliminated) sd.eliminated = {};
+    nonQualifiers.forEach((m) => {
+      if (!sd.eliminated[m]) sd.eliminated[m] = 'PP';
+    });
+    saveSeason(SELECTED_SEASON, sd);
+    nonQualifiers.forEach((m) => generateRoastForManager(m, 'PP'));
+    renderWeeklyUploadSections();
+    init();
+    return;
   }
 
   // Auto-advance players to next round if applicable
@@ -12106,6 +12210,122 @@ window.finalizeRound = function (roundKey, weekIndex) {
   renderWeeklyUploadSections();
   init();
 };
+
+// Remove losing managers' next-round submissions, mark them eliminated, trigger roasts.
+// round = 'QF' (dumps QF losers from SF) or 'SF' (dumps SF losers from Finals).
+window.dumpPlayoffLosers = async function (round) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  if (!sd.eliminated) sd.eliminated = {};
+  if (!sd.period_submissions) sd.period_submissions = {};
+
+  let losers = [];
+  if (round === 'QF') {
+    const qfQualifiers = getQFQualifiers(sd) || [];
+    const sfParticipants = getSFParticipants(sd) || [];
+    losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
+    const sfSubs = sd.period_submissions.sf || {};
+    losers.forEach((m) => {
+      delete sfSubs[m];
+      sd.eliminated[m] = 'QF';
+    });
+    sd.period_submissions.sf = sfSubs;
+  } else if (round === 'SF') {
+    const sfParticipants = getSFParticipants(sd) || [];
+    const finalsParticipants = getFinalsParticipants(sd) || [];
+    losers = sfParticipants.filter((m) => !finalsParticipants.includes(m));
+    const finalsSubs = sd.period_submissions.finals || {};
+    losers.forEach((m) => {
+      delete finalsSubs[m];
+      sd.eliminated[m] = 'SF';
+    });
+    sd.period_submissions.finals = finalsSubs;
+  }
+
+  if (losers.length === 0) {
+    alert('No losers identified — make sure the round is finalized and scores are uploaded.');
+    return;
+  }
+
+  sd.losers_dumped = sd.losers_dumped || [];
+  sd.losers_dumped.push(round);
+
+  saveSeason(SELECTED_SEASON, sd);
+  for (const m of losers) {
+    await generateRoastForManager(m, round);
+  }
+  alert(`Dumped ${losers.length} loser roster${losers.length > 1 ? 's' : ''}: ${losers.join(', ')}`);
+  renderWeeklyUploadSections();
+  init();
+};
+
+// Call the server to generate and store a roast for an eliminated manager.
+async function generateRoastForManager(manager, round) {
+  try {
+    await apiFetch(`/api/seasons/${SELECTED_SEASON}/generate-roast`, {
+      method: 'POST',
+      body: JSON.stringify({ manager, round }),
+    });
+    // Re-sync seasons from server so roasts appear immediately
+    const fresh = await fetch('/api/seasons');
+    if (fresh.ok) {
+      const serverSeasons = await fresh.json();
+      if (serverSeasons && Object.keys(serverSeasons).length > 0) {
+        localStorage.setItem('wmmc_seasons', JSON.stringify(serverSeasons));
+      }
+    }
+  } catch (e) {
+    console.error('Roast generation failed for', manager, e);
+  }
+}
+
+// Show/hide the global submission warning banner below the nav.
+function updateSubmissionWarningBanner() {
+  const banner = document.getElementById('submission-warning-banner');
+  if (!banner || !LOGGED_IN_EMAIL) return;
+
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd || sd.status !== 'active') {
+    banner.style.display = 'none';
+    return;
+  }
+
+  const managers = getManagers();
+  const me = managers.find((m) => m.email && m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
+  if (!me) {
+    banner.style.display = 'none';
+    return;
+  }
+
+  const warnings = [];
+
+  // PP2 submission incomplete
+  if (isPeriodTimeOpen(sd, 'pp2')) {
+    const sub = getPeriodSub(sd, 'pp2', me.name);
+    if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
+      warnings.push('Your <strong>Pool Play 2</strong> lineup is not submitted.');
+    }
+  }
+
+  // QF submission incomplete (only for qualified managers)
+  if (isPeriodTimeOpen(sd, 'qf') && isManagerQualifiedForPeriod(me.name, 'qf', sd)) {
+    const sub = getPeriodSub(sd, 'qf', me.name);
+    if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
+      warnings.push('Your <strong>Quarterfinals</strong> lineup is not submitted.');
+    }
+  }
+
+  if (warnings.length === 0) {
+    banner.style.display = 'none';
+    return;
+  }
+
+  banner.innerHTML = warnings.map((w) => `<span class="sub-warn-item">⚠️ ${w}</span>`).join('');
+  banner.style.display = 'flex';
+}
 
 window.uploadWeeklyBatting = function (weekIndex) {
   const scheduleWeek = SEASON_SCHEDULE[weekIndex];

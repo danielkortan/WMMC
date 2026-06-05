@@ -1,5 +1,33 @@
 # WMMC — Decisions Log
 
+## Weekly Team Scoring rework (2026-06-05)
+
+Rebuilt the Weekly Team Scoring page (`renderWeekly` in app.js) into three grouped
+sections — **Weekly**, **Per Round**, **Overall** — each with Batting / Pitching /
+Total, replacing the old loose BAT/PIT/RK columns.
+
+- **`enrichTeamWeekly(rows, schedule)` in `js/scoring.js`** (exported, on `window`,
+  unit-tested) is the single source of truth. Given base rows carrying only
+  `weekly_batting/pitching/total`, it stamps:
+  - `round_*` — cumulative within a round, **resets** each round (PP1→PP2→QF→…).
+  - `overall_*` — cumulative across the **whole season** (continues through playoffs
+    for managers who advance). Chronological order = round position in `SEASON_SCHEDULE`
+    × 1000 + numeric week, so it also handles legacy historical data whose weeks run
+    continuously (Week 1..16) with non-schedule round keys (PP2 wk 6-10, QF wk 11-12, …).
+  - `rank[field] = { pool: {rank,total}|null, ovr: {rank,total} }` for all nine
+    metrics. Ranks compare managers sharing the same `(round, week)`: `ovr` vs every
+    manager active that week, `pool` vs same-pool managers only. **Assumption:** the
+    Overall-section rank cohort is "managers active that week" (so in playoff weeks
+    only advancing managers are ranked), not all season managers. Flag if wrong.
+- Ranks render as two small rows under each value: `Pool: x/total` / `OVR: x/total`
+  (matches My Roster's `rank/total` style). Helpers `teamWeeklyMetricCell` /
+  `teamWeeklyRankLines` in app.js; styles under `.weekly-grouped` in styles.css.
+- `buildTeamWeekly` calls `enrichTeamWeekly`. `renderWeekly` also enriches on demand
+  (guarded by `!rows[0].rank`) because **historical seasons** load raw `team_weekly`
+  straight from `data.json` (`DATA = seasonData.data`) and never go through
+  `buildTeamWeekly`. Enrichment is idempotent — recomputed from the `weekly_*` values.
+- Added global `enrichTeamWeekly` to `.eslintrc.json` (app.js is a classic script).
+
 ## Google Sign-In (added 2026-06-04)
 
 "Sign in with Google" on the login page, alongside email/password.
@@ -10,21 +38,32 @@
 - **Email mapping:** managers have a `googleEmail` field (editable in the admin panel, shown as a "Google Email" column). The Google account's verified email is matched against `googleEmail || email`. A one-shot startup backfill defaults `googleEmail = email` for every manager. Use it when a manager's Google address differs from their league email.
 - **Origins:** every browser origin must be listed in the Google Cloud OAuth client's Authorized JavaScript origins (exact scheme+host, https except localhost). Prod authorized: `https://wmmc.live` (+ `www` if it resolves). Staging would need its own client ID + `https://wmmc-staging.onrender.com` authorized — not set up, so the staging button stays hidden.
 
-## Deployment workflow (established 2026-06-04)
+## Deployment workflow (established 2026-06-04, updated 2026-06-05)
 
-After completing any feature branch, always:
+After completing any feature branch, **always auto-push to `staging`** (no
+confirmation needed unless there are open questions or merge conflicts), then
+**prompt** to promote to prod and delete the branch:
 
-1. **Squash-merge** the feature branch into `staging` (no confirmation needed unless there are open questions or merge conflicts)
+1. **Squash-merge** the feature branch into `staging` and push:
    ```
    git checkout staging && git merge --squash <feature-branch>
    git commit -m "<summary>"
    git push origin staging
    ```
-2. **Tell the user**: "Pushed to staging — check wmmc-staging.onrender.com. When ready, let me know and I'll merge to prod."
-3. **Wait** for the user's go-ahead before touching `main`.
-4. The user handles branch deletion themselves.
+2. **Prompt the user** (via AskUserQuestion) whether to merge to prod and delete the
+   branch — e.g. "Pushed to staging (wmmc-staging.onrender.com). Merge to prod and
+   delete `<feature-branch>`?"
+3. **On approval**, merge `staging` into `main`, push, then delete the feature branch
+   locally and on origin:
+   ```
+   git checkout main && git merge staging && git push origin main
+   git branch -d <feature-branch> && git push origin --delete <feature-branch>
+   ```
 
-Do NOT ask whether to push to staging — just do it at the end of every session unless there is an explicit reason not to (e.g., the user said "don't push yet").
+Do NOT ask whether to push to staging — just do it at the end of every session unless
+there is an explicit reason not to (e.g., the user said "don't push yet"). Only the
+prod merge + branch deletion needs the prompt. If the user has already said to go all
+the way to prod, skip the prompt and run steps 1 → 3.
 
 ## Git identity — run at session start (established 2026-06-04)
 
