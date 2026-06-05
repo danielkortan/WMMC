@@ -71,6 +71,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - Open the PR as soon as the branch is pushed and the work is ready for review — don't wait to be asked. After opening one, offer to watch it for CI failures and review comments.
 - Keep PRs focused: one logical change per PR, with a clear title and a body summarizing what changed and why.
 - Do not merge your own PR unless explicitly told to — opening it is the deliverable; merging is the maintainer's call.
+- **`main` is protected.** Merging requires the **`check`** status check (the job in `.github/workflows/ci.yml` — tests + lint + format) to pass, and the PR branch must be up to date with `main` first. If `main` moves while a PR is open, merge/rebase `main` into the branch before the merge button enables. If you ever rename the CI job, update the required-check name in the branch protection rule to match, or merges will block on a check that never reports.
 
 ## Conventions and patterns
 
