@@ -1774,13 +1774,6 @@ function renderLiveContent(d) {
       });
     }
 
-    const stateBadge = (pl) =>
-      pl.liveToday
-        ? '<span class="live-pill live-pill-live">LIVE</span>'
-        : pl.finalToday
-          ? '<span class="live-pill live-pill-final">FINAL</span>'
-          : '';
-
     const batterRow = (pl) => `<tr>
       <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
       <td>${escapeHtml(pl.team || '')}</td>
