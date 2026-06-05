@@ -2815,7 +2815,16 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
     if (swaps.length > 0) {
       const last = swaps[swaps.length - 1];
       swapReason = last.reason;
-      if (last.swap_date) dropDate = fmtShortDate(last.swap_date);
+      // Prefer the effective drop_date from roster_dates (the last day actually
+      // rostered); fall back to the raw swap_date only when none was recorded.
+      if (!dropDate && last.swap_date) dropDate = fmtShortDate(last.swap_date);
+    }
+
+    // An original player later dropped (a drop_date but no add_date) was rostered
+    // from the season's first day, so surface that as the start of their range.
+    if (!addDate && dropDate) {
+      const d0 = sd.schedule_dates && sd.schedule_dates[0];
+      if (d0 && d0.start) addDate = fmtShortDate(d0.start);
     }
 
     return { addDate, dropDate, swapReason };
@@ -2874,7 +2883,11 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
         const pts = playerPts(name, type);
         const isActive = activeSet.has(name);
         const { addDate, dropDate } = playerHistory(name, batOrPit);
-        const wasOriginal = (firstRoster[batOrPit] || []).includes(name);
+        // A player carrying an explicit add_date in roster_dates was added mid-season
+        // (e.g. a Week-1 swap-in that now also sits in the seed array) and is NOT an
+        // original, so their start date should still show.
+        const hasExplicitAdd = Object.values(detailMgrRosterDates || {}).some((wk) => wk[name] && wk[name].add_date);
+        const wasOriginal = (firstRoster[batOrPit] || []).includes(name) && !hasExplicitAdd;
         // Only show a date range when the player was actually swapped in or out
         let dateCell = '';
         if (!isActive) {
@@ -5562,6 +5575,13 @@ function repairMissingSwapRecords(seasonData) {
   return changed;
 }
 
+// Return the ISO date (YYYY-MM-DD) one day before the given ISO date, tz-safe.
+function dayBeforeISO(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 // Back-fill missing add/drop dates in roster_dates from approved swap records.
 // Runs on every commissioner roster render so existing swaps (approved before this
 // feature existed) also get their dates populated automatically.
@@ -5577,9 +5597,15 @@ function backfillRosterDatesFromSwaps(seasonData) {
     }
     const wkDates = seasonData.roster_dates[swap.manager][swap.week_key];
     if (swap.player_out) {
+      // The outgoing player keeps credit through the day BEFORE the swap takes
+      // effect; the incoming player starts ON swap_date. Storing swap_date as the
+      // drop_date double-counts the swap day for both players, so use the adjacent
+      // date — and self-heal legacy entries that stored the raw swap_date.
+      const effectiveDrop = dayBeforeISO(swap.swap_date);
       if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
-      if (!wkDates[swap.player_out].drop_date) {
-        wkDates[swap.player_out].drop_date = swap.swap_date;
+      const cur = wkDates[swap.player_out].drop_date;
+      if ((!cur || cur === swap.swap_date) && cur !== effectiveDrop) {
+        wkDates[swap.player_out].drop_date = effectiveDrop;
         changed = true;
       }
     }
@@ -5761,11 +5787,14 @@ function repairGhostInitialRosterPlayers(seasonData) {
   const weekKey = `${firstSched.round}|${firstSched.week}`;
   let repaired = false;
 
-  // Build set of players explicitly added by the commissioner via swaps for Week 1
+  // Players involved in an approved Week-1 swap are legitimate, not ghosts:
+  // player_in was commissioner-added, and player_out was genuinely rostered
+  // before being swapped out (so the days they scored pre-drop must survive,
+  // even when the recorded initial_submission is incomplete).
   const commAdded = new Set(
     (seasonData.swaps || [])
-      .filter((s) => s.status === 'approved' && s.player_in && s.week_key === weekKey)
-      .map((s) => s.player_in)
+      .filter((s) => s.status === 'approved' && s.week_key === weekKey)
+      .flatMap((s) => [s.player_in, s.player_out].filter(Boolean))
   );
 
   for (const [manager, sub] of Object.entries(seasonData.initial_submissions)) {

@@ -2711,10 +2711,14 @@ function repairGhostInitialRosterPlayers(sd) {
   const weekKey = `${firstSched.round}|${firstSched.week}`;
   let repaired = false;
 
+  // Players involved in an approved Week-1 swap are legitimate, not ghosts:
+  // player_in was commissioner-added, and player_out was genuinely rostered
+  // before being swapped out (so the days they scored pre-drop must survive,
+  // even when the recorded initial_submission is incomplete).
   const commAdded = new Set(
     (sd.swaps || [])
-      .filter((s) => s.status === 'approved' && s.player_in && s.week_key === weekKey)
-      .map((s) => s.player_in)
+      .filter((s) => s.status === 'approved' && s.week_key === weekKey)
+      .flatMap((s) => [s.player_in, s.player_out].filter(Boolean))
   );
 
   for (const [manager, sub] of Object.entries(sd.initial_submissions)) {
