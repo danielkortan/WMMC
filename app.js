@@ -8221,8 +8221,6 @@ window.submitSwapRequest = async function (managerName) {
   );
 
   const swap = {
-    id: Date.now().toString(),
-    timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
     email: LOGGED_IN_EMAIL,
     manager: managerName,
     player_out: playerOut,
@@ -8235,11 +8233,37 @@ window.submitSwapRequest = async function (managerName) {
     teams_started: teams_started,
     round: round,
     week_key: weekKey,
-    status: 'pending',
   };
 
-  sd.swaps.push(swap);
-  saveSeason(SELECTED_SEASON, sd);
+  // Post only the swap object to the dedicated endpoint — avoids the whole-season
+  // payload that previously failed silently when the JSON was large or auth was stale.
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps`, {
+      method: 'POST',
+      body: JSON.stringify(swap),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    const { swap: savedSwap } = await resp.json();
+
+    // Mirror the confirmed server swap into localStorage so the view is consistent.
+    const freshSeasons = getSeasons();
+    const freshSd = freshSeasons[SELECTED_SEASON];
+    if (freshSd) {
+      if (!Array.isArray(freshSd.swaps)) freshSd.swaps = [];
+      freshSd.swaps.push(savedSwap);
+      localStorage.setItem('wmmc_seasons', JSON.stringify(freshSeasons));
+    }
+
+    succEl.textContent = 'Swap request submitted!';
+    succEl.style.display = 'block';
+  } catch (e) {
+    errEl.textContent = `Swap not submitted — ${e.message}. Please try again or contact the commissioner.`;
+    errEl.style.display = 'block';
+    return;
+  }
 
   // Re-render entire roster view
   const isComm = isLoggedInCommissioner();
