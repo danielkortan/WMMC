@@ -1,5 +1,37 @@
 # WMMC — Decisions Log
 
+## PP1 submission window gating + delete capability (2026-06-06)
+
+Commissioner saw stray "Pool Play 1 / Pending" entries during the PP2 window and
+read them as misrouted PP2 submissions. They weren't — PP1/PP2 routing is correct
+(`getPeriodSub`/`ensurePeriodSub` keep `initial_submissions` vs
+`period_submissions[period]` strictly separate). Root cause: the legacy PP1
+("initial") submission card never closed. Unlike `buildPeriodSubmissionCard`
+(pp2/qf/sf/finals), the PP1 card's editable branch had **no `isPeriodTimeOpen`
+check**, so a manager whose PP1 was never approved still saw a fully editable +
+submittable PP1 form mid-season and could drop a fresh `pending` PP1 into the queue.
+Worse: `repairGhostInitialRosterPlayers` (runs every active-season render) treats any
+**populated** `initial_submissions` record — even `pending` — as the authoritative
+Week-1 roster and purges Week-1 players/stats not in it, so a stray PP1 re-submission
+with a different roster can silently corrupt PP1 scores.
+
+- **PP1 now uses the same window as every other period:** added `pp1: 'PP1'` to
+  `PERIOD_OPEN_ROUND`, so PP1 opens the Friday before its Week 1 (3 days before the
+  Monday start) and closes at its first games (`getPeriodFirstGame`, already had pp1).
+  Behavior change for **future** seasons only (PP1 used to open as soon as the pool
+  was uploaded); current season's PP1 is long past so it now reads as closed.
+- **Gated the PP1 card's editable form** on `isPeriodTimeOpen(sd,'pp1')`, mirroring the
+  playoff cards' "opens X" / "window has closed" states. No more editable/submittable
+  PP1 form after PP1 has begun.
+- **Added `deleteInitialSubmission(manager)`** (+ a "Delete" button on the commissioner
+  PP1 pending entry). Unlike Deny (leaves an empty `draft` record), this removes the
+  `initial_submissions[manager]` key entirely. Safe: the season-save POST does not
+  merge-protect `initial_submissions`, and the actual Week-1 roster lives in
+  `sd.rosters` — deletion clears only the submission artifact and drops the manager
+  from the ghost-purge loop. Used to clear the stray PP1 entries.
+
+Frontend-only (`app.js`); no `SCORING`/`SEASON_SCHEDULE`/server changes.
+
 ## Phase 3 — retire the hardcoded band-aids (2026-06-06)
 
 After the eligibility + array fixes stabilized the league, removed the first-season

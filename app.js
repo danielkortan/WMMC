@@ -131,10 +131,12 @@ const PERIOD_LABELS = {
 
 // Returns a Date for when a period's submission window opens, or null (= open from season start)
 //
-// Each playoff period's window opens the Friday before its Week 1 starts (3 days
-// before the Monday start). PP1 has no gated open — it opens once the pool is
-// ready — so it (and any unknown period) returns null.
-const PERIOD_OPEN_ROUND = { pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+// Every period's window opens the Friday before its Week 1 starts (3 days before the
+// Monday start), including PP1 — once the commissioner has set the schedule. PP1 closes
+// at its first games like the rest (see getPeriodFirstGame), so the initial-submission
+// form is no longer editable/submittable after PP1 has begun. An unknown period returns
+// null (= open from season start).
+const PERIOD_OPEN_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
 
 function getPeriodOpenDate(sd, period) {
   const dates = sd && sd.schedule_dates;
@@ -7710,8 +7712,25 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">${deadlineNote}</p>
         </div>`;
       }
+    } else if (poolReady && !isPeriodTimeOpen(seasonData, 'pp1')) {
+      // Window not yet open, or already closed (PP1 has begun) — no editable form, no submit.
+      // Mirrors the playoff-period cards so stray PP1 submissions can't land mid-season.
+      const pp1OpenDate = getPeriodOpenDate(seasonData, 'pp1');
+      const pp1Deadline = getPeriodDeadline(seasonData, 'pp1');
+      if (pp1OpenDate && Date.now() < pp1OpenDate.getTime()) {
+        const openStr = pp1OpenDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+          <p class="text-muted" style="font-size:0.85rem;margin:0;">Submission window opens <strong>${openStr}</strong>${
+            pp1Deadline
+              ? ` and closes at <strong>${pp1Deadline.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}</strong>`
+              : ''
+          }.</p>
+        </div>`;
+      } else {
+        html += `<p class="text-muted" style="font-size:0.85rem;">Submission window has closed.</p>`;
+      }
     } else if (poolReady) {
-      // Editable submission form (only when pool is available)
+      // Editable submission form (only when pool is available and the window is open)
       if (isPending) {
         html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>`;
       }
@@ -9178,6 +9197,7 @@ function renderPendingSwapRequests() {
       approveFn: 'approveInitialSubmission',
       denyFn: 'denyInitialSubmission',
       editFn: 'editInitialSubmissionComm',
+      deleteFn: 'deleteInitialSubmission',
       isLegacy: true,
     },
     { period: 'pp2', label: 'Pool Play 2', isLegacy: false },
@@ -9186,7 +9206,7 @@ function renderPendingSwapRequests() {
     { period: 'finals', label: 'Finals', isLegacy: false },
   ];
 
-  for (const { period, label, isLegacy, approveFn, denyFn, editFn } of allPeriods) {
+  for (const { period, label, isLegacy, approveFn, denyFn, editFn, deleteFn } of allPeriods) {
     managers
       .filter((m) => {
         const sub = getPeriodSub(sd, period, m.name);
@@ -9212,6 +9232,7 @@ function renderPendingSwapRequests() {
             <button class="btn btn-sm btn-success" onclick="${approveFn}('${safeName}')">Approve</button>
             <button class="btn btn-sm btn-secondary" onclick="${editFn}('${safeName}')">Edit</button>
             <button class="btn btn-sm btn-danger" onclick="${denyFn}('${safeName}')">Deny</button>
+            <button class="btn btn-sm btn-danger" onclick="${deleteFn}('${safeName}')">Delete</button>
             <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${safeName}')">View Roster</button>
           </div>
         </div>`;
@@ -10629,6 +10650,30 @@ window.denyInitialSubmission = function (manager) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions) return;
   sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
+  saveSeason(SELECTED_SEASON, sd);
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = isLoggedInCommissioner();
+  renderRosterData(manager, isComm);
+};
+
+// Permanently remove a manager's Pool Play 1 (initial) submission record. Unlike Deny — which
+// leaves an empty 'draft' record behind — this deletes the entry entirely, so it no longer shows
+// in the pending list and is no longer treated as the authoritative Week 1 roster by the
+// ghost-purge repair. The manager's actual Week 1 roster (sd.rosters) and stats are untouched.
+window.deleteInitialSubmission = function (manager) {
+  if (
+    !confirm(
+      `Delete ${manager}'s Pool Play 1 submission record entirely?\n\n` +
+        'This removes only the submission artifact — their existing Week 1 roster and scores are not affected. This cannot be undone.'
+    )
+  ) {
+    return;
+  }
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
+  delete sd.initial_submissions[manager];
   saveSeason(SELECTED_SEASON, sd);
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
