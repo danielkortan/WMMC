@@ -644,6 +644,50 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
   }
 });
 
+// POST /api/seasons/:year/swaps — atomically append a single pending swap.
+// Uses a tiny payload (just the swap object) instead of the full season JSON, so it
+// cannot fail due to payload size and gives the client a clear success/error signal.
+// The full-season save (POST /api/seasons/:year) still acts as a safety net, but
+// swap submission no longer depends on it succeeding.
+app.post('/api/seasons/:year/swaps', requireAuth, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const swap = req.body;
+  if (!swap || typeof swap !== 'object' || Array.isArray(swap)) {
+    return res.status(400).json({ error: 'Request body must be a swap object' });
+  }
+  if (!swap.player_out || !swap.player_in || !swap.manager) {
+    return res.status(400).json({ error: 'Swap must include manager, player_out, and player_in' });
+  }
+  const db = readDB();
+  if (!db.seasons) db.seasons = {};
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  if (sd.status !== 'active') return res.status(400).json({ error: 'Season is not active' });
+
+  // Server stamps id, timestamp, and status so the client cannot forge them.
+  swap.id = Date.now().toString();
+  swap.timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  swap.status = 'pending';
+
+  if (!Array.isArray(sd.swaps)) sd.swaps = [];
+  sd.swaps.push(swap);
+
+  addAuditEntry(
+    db,
+    'swap_submitted',
+    { year: req.params.year, manager: swap.manager, player_out: swap.player_out, player_in: swap.player_in },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, swap });
+
+  postSlack(
+    `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
+  ).catch(() => {});
+});
+
 // GET /api/pending-count — number of pending swaps for a given season year
 app.get('/api/pending-count', (req, res) => {
   const { year } = req.query;
