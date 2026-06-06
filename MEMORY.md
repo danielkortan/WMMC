@@ -26,6 +26,17 @@ Alcántara counts Weeks 2–3, both resolve to the correct 4 batters / 3 pitcher
 week. This fixes the scores **without any data surgery** — the add/drop history in
 `roster_dates` was already correct; only the roster _arrays_ were stale.
 
+The per-player roster **view** still read the stale arrays (showing carried-forward
+swap-ins as greyed / missing / only-first-week points), so added
+`POST /api/seasons/:year/rebuild-roster-arrays` (commissioner) + the generic
+`rebuildRosterArraysFromDates(sd)`: a purely **additive** pass that, for each
+existing week, adds any player active per `roster_dates` but missing from the array.
+Never removes a slot. Type (batter/pitcher) comes from the manager's own arrays +
+weekly rows first; pools only classify single-type players (so two-way Ohtani is
+never forced onto a manager who didn't roster him both ways). Run once per season to
+heal stale arrays; totals don't move (scoring already derives eligibility from the
+same dates — the endpoint returns a before/after check to confirm).
+
 Follow-up (next PR): correct the two `initial_submissions` (Anton missing Carpenter,
 Austin missing Skubal), add a generic commissioner "edit initial submission until
 first games" capability, then delete the hardcoded band-aid repairs and harden the

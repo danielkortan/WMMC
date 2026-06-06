@@ -2324,6 +2324,87 @@ function diffScoreSnapshots(a, b) {
   return out;
 }
 
+// Reconcile every manager's per-week roster ARRAYS with the authoritative
+// roster_dates add/drop history. Purely additive: for each existing week it adds
+// any player who is active that week per their add/drop dates but missing from
+// the array (the stale-array bug that hid carried-forward swap-ins like Devers
+// from the roster view and per-player breakdown). Never removes a player, so it
+// can't drop a legitimate slot. Batter/pitcher type comes from the manager's own
+// arrays + weekly rows first; pools are used only for single-type players so a
+// two-way player (Ohtani) is never forced onto a manager who didn't roster him
+// both ways. Returns a list of the additions made.
+function rebuildRosterArraysFromDates(sd) {
+  const scheduleDates = sd.schedule_dates || [];
+  const weekIdxByKey = {};
+  SEASON_SCHEDULE.forEach((s, i) => (weekIdxByKey[`${s.round}|${s.week}`] = i));
+  const batPool = new Set(sd.batters_pool || []);
+  const pitPool = new Set(sd.pitchers_pool || []);
+
+  const changes = [];
+  for (const [mgr, weeks] of Object.entries(sd.rosters || {})) {
+    const mgrDates = (sd.roster_dates || {})[mgr];
+    if (!mgrDates || !weeks) continue;
+
+    // Classify names this manager touches as batter and/or pitcher.
+    const batterNames = new Set();
+    const pitcherNames = new Set();
+    for (const wr of Object.values(weeks)) {
+      for (const p of wr.batters || []) batterNames.add(p);
+      for (const p of wr.pitchers || []) pitcherNames.add(p);
+    }
+    for (const r of sd.weekly_batting || []) if (r.manager === mgr && r.batter) batterNames.add(r.batter);
+    for (const r of sd.weekly_pitching || []) if (r.manager === mgr && r.pitcher) pitcherNames.add(r.pitcher);
+    const allDated = new Set();
+    for (const players of Object.values(mgrDates)) for (const p of Object.keys(players)) allDated.add(p);
+    for (const p of allDated) {
+      const inBat = batPool.has(p);
+      const inPit = pitPool.has(p);
+      if (inBat && !inPit) batterNames.add(p);
+      else if (inPit && !inBat) pitcherNames.add(p); // both/neither: rely on arrays + rows
+    }
+
+    for (const weekKey of Object.keys(weeks)) {
+      const idx = weekIdxByKey[weekKey];
+      const weekEnd = idx != null && scheduleDates[idx] ? scheduleDates[idx].end : null;
+
+      // Players whose most-recent roster_dates event as of this week's end is an add.
+      const latestAdd = {};
+      const latestDrop = {};
+      for (const players of Object.values(mgrDates)) {
+        for (const [p, d] of Object.entries(players)) {
+          if (d.add_date && (!weekEnd || d.add_date <= weekEnd) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+            latestAdd[p] = d.add_date;
+          }
+          if (d.drop_date && (!weekEnd || d.drop_date <= weekEnd) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+            latestDrop[p] = d.drop_date;
+          }
+        }
+      }
+      const active = Object.keys(latestAdd).filter((p) => !latestDrop[p] || latestAdd[p] > latestDrop[p]);
+
+      const wr = weeks[weekKey];
+      if (!Array.isArray(wr.batters)) wr.batters = [];
+      if (!Array.isArray(wr.pitchers)) wr.pitchers = [];
+      const addedBat = [];
+      const addedPit = [];
+      for (const p of active) {
+        if (batterNames.has(p) && !wr.batters.includes(p)) {
+          wr.batters.push(p);
+          addedBat.push(p);
+        }
+        if (pitcherNames.has(p) && !wr.pitchers.includes(p)) {
+          wr.pitchers.push(p);
+          addedPit.push(p);
+        }
+      }
+      if (addedBat.length || addedPit.length) {
+        changes.push({ manager: mgr, week: weekKey, added_batters: addedBat, added_pitchers: addedPit });
+      }
+    }
+  }
+  return changes;
+}
+
 // Compute high/low scores for a specific date (YYYY-MM-DD).
 // Returns { bestManager, worstManager, bestPlayer, worstPlayer } or null if no data.
 function computeDailyHighLow(sd, date) {
@@ -4863,6 +4944,44 @@ app.get('/api/diag/manager', requireCommissioner, (req, res) => {
       total: (snapshot.totals || {})[name] || null,
       by_week: (snapshot.detail || {})[name] || {},
     },
+  });
+});
+
+// POST /api/seasons/:year/rebuild-roster-arrays
+// Reconcile every manager's weekly roster arrays with their roster_dates add/drop
+// history (purely additive — adds active-but-missing players, removes nothing).
+// Fixes the per-player roster view showing carried-forward swap-ins as greyed /
+// missing. Returns the additions made + a before/after total check (totals should
+// not move, since scoring already derives eligibility from the same dates).
+app.post('/api/seasons/:year/rebuild-roster-arrays', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const before = captureScoreSnapshot(sd, todayET).totals;
+  const changes = rebuildRosterArraysFromDates(sd);
+  const after = captureScoreSnapshot(sd, todayET).totals;
+
+  // Totals shouldn't move; surface any that did so the commissioner can eyeball it.
+  const movedTotals = [];
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[m] || {}).total || 0;
+    const a = (after[m] || {}).total || 0;
+    if (Math.abs(a - b) >= 0.01) {
+      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+    }
+  }
+
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'rebuild_roster_arrays', { year, changes: changes.length }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({
+    ok: true,
+    managers_touched: new Set(changes.map((c) => c.manager)).size,
+    changes,
+    moved_totals: movedTotals,
   });
 });
 
