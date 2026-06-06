@@ -163,56 +163,67 @@ function watchLiveDetails() {
     const trs = Array.from(table.querySelectorAll('tbody tr'));
     if (!ths.length) return null;
 
-    const makeCell = (content, i, colCount, isHeader) => {
-      const isFirst = i === 0;
-      const isLast = i === colCount - 1;
-      const el = document.createElement('div');
-      const w = isFirst ? '130px' : '52px';
-      const color = isHeader ? '#6c7a9c' : isFirst ? '#e8eaf6' : isLast ? '#4a9eff' : '#9fa8da';
-      const size = isHeader ? '12px' : isFirst ? '22px' : '20px';
-      const weight = !isHeader && (isFirst || isLast) ? '700' : isHeader ? '700' : '400';
-      el.style.cssText =
-        `flex:0 0 ${w};padding:9px 7px;font-size:${size};font-weight:${weight};` +
-        `color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;` +
-        `text-align:${isFirst ? 'left' : 'center'};box-sizing:border-box;` +
-        (isHeader ? 'text-transform:uppercase;letter-spacing:0.4px;' : '');
-      if (isHeader) {
-        el.textContent = content.textContent.trim();
-      } else {
-        el.innerHTML = content.innerHTML;
-      }
-      return el;
-    };
+    const visThs = ths.filter((_, i) => i !== TEAM_COL);
 
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;';
+    wrap.style.cssText = 'width:100%;';
 
-    const inner = document.createElement('div');
-    inner.style.cssText = 'display:inline-flex;flex-direction:column;min-width:100%;';
-
-    // Header
-    const hdr = document.createElement('div');
-    hdr.style.cssText =
-      'display:flex;flex-direction:row;background:#0d0d1e;' + 'border-bottom:2px solid #3a3a5a;position:sticky;top:0;';
-    const visThCols = ths.filter((_, i) => i !== TEAM_COL);
-    visThCols.forEach((th, ci) =>
-      hdr.appendChild(makeCell(th, ci === 0 ? 0 : ci === visThCols.length - 1 ? -1 : ci, visThCols.length, true))
-    );
-    inner.appendChild(hdr);
-
-    // Data rows
     trs.forEach((tr) => {
       const tds = Array.from(tr.querySelectorAll('td')).filter((_, i) => i !== TEAM_COL);
       if (!tds.length) return;
-      const rowEl = document.createElement('div');
-      rowEl.style.cssText = 'display:flex;flex-direction:row;border-bottom:1px solid #2a2a45;';
-      tds.forEach((td, ci) => {
-        rowEl.appendChild(makeCell(td, ci === 0 ? 0 : ci === tds.length - 1 ? -1 : ci, tds.length, false));
-      });
-      inner.appendChild(rowEl);
+
+      const card = document.createElement('div');
+      card.style.cssText = 'border-bottom:1px solid #2a2a45;padding:6px 8px;';
+
+      // Row 1: player name + pts side by side, same font size, no truncation
+      const row1 = document.createElement('div');
+      row1.style.cssText = 'display:flex;align-items:baseline;gap:8px;';
+
+      const nameTd = tds[0];
+      const nameCls = nameTd.className || '';
+      const nameColor = nameCls.includes('player-name-live')
+        ? '#4caf6e'
+        : nameCls.includes('player-name-final')
+          ? '#6c7a9c'
+          : '#e8eaf6';
+
+      const nameEl = document.createElement('div');
+      nameEl.style.cssText =
+        `flex:1;font-size:15px;font-weight:700;color:${nameColor};` + 'word-break:break-word;line-height:1.3;';
+      nameEl.textContent = nameTd.textContent.trim();
+
+      const ptsTd = tds[tds.length - 1];
+      const ptsEl = document.createElement('div');
+      ptsEl.style.cssText = 'flex-shrink:0;font-size:15px;font-weight:700;color:#4a9eff;white-space:nowrap;';
+      ptsEl.innerHTML = ptsTd.innerHTML;
+
+      row1.appendChild(nameEl);
+      row1.appendChild(ptsEl);
+      card.appendChild(row1);
+
+      // Row 2: stat columns with inline labels, horizontally scrollable
+      const statTds = tds.slice(1, -1);
+      const statThs = visThs.slice(1, -1);
+      if (statTds.length) {
+        const row2 = document.createElement('div');
+        row2.style.cssText =
+          'display:flex;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;' +
+          'gap:0;margin-top:4px;padding-bottom:2px;';
+        statTds.forEach((td, i) => {
+          const label = statThs[i]?.textContent.trim() || '';
+          const statEl = document.createElement('div');
+          statEl.style.cssText = 'flex:0 0 auto;text-align:center;padding:0 5px;min-width:30px;';
+          statEl.innerHTML =
+            `<div style="font-size:9px;color:#5a6690;font-weight:700;letter-spacing:0.3px;">${label}</div>` +
+            `<div style="font-size:11px;color:#9fa8da;">${td.textContent.trim()}</div>`;
+          row2.appendChild(statEl);
+        });
+        card.appendChild(row2);
+      }
+
+      wrap.appendChild(card);
     });
 
-    wrap.appendChild(inner);
     return wrap;
   };
 
