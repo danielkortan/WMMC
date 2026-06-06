@@ -218,3 +218,61 @@ export function enrichTeamWeekly(rows, schedule = SEASON_SCHEDULE) {
 
   return rows;
 }
+
+// ============================================================
+// Score-swing guard (pure)
+// ============================================================
+// Compares per-manager Overall totals before and after a score compile and
+// flags suspicious swings. The Overall standings are recomputed live from
+// rosters + add/drop dates + swaps on every compile, so a single bad date or
+// swap can retroactively move a manager's cumulative total by hundreds of
+// points. This catches that before it reaches the scoreboard.
+//
+// Scores normally only go UP day to day, so:
+//   - a DOWNWARD swing of `blockDropPts` (default 40) or more for any manager
+//     BLOCKS the compile (the case we care about).
+//   - an UPWARD jump of more than `warnGainPts` (default 200) only WARNS — up is
+//     normal, but a jump that big is worth a look (e.g. possible double-credit).
+//
+// `before` / `after`: { [manager]: number } or { [manager]: { total } }.
+// Returns { swings, warnings, blockers, block, maxDrop, maxGain, thresholds }.
+// NOTE: a synced copy lives in server.js (the only runtime caller). Keep both in
+// sync — this canonical copy is the unit-tested one.
+export function detectScoreSwings(before = {}, after = {}, opts = {}) {
+  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 40;
+  const warnGainPts = opts.warnGainPts != null ? opts.warnGainPts : 200;
+
+  const tot = (v) => (typeof v === 'number' ? v : v && typeof v.total === 'number' ? v.total : 0);
+  const managers = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+
+  const swings = [];
+  for (const m of managers) {
+    const b = tot(before[m]);
+    const a = tot(after[m]);
+    const delta = Math.round((a - b) * 100) / 100;
+    const pct = b > 0 ? delta / b : 0;
+    swings.push({ manager: m, before: b, after: a, delta, pct });
+  }
+  swings.sort((x, y) => x.delta - y.delta); // biggest drop first
+
+  const warnings = [];
+  const blockers = [];
+  for (const s of swings) {
+    if (-s.delta >= blockDropPts) {
+      blockers.push(s);
+    } // dropped 40+ pts — block
+    else if (s.delta > warnGainPts) warnings.push(s); // jumped >200 pts — warn
+  }
+
+  const maxDrop = swings.length ? Math.max(0, -swings[0].delta) : 0;
+  const maxGain = swings.length ? Math.max(0, swings[swings.length - 1].delta) : 0;
+  return {
+    swings,
+    warnings,
+    blockers,
+    block: blockers.length > 0,
+    maxDrop,
+    maxGain,
+    thresholds: { blockDropPts, warnGainPts },
+  };
+}

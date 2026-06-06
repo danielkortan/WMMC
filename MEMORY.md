@@ -1,5 +1,34 @@
 # WMMC — Decisions Log
 
+## Score-swing guard + daily snapshot trail (2026-06-06)
+
+Added a safeguard against wild downward swings in the Overall standings (a
+recurring problem — the standings are recomputed live from rosters + add/drop
+dates + swaps on every compile, so one bad date/swap can move a cumulative total
+by hundreds of points).
+
+- **`detectScoreSwings(before, after, opts)`** — pure, unit-tested in
+  `js/scoring.js`; **synced copy in `server.js`** (the only runtime caller; server
+  is CJS and can't import the ESM module). Compares per-manager Overall totals.
+  Thresholds (per commissioner, 2026-06-06): **blocks on a drop of ≥40 pts** for
+  any single manager (scores normally only go up, so a real downward move is the
+  thing we care about); an **upward jump of >200 pts only warns** (up is normal,
+  but a jump that big is worth a look — possible double-credit). Applies uniformly
+  to daily and Wednesday/Sync-Now compiles — a legit MLB stat correction that
+  drops someone 40+ pts will block and must be re-run with Force.
+- **`captureScoreSnapshot(sd, date)`** mirrors `computeRoundScores` attribution
+  (added an optional `detailOut` param to `managerWeekSubtotal` to collect
+  per-player rows without changing its numeric return). Stores per-manager
+  totals plus a per-week / per-player breakdown in `sd.score_snapshots`, pruned
+  to `MAX_SCORE_SNAPSHOTS = 21` (one per date; same-day re-run replaces).
+- **Wired into:** the 4am auto-sync (blocks → skips writeDB, keeps last-good
+  scores, Slack-alerts; the 7am scoreboard then posts the good numbers), and the
+  commissioner `POST /api/mlb/sync-current` + `POST /api/mlb/sync` (block returns
+  **409** with the report; re-submit with `{ force: true }` to override).
+- **Diagnosis:** `GET /api/mlb/score-guard?year=` lists snapshot totals;
+  `&from=DATE&to=DATE` returns a player-level diff ("what changed?"). No UI yet.
+- Slack alerts go to the general `SLACK_WEBHOOK_URL` (same channel as sync errors).
+
 ## Weekly Team Scoring rework (2026-06-05)
 
 Rebuilt the Weekly Team Scoring page (`renderWeekly` in app.js) into three grouped

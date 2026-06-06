@@ -1951,7 +1951,11 @@ function detectCurrentRound(scheduleDates) {
 // exactly so the Slack scoreboard and Live tab totals reconcile to the
 // in-app My Roster page (wasDroppedBefore filter -> eligibility set ->
 // manager/null dedup -> sum of weekly_score).
-function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey) {
+// `detailOut` (optional): when provided, each eligible player row that
+// contributes to the subtotal is pushed as { player, score } — used by the
+// daily score-snapshot trail to record per-player breakdowns without changing
+// the numeric return value the other callers rely on.
+function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut) {
   if (!sd || !managerName) return 0;
   const round = schedWeek.round;
   const week = schedWeek.week;
@@ -2034,7 +2038,11 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
     }
   });
 
-  return allWeekRows.filter((r) => eligible.has(r[playerKey])).reduce((s, r) => s + (r.weekly_score || 0), 0);
+  const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
+  if (detailOut) {
+    for (const r of finalRows) detailOut.push({ player: r[playerKey], score: r.weekly_score || 0 });
+  }
+  return finalRows.reduce((s, r) => s + (r.weekly_score || 0), 0);
 }
 
 // Sum batting + pitching weekly_scores for the given rounds, scoped per
@@ -2091,6 +2099,199 @@ function computeRoundScores(batting, pitching, rounds, sd) {
     pitching: Math.round(s.pitching * 100) / 100,
     total: Math.round((s.batting + s.pitching) * 100) / 100,
   }));
+}
+
+// ============================================================
+// Score-swing guard + daily snapshot trail
+// ============================================================
+// The Overall standings are recomputed live from rosters + add/drop dates +
+// swaps on every compile, so a single bad date or swap can retroactively move a
+// manager's cumulative total by hundreds of points. These helpers snapshot the
+// per-manager (and per-player/week) totals before and after each compile, flag
+// suspicious DOWNWARD swings, and keep a rolling trail so any swing can be
+// traced to the exact player/week that moved.
+
+// Number of full-detail daily snapshots retained per season (rolling window).
+const MAX_SCORE_SNAPSHOTS = 21;
+
+// Build a full snapshot of the current standings: per-manager totals plus a
+// per-manager / per-week / per-player breakdown. Mirrors computeRoundScores'
+// attribution (managerWeekSubtotal) so the snapshot always matches what the
+// scoreboard shows.
+function captureScoreSnapshot(sd, dateISO) {
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const managers = new Set(Object.keys(sd.rosters || {}));
+  for (const r of batting) if (r.manager) managers.add(r.manager);
+  for (const r of pitching) if (r.manager) managers.add(r.manager);
+
+  const totals = {};
+  const detail = {};
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const wk = `${schedWeek.round}|${schedWeek.week}`;
+    for (const mgr of managers) {
+      const batRows = [];
+      const pitRows = [];
+      const bat = managerWeekSubtotal(sd, mgr, schedWeek, idx, batting, 'batter', 'batters', batRows);
+      const pit = managerWeekSubtotal(sd, mgr, schedWeek, idx, pitching, 'pitcher', 'pitchers', pitRows);
+      if (!bat && !pit && batRows.length === 0 && pitRows.length === 0) continue;
+      if (!totals[mgr]) totals[mgr] = { total: 0, batting: 0, pitching: 0 };
+      totals[mgr].batting += bat;
+      totals[mgr].pitching += pit;
+      totals[mgr].total += bat + pit;
+      if (!detail[mgr]) detail[mgr] = {};
+      detail[mgr][wk] = {
+        batting: Math.round(bat * 100) / 100,
+        pitching: Math.round(pit * 100) / 100,
+        batters: Object.fromEntries(batRows.map((r) => [r.player, Math.round(r.score * 100) / 100])),
+        pitchers: Object.fromEntries(pitRows.map((r) => [r.player, Math.round(r.score * 100) / 100])),
+      };
+    }
+  });
+  for (const m of Object.keys(totals)) {
+    totals[m].total = Math.round(totals[m].total * 100) / 100;
+    totals[m].batting = Math.round(totals[m].batting * 100) / 100;
+    totals[m].pitching = Math.round(totals[m].pitching * 100) / 100;
+  }
+  return { date: dateISO, captured_at: new Date().toISOString(), totals, detail };
+}
+
+// Append a snapshot to the rolling trail (one per date — a same-day re-run
+// replaces the prior entry), pruned to MAX_SCORE_SNAPSHOTS.
+function recordScoreSnapshot(sd, snapshot) {
+  if (!sd.score_snapshots) sd.score_snapshots = [];
+  sd.score_snapshots = sd.score_snapshots.filter((s) => s.date !== snapshot.date);
+  sd.score_snapshots.push(snapshot);
+  sd.score_snapshots.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (sd.score_snapshots.length > MAX_SCORE_SNAPSHOTS) {
+    sd.score_snapshots = sd.score_snapshots.slice(-MAX_SCORE_SNAPSHOTS);
+  }
+}
+
+// Synced copy of js/scoring.js detectScoreSwings — the canonical, unit-tested
+// version lives there. Keep both in sync. (See CLAUDE.md "two places that must
+// stay in sync".)
+function detectScoreSwings(before = {}, after = {}, opts = {}) {
+  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 40;
+  const warnGainPts = opts.warnGainPts != null ? opts.warnGainPts : 200;
+
+  const tot = (v) => (typeof v === 'number' ? v : v && typeof v.total === 'number' ? v.total : 0);
+  const managers = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+
+  const swings = [];
+  for (const m of managers) {
+    const b = tot(before[m]);
+    const a = tot(after[m]);
+    const delta = Math.round((a - b) * 100) / 100;
+    const pct = b > 0 ? delta / b : 0;
+    swings.push({ manager: m, before: b, after: a, delta, pct });
+  }
+  swings.sort((x, y) => x.delta - y.delta);
+
+  const warnings = [];
+  const blockers = [];
+  for (const s of swings) {
+    if (-s.delta >= blockDropPts) {
+      blockers.push(s);
+    } // dropped 40+ pts — block
+    else if (s.delta > warnGainPts) warnings.push(s); // jumped >200 pts — warn
+  }
+
+  const maxDrop = swings.length ? Math.max(0, -swings[0].delta) : 0;
+  const maxGain = swings.length ? Math.max(0, swings[swings.length - 1].delta) : 0;
+  return {
+    swings,
+    warnings,
+    blockers,
+    block: blockers.length > 0,
+    maxDrop,
+    maxGain,
+    thresholds: { blockDropPts, warnGainPts },
+  };
+}
+
+// Format a list of swing rows for a Slack alert.
+function formatSwingLines(rows) {
+  return rows
+    .map(
+      (s) =>
+        `• ${s.manager}: ${s.before} → ${s.after} (${s.delta >= 0 ? '+' : ''}${s.delta}, ` +
+        `${(s.pct * 100).toFixed(1)}%)`
+    )
+    .join('\n');
+}
+
+// Evaluate a completed (in-memory) compile against the pre-compile totals.
+// Returns { snapshot, report, blocked }. Does NOT write the db — the caller
+// decides whether to commit (recordScoreSnapshot + writeDB) based on `blocked`.
+// `force` overrides a block (commissioner "I know what I'm doing").
+function evaluateScoreGuard(beforeTotals, sd, opts = {}) {
+  const { dateISO, force = false, trigger = 'auto', year } = opts;
+  const snapshot = captureScoreSnapshot(sd, dateISO);
+  const report = detectScoreSwings(beforeTotals, snapshot.totals);
+  const blocked = report.block && !force;
+
+  if (report.block) {
+    // Blockers are downward swings of 40+ pts — the case we refuse to save.
+    const header = blocked
+      ? ':warning: *Score guard BLOCKED a compile* — scores NOT saved (drop of 40+ pts).'
+      : ':warning: *Score guard tripped* (force-overridden — scores saved).';
+    postSlack(
+      `${header}\n` +
+        `Season ${year || ''} • ${dateISO} • trigger: ${trigger}\n` +
+        `Largest drops:\n${formatSwingLines(report.blockers)}\n` +
+        (blocked ? '_Review rosters / swaps / add-drop dates, then re-run Sync Now (Force to override)._' : '')
+    ).catch(() => {});
+  } else if (report.warnings.length > 0) {
+    // Warnings are unusually large UPWARD jumps (>200 pts) — saved, just flagged.
+    postSlack(
+      `:eyes: *Score guard: large upward jump (>200 pts)* (${dateISO}, ${trigger}) — scores saved, worth a look.\n` +
+        formatSwingLines(report.warnings)
+    ).catch(() => {});
+  }
+
+  return { snapshot, report, blocked };
+}
+
+// Diff two stored snapshots (a = earlier, b = later) down to the player level,
+// surfacing only managers / weeks / players whose score actually moved. Used by
+// the score-guard read endpoint to answer "what changed?" after a swing.
+function diffScoreSnapshots(a, b) {
+  const managers = new Set([...Object.keys(a.totals || {}), ...Object.keys(b.totals || {})]);
+  const out = [];
+  for (const m of managers) {
+    const at = (a.totals[m] || {}).total || 0;
+    const bt = (b.totals[m] || {}).total || 0;
+    const delta = Math.round((bt - at) * 100) / 100;
+    if (Math.abs(delta) < 0.01) continue;
+
+    const aWk = (a.detail || {})[m] || {};
+    const bWk = (b.detail || {})[m] || {};
+    const weeks = [];
+    for (const wk of new Set([...Object.keys(aWk), ...Object.keys(bWk)])) {
+      const aw = aWk[wk] || { batting: 0, pitching: 0, batters: {}, pitchers: {} };
+      const bw = bWk[wk] || { batting: 0, pitching: 0, batters: {}, pitchers: {} };
+      const wkDelta = Math.round((bw.batting + bw.pitching - (aw.batting + aw.pitching)) * 100) / 100;
+      if (Math.abs(wkDelta) < 0.01) continue;
+
+      const players = [];
+      for (const type of ['batters', 'pitchers']) {
+        const names = new Set([...Object.keys(aw[type] || {}), ...Object.keys(bw[type] || {})]);
+        for (const name of names) {
+          const before = (aw[type] || {})[name] || 0;
+          const after = (bw[type] || {})[name] || 0;
+          const pd = Math.round((after - before) * 100) / 100;
+          if (Math.abs(pd) >= 0.01) players.push({ player: name, type, before, after, delta: pd });
+        }
+      }
+      players.sort((x, y) => x.delta - y.delta);
+      weeks.push({ week: wk, delta: wkDelta, players });
+    }
+    weeks.sort((x, y) => x.delta - y.delta);
+    out.push({ manager: m, before: at, after: bt, delta, weeks });
+  }
+  out.sort((x, y) => x.delta - y.delta);
+  return out;
 }
 
 // Compute high/low scores for a specific date (YYYY-MM-DD).
@@ -4450,6 +4651,8 @@ app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
     const weekPairs = resolveWeeksForCatchUp(sd, todayET);
     if (weekPairs.length === 0) return res.status(400).json({ error: 'No schedule week found for today' });
 
+    const guardBefore = captureScoreSnapshot(sd, todayET).totals;
+
     const results = [];
     for (const { schedWeek, dates, label } of weekPairs) {
       const r = await performMLBSync(sd, schedWeek, dates);
@@ -4464,9 +4667,28 @@ app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
       results.push({ week: `${schedWeek.round} ${schedWeek.week}`, label, ...r });
     }
 
+    // Score guard: a manual full-week re-sync can legitimately apply MLB stat
+    // corrections, but on a drop of 40+ pts we refuse to save unless the
+    // commissioner re-submits with { force: true }.
+    const guard = evaluateScoreGuard(guardBefore, sd, {
+      dateISO: todayET,
+      trigger: 'sync-now',
+      force: !!req.body.force,
+      year,
+    });
+    if (guard.blocked) {
+      return res.status(409).json({
+        error: 'Score guard blocked this sync — large downward swing detected. Re-run with force to override.',
+        guard_blocked: true,
+        report: guard.report,
+        results,
+      });
+    }
+    recordScoreSnapshot(sd, guard.snapshot);
+
     db.seasons[year] = sd;
     writeDB(db);
-    res.json({ ok: true, results });
+    res.json({ ok: true, results, guard: guard.report });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -4482,7 +4704,25 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
   const { db, sd, year, round, week, dates, schedWeek } = ctx;
 
   try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const guardBefore = captureScoreSnapshot(sd, todayET).totals;
     const result = await performMLBSync(sd, schedWeek, dates);
+
+    const guard = evaluateScoreGuard(guardBefore, sd, {
+      dateISO: todayET,
+      trigger: 'manual-week-sync',
+      force: !!req.body.force,
+      year,
+    });
+    if (guard.blocked) {
+      return res.status(409).json({
+        error: 'Score guard blocked this sync — large downward swing detected. Re-run with force to override.',
+        guard_blocked: true,
+        report: guard.report,
+      });
+    }
+    recordScoreSnapshot(sd, guard.snapshot);
+
     db.seasons[year] = sd;
     addAuditEntry(db, 'mlbapi_sync', {
       year,
@@ -4492,10 +4732,39 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
       pitching_imported: result.pitching_imported,
     });
     writeDB(db);
-    res.json({ ok: true, ...result });
+    res.json({ ok: true, ...result, guard: guard.report });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// GET /api/mlb/score-guard?year=YYYY
+//   Default: lightweight list of stored daily snapshots (date + per-manager totals).
+// GET /api/mlb/score-guard?year=YYYY&from=DATE&to=DATE
+//   Player-level diff between two snapshot dates — "what changed?" after a swing.
+app.get('/api/mlb/score-guard', requireCommissioner, (req, res) => {
+  const year = (req.query.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const snaps = sd.score_snapshots || [];
+  if (req.query.from && req.query.to) {
+    const a = snaps.find((s) => s.date === req.query.from);
+    const b = snaps.find((s) => s.date === req.query.to);
+    if (!a || !b) {
+      return res
+        .status(404)
+        .json({ error: 'Snapshot not found for one of the dates', available: snaps.map((s) => s.date) });
+    }
+    return res.json({ year, from: a.date, to: b.date, diff: diffScoreSnapshots(a, b) });
+  }
+
+  res.json({
+    year,
+    retained: MAX_SCORE_SNAPSHOTS,
+    snapshots: snaps.map((s) => ({ date: s.date, captured_at: s.captured_at, totals: s.totals })),
+  });
 });
 
 // ============================================================
@@ -7247,6 +7516,8 @@ function scheduleMLBApiSync() {
         console.log(`[MLB-API] Skipping — no season data for ${season}`);
       } else {
         let dirty = false;
+        let statsCompiled = false;
+        let guardBefore = null;
 
         // Refresh player pool every day so call-ups / trades appear in autocomplete.
         try {
@@ -7267,6 +7538,12 @@ function scheduleMLBApiSync() {
             timeZone: 'America/New_York',
           });
           const dayOfWeek = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+
+          // Snapshot Overall totals BEFORE the compile so the score guard can
+          // detect a downward swing introduced by this sync (Wednesday's
+          // full-week correction included — a real MLB stat fix that drops a
+          // manager 40+ pts will block and can be re-run with Force).
+          guardBefore = captureScoreSnapshot(sd, todayET).totals;
 
           // Wednesday: full-week correction for current + prior week (same phase).
           if (dayOfWeek === 'Wednesday') {
@@ -7290,6 +7567,7 @@ function scheduleMLBApiSync() {
               );
             }
             dirty = true;
+            statsCompiled = true;
           }
 
           // Daily delta: fetch yesterday's games and add to existing weekly data.
@@ -7308,8 +7586,31 @@ function scheduleMLBApiSync() {
                 `${dailyResult.batting_imported} bat / ${dailyResult.pitching_imported} pit (${dailyResult.games_fetched} games)`
             );
             dirty = true;
+            statsCompiled = true;
           } else {
             console.log(`[MLB-API] Daily delta skipped — ${yesterdayET} outside season schedule`);
+          }
+        }
+
+        // Score guard: if this compile produced a wild downward swing, do NOT
+        // persist it — keep the prior (correct) db.json and alert the
+        // commissioner to investigate. The unattended 4am run can't ask a human,
+        // so a block here is the safe default; the 7am scoreboard then posts the
+        // last-good numbers and the commissioner re-runs Sync Now after fixing.
+        if (statsCompiled && guardBefore) {
+          const guard = evaluateScoreGuard(guardBefore, sd, {
+            dateISO: now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }),
+            trigger: 'auto-4am',
+            year: season,
+          });
+          if (guard.blocked) {
+            const lines = guard.report.blockers.map((s) => `${s.manager} ${s.delta}`).join(', ');
+            console.error(`[MLB-API] Score guard BLOCKED write — not persisting. Drops: ${lines}`);
+            // Don't writeDB — the Slack alert (sent by evaluateScoreGuard) is the
+            // durable record; an audit entry here would be discarded with the db.
+            dirty = false; // skip the write below — keep last-good scores
+          } else {
+            recordScoreSnapshot(sd, guard.snapshot);
           }
         }
 
