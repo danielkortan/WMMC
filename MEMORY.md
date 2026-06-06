@@ -9,10 +9,10 @@ on real data (Anton Capria, Austin Johnson). Two bugs in `managerWeekSubtotal`
 - **Bug A (cross-manager leak):** `approvedSwaps` was `swaps.filter(status==='approved')`
   with **no manager filter**, then used to build the per-week eligibility set. A
   newly-added player whose weekly row wasn't yet attributed (`manager: null`) got
-  pulled onto *every* manager who had a swap that same week (e.g. Austin's Shane Baz
+  pulled onto _every_ manager who had a swap that same week (e.g. Austin's Shane Baz
   / Bubba Chandler / Joc Pederson showed up in Anton's Week 5). Fix: scope
   `approvedSwaps` to `s.manager === managerName`.
-- **Bug B (carry-forward eligibility):** eligibility only considered the *current*
+- **Bug B (carry-forward eligibility):** eligibility only considered the _current_
   week's roster array + that week's roster_dates/swaps. A player added in an earlier
   week and never dropped (e.g. Devers added 5/9) stopped scoring the next week
   whenever a stale roster array (or a first-season repair) hadn't carried them into
@@ -24,7 +24,7 @@ on real data (Anton Capria, Austin Johnson). Two bugs in `managerWeekSubtotal`
 Verified against the real diag data: Anton's Devers now counts Weeks 2–5, Austin's
 Alcántara counts Weeks 2–3, both resolve to the correct 4 batters / 3 pitchers each
 week. This fixes the scores **without any data surgery** — the add/drop history in
-`roster_dates` was already correct; only the roster *arrays* were stale.
+`roster_dates` was already correct; only the roster _arrays_ were stale.
 
 Follow-up (next PR): correct the two `initial_submissions` (Anton missing Carpenter,
 Austin missing Skubal), add a generic commissioner "edit initial submission until
