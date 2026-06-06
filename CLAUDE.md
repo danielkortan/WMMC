@@ -108,6 +108,16 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - Don't skip the pre-push hook (`--no-verify`).
 - Don't push directly to `main` or merge without a PR — every change goes through a pull request.
 
+## Passphrases / triggers
+
+- **`SCOREFIX`** — the user pastes this (or says "the score-swing guard fired" / "scoring swing
+  Slack alert") when PR #247's score-swing guard posts a Slack alert. Open
+  `RUNBOOK.md` → "Score-swing guard fired (Slack alert) — troubleshooting" and walk them
+  through it step by step: have them run the `wmmc.*` console helpers (`wmmc.dates()`,
+  `wmmc.diff()`, `wmmc.mgr()`), read back the diff to find the manager → week → player that
+  moved, then either guide a `wmmc.forceSync()` (legit MLB correction) or diagnose the bad
+  roster/swap/date and propose the fix. The guard blocks ≥40-pt drops and warns on >200-pt jumps.
+
 ## Memory files
 
 - `MEMORY.md` — decisions log. Read at session start if it exists. Append on meaningful decisions and at session end.
