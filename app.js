@@ -5513,102 +5513,6 @@ function renderTrends() {
 // convertIP, calculateBattingScore, calculatePitchingScore live in
 // js/scoring.js (loaded via window globals by js/index.js).
 
-// One-time migration: restore swap records confirmed via Slack that are missing from db,
-// and remove the known erroneous pure-add duplicate for Kyle Harrison.
-// Idempotent — each insertion is guarded by an existence check.
-function repairMissingSwapRecords(seasonData) {
-  if (!seasonData || !seasonData.swaps) return false;
-  const scheduleDates = seasonData.schedule_dates || [];
-  let changed = false;
-
-  function dateToWeekKey(dateStr) {
-    if (!dateStr) return null;
-    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
-      const d = scheduleDates[i];
-      if (d && dateStr >= d.start && dateStr <= d.end) return `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
-    }
-    return null;
-  }
-
-  // Remove erroneous duplicate: Daniel Kortan pure-add Kyle Harrison on 2026-05-11.
-  // The real swap (Logan Webb → Kyle Harrison) already exists in the log.
-  const before = seasonData.swaps.length;
-  seasonData.swaps = seasonData.swaps.filter(
-    (s) =>
-      !(
-        s.manager === 'Daniel Kortan' &&
-        !s.player_out &&
-        s.player_in === 'Kyle Harrison' &&
-        s.swap_date === '2026-05-11' &&
-        s.status === 'approved'
-      )
-  );
-  if (seasonData.swaps.length < before) changed = true;
-
-  // Missing approved swaps confirmed via Slack notifications.
-  const missing = [
-    {
-      manager: 'Daniel Kortan',
-      player_out: 'Yordan Alvarez',
-      player_in: 'Juan Soto',
-      swap_date: '2026-05-22',
-      reason: 'Free Swap (one per round)',
-    },
-    {
-      manager: 'Austin Johnson',
-      player_out: 'Christian Walker',
-      player_in: 'Jazz Chisholm Jr.',
-      swap_date: '2026-05-25',
-      reason: 'Drop Swap',
-    },
-    {
-      manager: 'Chris Bentivegna',
-      player_out: 'Dylan Cease',
-      player_in: 'Ranger Suarez',
-      swap_date: '2026-05-26',
-      reason: 'IL Swap',
-    },
-  ];
-
-  for (const ms of missing) {
-    const exists = seasonData.swaps.some(
-      (s) =>
-        s.manager === ms.manager &&
-        s.player_out === ms.player_out &&
-        s.player_in === ms.player_in &&
-        s.status === 'approved'
-    );
-    if (exists) continue;
-    const wk = dateToWeekKey(ms.swap_date);
-    seasonData.swaps.push({
-      id: `repair-${ms.manager.replace(/\s+/g, '-').toLowerCase()}-${ms.swap_date}`,
-      timestamp: `${ms.swap_date} 12:00:00`,
-      email: '',
-      manager: ms.manager,
-      player_out: ms.player_out,
-      player_in: ms.player_in,
-      reason: ms.reason,
-      swap_date: ms.swap_date,
-      round: wk ? wk.split('|')[0] : 'PP1',
-      week_key: wk,
-      status: 'approved',
-      reviewed_at: `${ms.swap_date} 12:00:00`,
-    });
-    // Pre-seed roster_dates so wasDroppedBefore works immediately.
-    if (!seasonData.roster_dates) seasonData.roster_dates = {};
-    if (!seasonData.roster_dates[ms.manager]) seasonData.roster_dates[ms.manager] = {};
-    if (wk) {
-      if (!seasonData.roster_dates[ms.manager][wk]) seasonData.roster_dates[ms.manager][wk] = {};
-      const wkd = seasonData.roster_dates[ms.manager][wk];
-      if (ms.player_out && !wkd[ms.player_out]) wkd[ms.player_out] = { drop_date: ms.swap_date };
-      if (ms.player_in && !wkd[ms.player_in]) wkd[ms.player_in] = { add_date: ms.swap_date };
-    }
-    changed = true;
-  }
-
-  return changed;
-}
-
 // Return the ISO date (YYYY-MM-DD) one day before the given ISO date, tz-safe.
 function dayBeforeISO(dateStr) {
   const d = new Date(dateStr + 'T00:00:00Z');
@@ -6391,10 +6295,6 @@ function renderRosterData(managerName, isCommissioner) {
 
   // Migrate old flat rosters to per-week format if needed
   if (isActive) migrateRostersToWeekly(seasonData);
-  // Restore missing swap records and remove known duplicates before any roster repair.
-  if (isActive && repairMissingSwapRecords(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
-  // (The one-time Austin/Anton initial-submission roster-chain repair is applied and gated
-  // server-side in repairMissingRosterChains; the client no longer needs to run it.)
   // Ensure roster_dates has drop/add dates for all approved swaps.
   if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
   // Fill / recompute per-week roster entries by carrying forward the last known roster.

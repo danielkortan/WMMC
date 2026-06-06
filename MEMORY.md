@@ -1,5 +1,32 @@
 # WMMC — Decisions Log
 
+## Phase 3 — retire the hardcoded band-aids (2026-06-06)
+
+After the eligibility + array fixes stabilized the league, removed the first-season
+band-aids so this class of issue can't recur and the code stops carrying
+player-specific repairs.
+
+- **3a — `POST /api/seasons/:year/initial-submission { manager, batters, pitchers }`**
+  (commissioner): generic set/override of a manager's PP1 submission at any time.
+  The reusable replacement for hardcoded "missing submission" repairs. Used to fix
+  Anton (+Kerry Carpenter, the real 4th batter) and Austin (+Tarik Skubal, the real
+  3rd pitcher).
+- **3b — deleted three hardcoded repairs** from `server.js` + their startup calls:
+  `repairMissingSwapRecords`, `repairMissingRosterChains` (the Anton/Carpenter +
+  Austin/Skubal chains), `repairBentivegnaPitcherRoster`; and the client copy of
+  `repairMissingSwapRecords` in `app.js` (+ its per-render call). Their effects were
+  already persisted in `db.json` (swaps + roster_dates), so deletion is a no-op at
+  runtime — they were gated one-shots that had already run. Net −524 lines.
+- **Hardened `repairGhostInitialRosterPlayers`:** its `commAdded` protection now
+  covers players in ANY approved swap (in/out, any week), not just Week-1 swaps —
+  so a legitimately-swapped player can never be purged from Week 1 as a "ghost".
+- **Kept** the general logic: `repairCarryForwardRosters`, `backfillRosterDatesFromSwaps`,
+  `syncPlayerDatesFromRosterDates`, `repairGhostInitialRosterPlayers`,
+  `purgeCarriedForwardDropRecords` (generic, not player-specific), and the structural
+  one-shots (`applyMLBApiTakeover`, `backfillWmmcQS`).
+- Not done (optional follow-up): change the manager-facing "Edit Submission" gate
+  from the deadline to "until the period's first games".
+
 ## Scoring eligibility fixes — cross-manager leak + carry-forward (2026-06-06)
 
 Root cause of the recurring Overall-standings swings, found via `/api/diag/manager`
