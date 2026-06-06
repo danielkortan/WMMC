@@ -9,6 +9,7 @@ import {
   calculatePitchingScore,
   enrichTeamWeekly,
   TEAM_WEEKLY_METRIC_FIELDS,
+  detectScoreSwings,
 } from '../js/scoring.js';
 
 describe('SCORING constants', () => {
@@ -220,5 +221,69 @@ describe('enrichTeamWeekly', () => {
 
   it('returns the input array untouched when given a non-array', () => {
     assert.equal(enrichTeamWeekly(null), null);
+  });
+});
+
+describe('detectScoreSwings', () => {
+  it('flags no swings when totals are unchanged', () => {
+    const r = detectScoreSwings({ A: 100, B: 200 }, { A: 100, B: 200 }, { mode: 'daily' });
+    assert.equal(r.block, false);
+    assert.equal(r.warnings.length, 0);
+    assert.equal(r.blockers.length, 0);
+    assert.equal(r.maxDrop, 0);
+  });
+
+  it('does not block or warn when scores only go up on a daily day', () => {
+    const r = detectScoreSwings({ A: 100 }, { A: 150 }, { mode: 'daily' });
+    assert.equal(r.block, false);
+    assert.equal(r.warnings.length, 0);
+    assert.equal(r.swings[0].delta, 50);
+  });
+
+  it('warns (not blocks) on a tiny drop on a daily day', () => {
+    const r = detectScoreSwings({ A: 100 }, { A: 98 }, { mode: 'daily' });
+    assert.equal(r.block, false);
+    assert.equal(r.warnings.length, 1);
+    assert.equal(r.warnings[0].manager, 'A');
+  });
+
+  it('blocks when a single manager drops more than the points threshold', () => {
+    const r = detectScoreSwings({ A: 1400 }, { A: 1050 }, { mode: 'daily', blockDropPts: 50, blockDropPct: 0.05 });
+    assert.equal(r.block, true);
+    assert.equal(r.blockers[0].manager, 'A');
+    assert.equal(r.maxDrop, 350);
+  });
+
+  it('blocks when a manager drops more than the percent threshold even under the points bar', () => {
+    // 6-point drop on a 100 total = 6% > 5% but < 50 pts
+    const r = detectScoreSwings({ A: 100 }, { A: 94 }, { mode: 'daily', blockDropPts: 50, blockDropPct: 0.05 });
+    assert.equal(r.block, true);
+    assert.equal(r.blockers[0].manager, 'A');
+  });
+
+  it('treats small drops as warn-only in correction mode', () => {
+    const r = detectScoreSwings({ A: 1000 }, { A: 990 }, { mode: 'correction' });
+    assert.equal(r.block, false);
+    assert.equal(r.warnings.length, 0); // 10 < default correction warn of 15
+  });
+
+  it('still blocks huge drops in correction mode', () => {
+    const r = detectScoreSwings({ A: 1000 }, { A: 600 }, { mode: 'correction' });
+    assert.equal(r.block, true);
+  });
+
+  it('accepts {total} objects as well as plain numbers', () => {
+    const r = detectScoreSwings({ A: { total: 1400 } }, { A: { total: 1000 } }, { mode: 'daily' });
+    assert.equal(r.block, true);
+    assert.equal(r.swings[0].delta, -400);
+  });
+
+  it('sorts swings biggest-drop-first and reports every manager', () => {
+    const before = { A: 1400, B: 1150, C: 1100 };
+    const after = { A: 1050, B: 1170, C: 1095 };
+    const r = detectScoreSwings(before, after, { mode: 'daily' });
+    assert.equal(r.swings.length, 3);
+    assert.equal(r.swings[0].manager, 'A'); // -350, biggest drop
+    assert.equal(r.swings[r.swings.length - 1].manager, 'B'); // +20, only gainer
   });
 });

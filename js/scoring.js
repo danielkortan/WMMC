@@ -218,3 +218,68 @@ export function enrichTeamWeekly(rows, schedule = SEASON_SCHEDULE) {
 
   return rows;
 }
+
+// ============================================================
+// Score-swing guard (pure)
+// ============================================================
+// Compares per-manager Overall totals before and after a score compile and
+// flags suspicious DOWNWARD swings. The Overall standings are recomputed live
+// from rosters + add/drop dates + swaps on every compile, so a single bad date
+// or swap can retroactively move a manager's cumulative total by hundreds of
+// points. This catches that before it reaches the scoreboard.
+//
+// `before` / `after`: { [manager]: number } or { [manager]: { total } }.
+// `opts`:
+//   mode          'daily' (pure additive day — any drop is suspect) or
+//                 'correction' (Wednesday / Sync Now — MLB stat corrections can
+//                 legitimately lower scores, so small drops only warn).
+//   blockDropPts  a single manager dropping more than this many points blocks
+//                 (default 50).
+//   blockDropPct  ...OR dropping more than this fraction of their prior total
+//                 blocks (default 0.05 = 5%).
+//   warnDropPts   drops beyond this (but below the block bar) raise a
+//                 non-blocking warning (default: daily 0.01, correction 15).
+//
+// Returns { mode, swings, warnings, blockers, block, maxDrop, thresholds }.
+// NOTE: a synced copy lives in server.js (the only runtime caller). Keep both in
+// sync — this canonical copy is the unit-tested one.
+export function detectScoreSwings(before = {}, after = {}, opts = {}) {
+  const mode = opts.mode === 'correction' ? 'correction' : 'daily';
+  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 50;
+  const blockDropPct = opts.blockDropPct != null ? opts.blockDropPct : 0.05;
+  const warnDropPts = opts.warnDropPts != null ? opts.warnDropPts : mode === 'daily' ? 0.01 : 15;
+
+  const tot = (v) => (typeof v === 'number' ? v : v && typeof v.total === 'number' ? v.total : 0);
+  const managers = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+
+  const swings = [];
+  for (const m of managers) {
+    const b = tot(before[m]);
+    const a = tot(after[m]);
+    const delta = Math.round((a - b) * 100) / 100;
+    const pct = b > 0 ? delta / b : 0;
+    swings.push({ manager: m, before: b, after: a, delta, pct });
+  }
+  swings.sort((x, y) => x.delta - y.delta); // biggest drop first
+
+  const warnings = [];
+  const blockers = [];
+  for (const s of swings) {
+    const drop = -s.delta; // positive when the score went DOWN
+    if (drop <= 0) continue;
+    const isBlock = drop > blockDropPts || (s.before > 0 && drop / s.before > blockDropPct);
+    if (isBlock) blockers.push(s);
+    else if (drop > warnDropPts) warnings.push(s);
+  }
+
+  const maxDrop = swings.length ? Math.max(0, -swings[0].delta) : 0;
+  return {
+    mode,
+    swings,
+    warnings,
+    blockers,
+    block: blockers.length > 0,
+    maxDrop,
+    thresholds: { blockDropPts, blockDropPct, warnDropPts },
+  };
+}

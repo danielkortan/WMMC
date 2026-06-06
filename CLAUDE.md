@@ -83,6 +83,8 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 ## Gotchas — things that look wrong but aren't
 
+- `detectScoreSwings` exists in **both** `js/scoring.js` (canonical, unit-tested) and `server.js` (the only runtime caller). Like `SCORING`/`SEASON_SCHEDULE`, the two copies must stay identical — edit both. The server can't import the ESM `js/` copy.
+
 - `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.)
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
