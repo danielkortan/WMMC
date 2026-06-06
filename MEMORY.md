@@ -1,5 +1,38 @@
 # WMMC — Decisions Log
 
+## Atomic roster-submission endpoints — stop lost/clobbered submissions (2026-06-06)
+
+Commissioner saw a manager's PP2 submission on the manager's device (pending) but not in
+their own queue. Root cause: roster submissions (PP1 + PP2/playoff) were written **only**
+through the fire-and-forget full-season save (`saveSeason` → background `POST /api/seasons/:year`
+with `.catch(()=>{})`). Two failure modes: (1) the POST fails silently on a weak connection →
+submission lives in localStorage only; (2) `initial_submissions`/`period_submissions` were **not**
+merge-protected on the server, so a stale full-season save from another browser (e.g. the
+commissioner working the queue) overwrote a submission someone else just made. Same class of
+bug as the lost-swaps fix (#257, `d7286a6`); submissions just never got the same treatment.
+
+Fix mirrors the swap fix:
+
+- **Server:** `POST /api/seasons/:year/submissions` (upsert one manager's submission for a
+  period; server stamps `submitted_at`/`approved_at`), `DELETE …/submissions/:period/:manager`
+  (remove one), `DELETE …/submissions` (clear all — for Reset Season Data). `submissionBucket()`
+  routes pp1→`initial_submissions`, others→`period_submissions[period]`.
+- **Server full-save is now server-authoritative for submissions:** in `POST /api/seasons/:year`
+  the `existingSd` merge block resets `sd.initial_submissions`/`sd.period_submissions` to the
+  server's copy, so a full-season save can never clobber them. (Brand-new season has no
+  `existingSd`, so its first save still establishes the empty buckets.)
+- **Client:** added `persistSubmission(period, manager, sub)` + `removeSubmissionRemote()` +
+  `mirrorSubmissionLocally()` (await a confirmed response, mirror into localStorage, alert on
+  failure). Rewired **all 14** submission handlers (add/remove/submit/approve/deny/edit/delete
+  for PP1 and the periods) to await these instead of `saveSeason`. Approve/edit-approved persist
+  the submission **first**, then do their roster/`roster_dates` side-effects via `saveSeason`
+  (rosters are still saved the old way; only the submission buckets moved). Reset Season Data
+  also calls the bulk `DELETE …/submissions`.
+
+Note: `backfillSubmissionTimestamps` still uses `saveSeason`, so its cosmetic timestamp fills
+no longer persist server-side (they apply to the local view each load — harmless). Auth posture
+unchanged (`requireAuth` on upsert/delete, matching the full-season save it replaces).
+
 ## PP1 submission window gating + delete capability (2026-06-06)
 
 Commissioner saw stray "Pool Play 1 / Pending" entries during the PP2 window and

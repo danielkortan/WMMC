@@ -746,6 +746,75 @@ function saveSeason(year, data) {
     body: JSON.stringify(data),
   }).catch(() => {});
 }
+
+// ---- Atomic submission persistence ----
+// Roster submissions are written through dedicated endpoints, never the clobber-prone
+// full-season save (saveSeason no longer persists submissions — the server treats them as
+// authoritative). Each call awaits a confirmed server response and mirrors it into
+// localStorage so the local view matches the server. Returns the saved record (or true for
+// delete) on success, or null/false on failure — callers surface the error to the user.
+function mirrorSubmissionLocally(period, manager, submission) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+  if (period === 'pp1') {
+    if (!sd.initial_submissions) sd.initial_submissions = {};
+    if (submission) sd.initial_submissions[manager] = submission;
+    else delete sd.initial_submissions[manager];
+  } else {
+    if (!sd.period_submissions) sd.period_submissions = {};
+    if (!sd.period_submissions[period]) sd.period_submissions[period] = {};
+    if (submission) sd.period_submissions[period][manager] = submission;
+    else delete sd.period_submissions[period][manager];
+  }
+  localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+}
+
+async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/submissions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        period,
+        manager,
+        batters: sub.batters || [],
+        pitchers: sub.pitchers || [],
+        status: sub.status || 'draft',
+      }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    const { submission } = await resp.json();
+    mirrorSubmissionLocally(period, manager, submission);
+    return submission;
+  } catch (e) {
+    if (!quiet) {
+      alert(`Your submission did not save — ${e.message}. Please check your connection and try again.`);
+    }
+    return null;
+  }
+}
+
+async function removeSubmissionRemote(period, manager) {
+  try {
+    const resp = await apiFetch(
+      `/api/seasons/${SELECTED_SEASON}/submissions/${period}/${encodeURIComponent(manager)}`,
+      { method: 'DELETE' }
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    mirrorSubmissionLocally(period, manager, null);
+    return true;
+  } catch (e) {
+    alert(`Delete failed — ${e.message}. Please try again.`);
+    return false;
+  }
+}
+
 function getManagers() {
   return JSON.parse(localStorage.getItem('wmmc_managers') || '[]');
 }
@@ -9410,7 +9479,7 @@ function setupSeasonSetupToggle() {
   const resetBtn = document.getElementById('reset-season-btn');
   const resetStatus = document.getElementById('reset-season-status');
   if (resetBtn) {
-    resetBtn.onclick = () => {
+    resetBtn.onclick = async () => {
       const confirmed = confirm(
         `Are you sure you want to reset all season data for ${SELECTED_SEASON}?\n\n` +
           'This will clear:\n' +
@@ -9437,8 +9506,12 @@ function setupSeasonSetupToggle() {
       sd.swaps = [];
       sd.upload_log = [];
       sd.initial_submissions = {};
+      sd.period_submissions = { pp2: {}, qf: {}, sf: {}, finals: {} };
 
       saveSeason(SELECTED_SEASON, sd);
+      // Submissions are server-authoritative on the full save, so clear them via their
+      // dedicated endpoint too (best-effort) — otherwise the reload would restore them.
+      await apiFetch(`/api/seasons/${SELECTED_SEASON}/submissions`, { method: 'DELETE' }).catch(() => {});
       if (resetStatus) {
         resetStatus.innerHTML = '<p style="color:var(--success);font-weight:600;">Season data has been reset.</p>';
       }
@@ -10386,7 +10459,7 @@ window.selectSwapPlayerIn = function (playerName) {
 };
 
 // ---- Initial Player Submission Handlers ----
-window.addInitialPlayer = function (manager, type) {
+window.addInitialPlayer = async function (manager, type) {
   const inputId = type === 'batters' ? 'initial-add-bat' : 'initial-add-pit';
   const input = document.getElementById(inputId);
   if (!input) return;
@@ -10402,12 +10475,7 @@ window.addInitialPlayer = function (manager, type) {
     return;
   }
 
-  if (!sd.initial_submissions) sd.initial_submissions = {};
-  if (!sd.initial_submissions[manager]) {
-    sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
-  }
-  const sub = sd.initial_submissions[manager];
-
+  const sub = ensurePeriodSub(sd, 'pp1', manager);
   const maxCount = type === 'batters' ? 4 : 3;
   if ((sub[type] || []).length >= maxCount) {
     alert(`Maximum ${maxCount} ${type} allowed.`);
@@ -10421,12 +10489,12 @@ window.addInitialPlayer = function (manager, type) {
   }
   sub[type].push(match);
 
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission('pp1', manager, sub))) return;
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.removeInitialPlayer = function (manager, type, player) {
+window.removeInitialPlayer = async function (manager, type, player) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
@@ -10434,12 +10502,12 @@ window.removeInitialPlayer = function (manager, type, player) {
   if (sub.status === 'approved') return;
 
   sub[type] = (sub[type] || []).filter((p) => p !== player);
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission('pp1', manager, sub))) return;
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.submitInitialRoster = function (manager) {
+window.submitInitialRoster = async function (manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
@@ -10451,15 +10519,14 @@ window.submitInitialRoster = function (manager) {
   }
 
   sub.status = 'pending';
-  sub.submitted_at = new Date().toISOString();
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission('pp1', manager, sub))) return;
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.approveInitialSubmission = function (manager) {
+window.approveInitialSubmission = async function (manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
@@ -10491,7 +10558,8 @@ window.approveInitialSubmission = function (manager) {
   }
 
   sub.status = 'approved';
-  sub.approved_at = new Date().toISOString();
+  // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
+  if (!(await persistSubmission('pp1', manager, sub))) return;
 
   // Add all players to Week 1 roster
   const firstWeek = SEASON_SCHEDULE[0];
@@ -10618,7 +10686,7 @@ window.editInitialSubmission = function (manager) {
   editDiv.style.display = 'block';
 };
 
-window.saveInitialSubmissionEdits = function (manager) {
+window.saveInitialSubmissionEdits = async function (manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
@@ -10636,21 +10704,15 @@ window.saveInitialSubmissionEdits = function (manager) {
     if (sel) newPitchers.push(sel.value);
   }
 
-  sub.batters = newBatters;
-  sub.pitchers = newPitchers;
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission('pp1', manager, { ...sub, batters: newBatters, pitchers: newPitchers }))) return;
   renderPendingSwapRequests();
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.denyInitialSubmission = function (manager) {
+window.denyInitialSubmission = async function (manager) {
   if (!confirm(`Deny initial roster submission for ${manager}? This will reset their submission.`)) return;
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd.initial_submissions) return;
-  sd.initial_submissions[manager] = { batters: [], pitchers: [], status: 'draft' };
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission('pp1', manager, { batters: [], pitchers: [], status: 'draft' }))) return;
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
   const isComm = isLoggedInCommissioner();
@@ -10661,7 +10723,7 @@ window.denyInitialSubmission = function (manager) {
 // leaves an empty 'draft' record behind — this deletes the entry entirely, so it no longer shows
 // in the pending list and is no longer treated as the authoritative Week 1 roster by the
 // ghost-purge repair. The manager's actual Week 1 roster (sd.rosters) and stats are untouched.
-window.deleteInitialSubmission = function (manager) {
+window.deleteInitialSubmission = async function (manager) {
   if (
     !confirm(
       `Delete ${manager}'s Pool Play 1 submission record entirely?\n\n` +
@@ -10670,11 +10732,7 @@ window.deleteInitialSubmission = function (manager) {
   ) {
     return;
   }
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
-  delete sd.initial_submissions[manager];
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await removeSubmissionRemote('pp1', manager))) return;
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
   const isComm = isLoggedInCommissioner();
@@ -10683,7 +10741,7 @@ window.deleteInitialSubmission = function (manager) {
 
 // ---- Period Submission Handlers (pp2 / qf / sf / finals) ----
 
-window.addPeriodPlayer = function (period, manager, type) {
+window.addPeriodPlayer = async function (period, manager, type) {
   const inputId = `period-add-${type === 'batters' ? 'bat' : 'pit'}-${period}`;
   const input = document.getElementById(inputId);
   if (!input) return;
@@ -10711,24 +10769,24 @@ window.addPeriodPlayer = function (period, manager, type) {
     return;
   }
   sub[type].push(match);
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission(period, manager, sub))) return;
   input.value = '';
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.removePeriodPlayer = function (period, manager, type, player) {
+window.removePeriodPlayer = async function (period, manager, type, player) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   const sub = getPeriodSub(sd, period, manager);
   if (!sub) return;
   sub[type] = (sub[type] || []).filter((p) => p !== player);
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission(period, manager, sub))) return;
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.submitPeriodRoster = function (period, manager) {
+window.submitPeriodRoster = async function (period, manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   const sub = getPeriodSub(sd, period, manager);
@@ -10738,15 +10796,14 @@ window.submitPeriodRoster = function (period, manager) {
     return;
   }
   sub.status = 'pending';
-  sub.submitted_at = new Date().toISOString();
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission(period, manager, sub))) return;
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
   const isComm = isLoggedInCommissioner();
   renderRosterData(manager, isComm);
 };
 
-window.approvePeriodSubmission = function (period, manager) {
+window.approvePeriodSubmission = async function (period, manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   const sub = getPeriodSub(sd, period, manager);
@@ -10778,7 +10835,8 @@ window.approvePeriodSubmission = function (period, manager) {
   }
 
   sub.status = 'approved';
-  sub.approved_at = new Date().toISOString();
+  // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
+  if (!(await persistSubmission(period, manager, sub))) return;
 
   // Add players to the first week of the corresponding round's roster
   const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
@@ -10819,16 +10877,11 @@ window.approvePeriodSubmission = function (period, manager) {
   renderRosterData(manager, isComm);
 };
 
-window.denyPeriodSubmission = function (period, manager) {
+window.denyPeriodSubmission = async function (period, manager) {
   const label = PERIOD_LABELS[period] || period;
   if (!confirm(`Deny ${label} submission for ${manager}? Their selection will be reset to draft.`)) return;
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  const sub = ensurePeriodSub(sd, period, manager);
-  Object.assign(sub, { batters: [], pitchers: [], status: 'draft' });
-  delete sub.submitted_at;
-  delete sub.approved_at;
-  saveSeason(SELECTED_SEASON, sd);
+  const draft = { batters: [], pitchers: [], status: 'draft' };
+  if (!(await persistSubmission(period, manager, draft))) return;
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
   const isComm = isLoggedInCommissioner();
@@ -10836,7 +10889,7 @@ window.denyPeriodSubmission = function (period, manager) {
 };
 
 // Called when a manager clicks "Edit Submission" on their approved roster (before the deadline)
-window.editApprovedPeriodSubmission = function (period, manager) {
+window.editApprovedPeriodSubmission = async function (period, manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   const sub = getPeriodSub(sd, period, manager);
@@ -10858,6 +10911,10 @@ window.editApprovedPeriodSubmission = function (period, manager) {
     return;
   }
 
+  // Un-approve the submission atomically first; only clear the roster if it stuck.
+  sub.status = 'draft';
+  if (!(await persistSubmission(period, manager, sub))) return;
+
   // Remove the approved players from the period's Week 1 roster
   const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
   const roundKey = periodToRound[period];
@@ -10866,9 +10923,6 @@ window.editApprovedPeriodSubmission = function (period, manager) {
     const weekKey = `${firstEntry.round}|${firstEntry.week}`;
     if (sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
   }
-
-  sub.status = 'draft';
-  delete sub.approved_at;
 
   saveSeason(SELECTED_SEASON, sd);
   renderSubmissionStatusTable();
@@ -10919,7 +10973,7 @@ window.editInitialSubmissionComm = function (manager) {
   editDiv.style.display = 'block';
 };
 
-window.saveInitialSubmissionEditsComm = function (manager) {
+window.saveInitialSubmissionEditsComm = async function (manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
@@ -10937,9 +10991,7 @@ window.saveInitialSubmissionEditsComm = function (manager) {
     if (sel) newPitchers.push(sel.value);
   }
 
-  sub.batters = newBatters;
-  sub.pitchers = newPitchers;
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await persistSubmission('pp1', manager, { ...sub, batters: newBatters, pitchers: newPitchers }))) return;
   renderPendingSwapRequests();
 };
 
