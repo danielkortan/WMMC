@@ -9319,6 +9319,7 @@ function renderPendingSwapRequests() {
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
             <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
+            <button class="btn btn-sm btn-danger" onclick="deletePeriodSubmission('${period}','${safeName}')">Delete</button>
             <button class="btn btn-sm btn-secondary" onclick="viewSwapManager('${safeName}')">View Roster</button>
           </div>
         </div>`;
@@ -10900,6 +10901,26 @@ window.denyPeriodSubmission = async function (period, manager) {
   if (!confirm(`Deny ${label} submission for ${manager}? Their selection will be reset to draft.`)) return;
   const draft = { batters: [], pitchers: [], status: 'draft' };
   if (!(await persistSubmission(period, manager, draft))) return;
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = isLoggedInCommissioner();
+  renderRosterData(manager, isComm);
+};
+
+// Permanently remove a manager's submission record for a period (pp2/qf/sf/finals). Unlike Deny —
+// which leaves an empty 'draft' record behind — this deletes the entry entirely. The manager's
+// actual roster (sd.rosters) is untouched; only the submission artifact is removed.
+window.deletePeriodSubmission = async function (period, manager) {
+  const label = PERIOD_LABELS[period] || period;
+  if (
+    !confirm(
+      `Delete ${manager}'s ${label} submission record entirely?\n\n` +
+        'This removes only the submission artifact — their existing roster and scores are not affected. This cannot be undone.'
+    )
+  ) {
+    return;
+  }
+  if (!(await removeSubmissionRemote(period, manager))) return;
   renderPendingSwapRequests();
   renderSubmissionStatusTable();
   const isComm = isLoggedInCommissioner();
