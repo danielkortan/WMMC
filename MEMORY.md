@@ -1,5 +1,23 @@
 # WMMC — Decisions Log
 
+## Approving a not-yet-started period's submission was purged by carry-forward repair (2026-06-06)
+
+Staging smoke-test of the atomic-submission PR: approving a PP2 submission marked it approved
+but the 7 players never appeared on the manager's PP2 Week 1 roster (no error). Server side was
+proven correct (the full-save persists the roster); the culprit is **client-only**
+`repairCarryForwardRosters`, which runs on every `renderRosterData` and **purges any future-week
+roster (weekStart > today) whose index isn't in `advanced_weeks`** ("speculative future write"
+guard). Submission windows open _before_ a round starts, so an approved PP2/QF/SF/Finals roster
+(and now PP1, since its window opens early too) is written to a future week and immediately wiped
+on the next render.
+
+Fix: in `approvePeriodSubmission` / `approveInitialSubmission`, when the period's Week 1 is still
+in the future (`weekStart > todayET`), push that week index into `sd.advanced_weeks` so the purge
+treats it as a legitimate write. Surgical — only marks the week when it's actually future
+(current/past-week approvals, e.g. PP1 at normal season start, are untouched). Pre-existing latent
+bug, exposed by the early submission windows; fixed as part of the submission PR since it blocks
+the very flow being shipped.
+
 ## Atomic roster-submission endpoints — stop lost/clobbered submissions (2026-06-06)
 
 Commissioner saw a manager's PP2 submission on the manager's device (pending) but not in

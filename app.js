@@ -10576,6 +10576,15 @@ window.approveInitialSubmission = async function (manager) {
     if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
   }
 
+  // If PP1 hasn't started yet (approved during the early submission window), mark Week 1 as
+  // legitimately advanced so repairCarryForwardRosters doesn't purge the approved roster as a
+  // speculative future write.
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (pp1StartDate && pp1StartDate > todayET) {
+    if (!Array.isArray(sd.advanced_weeks)) sd.advanced_weeks = [];
+    if (!sd.advanced_weeks.includes(0)) sd.advanced_weeks.push(0);
+  }
+
   // Reconcile: remove any players currently in the Week 1 roster who are not in this
   // (re-)submission. This handles updated initial submissions where the manager swapped
   // out players before the commissioner approved — the old approval must not persist.
@@ -10846,6 +10855,15 @@ window.approvePeriodSubmission = async function (period, manager) {
     const weekKey = `${firstEntry.round}|${firstEntry.week}`;
     const weekIdx = SEASON_SCHEDULE.indexOf(firstEntry);
     const weekStart = sd.schedule_dates && sd.schedule_dates[weekIdx] ? sd.schedule_dates[weekIdx].start : null;
+    // If this period hasn't started yet (its Week 1 is in the future), mark the week as
+    // legitimately advanced so repairCarryForwardRosters doesn't purge the approved starting
+    // roster as a speculative future write. (Windows open before a round begins, so approving
+    // a PP2/playoff — or an early PP1 — submission writes a future-week roster.)
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (weekStart && weekStart > todayET) {
+      if (!Array.isArray(sd.advanced_weeks)) sd.advanced_weeks = [];
+      if (!sd.advanced_weeks.includes(weekIdx)) sd.advanced_weeks.push(weekIdx);
+    }
     if (!sd.rosters) sd.rosters = {};
     if (!sd.rosters[manager]) sd.rosters[manager] = {};
     if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
