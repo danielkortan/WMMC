@@ -4767,6 +4767,75 @@ app.get('/api/mlb/score-guard', requireCommissioner, (req, res) => {
   });
 });
 
+// GET /api/diag/manager?year=YYYY&name=Manager Name
+// Read-only dump of one manager's source records — the inputs the live Overall
+// standings are recomputed from. Used to diagnose attribution swings: compare
+// what the manager actually rostered (initial_submissions + per-week rosters +
+// swaps) against what currently scores (the per-week / per-player breakdown) to
+// spot players wrongly excluded by a stray add/drop date. Mutates nothing.
+app.get('/api/diag/manager', requireCommissioner, (req, res) => {
+  const year = (req.query.year || new Date().getFullYear()).toString();
+  const name = (req.query.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name query param is required' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const managers = Object.keys(sd.rosters || {});
+  if (!managers.includes(name) && !(sd.initial_submissions || {})[name]) {
+    return res.status(404).json({ error: `Manager "${name}" not found`, available: managers });
+  }
+
+  // Every player this manager has ever been associated with — to scope player_dates.
+  const playerNames = new Set();
+  const mgrRosters = (sd.rosters || {})[name] || {};
+  for (const wk of Object.values(mgrRosters)) {
+    for (const p of wk.batters || []) playerNames.add(p);
+    for (const p of wk.pitchers || []) playerNames.add(p);
+  }
+  const mgrRosterDates = (sd.roster_dates || {})[name] || {};
+  for (const wk of Object.values(mgrRosterDates)) for (const p of Object.keys(wk)) playerNames.add(p);
+  const mgrSwaps = (sd.swaps || []).filter((s) => s.manager === name);
+  for (const s of mgrSwaps) {
+    if (s.player_in) playerNames.add(s.player_in);
+    if (s.player_out) playerNames.add(s.player_out);
+  }
+
+  // player_dates entries (the derived add/drop cutoffs) touching this manager's players.
+  const playerDates = {};
+  for (const [weekKey, types] of Object.entries(sd.player_dates || {})) {
+    for (const type of ['batter', 'pitcher']) {
+      for (const [player, entry] of Object.entries((types || {})[type] || {})) {
+        if (!playerNames.has(player)) continue;
+        playerDates[weekKey] = playerDates[weekKey] || {};
+        playerDates[weekKey][type] = playerDates[weekKey][type] || {};
+        playerDates[weekKey][type][player] = entry;
+      }
+    }
+  }
+
+  // What currently scores: per-week / per-player breakdown for this manager,
+  // pulled from a fresh snapshot (mirrors the live scoreboard attribution).
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const snapshot = captureScoreSnapshot(sd, todayET);
+
+  res.json({
+    year,
+    manager: name,
+    schedule_dates: sd.schedule_dates || [],
+    initial_submission: (sd.initial_submissions || {})[name] || null,
+    rosters: mgrRosters,
+    roster_dates: mgrRosterDates,
+    player_dates: playerDates,
+    swaps: mgrSwaps,
+    scoring: {
+      total: (snapshot.totals || {})[name] || null,
+      by_week: (snapshot.detail || {})[name] || {},
+    },
+  });
+});
+
 // ============================================================
 // MLB Name Normalization
 // ============================================================
