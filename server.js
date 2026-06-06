@@ -4985,6 +4985,44 @@ app.post('/api/seasons/:year/rebuild-roster-arrays', requireCommissioner, (req, 
   });
 });
 
+// POST /api/seasons/:year/initial-submission  { manager, batters, pitchers }
+// Commissioner set/override of a manager's initial (Pool Play 1) submission, at any
+// time. This is the generic, reusable replacement for the hardcoded "missing initial
+// submission" repairs — correct the source record here instead of baking a player-
+// specific fix into the server. Preserves the original submitted_at if present.
+app.post('/api/seasons/:year/initial-submission', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const { manager, batters, pitchers } = req.body || {};
+  if (!manager || !Array.isArray(batters) || !Array.isArray(pitchers)) {
+    return res.status(400).json({ error: 'manager, batters[] and pitchers[] are required' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  if (!sd.initial_submissions) sd.initial_submissions = {};
+  const existing = sd.initial_submissions[manager] || {};
+  const now = new Date().toISOString();
+  sd.initial_submissions[manager] = {
+    ...existing,
+    batters,
+    pitchers,
+    status: 'approved',
+    submitted_at: existing.submitted_at || now,
+    approved_at: now,
+  };
+
+  db.seasons[year] = sd;
+  addAuditEntry(
+    db,
+    'set_initial_submission',
+    { year, manager, batters: batters.length, pitchers: pitchers.length },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, manager, initial_submission: sd.initial_submissions[manager] });
+});
+
 // ============================================================
 // MLB Name Normalization
 // ============================================================
