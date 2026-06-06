@@ -223,31 +223,24 @@ export function enrichTeamWeekly(rows, schedule = SEASON_SCHEDULE) {
 // Score-swing guard (pure)
 // ============================================================
 // Compares per-manager Overall totals before and after a score compile and
-// flags suspicious DOWNWARD swings. The Overall standings are recomputed live
-// from rosters + add/drop dates + swaps on every compile, so a single bad date
-// or swap can retroactively move a manager's cumulative total by hundreds of
+// flags suspicious swings. The Overall standings are recomputed live from
+// rosters + add/drop dates + swaps on every compile, so a single bad date or
+// swap can retroactively move a manager's cumulative total by hundreds of
 // points. This catches that before it reaches the scoreboard.
 //
-// `before` / `after`: { [manager]: number } or { [manager]: { total } }.
-// `opts`:
-//   mode          'daily' (pure additive day — any drop is suspect) or
-//                 'correction' (Wednesday / Sync Now — MLB stat corrections can
-//                 legitimately lower scores, so small drops only warn).
-//   blockDropPts  a single manager dropping more than this many points blocks
-//                 (default 50).
-//   blockDropPct  ...OR dropping more than this fraction of their prior total
-//                 blocks (default 0.05 = 5%).
-//   warnDropPts   drops beyond this (but below the block bar) raise a
-//                 non-blocking warning (default: daily 0.01, correction 15).
+// Scores normally only go UP day to day, so:
+//   - a DOWNWARD swing of `blockDropPts` (default 40) or more for any manager
+//     BLOCKS the compile (the case we care about).
+//   - an UPWARD jump of more than `warnGainPts` (default 200) only WARNS — up is
+//     normal, but a jump that big is worth a look (e.g. possible double-credit).
 //
-// Returns { mode, swings, warnings, blockers, block, maxDrop, thresholds }.
+// `before` / `after`: { [manager]: number } or { [manager]: { total } }.
+// Returns { swings, warnings, blockers, block, maxDrop, maxGain, thresholds }.
 // NOTE: a synced copy lives in server.js (the only runtime caller). Keep both in
 // sync — this canonical copy is the unit-tested one.
 export function detectScoreSwings(before = {}, after = {}, opts = {}) {
-  const mode = opts.mode === 'correction' ? 'correction' : 'daily';
-  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 50;
-  const blockDropPct = opts.blockDropPct != null ? opts.blockDropPct : 0.05;
-  const warnDropPts = opts.warnDropPts != null ? opts.warnDropPts : mode === 'daily' ? 0.01 : 15;
+  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 40;
+  const warnGainPts = opts.warnGainPts != null ? opts.warnGainPts : 200;
 
   const tot = (v) => (typeof v === 'number' ? v : v && typeof v.total === 'number' ? v.total : 0);
   const managers = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
@@ -265,21 +258,21 @@ export function detectScoreSwings(before = {}, after = {}, opts = {}) {
   const warnings = [];
   const blockers = [];
   for (const s of swings) {
-    const drop = -s.delta; // positive when the score went DOWN
-    if (drop <= 0) continue;
-    const isBlock = drop > blockDropPts || (s.before > 0 && drop / s.before > blockDropPct);
-    if (isBlock) blockers.push(s);
-    else if (drop > warnDropPts) warnings.push(s);
+    if (-s.delta >= blockDropPts) {
+      blockers.push(s);
+    } // dropped 40+ pts — block
+    else if (s.delta > warnGainPts) warnings.push(s); // jumped >200 pts — warn
   }
 
   const maxDrop = swings.length ? Math.max(0, -swings[0].delta) : 0;
+  const maxGain = swings.length ? Math.max(0, swings[swings.length - 1].delta) : 0;
   return {
-    mode,
     swings,
     warnings,
     blockers,
     block: blockers.length > 0,
     maxDrop,
-    thresholds: { blockDropPts, blockDropPct, warnDropPts },
+    maxGain,
+    thresholds: { blockDropPts, warnGainPts },
   };
 }

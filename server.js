@@ -2172,10 +2172,8 @@ function recordScoreSnapshot(sd, snapshot) {
 // version lives there. Keep both in sync. (See CLAUDE.md "two places that must
 // stay in sync".)
 function detectScoreSwings(before = {}, after = {}, opts = {}) {
-  const mode = opts.mode === 'correction' ? 'correction' : 'daily';
-  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 50;
-  const blockDropPct = opts.blockDropPct != null ? opts.blockDropPct : 0.05;
-  const warnDropPts = opts.warnDropPts != null ? opts.warnDropPts : mode === 'daily' ? 0.01 : 15;
+  const blockDropPts = opts.blockDropPts != null ? opts.blockDropPts : 40;
+  const warnGainPts = opts.warnGainPts != null ? opts.warnGainPts : 200;
 
   const tot = (v) => (typeof v === 'number' ? v : v && typeof v.total === 'number' ? v.total : 0);
   const managers = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
@@ -2193,22 +2191,22 @@ function detectScoreSwings(before = {}, after = {}, opts = {}) {
   const warnings = [];
   const blockers = [];
   for (const s of swings) {
-    const drop = -s.delta;
-    if (drop <= 0) continue;
-    const isBlock = drop > blockDropPts || (s.before > 0 && drop / s.before > blockDropPct);
-    if (isBlock) blockers.push(s);
-    else if (drop > warnDropPts) warnings.push(s);
+    if (-s.delta >= blockDropPts) {
+      blockers.push(s);
+    } // dropped 40+ pts — block
+    else if (s.delta > warnGainPts) warnings.push(s); // jumped >200 pts — warn
   }
 
   const maxDrop = swings.length ? Math.max(0, -swings[0].delta) : 0;
+  const maxGain = swings.length ? Math.max(0, swings[swings.length - 1].delta) : 0;
   return {
-    mode,
     swings,
     warnings,
     blockers,
     block: blockers.length > 0,
     maxDrop,
-    thresholds: { blockDropPts, blockDropPct, warnDropPts },
+    maxGain,
+    thresholds: { blockDropPts, warnGainPts },
   };
 }
 
@@ -2228,15 +2226,16 @@ function formatSwingLines(rows) {
 // decides whether to commit (recordScoreSnapshot + writeDB) based on `blocked`.
 // `force` overrides a block (commissioner "I know what I'm doing").
 function evaluateScoreGuard(beforeTotals, sd, opts = {}) {
-  const { mode = 'daily', dateISO, force = false, trigger = 'auto', year } = opts;
+  const { dateISO, force = false, trigger = 'auto', year } = opts;
   const snapshot = captureScoreSnapshot(sd, dateISO);
-  const report = detectScoreSwings(beforeTotals, snapshot.totals, { mode });
+  const report = detectScoreSwings(beforeTotals, snapshot.totals);
   const blocked = report.block && !force;
 
   if (report.block) {
+    // Blockers are downward swings of 40+ pts — the case we refuse to save.
     const header = blocked
-      ? `:warning: *Score guard BLOCKED a ${mode} compile* — scores NOT saved.`
-      : `:warning: *Score guard tripped on a ${mode} compile* (force-overridden — scores saved).`;
+      ? ':warning: *Score guard BLOCKED a compile* — scores NOT saved (drop of 40+ pts).'
+      : ':warning: *Score guard tripped* (force-overridden — scores saved).';
     postSlack(
       `${header}\n` +
         `Season ${year || ''} • ${dateISO} • trigger: ${trigger}\n` +
@@ -2244,8 +2243,9 @@ function evaluateScoreGuard(beforeTotals, sd, opts = {}) {
         (blocked ? '_Review rosters / swaps / add-drop dates, then re-run Sync Now (Force to override)._' : '')
     ).catch(() => {});
   } else if (report.warnings.length > 0) {
+    // Warnings are unusually large UPWARD jumps (>200 pts) — saved, just flagged.
     postSlack(
-      `:eyes: *Score guard: notable drop on a ${mode} compile* (${dateISO}, ${trigger}) — scores saved.\n` +
+      `:eyes: *Score guard: large upward jump (>200 pts)* (${dateISO}, ${trigger}) — scores saved, worth a look.\n` +
         formatSwingLines(report.warnings)
     ).catch(() => {});
   }
@@ -4667,11 +4667,10 @@ app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
       results.push({ week: `${schedWeek.round} ${schedWeek.week}`, label, ...r });
     }
 
-    // Score guard (correction mode — a manual full-week re-sync can legitimately
-    // apply MLB stat corrections). On a huge drop, refuse to save unless the
+    // Score guard: a manual full-week re-sync can legitimately apply MLB stat
+    // corrections, but on a drop of 40+ pts we refuse to save unless the
     // commissioner re-submits with { force: true }.
     const guard = evaluateScoreGuard(guardBefore, sd, {
-      mode: 'correction',
       dateISO: todayET,
       trigger: 'sync-now',
       force: !!req.body.force,
@@ -4710,7 +4709,6 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
     const result = await performMLBSync(sd, schedWeek, dates);
 
     const guard = evaluateScoreGuard(guardBefore, sd, {
-      mode: 'correction',
       dateISO: todayET,
       trigger: 'manual-week-sync',
       force: !!req.body.force,
@@ -7520,7 +7518,6 @@ function scheduleMLBApiSync() {
         let dirty = false;
         let statsCompiled = false;
         let guardBefore = null;
-        let guardMode = 'daily';
 
         // Refresh player pool every day so call-ups / trades appear in autocomplete.
         try {
@@ -7543,11 +7540,10 @@ function scheduleMLBApiSync() {
           const dayOfWeek = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
 
           // Snapshot Overall totals BEFORE the compile so the score guard can
-          // detect downward swings introduced by this sync. Wednesday runs a
-          // full-week correction (MLB stat corrections can legitimately lower
-          // scores), so it uses the looser 'correction' mode.
+          // detect a downward swing introduced by this sync (Wednesday's
+          // full-week correction included — a real MLB stat fix that drops a
+          // manager 40+ pts will block and can be re-run with Force).
           guardBefore = captureScoreSnapshot(sd, todayET).totals;
-          guardMode = dayOfWeek === 'Wednesday' ? 'correction' : 'daily';
 
           // Wednesday: full-week correction for current + prior week (same phase).
           if (dayOfWeek === 'Wednesday') {
@@ -7603,7 +7599,6 @@ function scheduleMLBApiSync() {
         // last-good numbers and the commissioner re-runs Sync Now after fixing.
         if (statsCompiled && guardBefore) {
           const guard = evaluateScoreGuard(guardBefore, sd, {
-            mode: guardMode,
             dateISO: now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }),
             trigger: 'auto-4am',
             year: season,

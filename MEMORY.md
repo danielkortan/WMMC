@@ -10,15 +10,17 @@ by hundreds of points).
 - **`detectScoreSwings(before, after, opts)`** — pure, unit-tested in
   `js/scoring.js`; **synced copy in `server.js`** (the only runtime caller; server
   is CJS and can't import the ESM module). Compares per-manager Overall totals.
-  Blocks on a drop of **>50 pts OR >5%** for any single manager ("block only on
-  huge swings"); smaller drops warn. `mode: 'daily'` (any drop warns — a daily
-  delta is purely additive) vs `'correction'` (Wed / Sync Now — MLB corrections
-  legitimately lower scores, so small drops are ignored).
+  Thresholds (per commissioner, 2026-06-06): **blocks on a drop of ≥40 pts** for
+  any single manager (scores normally only go up, so a real downward move is the
+  thing we care about); an **upward jump of >200 pts only warns** (up is normal,
+  but a jump that big is worth a look — possible double-credit). Applies uniformly
+  to daily and Wednesday/Sync-Now compiles — a legit MLB stat correction that
+  drops someone 40+ pts will block and must be re-run with Force.
 - **`captureScoreSnapshot(sd, date)`** mirrors `computeRoundScores` attribution
   (added an optional `detailOut` param to `managerWeekSubtotal` to collect
-  per-player rows without changing its numeric return). Stores per-manager totals
-  + per-week + per-player breakdown in `sd.score_snapshots`, pruned to
-  `MAX_SCORE_SNAPSHOTS = 21` (one per date; same-day re-run replaces).
+  per-player rows without changing its numeric return). Stores per-manager
+  totals plus a per-week / per-player breakdown in `sd.score_snapshots`, pruned
+  to `MAX_SCORE_SNAPSHOTS = 21` (one per date; same-day re-run replaces).
 - **Wired into:** the 4am auto-sync (blocks → skips writeDB, keeps last-good
   scores, Slack-alerts; the 7am scoreboard then posts the good numbers), and the
   commissioner `POST /api/mlb/sync-current` + `POST /api/mlb/sync` (block returns
