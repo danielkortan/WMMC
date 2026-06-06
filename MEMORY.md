@@ -24,8 +24,12 @@ player-specific repairs.
   `syncPlayerDatesFromRosterDates`, `repairGhostInitialRosterPlayers`,
   `purgeCarriedForwardDropRecords` (generic, not player-specific), and the structural
   one-shots (`applyMLBApiTakeover`, `backfillWmmcQS`).
-- Not done (optional follow-up): change the manager-facing "Edit Submission" gate
-  from the deadline to "until the period's first games".
+- **Follow-up done:** `getPeriodFirstGame` (app.js) now falls back to the period's
+  first scheduled games (Week-1 start of that round via `PERIOD_FIRST_GAME_ROUND`)
+  when no explicit `period_deadlines[period]` is set. So a submission stays editable
+  until that period's first games without manual deadline config (e.g. PP2 auto-opens
+  Fri-before and auto-closes at its first games). Explicit `period_deadlines` still
+  wins; commissioner can always override via the initial-submission endpoint.
 
 ## Scoring eligibility fixes — cross-manager leak + carry-forward (2026-06-06)
 

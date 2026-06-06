@@ -148,10 +148,22 @@ function getPeriodOpenDate(sd, period) {
   return d;
 }
 
-// Returns a Date for the first MLB game of a period's start date, or null if not configured
+// Round each submission period maps to, for deriving its first-games date from the schedule.
+const PERIOD_FIRST_GAME_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+
+// Returns a Date for the first MLB game of a period. Prefers an explicitly configured
+// first-game time (sd.period_deadlines[period]); otherwise falls back to the period's first
+// scheduled games (Week 1 start of that round), so a submission stays editable right up until
+// that period's first games even when no explicit deadline was set. Null when neither exists.
 function getPeriodFirstGame(sd, period) {
   const val = sd && sd.period_deadlines && sd.period_deadlines[period];
-  return val ? new Date(val) : null;
+  if (val) return new Date(val);
+  const dates = sd && sd.schedule_dates;
+  const round = PERIOD_FIRST_GAME_ROUND[period];
+  if (!dates || !round) return null;
+  const idx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === 'Week 1');
+  if (idx < 0 || !dates[idx] || !dates[idx].start) return null;
+  return new Date(dates[idx].start + 'T00:00:00');
 }
 
 // Returns the submission deadline Date (first game − 5 min) for a period, or null
