@@ -4634,6 +4634,27 @@ app.post('/api/seasons/:year/initial-submission', requireCommissioner, (req, res
   res.json({ ok: true, manager, initial_submission: sd.initial_submissions[manager] });
 });
 
+// POST /api/slack/test-guard-alert  — posts a clearly-labeled TEST score-guard alert to the
+// notifications Slack channel so the commissioner can preview the format. Changes no data.
+app.post('/api/slack/test-guard-alert', requireCommissioner, async (req, res) => {
+  const blockers = [
+    { manager: 'Example Manager A', before: 1419.6, after: 1053.8, delta: -365.8, pct: -0.258 },
+    { manager: 'Example Manager B', before: 1108.2, after: 980.1, delta: -128.1, pct: -0.116 },
+  ];
+  const dateISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const msg =
+    ':test_tube: *TEST — Score guard BLOCKED a compile* — scores NOT saved (drop of 40+ pts).\n' +
+    `Season 2026 • ${dateISO} • trigger: test\n` +
+    `Largest drops:\n${formatSwingLines(blockers)}\n` +
+    '_This is a test — no scores changed. To triage a real one: paste `SCOREFIX` to Claude, or see RUNBOOK.md._';
+  try {
+    await postSlack(msg);
+    res.json({ ok: true, posted: !!SLACK_WEBHOOK_URL, preview: msg });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ============================================================
 // MLB Name Normalization
 // ============================================================
