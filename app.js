@@ -597,7 +597,10 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
 
   const scheduleDates = seasonData.schedule_dates || [];
   const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
-  const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved');
+  // Scope to THIS manager — eligibility must never pull in another manager's swap-in.
+  // The unscoped version leaked one manager's same-week add onto every other manager
+  // who also had a swap that week (e.g. Austin's Shane Baz showing on Anton's roster).
+  const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved' && s.manager === managerName);
   const allMgrDates = (seasonData.roster_dates && seasonData.roster_dates[managerName]) || null;
 
   let weekRoster = (seasonData.rosters &&
@@ -639,10 +642,37 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
     };
   }
 
+  // Carry-forward eligibility: a player added in an earlier (or this) week via
+  // roster_dates and not dropped as of this week is still rostered now, even if a
+  // stale roster array (or a first-season repair) never carried them into this
+  // week's array. Without this, a mid-season swap-in silently stops scoring the
+  // week after it was added (e.g. Devers added 5/9 vanished from Weeks 2+). Mirrors
+  // isStillActiveForMgr but evaluated as of this week's end.
+  const weekEnd = scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+  const activeByDates = [];
+  if (allMgrDates) {
+    const latestAdd = {};
+    const latestDrop = {};
+    for (const players of Object.values(allMgrDates)) {
+      for (const [p, d] of Object.entries(players)) {
+        if (d.add_date && (!weekEnd || d.add_date <= weekEnd) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+          latestAdd[p] = d.add_date;
+        }
+        if (d.drop_date && (!weekEnd || d.drop_date <= weekEnd) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+          latestDrop[p] = d.drop_date;
+        }
+      }
+    }
+    for (const p of Object.keys(latestAdd)) {
+      if (!latestDrop[p] || latestAdd[p] > latestDrop[p]) activeByDates.push(p);
+    }
+  }
+
   // Eligibility set matches renderRosterData's historicalBatters /
   // historicalPitchers exactly (post-pool-filter removal).
   const eligible = new Set([
     ...weekRoster[listKey],
+    ...activeByDates,
     ...Object.keys(weekRosterDates).filter(
       (p) => !seasonStartDate || !weekRosterDates[p].drop_date || weekRosterDates[p].drop_date >= seasonStartDate
     ),

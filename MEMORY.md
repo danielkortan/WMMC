@@ -1,5 +1,36 @@
 # WMMC — Decisions Log
 
+## Scoring eligibility fixes — cross-manager leak + carry-forward (2026-06-06)
+
+Root cause of the recurring Overall-standings swings, found via `/api/diag/manager`
+on real data (Anton Capria, Austin Johnson). Two bugs in `managerWeekSubtotal`
+(duplicated in **server.js** and **app.js** — keep both in sync):
+
+- **Bug A (cross-manager leak):** `approvedSwaps` was `swaps.filter(status==='approved')`
+  with **no manager filter**, then used to build the per-week eligibility set. A
+  newly-added player whose weekly row wasn't yet attributed (`manager: null`) got
+  pulled onto *every* manager who had a swap that same week (e.g. Austin's Shane Baz
+  / Bubba Chandler / Joc Pederson showed up in Anton's Week 5). Fix: scope
+  `approvedSwaps` to `s.manager === managerName`.
+- **Bug B (carry-forward eligibility):** eligibility only considered the *current*
+  week's roster array + that week's roster_dates/swaps. A player added in an earlier
+  week and never dropped (e.g. Devers added 5/9) stopped scoring the next week
+  whenever a stale roster array (or a first-season repair) hadn't carried them into
+  later weeks' arrays. Fix: add `activeByDates` — players whose most-recent
+  roster_dates event (as of this week's end) for this manager is an add. Additive
+  (can only restore under-counted scores; never reduces a correct one). Mirrors the
+  frontend `isStillActiveForMgr`, evaluated per week.
+
+Verified against the real diag data: Anton's Devers now counts Weeks 2–5, Austin's
+Alcántara counts Weeks 2–3, both resolve to the correct 4 batters / 3 pitchers each
+week. This fixes the scores **without any data surgery** — the add/drop history in
+`roster_dates` was already correct; only the roster *arrays* were stale.
+
+Follow-up (next PR): correct the two `initial_submissions` (Anton missing Carpenter,
+Austin missing Skubal), add a generic commissioner "edit initial submission until
+first games" capability, then delete the hardcoded band-aid repairs and harden the
+ghost-purge.
+
 ## Score-swing guard + daily snapshot trail (2026-06-06)
 
 Added a safeguard against wild downward swings in the Overall standings (a
