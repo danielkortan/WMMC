@@ -7786,7 +7786,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
 
     if (!poolReady && !isApproved) {
       html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);margin-bottom:0.75rem;">
-        <p class="text-muted" style="font-size:0.85rem;margin:0;">The player pool has not been uploaded yet. Please wait for the commissioner to upload the initial player pool files before selecting your roster.</p>
+        <p class="text-muted" style="font-size:0.85rem;margin:0;">The player pool has not been uploaded yet. Please wait for the commissioner to upload the initial player pool files before selecting your roster. If you expect it to be ready, <a href="#" onclick="location.reload();return false;">refresh the page</a>.</p>
       </div>`;
     } else if (poolReady && !isApproved) {
       html += `<p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">Player pool available: ${poolBatCount} batters, ${poolPitCount} pitchers</p>`;
@@ -8047,7 +8047,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
       </div>`;
     }
   } else if (!poolReady) {
-    html += `<p class="text-muted" style="font-size:0.85rem;">Waiting for commissioner to upload player pool.</p>`;
+    html += `<p class="text-muted" style="font-size:0.85rem;">Waiting for commissioner to upload player pool. If you expect it to be ready, <a href="#" onclick="location.reload();return false;">refresh the page</a>.</p>`;
   } else if (!isOpen) {
     if (openDate && Date.now() < openDate.getTime()) {
       const openStr = openDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
