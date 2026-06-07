@@ -4798,6 +4798,92 @@ app.post('/api/mlb/snapshot', requireCommissioner, (req, res) => {
   res.json({ ok: true, year, date: dateISO, totals: snapshot.totals });
 });
 
+// Read-only audit: surface "ghost" players — anyone credited to a manager (via a weekly
+// roster, a roster_dates entry, or attributed stat rows) who is NOT in that manager's
+// legitimate origin set: their initial submission plus the player_in/player_out of any
+// approved swap (commissioner adds go through swaps). Mirrors the Iván Herrera case, where
+// a player with stat records + a roster_dates add-date but no submission/swap origin was
+// credited via managerWeekSubtotal's roster_dates carry-forward. Name matching is
+// accent/format-insensitive. This only reports — it never mutates — so a player whose
+// submission slot was legitimately lost (see DATA_REPAIRS) will surface here for review
+// rather than being purged automatically.
+function auditGhostPlayers(sd) {
+  const out = [];
+  if (!sd) return out;
+
+  const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+  const initial = sd.initial_submissions || {};
+  const rosters = sd.rosters || {};
+  const rosterDates = sd.roster_dates || {};
+  const weeklyBat = sd.weekly_batting || [];
+  const weeklyPit = sd.weekly_pitching || [];
+
+  const managers = new Set([...Object.keys(initial), ...Object.keys(rosters), ...Object.keys(rosterDates)]);
+
+  for (const mgr of managers) {
+    const origin = new Set();
+    const sub = initial[mgr] || {};
+    [...(sub.batters || []), ...(sub.pitchers || [])].forEach((p) => origin.add(normalizeName(p)));
+    approvedSwaps
+      .filter((s) => s.manager === mgr)
+      .forEach((s) => {
+        if (s.player_in) origin.add(normalizeName(s.player_in));
+        if (s.player_out) origin.add(normalizeName(s.player_out));
+      });
+
+    // Every player credited to this manager, keyed by normalized name → display name.
+    const candidates = new Map();
+    for (const wr of Object.values(rosters[mgr] || {})) {
+      [...(wr.batters || []), ...(wr.pitchers || [])].forEach((p) => candidates.set(normalizeName(p), p));
+    }
+    for (const week of Object.values(rosterDates[mgr] || {})) {
+      Object.keys(week || {}).forEach((p) => candidates.set(normalizeName(p), p));
+    }
+    weeklyBat.forEach((r) => r.manager === mgr && r.batter && candidates.set(normalizeName(r.batter), r.batter));
+    weeklyPit.forEach((r) => r.manager === mgr && r.pitcher && candidates.set(normalizeName(r.pitcher), r.pitcher));
+
+    for (const [norm, display] of candidates) {
+      if (origin.has(norm)) continue;
+      let points = 0;
+      const weeks = new Set();
+      weeklyBat.forEach((r) => {
+        if (r.manager === mgr && normalizeName(r.batter) === norm) {
+          points += r.weekly_score || 0;
+          weeks.add(`${r.round}|${r.week}`);
+        }
+      });
+      weeklyPit.forEach((r) => {
+        if (r.manager === mgr && normalizeName(r.pitcher) === norm) {
+          points += r.weekly_score || 0;
+          weeks.add(`${r.round}|${r.week}`);
+        }
+      });
+      const inRosterDates = Object.values(rosterDates[mgr] || {}).some((w) =>
+        Object.keys(w || {}).some((p) => normalizeName(p) === norm)
+      );
+      out.push({
+        manager: mgr,
+        player: display,
+        points: Math.round(points * 100) / 100,
+        weeks: [...weeks],
+        in_roster_dates: inRosterDates,
+      });
+    }
+  }
+
+  return out.sort((a, b) => Math.abs(b.points) - Math.abs(a.points));
+}
+
+// GET /api/mlb/ghost-audit?year=YYYY  — read-only list of ghost players to review.
+app.get('/api/mlb/ghost-audit', requireCommissioner, (req, res) => {
+  const year = (req.query.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+  const ghosts = auditGhostPlayers(sd);
+  res.json({ year, count: ghosts.length, ghosts });
+});
+
 // GET /api/diag/manager?year=YYYY&name=Manager Name
 // Read-only dump of one manager's source records — the inputs the live Overall
 // standings are recomputed from. Used to diagnose attribution swings: compare

@@ -1,5 +1,50 @@
 # WMMC — Decisions Log
 
+## Ghost player caused recurring 4am score-guard block — Joey Auclair / Iván Herrera (2026-06-07)
+
+**Symptom.** Every morning the guard BLOCKED the 4am compile (Joey ~−177), the 7am Slack post
+didn't match the live scoreboard, and the snapshot trail was empty (`wmmc.dates()` → 0). The
+Sunday 6am auto-advance also posted a misleading "advanced 12 rosters to PP2 Week 1".
+
+**Root cause.** **Iván Herrera** was credited to Joey across PP1 Wk1–5 (~207 pts) via stat
+records + a `roster_dates` add-date, but was never in his submission, any weekly roster, or any
+approved swap. The server's `managerWeekSubtotal` credits a player who has a `roster_dates` add
+(and isn't dropped) via **carry-forward eligibility**, even when the `rosters[week]` array omits
+them — so server paths (score-guard snapshot, server scoreboard, `/api/diag/manager`) counted
+Herrera (~1,549) while the **client** scoreboard's stricter array check excluded him (~1,342).
+That mismatch is the "two different scores." The 4am compile tried to land the correct ~1,372
+(ghost gone + real games), which read as a >40-pt drop → blocked → nothing saved → no snapshot →
+empty trail → stale 7am post → re-blocked daily.
+
+**Gotchas to remember:**
+
+- `roster_dates` is **sticky**: the roster-save endpoint (`server.js` ~588) re-appends any
+  server-side entry the client omits, so a ghost add-date must be purged server-side.
+- `managerWeekSubtotal` credits via `roster_dates` carry-forward, not just the rosters array —
+  that's the path a ghost rides to score. Purges must remove `roster_dates`/`player_dates`, not
+  just stat rows.
+- `repairGhostInitialRosterPlayers` only cleans **Week 1** (can't catch a multi-week ghost); it
+  now matches the pool via `normalizeName` (an accented name like "Iván" slipped the old
+  exact-string filter).
+- The snapshot trail is written only by a **non-blocked** compile, so blocked mornings leave it
+  empty and `wmmc.diff()` useless — fall back to `wmmc.mgr("<name>")`.
+
+**Fixes (PR #261, merged → prod 2026-06-07):** `purgeGhostHerreraFromJoey` and
+`purgeBoundaryAutoAdvance` (gated one-time repairs); boundary-aware auto-advance
+(`isPeriodBoundaryWeek` — silent at PP1→PP2/PP2→QF/QF→SF/SF→Finals, runs mid-period);
+`POST /api/mlb/snapshot` (+ `wmmc.snapshot()`); `GET /api/mlb/ghost-audit` (+ `wmmc.ghosts()`,
+read-only). SCOREFIX is now walked through **inline in chat**, not by pointing at RUNBOOK
+(codified in `CLAUDE.md`).
+
+**Recovery procedure (reusable):** identify (`wmmc.mgr` / `wmmc.ghosts`) → confirm with
+commissioner the player was never rostered → purge server-side incl. `roster_dates`/`player_dates`
+→ deploy, confirm `[Ghost purge]` log → `wmmc.forceSync()` (applies dropped games + records
+baseline) → `wmmc.dates()` to confirm the seeded baseline. Verified: Joey settled at 1,372.45
+(== the guard's original "after"), `maxDrop 2.6, blockers 0`, trail seeded.
+
+**Open follow-up (not built):** generalized ghost sweep driven by `ghost-audit`, plus a guard on
+the sticky `roster_dates` re-append so it won't resurrect an originless entry.
+
 ## Roster-date display hardening + duplicate repair-swap dedup (2026-06-07)
 
 Commissioner flagged odd roster displays. Diagnosed from `/api/diag/manager`:
