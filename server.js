@@ -1303,6 +1303,59 @@ function purgeBoundaryAutoAdvance(db) {
   return true;
 }
 
+// One-shot maintenance: purge an orphaned "ghost" player from a manager's records.
+// Iván Herrera scored for Joey Auclair across PP1 Weeks 1–5 (~207 pts) via stat records
+// plus a roster_dates add-date, but was never in his initial submission, any weekly
+// roster, or any approved swap. The roster-validated scoreboard correctly excluded him
+// (~1,342) while raw-stat paths — the diag dump and the score-guard snapshot — still
+// counted him (~1,549). That 207-pt phantom made the nightly compile look like a 40+ pt
+// drop, so the score guard blocked the save every morning (and never recorded a snapshot,
+// leaving the trail empty). repairGhostInitialRosterPlayers only cleans Week 1, so it
+// could never fully remove a multi-week ghost. Commissioner confirmed he was never
+// rostered → remove his stat records and date/roster entries for Joey across all weeks.
+// Score-neutral for every correct (roster-validated) view. Gated by a db flag → runs once.
+function purgeGhostHerreraFromJoey(db) {
+  if (!db || db.ghost_herrera_purge_done) return false;
+
+  const MANAGER = 'Joey Auclair';
+  const isGhost = (name) => normalizeName(name) === 'ivan herrera';
+  let removed = 0;
+
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd || sd.status !== 'active') continue;
+
+    const filterStats = (list, key) => {
+      if (!Array.isArray(list)) return list;
+      const kept = list.filter((r) => !(r.manager === MANAGER && isGhost(r[key])));
+      removed += list.length - kept.length;
+      return kept;
+    };
+    sd.weekly_batting = filterStats(sd.weekly_batting, 'batter');
+    sd.daily_batting = filterStats(sd.daily_batting, 'batter');
+    sd.weekly_pitching = filterStats(sd.weekly_pitching, 'pitcher');
+    sd.daily_pitching = filterStats(sd.daily_pitching, 'pitcher');
+
+    // Drop his date entries (roster_dates: week → {player}; player_dates: week →
+    // {batter|pitcher → {player}}) and any stray roster membership, all weeks.
+    for (const week of Object.values((sd.roster_dates || {})[MANAGER] || {})) {
+      for (const name of Object.keys(week || {})) if (isGhost(name)) delete week[name];
+    }
+    for (const week of Object.values((sd.player_dates || {})[MANAGER] || {})) {
+      for (const sub of ['batter', 'pitcher']) {
+        if (week && week[sub]) for (const name of Object.keys(week[sub])) if (isGhost(name)) delete week[sub][name];
+      }
+    }
+    for (const wr of Object.values((sd.rosters || {})[MANAGER] || {})) {
+      if (wr.batters) wr.batters = wr.batters.filter((p) => !isGhost(p));
+      if (wr.pitchers) wr.pitchers = wr.pitchers.filter((p) => !isGhost(p));
+    }
+  }
+
+  db.ghost_herrera_purge_done = true;
+  if (removed > 0) console.log(`[Ghost purge] Removed ${removed} Iván Herrera stat record(s) from ${MANAGER}.`);
+  return true;
+}
+
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
 // v6: carry-forward now folds swaps effective in a trusted seed week into the
 // baseline, so an in-season move made during the first week propagates forward.
@@ -8013,6 +8066,16 @@ async function main() {
       if (ran) writeDB(dbForBoundaryPurge);
     } catch (e) {
       console.error('[Boundary purge] Error (continuing):', e.message);
+    }
+
+    // One-shot: purge the Iván Herrera ghost records from Joey Auclair (never rostered;
+    // caused the recurring score-guard block). Gated by a db flag so it runs once.
+    try {
+      const dbForGhostPurge = readDB();
+      const ran = purgeGhostHerreraFromJoey(dbForGhostPurge);
+      if (ran) writeDB(dbForGhostPurge);
+    } catch (e) {
+      console.error('[Ghost purge] Error (continuing):', e.message);
     }
 
     // Fill / recompute per-week roster entries carrying forward approved swaps.
