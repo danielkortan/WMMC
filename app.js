@@ -46,6 +46,44 @@ async function apiFetch(url, options = {}) {
   return resp;
 }
 
+// ============================================================
+// Theme (light / dark) — global, persisted per account
+// ============================================================
+// Default is light. The locally cached value (wmmc_theme) is applied before
+// first paint by the inline script in index.html; once logged in, the account
+// preference (manager.theme from /api/managers) becomes authoritative.
+function getStoredTheme() {
+  try {
+    return localStorage.getItem('wmmc_theme') === 'dark' ? 'dark' : 'light';
+  } catch (e) {
+    return 'light';
+  }
+}
+
+function applyTheme(theme) {
+  const dark = theme === 'dark';
+  document.documentElement.classList.toggle('theme-dark', dark);
+  try {
+    localStorage.setItem('wmmc_theme', dark ? 'dark' : 'light');
+  } catch (e) {
+    /* localStorage unavailable — DOM class still applied */
+  }
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) btn.textContent = dark ? 'Light Mode' : 'Dark Mode';
+}
+
+async function persistTheme(theme) {
+  if (!LOGGED_IN_EMAIL) return;
+  try {
+    await apiFetch(`/api/managers/${encodeURIComponent(LOGGED_IN_EMAIL)}/theme`, {
+      method: 'POST',
+      body: JSON.stringify({ theme }),
+    });
+  } catch (e) {
+    /* best-effort — the local copy is already applied and cached */
+  }
+}
+
 // SCORING and SEASON_SCHEDULE live in js/scoring.js (loaded via window
 // globals by js/index.js). Server-side copies are kept in sync in server.js.
 
@@ -993,6 +1031,10 @@ function enterApp(mgr) {
   document.getElementById('user-display-name').textContent = mgr.name;
   setupUserBar();
 
+  // Apply the user's saved theme. The account preference wins; if the account has
+  // none yet, fall back to whatever was cached locally (defaults to light).
+  applyTheme(mgr.theme === 'dark' || mgr.theme === 'light' ? mgr.theme : getStoredTheme());
+
   // Auto-auth commissioner if applicable
   if (mgr.commissioner) {
     COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
@@ -1180,6 +1222,17 @@ function setupUserBar() {
     dropdown.classList.remove('open');
     openChangePasswordModal();
   };
+
+  const themeBtn = document.getElementById('theme-toggle-btn');
+  if (themeBtn) {
+    themeBtn.textContent = getStoredTheme() === 'dark' ? 'Light Mode' : 'Dark Mode';
+    themeBtn.onclick = () => {
+      const next = getStoredTheme() === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      persistTheme(next);
+      dropdown.classList.remove('open');
+    };
+  }
 }
 
 function openChangePasswordModal() {

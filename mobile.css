@@ -1,6 +1,13 @@
 /* =================================================================
-   WMMC — Mobile Experience
-   Dark sports-app theme. Activates at ≤ 768 px.
+   WMMC — Mobile Experience (rebuilt)
+   Activates at ≤ 768 px. This round focuses on the Scoreboard (home)
+   landing: a balanced header, a centered readable banner, the Pool
+   Play Overall card, and stacked, tap-to-expand Pool Play 1 / Pool
+   Play 2 sections. Other tabs fall back to the desktop layout.
+
+   Colors come from the global CSS custom properties in styles.css, so
+   both Light and Dark themes (html.theme-dark) work automatically —
+   never hardcode theme colors here.
    ================================================================= */
 
 /* Header short title hidden on desktop; shown on mobile by media query */
@@ -8,26 +15,25 @@
   display: none;
 }
 
-/* ── Bottom nav (always in DOM, hidden on desktop) ───────────── */
+/* ── Bottom nav (always in DOM, hidden on desktop) ───────────────── */
 .mobile-bottom-nav {
   display: none;
   position: fixed;
-  top: auto; /* override nav { top: 0 } from styles.css — without this the nav sticks to the top */
+  top: auto; /* override nav { top: 0 } from styles.css */
   bottom: 0;
   left: 0;
   right: 0;
-  height: 80px;
-  background: #12122a;
-  border-top: 1px solid #2a2a45;
-  border-bottom: none; /* override nav { border-bottom } from styles.css */
-  overflow: hidden; /* override nav { overflow-x: auto } from styles.css */
+  height: 72px;
+  background: var(--card-bg);
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+  overflow: hidden;
   z-index: 1000;
   padding: 0 0.25rem;
   padding-bottom: env(safe-area-inset-bottom, 0px);
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
-  /* During pinch-zoom a position:fixed element anchors to the layout viewport and
-     scrolls/scales away. pinMobileNavToVisualViewport() in app.js counter-transforms
-     this nav (via the VisualViewport API) to keep it pinned to the visual viewport. */
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.18);
+  /* pinMobileNavToVisualViewport() in app.js counter-transforms this nav so it
+     stays pinned to the visual viewport during pinch-zoom. */
   transform-origin: left bottom;
   will-change: transform;
 }
@@ -38,65 +44,62 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
   background: none;
   border: none;
-  color: #5a6690;
-  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.62rem;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
   text-transform: uppercase;
   cursor: pointer;
-  padding: 0.45rem 0.25rem;
+  padding: 0.4rem 0.25rem;
   transition: color 0.15s;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
 }
 
 .mobile-nav-btn .mnb-icon {
-  font-size: 2.75rem;
+  font-size: 1.6rem;
   line-height: 1;
   transition: transform 0.15s;
 }
 
 .mobile-nav-btn.active {
-  color: #4a9eff;
+  color: var(--primary);
 }
 
 .mobile-nav-btn.active .mnb-icon {
-  transform: scale(1.12);
+  transform: scale(1.1);
 }
 
-/* ── More overlay ─────────────────────────────────────────────── */
+/* ── More overlay + bottom sheet ──────────────────────────────────── */
 .mobile-more-overlay {
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.45);
   z-index: 998;
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
 }
 
 .mobile-more-overlay.open {
   display: block;
 }
 
-/* ── More bottom sheet ────────────────────────────────────────── */
 .mobile-more-sheet {
   display: none;
   position: fixed;
-  bottom: 80px;
+  bottom: 72px;
   left: 0;
   right: 0;
-  background: #1a1a2e;
-  border-top: 1px solid #2a2a45;
+  background: var(--card-bg);
+  border-top: 1px solid var(--border);
   border-radius: 18px 18px 0 0;
   z-index: 999;
   padding: 0.625rem 0 0.5rem;
   transform: translateY(110%);
   transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
-  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.3);
 }
 
 .mobile-more-sheet.open {
@@ -106,7 +109,7 @@
 .mobile-more-sheet-handle {
   width: 36px;
   height: 4px;
-  background: #3a3a55;
+  background: var(--border);
   border-radius: 2px;
   margin: 0 auto 0.875rem;
 }
@@ -118,7 +121,7 @@
   width: 100%;
   background: none;
   border: none;
-  color: #d0d4f0;
+  color: var(--text);
   font-size: 1rem;
   font-weight: 600;
   padding: 0.875rem 1.5rem;
@@ -129,11 +132,11 @@
 }
 
 .mobile-more-item:active {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(127, 127, 127, 0.12);
 }
 
 .mobile-more-item.active {
-  color: #4a9eff;
+  color: var(--primary);
 }
 
 .mmi-icon {
@@ -143,213 +146,70 @@
   flex-shrink: 0;
 }
 
-/* ── Weekly score cards (shown only on mobile) ── */
-.mobile-weekly-cards {
-  display: none;
-}
-
-.mobile-weekly-card {
-  background: #1a1a2e;
-  border-radius: 12px;
-  margin-bottom: 0.625rem;
-  overflow: hidden;
-  border: 1px solid #2a2a45;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: border-color 0.15s;
-}
-
-.mobile-weekly-card.expanded {
-  border-color: #3a4a70;
-}
-
-.mwc-summary {
-  display: flex;
-  align-items: center;
-  padding: 0.875rem 1rem;
-  gap: 0.75rem;
-}
-
-.mwc-rank {
-  font-size: 1.2rem;
-  font-weight: 900;
-  color: #5a6690;
-  width: 2rem;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.mwc-rank.rank-1 {
-  color: #ffd700;
-}
-.mwc-rank.rank-2 {
-  color: #c0c0c0;
-}
-.mwc-rank.rank-3 {
-  color: #cd7f32;
-}
-
-.mwc-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.mwc-name {
-  font-size: 1rem;
-  font-weight: 700;
-  color: #e8eaf6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.mwc-meta {
-  font-size: 0.72rem;
-  color: #6c7a9c;
-  margin-top: 2px;
-  letter-spacing: 0.2px;
-}
-
-.mwc-score {
-  text-align: right;
-  flex-shrink: 0;
-}
-
-.mwc-total {
-  font-size: 1.6rem;
-  font-weight: 900;
-  color: #e8eaf6;
-  line-height: 1;
-  letter-spacing: -1px;
-}
-
-.mwc-bat-pit {
-  font-size: 0.68rem;
-  color: #9fa8da;
-  margin-top: 3px;
-  letter-spacing: 0.2px;
-}
-
-.mwc-chevron {
-  color: #3a3a55;
-  font-size: 0.75rem;
-  transition: transform 0.2s;
-  flex-shrink: 0;
-  margin-left: 0.25rem;
-}
-
-.mobile-weekly-card.expanded .mwc-chevron {
-  transform: rotate(180deg);
-}
-
-.mwc-detail {
-  display: none;
-  padding: 0.75rem 1rem 1rem;
-  border-top: 1px solid #2a2a45;
-  background: #13132a;
-}
-
-.mobile-weekly-card.expanded .mwc-detail {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.625rem 1.5rem;
-}
-
-.mwc-stat {
-  display: flex;
-  flex-direction: column;
-}
-
-.mwc-stat-label {
-  font-size: 0.63rem;
-  color: #6c7a9c;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  margin-bottom: 1px;
-}
-
-.mwc-stat-value {
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: #e8eaf6;
-}
-
-/* ── Scoreboard + Live row card layout (used only on mobile) ──── */
-
-/* Applied by JS on mobile to manager summary rows */
-.mob-sbrow {
-  display: none; /* JS adds this class on mobile only; mobile CSS overrides to flex */
-}
-
-/* Bat/pit breakdown row (inserted by JS, shown on score tap) */
-.mob-score-breakdown-row {
-  display: none !important;
-}
-
-.mob-score-breakdown-row.open {
-  display: block !important;
-}
-
-.mob-score-breakdown-row td {
-  display: flex !important;
-  padding: 0.625rem 1rem !important;
-  background: #13132a !important;
-  border: none !important;
-  border-bottom: 1px solid #2a2a45 !important;
-  justify-content: center;
-  gap: 2.5rem;
-  font-size: 1rem;
-  font-weight: 600;
-  color: #9fa8da !important;
-}
-
 /* =================================================================
    MOBILE MEDIA QUERY — activates ≤ 768 px
    ================================================================= */
 @media (max-width: 768px) {
-  /* ── Dark theme variables ──────────────────────────────────── */
-  :root {
-    --bg: #0f0f1a;
-    --card-bg: #1a1a2e;
-    --primary: #4a9eff;
-    --primary-light: #6ab4ff;
-    --accent: #ff4560;
-    --accent-light: #ff6b80;
-    --text: #e8eaf6;
-    --text-light: #9fa8da;
-    --text-muted: #6c7a9c;
-    --border: #2a2a45;
-    --success: #4caf6e;
-    --danger: #ff4560;
-    --winner: rgba(255, 215, 0, 0.08);
-    --rank1: #ffd700;
-    --rank2: #c0c0c0;
-    --rank3: #cd7f32;
-    --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.5), 0 10px 24px rgba(0, 0, 0, 0.4);
-  }
-
-  /* ── Body ──────────────────────────────────────────────────── */
+  /* ── Body / chrome ─────────────────────────────────────────────── */
   body {
-    padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px));
-    background: #0f0f1a;
-    font-size: 1rem;
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
   }
 
-  /* ── Header ────────────────────────────────────────────────── */
+  /* Hide the desktop nav; show the bottom nav + sheet */
+  #main-nav {
+    display: none !important;
+  }
+  .mobile-bottom-nav {
+    display: flex;
+  }
+  .mobile-more-sheet {
+    display: block;
+  }
+
+  main {
+    max-width: 100%;
+    padding: 0.6rem 0.5rem;
+  }
+
+  /* ── Header: one balanced row — title | season | user ──────────── */
   header {
-    background: linear-gradient(135deg, #090918 0%, #10183a 100%);
-    padding: 0.5rem 0.875rem;
+    padding: 0.5rem 0.75rem;
   }
 
   header::after {
     height: 3px;
   }
 
+  .header-top {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  /* Three equal-width cells so nothing dominates and font sizes match */
+  .header-top > h1,
+  .header-top > .season-selector,
+  .header-top > .user-bar {
+    flex: 1 1 0;
+    min-width: 0;
+    margin: 0;
+  }
+
   header h1 {
-    font-size: clamp(1rem, 5vw, 1.6rem);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    justify-content: flex-start;
+    font-size: clamp(0.95rem, 4vw, 1.2rem);
+    font-weight: 800;
     white-space: nowrap;
-    flex: 0 0 auto;
+  }
+
+  .header-ball {
+    font-size: 1em;
   }
 
   .header-title-long {
@@ -360,232 +220,286 @@
     display: inline !important;
   }
 
-  .header-top {
-    flex-direction: row;
-    flex-wrap: nowrap;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
   .season-selector {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
     text-align: center;
+    overflow: hidden;
   }
 
   .season-selector select {
+    width: 100%;
+    max-width: 100%;
     -webkit-appearance: none;
     appearance: none;
-    background: transparent;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239fa8da'/%3E%3C/svg%3E");
+    background-color: rgba(255, 255, 255, 0.14);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23ffffff'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
-    background-position: right 0.35rem center;
+    background-position: right 0.4rem center;
     background-size: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 6px;
-    color: #e8eaf6;
-    font-size: 0.75rem;
-    padding: 0.15rem 1.1rem 0.15rem 0.35rem;
-    max-width: 100%;
+    color: #fff;
+    -webkit-text-fill-color: #fff;
+    font-size: clamp(0.85rem, 3.6vw, 1.05rem);
+    font-weight: 600;
+    text-align: center;
+    text-align-last: center;
+    padding: 0.3rem 1.1rem 0.3rem 0.5rem;
     cursor: pointer;
   }
 
+  /* No display override here — app.js flips this from none → flex on login. */
   .user-bar {
+    justify-content: flex-end;
     margin-left: 0;
-    flex: 0 1 auto;
+  }
+
+  .user-dropdown,
+  .user-dropdown-trigger {
+    max-width: 100%;
     min-width: 0;
   }
 
-  #online-users-bar {
-    display: none;
+  .user-dropdown-trigger {
+    font-size: clamp(0.85rem, 3.6vw, 1.05rem) !important;
+    padding: 0.3rem 0.5rem !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  /* ── Hide desktop nav ──────────────────────────────────────── */
-  #main-nav {
+  .user-dropdown-trigger #user-display-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #online-users-bar {
     display: none !important;
   }
 
-  /* ── Show mobile nav elements ──────────────────────────────── */
-  .mobile-bottom-nav {
-    display: flex;
+  /* ── Champion banner: centered + readable (no separate mini banner) ── */
+  #champion-banner {
+    display: block !important;
   }
 
-  .mobile-more-sheet {
-    display: block;
+  .champion-banner {
+    padding: 1.1rem 1rem 0.9rem;
+    border-radius: 12px;
+    text-align: center;
+    margin-bottom: 0.75rem;
   }
 
-  /* ── Main content area ─────────────────────────────────────── */
-  main {
-    max-width: 100%;
-    padding: 0.625rem 0.5rem;
+  .banner-main {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.7rem;
   }
 
-  /* ── Cards ─────────────────────────────────────────────────── */
+  .banner-left {
+    justify-content: center;
+  }
+
+  .banner-title {
+    font-size: clamp(1.7rem, 8vw, 2.4rem);
+    letter-spacing: 1.5px;
+  }
+
+  .banner-right {
+    text-align: center;
+    justify-content: center;
+  }
+
+  .banner-champ-label {
+    font-size: 0.78rem;
+  }
+
+  .banner-champ-name {
+    font-size: clamp(1.3rem, 6vw, 1.7rem);
+  }
+
+  .banner-champ-year {
+    font-size: 0.85rem;
+    opacity: 0.85;
+  }
+
+  .banner-footer {
+    font-size: clamp(0.78rem, 3.4vw, 0.95rem);
+    letter-spacing: 1px;
+    opacity: 0.9;
+    margin-top: 0.85rem;
+  }
+
+  /* ── Cards ─────────────────────────────────────────────────────── */
   .card {
-    background: #1a1a2e;
-    border: 1px solid #2a2a45;
     border-radius: 10px;
     padding: 0.75rem;
-    box-shadow: none;
     margin-bottom: 0.625rem;
   }
 
-  .card h2 {
-    color: var(--primary);
-    border-bottom-color: #2a2a45;
-    font-size: 1.05rem;
-    margin-bottom: 0.625rem;
-    padding-bottom: 0.375rem;
+  .scoreboard-card {
+    padding: 0.5rem 0.4rem;
   }
 
-  .card h3 {
-    color: var(--primary);
-    font-size: 0.9rem;
-  }
+  /* =============================================================
+     POOL PLAY — landing scoreboard
+     ============================================================= */
 
-  /* ── Champion banner: hidden on mobile, replaced by #mobile-banner ── */
-  #champion-banner {
-    display: none !important;
-  }
-
-  /* ── Mobile mini-banner (JS-built from champion-banner content) ── */
-  #mobile-banner {
-    background: #0d1220;
-    padding: 0.5rem 0.875rem 0.35rem;
-    border-bottom: 1px solid #2a2a45;
-    margin-bottom: 0.25rem;
-  }
-
-  .mb-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 0.2rem;
-  }
-
-  .mb-title {
-    font-size: 1.05rem;
-    font-weight: 900;
-    letter-spacing: 1px;
-    color: #e8eaf6;
-    white-space: nowrap;
-  }
-
-  .mb-champ {
-    font-size: 0.88rem;
-    font-weight: 700;
-    color: #ffd700;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .mb-status {
-    font-size: 0.7rem;
-    color: #9fa8da;
-    letter-spacing: 0.3px;
-  }
-
-  /* ── Scoreboard sub-tabs: always hidden inside scoreboard, shown only in fixed bar ── */
-  /* Both container and buttons hidden so no remnant is ever visible on mobile */
+  /* Drop the period tab bar + secondary legends/info — we stack the
+     periods and surface only what matters on the landing. */
   #scoreboard-content .scoreboard-tabs,
-  #scoreboard-content .sb-tab {
-    display: none !important;
-  }
-
-  /* Tabs inside the fixed bar are visible and sized for touch */
-  #mobile-sb-tabs-bar .sb-tab {
-    display: inline-block !important;
-    font-size: 0.82rem;
-    padding: 0.55rem 0.875rem;
-    white-space: nowrap;
-  }
-
-  /* Extra bottom padding when scoreboard tabs bar is visible */
-  body.mob-sb-tabs-visible {
-    padding-bottom: calc(80px + 48px + env(safe-area-inset-bottom, 0px));
-  }
-
-  /* ── Pool Play: historical section heights ─────────────────── */
-  /* PP-Overall fills first screen so pools are below the fold */
-  #sb-pp-overall {
-    min-height: calc(100vh - 220px);
-    min-height: calc(100svh - 220px);
-  }
-
-  /* Separator + label injected by JS when pools are stacked */
-  .mob-section-header {
-    font-size: 0.75rem !important;
-    font-weight: 700 !important;
-    color: #9fa8da !important;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 0.5rem 0.5rem 0.3rem !important;
-    margin: 0.5rem 0 0.375rem !important;
-    border-top: 2px solid #3a3a5a;
-    border-bottom: 1px solid #2a2a45;
-  }
-
-  /* ── Active season: Pool Play Overall fills viewport ──────────── */
-  /* It is the 2nd child of #sb-poolplay-body (1st is .highlight-legend) */
-  #sb-poolplay-body > .scoreboard-section:nth-child(2) {
-    min-height: calc(100vh - 130px);
-    min-height: calc(100svh - 130px);
-  }
-
-  /* Pool sections (PP1, PP2) below — group visually as one block */
-  #sb-poolplay-body > .scoreboard-section:nth-child(2) ~ .scoreboard-section {
-    border-top: 2px solid #3a3a5a;
-  }
-
-  /* ── PP-Overall table: last col is Status badge, not total ──── */
-  /* Show col 8 (PP Total) and hide col 9 (Status) */
-  #sb-pp-overall .mob-sbrow td:last-child {
-    display: none !important;
-  }
-
-  #sb-pp-overall .mob-sbrow td:nth-child(8) {
-    display: flex !important;
-    flex-shrink: 0;
-    font-size: 2.2rem;
-    font-weight: 900;
-    color: #e8eaf6;
-    justify-content: flex-end;
-    align-items: center;
-    min-width: 5.5rem;
-    padding: 0 !important;
-    letter-spacing: -1px;
-  }
-
-  /* ── Compact Pool Play card header ─────────────────────────── */
-  .sb-poolplay-header {
-    padding: 0.3rem 0.5rem;
-    min-height: 0;
-  }
-
-  .sb-poolplay-header h2 {
-    font-size: 0.82rem !important;
-    color: #9fa8da !important;
-    font-weight: 600 !important;
-  }
-
-  .sb-poolplay-header .btn {
-    padding: 0.2rem 0.5rem;
-    font-size: 0.68rem;
-  }
-
-  /* ── Hide secondary scoreboard info on mobile ──────────────── */
+  #scoreboard-content .sb-tab,
   .highlight-legend,
   .sb-color-legend,
   .advancement-info,
   .pp-leader-cards {
-    display: none;
+    display: none !important;
   }
 
-  /* ── Scoreboard table → block + card rows ──────────────────── */
-  #scoreboard-content .data-table {
+  /* Always show Overall + PP1 + PP2 (overrides the tab show/hide logic
+     and the .sb-period{display:none} default). Playoff periods are
+     hidden this round — surfaced later. */
+  #scoreboard-content #sb-pp-overall,
+  #scoreboard-content #sb-pp1,
+  #scoreboard-content #sb-pp2 {
+    display: block !important;
+  }
+
+  #scoreboard-content #sb-qf,
+  #scoreboard-content #sb-sf,
+  #scoreboard-content #sb-finals {
+    display: none !important;
+  }
+
+  /* Outer "Pool Play Scoreboard" header: the name itself is the toggle
+     (onclick lives on the header) — hide the old Show/Hide button. */
+  .sb-poolplay-header {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    padding: 0.5rem 0.25rem;
+  }
+
+  .sb-poolplay-header h2 {
+    font-size: 1.15rem !important;
+    color: var(--primary) !important;
+    margin: 0 !important;
+  }
+
+  .sb-poolplay-toggle {
+    display: none !important;
+  }
+
+  /* Section heading inside Overall period ("Overall Pool Play Standings") */
+  #scoreboard-content .sb-period > h3 {
+    font-size: clamp(1rem, 4.5vw, 1.3rem);
+    color: var(--primary);
+    padding: 0.5rem 0.25rem 0.4rem;
+    margin: 0;
+    border: none;
+  }
+
+  /* Period header (Pool Play 1 / 2): large + centered, tap to collapse */
+  .pool-period-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    cursor: pointer;
+    padding: 0.65rem 2rem;
+    border-top: 2px solid var(--border);
+    margin-top: 0.6rem;
+  }
+
+  .pool-period-header h3 {
+    font-size: clamp(1.15rem, 5.2vw, 1.55rem) !important;
+    font-weight: 800;
+    text-align: center;
+    color: var(--primary) !important;
+    margin: 0;
+    padding: 0;
+    border: none;
+  }
+
+  .pool-expand-all-btn {
+    display: none !important;
+  }
+
+  .pool-period-header::after {
+    content: '▾';
+    position: absolute;
+    right: 0.75rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    transition: transform 0.2s;
+  }
+
+  .sb-period.mob-pp-collapsed .pool-period-header::after {
+    transform: rotate(-90deg);
+  }
+
+  .sb-period.mob-pp-collapsed .pool-play-grid {
+    display: none !important;
+  }
+
+  /* Single-column pools */
+  .pool-play-grid {
+    grid-template-columns: 1fr !important;
+    gap: 0.5rem;
+  }
+
+  .pool-card {
+    margin-bottom: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--card-bg);
+  }
+
+  /* Pool / matchup name: larger, left-aligned, tap to collapse */
+  .pool-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: relative;
+    cursor: pointer;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 0.55rem 0.75rem;
+  }
+
+  .pool-card-header h3,
+  .pool-card-header h4 {
+    font-size: clamp(1rem, 4.5vw, 1.25rem);
+    font-weight: 700;
+    text-align: left;
+    color: var(--text);
+    margin: 0;
+    padding: 0;
+    background: none;
+  }
+
+  .pool-toggle-btn {
+    display: none !important;
+  }
+
+  .pool-card-header::after {
+    content: '▾';
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    transition: transform 0.2s;
+  }
+
+  .pool-card.mob-pool-collapsed .pool-card-header::after {
+    transform: rotate(-90deg);
+  }
+
+  .pool-card.mob-pool-collapsed .pool-card-body {
+    display: none !important;
+  }
+
+  /* ── Scoreboard tables → block + card rows ─────────────────────── */
+  #scoreboard-content .data-table,
+  #scoreboard-content .data-table tbody {
     display: block !important;
     width: 100%;
     border: none;
@@ -595,11 +509,6 @@
     display: none !important;
   }
 
-  #scoreboard-content .data-table tbody {
-    display: block !important;
-  }
-
-  /* Remove table-wrapper border for scoreboard tables (cards replace it) */
   #scoreboard-content .table-wrapper,
   #scoreboard-content .pool-card-body .table-wrapper {
     overflow: visible;
@@ -607,114 +516,113 @@
     border-radius: 0;
   }
 
-  /* ── Manager summary row card (class added by JS) ──────────── */
-  .mob-sbrow {
+  /* Manager summary row → flex card: [rank] [name ……] [score]
+     Name flexes + truncates; score never shrinks, so they can't collide. */
+  #scoreboard-content .mob-sbrow {
     display: flex !important;
     align-items: center;
-    padding: 0.85rem 0.75rem !important;
-    border-bottom: 1px solid #2a2a45 !important;
-    gap: 0;
+    gap: 0.5rem;
+    padding: 0.7rem 0.5rem !important;
+    border-bottom: 1px solid var(--border) !important;
     cursor: pointer;
-    -webkit-tap-highlight-color: rgba(74, 158, 255, 0.06);
+    -webkit-tap-highlight-color: rgba(127, 127, 127, 0.08);
   }
 
-  .mob-sbrow:active {
-    background: rgba(74, 158, 255, 0.05);
-  }
-
-  /* Hide all cells */
-  .mob-sbrow td {
+  #scoreboard-content .mob-sbrow td {
     display: none !important;
-    border: none !important;
     padding: 0 !important;
+    border: none !important;
   }
 
-  /* Rank — 1st cell */
-  .mob-sbrow td:first-child {
+  /* Rank */
+  #scoreboard-content .mob-sbrow td:first-child {
     display: flex !important;
-    width: 2.75rem;
-    flex-shrink: 0;
-    font-size: 0.9rem;
-    font-weight: 900;
-    color: #5a6690;
+    flex: 0 0 auto;
+    width: 1.75rem;
     justify-content: center;
     align-items: center;
-    padding: 0 !important;
-  }
-
-  /* Name — 2nd cell */
-  .mob-sbrow td:nth-child(2) {
-    display: flex !important;
-    flex: 1;
-    font-size: 2.2rem;
+    font-size: 0.85rem;
     font-weight: 800;
-    color: #e8eaf6;
-    align-items: center;
-    min-width: 0;
-    padding: 0 0.5rem !important;
-    overflow: hidden;
-    line-height: 1.1;
+    color: var(--text-muted);
   }
 
-  .mob-sbrow td:nth-child(2) strong {
-    white-space: nowrap;
+  #scoreboard-content .mob-sbrow td:first-child.rank-1 {
+    color: var(--rank1);
+  }
+  #scoreboard-content .mob-sbrow td:first-child.rank-2 {
+    color: var(--rank2);
+  }
+  #scoreboard-content .mob-sbrow td:first-child.rank-3 {
+    color: var(--rank3);
+  }
+
+  /* Name */
+  #scoreboard-content .mob-sbrow td:nth-child(2) {
+    display: flex !important;
+    flex: 1 1 auto;
+    min-width: 0;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: clamp(1.05rem, 4.5vw, 1.4rem);
+    font-weight: 700;
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  #scoreboard-content .mob-sbrow td:nth-child(2) strong {
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 100%;
+    white-space: nowrap;
+    min-width: 0;
   }
 
-  /* Expand arrow inside name cell */
-  .mob-sbrow .sb-expand-arrow {
-    margin-left: 0.25rem;
-    color: #5a6690;
-    font-size: 0.65rem;
+  #scoreboard-content .mob-sbrow .sb-expand-arrow {
     flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 0.7rem;
   }
 
-  /* Total score — last cell (tap for bat/pit) */
-  .mob-sbrow td:last-child {
+  /* Score — last cell for 5-col pool tables (Rank|Name|Bat|Pit|Total) */
+  #scoreboard-content .mob-sbrow td:last-child {
     display: flex !important;
-    flex-shrink: 0;
-    font-size: 2.2rem;
-    font-weight: 900;
-    color: #e8eaf6;
+    flex: 0 0 auto;
     justify-content: flex-end;
     align-items: center;
-    min-width: 5.5rem;
-    padding: 0 !important;
-    touch-action: manipulation;
-    letter-spacing: -1px;
+    font-size: clamp(1.05rem, 4.8vw, 1.5rem);
+    font-weight: 800;
+    color: var(--text);
+    white-space: nowrap;
+    letter-spacing: -0.5px;
+    padding-left: 0.5rem !important;
   }
 
-  .mob-sbrow td:last-child:active {
-    color: #4a9eff;
-  }
-
-  /* Strong inside total cell */
-  .mob-sbrow td:last-child strong {
+  #scoreboard-content .mob-sbrow td:last-child strong {
     font-size: inherit;
-    font-weight: 900;
+    font-weight: inherit;
   }
 
-  /* Rank colors for top-3 */
-  .mob-sbrow td:first-child.rank-1 {
-    color: #ffd700 !important;
-  }
-  .mob-sbrow td:first-child.rank-2 {
-    color: #c0c0c0 !important;
-  }
-  .mob-sbrow td:first-child.rank-3 {
-    color: #cd7f32 !important;
+  /* Overall standings table has 9 cols; the last is a Status badge.
+     Hide it and promote col 8 (PP Total) to the score slot. */
+  #scoreboard-content #sb-pp-overall .mob-sbrow td:last-child {
+    display: none !important;
   }
 
-  /* ── Detail rows (player list) — full-width ───────────────── */
-  /* The <td> is forced to block/full-width; the <tr> display is
-     left to JS so toggling style="display:none" works correctly */
-  #scoreboard-content .data-table .sb-manager-detail-row {
-    width: 100% !important;
+  #scoreboard-content #sb-pp-overall .mob-sbrow td:nth-child(8) {
+    display: flex !important;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    align-items: center;
+    font-size: clamp(1.05rem, 4.8vw, 1.5rem);
+    font-weight: 800;
+    color: var(--text);
+    white-space: nowrap;
+    letter-spacing: -0.5px;
+    padding-left: 0.5rem !important;
   }
 
-  #scoreboard-content .data-table .sb-manager-detail-row td {
+  /* ── Manager detail (player list) pop-down — full width, readable ── */
+  #scoreboard-content .sb-manager-detail-row,
+  #scoreboard-content .sb-manager-detail-row td {
     display: block !important;
     width: 100% !important;
     box-sizing: border-box;
@@ -722,47 +630,45 @@
     border: none !important;
   }
 
-  /* Full-width detail panel chain */
-  .mgr-detail-panel {
+  #scoreboard-content .mgr-detail-panel {
     width: 100% !important;
-    box-sizing: border-box !important;
+    box-sizing: border-box;
     margin: 0 !important;
-    padding: 0.375rem 0.375rem 0.5rem !important;
-    background: #13132a;
+    padding: 0.4rem 0.4rem 0.5rem !important;
+    background: var(--bg);
   }
 
-  /* Override the 2-col grid → single block column */
-  .mgr-detail-cols {
+  #scoreboard-content .mgr-detail-cols {
     display: block !important;
     width: 100% !important;
     gap: 0 !important;
   }
 
-  .mgr-detail-section {
+  #scoreboard-content .mgr-detail-section {
     width: 100%;
-    margin-bottom: 0.375rem;
+    margin-bottom: 0.5rem;
   }
 
-  .mgr-detail-header {
-    font-size: 1.5rem !important;
+  #scoreboard-content .mgr-detail-header {
+    font-size: 0.95rem !important;
     font-weight: 700;
-    color: #9fa8da !important;
+    color: var(--text-light) !important;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    padding: 0.6rem 0.25rem 0.5rem !important;
-    border-bottom: 2px solid #3a3a5a;
+    padding: 0.5rem 0.25rem 0.4rem !important;
+    border-bottom: 1px solid var(--border);
     margin-bottom: 0.25rem;
   }
 
-  /* Player table — proper table display, all columns, full width.
-     Selectors use #scoreboard-content .data-table prefix (specificity [1,2,x])
-     to beat the outer display:block!important rule (specificity [1,1,0]). */
+  /* Player tables inside the detail panel keep a real table layout.
+     The #scoreboard-content .data-table prefix (specificity beats the
+     outer display:block!important on .data-table). */
   #scoreboard-content .data-table .mgr-detail-section table {
     display: table !important;
     width: 100% !important;
     table-layout: fixed;
     border-collapse: collapse;
-    font-size: 1.3rem;
+    font-size: 0.95rem;
   }
 
   #scoreboard-content .data-table .mgr-detail-section table thead {
@@ -771,13 +677,13 @@
 
   #scoreboard-content .data-table .mgr-detail-section table thead th {
     display: table-cell !important;
-    font-size: 1rem !important;
+    font-size: 0.72rem !important;
     font-weight: 700;
-    color: #6c7a9c !important;
+    color: var(--text-muted) !important;
     text-transform: uppercase;
     letter-spacing: 0.3px;
-    padding: 0.4rem 0.375rem !important;
-    border-bottom: 1px solid #2a2a45 !important;
+    padding: 0.35rem !important;
+    border-bottom: 1px solid var(--border) !important;
     text-align: left;
     background: none !important;
   }
@@ -788,346 +694,25 @@
 
   #scoreboard-content .data-table .mgr-detail-section table tbody tr {
     display: table-row !important;
-    padding: 0 !important;
   }
 
-  /* Show all 3 columns: Player | Pts | Date */
-  #scoreboard-content .data-table .mgr-detail-section table tbody tr td {
+  #scoreboard-content .data-table .mgr-detail-section table tbody td {
     display: table-cell !important;
-    padding: 0.5rem 0.375rem !important;
-    font-size: 1.3rem;
-    color: #e8eaf6;
-    border-bottom: 1px solid #1e1e38 !important;
+    padding: 0.4rem 0.35rem !important;
+    color: var(--text);
+    border-bottom: 1px solid var(--border) !important;
     vertical-align: middle;
   }
 
-  /* Player name column — fills remaining width */
-  #scoreboard-content .data-table .mgr-detail-section table tbody tr td:first-child {
-    font-weight: 600;
+  #scoreboard-content .data-table .mgr-detail-section table tbody td:first-child {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  /* Pts column */
-  #scoreboard-content .data-table .mgr-detail-section table tbody tr td:nth-child(2) {
-    font-weight: 700;
-    text-align: center;
-    color: #4a9eff;
-    width: 20%;
-  }
-
-  /* Date column */
-  #scoreboard-content .data-table .mgr-detail-section table tbody tr td:nth-child(3) {
-    color: #6c7a9c;
-    font-size: 1.1rem;
-    text-align: right;
-    white-space: nowrap;
-    width: 25%;
-  }
-
-  .pqv-pts-btn {
-    background: none;
-    border: none;
-    color: #4a9eff;
-    font-size: 1.3rem !important;
-    font-weight: 700;
-    padding: 0;
-    cursor: pointer;
-    text-decoration: underline;
-    text-decoration-style: dotted;
-  }
-
-  /* Dropped player: muted + strikethrough */
-  .dropped-player td:first-child {
-    color: #5a6690 !important;
-    text-decoration: line-through;
-  }
-
-  .dropped-player td:nth-child(2) {
-    color: #5a6690 !important;
-  }
-
-  /* ── Live manager table ────────────────────────────────────── */
-  /* Use > child combinators so these block-display rules only target the
-     outer manager table, NOT the nested inner player detail tables */
-  #live-managers .card > .table-wrapper > .data-table {
-    display: block !important;
-    width: 100%;
-    border: none;
-  }
-
-  #live-managers .card > .table-wrapper > .data-table > thead {
-    display: none !important;
-  }
-
-  #live-managers .card > .table-wrapper > .data-table > tbody {
-    display: block !important;
-  }
-
-  #live-managers .card .table-wrapper {
-    overflow: visible;
-    border: none;
-    border-radius: 0;
-  }
-
-  /* Live manager rows — single line: [#] Name  ΔRank  Daily  Total */
-  #live-managers .card .data-table .live-mgr-row {
-    display: flex !important;
-    flex-wrap: nowrap;
-    align-items: center;
-    padding: 0.85rem 0.75rem !important;
-    border-bottom: 1px solid #2a2a45 !important;
-    gap: 0;
-    cursor: pointer;
-    -webkit-tap-highlight-color: rgba(74, 158, 255, 0.06);
-  }
-
-  #live-managers .card .data-table .live-mgr-row:active {
-    background: rgba(74, 158, 255, 0.05);
-  }
-
-  /* Hide ALL live row cells first */
-  #live-managers .card .data-table .live-mgr-row td {
-    display: none !important;
-    border: none !important;
-    padding: 0 !important;
-  }
-
-  /* Rank — col 1, leftmost */
-  #live-managers .card .data-table .live-mgr-row td:first-child {
-    display: flex !important;
-    order: 1;
-    width: 2.75rem;
-    flex-shrink: 0;
-    font-size: 0.9rem;
-    font-weight: 900;
-    color: #5a6690;
-    justify-content: center;
-    align-items: center;
-    padding: 0 !important;
-  }
-
-  /* Name — col 2, fills available space */
-  #live-managers .card .data-table .live-mgr-row td:nth-child(2) {
-    display: flex !important;
-    order: 2;
-    flex: 1;
-    min-width: 0;
-    font-size: clamp(1rem, 4.5vw, 2.2rem);
-    font-weight: 800;
-    color: #e8eaf6;
-    align-items: center;
-    overflow: hidden;
-    padding: 0 0.5rem !important;
-    line-height: 1.1;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  /* Total (live season) — col 3, shown last */
-  #live-managers .card .data-table .live-mgr-row td:nth-child(3) {
-    display: flex !important;
-    order: 5;
-    flex-shrink: 0;
-    font-size: 2.2rem;
-    font-weight: 900;
-    color: #e8eaf6;
-    align-items: center;
-    padding: 0 0 0 0.5rem !important;
-    letter-spacing: -0.5px;
-  }
-
-  #live-managers .card .data-table .live-mgr-row td:nth-child(3) strong {
-    font-size: inherit;
-    font-weight: 900;
-  }
-
-  /* ΔRank — col 4 */
-  #live-managers .card .data-table .live-mgr-row td:nth-child(4) {
-    display: flex !important;
-    order: 3;
-    flex-shrink: 0;
-    font-size: 1rem;
-    font-weight: 700;
-    color: #9fa8da;
-    align-items: center;
-    padding: 0 0.4rem 0 0 !important;
-  }
-
-  /* Daily score — col 5 */
-  #live-managers .card .data-table .live-mgr-row td:nth-child(5) {
-    display: flex !important;
-    order: 4;
-    flex-shrink: 0;
-    font-size: 1rem;
-    font-weight: 700;
-    color: #9fa8da;
-    align-items: center;
-    padding: 0 0.4rem 0 0 !important;
-  }
-
-  #live-managers .card .data-table .live-mgr-row td:nth-child(5)::before {
-    content: '+';
-    font-size: 0.85rem;
-    font-weight: 400;
-    color: #6c7a9c;
-    margin-right: 2px;
-  }
-
-  /* Truncate name text (strong) not the flex container */
-  #live-managers .card .data-table .live-mgr-row td:nth-child(2) strong {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  #live-managers .card .data-table .live-mgr-row td:nth-child(2) .sb-expand-arrow {
-    flex-shrink: 0;
-  }
-
-  /* Active manager (has players live today) */
-  .live-mgr-active {
-    color: #4caf6e !important;
-  }
-
-  /* Player name color in live detail tables */
-  .player-name-live {
-    color: #4caf6e !important;
-    white-space: normal !important;
-    overflow: visible !important;
-    text-overflow: unset !important;
-    word-break: break-word;
-  }
-  .player-name-final {
-    color: #8b8b8b !important;
-    white-space: normal !important;
-    overflow: visible !important;
-    text-overflow: unset !important;
-    word-break: break-word;
-  }
-
-  /* Live detail row (today's player activity) */
-  #live-managers .card .data-table .live-mgr-detail-row td {
-    display: block !important;
-    padding: 0 !important;
-    border: none !important;
-  }
-
-  /* Live detail panel: batters then pitchers stacked vertically for readability */
-  #live-managers .mgr-detail-panel {
-    display: flex !important;
-    flex-direction: column !important;
-    gap: 0.75rem;
-    padding: 0.5rem !important;
-    background: #13132a;
-    overflow-x: hidden;
-    overflow-y: visible;
-  }
-
-  #live-managers .live-mgr-detail-section {
-    width: 100%;
-    overflow-x: hidden;
-  }
-
-  /* Section label */
-  #live-managers .mgr-detail-header {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: #9fa8da;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 0.6rem 0 0.6rem !important;
-  }
-
-  /* Live detail: player tables are rebuilt as div/flex rows by JS.
-     Only keep styles for the section wrapper and empty-state message. */
-
-  /* Empty state messages */
-  .live-mgr-detail-empty {
-    font-size: 1.2rem;
-    color: #5a6690;
-    padding: 0.75rem 0.5rem;
-  }
-
-  /* ── Weekly table → hidden, cards shown ────────────────────── */
-  #weekly .table-wrapper {
-    display: none;
-  }
-
-  .mobile-weekly-cards {
-    display: block;
-  }
-
-  /* ── Pool play grid → single column ────────────────────────── */
-  .pool-play-grid {
-    grid-template-columns: 1fr !important;
-    gap: 0.5rem;
-  }
-
-  .pool-card {
-    margin-bottom: 0;
-  }
-
-  .pool-card {
-    padding: 0 0 0.25rem;
-    border: 1px solid #2a2a45;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
-  .pool-card h3,
-  .pool-card h4 {
-    font-size: 0.8rem;
-    margin: 0;
-    padding: 0.35rem 0.625rem;
-    background: #12122a;
-    border-bottom: 1px solid #2a2a45;
-  }
-
-  .pool-card-header {
-    padding: 0.35rem 0.625rem;
-    background: #12122a;
-    border-bottom: 1px solid #2a2a45;
-  }
-
-  /* ── Scoreboard card body ───────────────────────────────────── */
-  .scoreboard-card {
-    padding: 0.5rem 0.375rem;
-    margin-bottom: 0.5rem;
-  }
-
-  /* ── Scoreboard section headers ─────────────────────────────── */
-  .scoreboard-section h3 {
-    font-size: 0.75rem;
-    padding: 0.3rem 0.5rem;
-    color: #9fa8da;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    font-weight: 700;
-    margin-bottom: 0;
-    border-bottom: 1px solid #2a2a45;
-  }
-
-  /* ── Pool play section collapsible ─────────────────────────── */
-  .sb-poolplay-header {
-    padding: 0.1rem 0;
-  }
-
-  /* ── Stat cards (secondary, hide on mobile) ─────────────────── */
-  .stat-card {
-    padding: 0.625rem;
-  }
-
-  .stat-value {
-    font-size: 1.25rem;
-  }
-
-  /* ── Seeding list ───────────────────────────────────────────── */
+  /* ── Seeding list (below Overall) ──────────────────────────────── */
   .seed-item {
-    font-size: 0.875rem;
+    font-size: 0.9rem;
     gap: 0.5rem;
     padding: 0.375rem 0;
   }
@@ -1138,366 +723,31 @@
     min-width: 1.75rem;
   }
 
-  /* ── Filters ────────────────────────────────────────────────── */
-  .filters {
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .filters select {
-    width: 100%;
-    background: #12122a;
-    color: #e8eaf6;
-    border: 1px solid #2a2a45;
-    border-radius: 8px;
-    padding: 0.7rem 0.875rem;
-    font-size: 0.95rem;
-  }
-
-  /* ── Data tables (non-scoreboard/live sections) ─────────────── */
-  .data-table {
-    font-size: 0.82rem;
-    color: #e8eaf6;
-  }
-
-  .data-table thead th {
-    background: #12122a;
-    color: #9fa8da;
-    border-bottom: 1px solid #2a2a45;
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    padding: 0.5rem 0.4rem;
-  }
-
-  .data-table tbody tr:nth-child(even) {
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  .data-table tbody td {
-    border-bottom: 1px solid #2a2a45;
-    padding: 0.5rem 0.4rem;
-  }
-
+  /* =============================================================
+     OTHER TABS — desktop fallback (this round). Keep wide tables
+     horizontally scrollable so they don't break the page width.
+     ============================================================= */
   .table-wrapper {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    border-radius: 8px;
-    border: 1px solid #2a2a45;
   }
 
-  /* ── Live header card ───────────────────────────────────────── */
-  #live-header.card {
-    background: #12122a;
-    padding: 0.625rem 0.75rem;
-    margin-bottom: 0.375rem;
-  }
-
-  .live-title-row {
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-
-  #live-week-title {
-    font-size: clamp(1.2rem, 5vw, 2.2rem) !important;
-  }
-
-  .live-date-btn {
-    font-size: clamp(1.2rem, 5vw, 2.2rem);
-    padding: 0.25rem 0.75rem;
-  }
-
-  .live-date-label {
-    font-size: clamp(1rem, 4.5vw, 2.2rem);
-    min-width: auto;
-  }
-
-  .live-status {
-    font-size: 0.78rem;
-  }
-
-  .live-game-row {
-    padding: 0.5rem 0;
-    gap: 0.75rem;
-  }
-
-  .live-game-line {
-    font-size: 1.9rem !important;
-  }
-
-  /* ── Roster ─────────────────────────────────────────────────── */
-  .roster-manager-bar-inner {
-    gap: 0.5rem;
-  }
-
-  /* When the title is hidden (commissioner view), let the select/dropdown fill the row */
-  .roster-manager-bar-inner .form-select,
-  .roster-manager-bar-inner .custom-dd {
-    width: 100%;
-    max-width: 100%;
-  }
-
-  /* ── Trends charts ──────────────────────────────────────────── */
   canvas {
-    max-height: 220px;
-  }
-
-  /* ── Forms and inputs ───────────────────────────────────────── */
-  input[type='text'],
-  input[type='email'],
-  input[type='password'],
-  input[type='date'],
-  input[type='datetime-local'],
-  select:not(.form-select),
-  textarea {
-    background: #12122a;
-    color: #e8eaf6;
-    border-color: #2a2a45;
-  }
-
-  /* Native .form-select pills (swap forms, week/season pickers) also go dark on
-     mobile — styles.css makes them white, unreadable in the dark theme. The custom
-     roster-picker toggle has its own (matching) rule below. */
-  .form-select {
-    background: #12122a;
-    color: #e8eaf6;
-    -webkit-text-fill-color: #e8eaf6;
-    border-color: #2a2a45;
-  }
-
-  /* Mobile uses a dark theme, so style the custom roster-picker dropdown dark
-     (light text on dark) to match — otherwise the menu's text reads light on the
-     white background I gave it for desktop. */
-  .custom-dd-toggle.form-select {
-    background: #12122a;
-    color: #e8eaf6;
-    -webkit-text-fill-color: #e8eaf6;
-    border-color: #2a2a45;
-  }
-  .custom-dd-menu {
-    background: #1a1a2e;
-    color: #e8eaf6;
-    border-color: #2a2a45;
-  }
-  .custom-dd-menu .custom-dd-option {
-    color: #e8eaf6;
-  }
-  .custom-dd-menu .custom-dd-option:hover {
-    background: #24243f;
-  }
-  .custom-dd-menu .custom-dd-option[aria-selected='true'] {
-    background: var(--field-green);
-    color: #fff;
-  }
-
-  input::placeholder {
-    color: #5a6690;
-  }
-
-  /* ── Buttons ─────────────────────────────────────────────────── */
-  .btn {
-    padding: 0.65rem 1.125rem;
-    font-size: 0.9rem;
-  }
-
-  /* ── Commissioner sub-tabs ───────────────────────────────────── */
-  .comm-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.375rem;
-    background: #12122a;
-    border-radius: 10px;
-    padding: 0.5rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .comm-tab-btn {
-    flex: 1;
-    min-width: calc(50% - 0.375rem);
-    font-size: 0.78rem;
-    padding: 0.5rem;
-    text-align: center;
-    border-radius: 6px;
-  }
-
-  .comm-tab-btn.active {
-    background: rgba(74, 158, 255, 0.15);
-    color: #4a9eff;
-  }
-
-  /* ── Two-column layouts ──────────────────────────────────────── */
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-
-  /* ── Stats grids ─────────────────────────────────────────────── */
-  .stats-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  /* ── Schedule grid ───────────────────────────────────────────── */
-  .schedule-grid {
-    grid-template-columns: 1fr;
-  }
-
-  /* ── Bracket ─────────────────────────────────────────────────── */
-  #scoreboard-bracket {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  /* ── Matchup grids ───────────────────────────────────────────── */
-  .matchup-results-grid,
-  .matchup-preview-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .matchup-card,
-  .matchup-preview {
-    padding: 0.75rem;
-    font-size: 0.9rem;
-  }
-
-  /* ── Login screen ────────────────────────────────────────────── */
-  #login-screen {
-    background: #0f0f1a;
-  }
-
-  .login-screen-inner {
-    background: #0f0f1a;
-    max-width: 480px;
-    padding: 2rem 1.25rem;
-  }
-
-  /* Larger brand mark so the login fills the screen on phones */
-  .login-baseball {
-    font-size: 5rem;
-  }
-
-  .login-card {
-    background: #1a1a2e;
-    border: 1px solid #2a2a45;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
-    padding: 1.75rem 1.5rem;
-  }
-
-  .login-card h2 {
-    color: #e8eaf6;
-    font-size: 1.4rem;
-  }
-
-  .login-brand h1 {
-    color: #e8eaf6;
-    font-size: 1.9rem;
-  }
-
-  .login-tagline {
-    color: #9fa8da;
-    font-size: 1.1rem;
-  }
-
-  .login-fields input {
-    background: #12122a;
-    color: #e8eaf6;
-    border: 1px solid #2a2a45;
-    font-size: 1.05rem;
-    padding: 0.9rem 1rem;
-  }
-
-  .login-fields .btn {
-    font-size: 1.05rem;
-    padding: 0.95rem;
-  }
-
-  .login-fields input:focus {
-    border-color: #4a9eff;
-    outline: none;
-  }
-
-  .login-divider span {
-    background: #1a1a2e;
-    color: #6c7a9c;
-  }
-
-  /* ── Footer ──────────────────────────────────────────────────── */
-  footer {
-    background: #12122a;
-    border-top: 1px solid #2a2a45;
-    color: #6c7a9c;
-    font-size: 0.78rem;
-    padding: 0.875rem 1rem;
-  }
-
-  /* ── Upload hints ────────────────────────────────────────────── */
-  .upload-hint {
-    color: #9fa8da;
-    font-size: 0.85rem;
+    max-height: 240px;
   }
 }
 
-/* ── Fixed scoreboard sub-tabs bar (JS-created, outside media query) ── */
-#mobile-sb-tabs-bar {
-  position: fixed;
-  bottom: calc(80px + env(safe-area-inset-bottom, 0px));
-  left: 0;
-  right: 0;
-  z-index: 990;
-  background: #12122a;
-  border-top: 1px solid #2a2a45;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.4);
-}
-
-#mobile-sb-tabs-bar::-webkit-scrollbar {
-  display: none;
-}
-
-#mobile-sb-tabs-bar .scoreboard-tabs {
-  display: flex;
-  gap: 0;
-  margin-bottom: 0;
-  padding: 0 0.375rem;
-  overflow: visible;
-  white-space: nowrap;
-}
-
-#mobile-sb-tabs-bar .sb-tab {
-  font-size: 0.82rem;
-  padding: 0.625rem 0.875rem;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-/* ── Very small phones (≤ 400 px) ─────────────────────────────── */
-@media (max-width: 400px) {
-  header h1 {
-    font-size: 1rem;
-  }
-
+/* ── Very small phones (≤ 380 px) ─────────────────────────────────── */
+@media (max-width: 380px) {
   .mobile-nav-btn {
-    font-size: 0.58rem;
+    font-size: 0.55rem;
   }
 
   .mobile-nav-btn .mnb-icon {
-    font-size: 2.2rem;
+    font-size: 1.4rem;
   }
 
   main {
-    padding: 0.5rem 0.375rem;
-  }
-
-  .mob-sbrow td:last-child {
-    font-size: 1.8rem;
-    min-width: 4.75rem;
-  }
-
-  .mob-sbrow td:nth-child(2) {
-    font-size: 1.8rem;
-  }
-
-  .mwc-total {
-    font-size: 1.35rem;
+    padding: 0.5rem 0.4rem;
   }
 }

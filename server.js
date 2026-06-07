@@ -930,6 +930,30 @@ app.post('/api/managers/:email/change-password', (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /api/managers/:email/theme — self-service UI theme preference (logged-in manager)
+app.post('/api/managers/:email/theme', requireAuth, (req, res) => {
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  // A user may only change their own theme.
+  if (req.manager.email.toLowerCase() !== email) {
+    return res.status(403).json({ error: "Cannot change another user's theme" });
+  }
+  const { theme } = req.body || {};
+  if (theme !== 'light' && theme !== 'dark') {
+    return res.status(400).json({ error: 'Theme must be "light" or "dark"' });
+  }
+  const db = readDB();
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  manager.theme = theme;
+  writeDB(db);
+  // Theme is a non-credential identity preference — keep it in the committed seed
+  // so it survives a redeploy (same as a manager's name/active flag).
+  writeManagersSeed(db.managers);
+  res.json({ ok: true });
+});
+
 // GET /api/audit-log — return recent audit log entries
 app.get('/api/audit-log', requireCommissioner, (req, res) => {
   const db = readDB();
