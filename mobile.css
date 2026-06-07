@@ -18,6 +18,10 @@
 /* ── Bottom nav (always in DOM, hidden on desktop) ───────────────── */
 .mobile-bottom-nav {
   display: none;
+  /* Plain fixed bottom bar — always visible, locked to the viewport bottom,
+     above page content. (We deliberately do NOT JS-transform this on
+     pinch-zoom; that hack left the bar floating on scroll and vanishing on
+     tab switches.) */
   position: fixed;
   top: auto; /* override nav { top: 0 } from styles.css */
   bottom: 0;
@@ -32,10 +36,6 @@
   padding: 0 0.25rem;
   padding-bottom: env(safe-area-inset-bottom, 0px);
   box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.18);
-  /* pinMobileNavToVisualViewport() in app.js counter-transforms this nav so it
-     stays pinned to the visual viewport during pinch-zoom. */
-  transform-origin: left bottom;
-  will-change: transform;
 }
 
 .mobile-nav-btn {
