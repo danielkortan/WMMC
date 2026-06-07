@@ -300,8 +300,12 @@
     gap: 0.5rem;
   }
 
-  /* Title is fixed-width — it is never resized by a long champion name. */
+  /* Title (+ status line below it) is fixed-width — never resized by a long
+     champion name. Stacked vertically so the short status sits under the title. */
   .banner-left {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
     text-align: left;
     flex: 0 0 auto;
     min-width: 0;
@@ -310,6 +314,18 @@
   .banner-title {
     font-size: clamp(1.2rem, 6.2vw, 2.2rem);
     letter-spacing: 1px;
+    white-space: nowrap;
+  }
+
+  /* Short season status ("In Progress" / "Preseason") moved under the title
+     by arrangeMobileBannerStatus() in js/mobile.js. */
+  .banner-status-mobile {
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0.8;
+    margin-top: 0.15rem;
     white-space: nowrap;
   }
 
@@ -363,6 +379,17 @@
     letter-spacing: 0.8px;
     opacity: 0.9;
     margin-top: 0.75rem;
+  }
+
+  /* Footer keeps only the period status (e.g. "Pool Play 2 — Week 5 of 5") on a
+     single row; the season status moved under the title (.banner-status-mobile). */
+  .banner-footer .banner-status,
+  .banner-footer .banner-sep {
+    display: none;
+  }
+
+  .banner-footer .banner-period {
+    white-space: nowrap;
   }
 
   /* ── Cards ─────────────────────────────────────────────────────── */

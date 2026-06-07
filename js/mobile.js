@@ -174,13 +174,42 @@ function fitBannerChampName() {
   });
 }
 
+// Move the short season status ("In Progress" / "Preseason") out of the footer
+// and under the WMMC title on the left. This frees the footer to show the full
+// period status (e.g. "Pool Play 2 — Week 5 of 5") on a single row. The footer
+// copy is hidden via CSS; here we mirror its short text into the title block.
+function arrangeMobileBannerStatus() {
+  if (!isMobile()) return;
+  const banner = document.getElementById('champion-banner');
+  if (!banner) return;
+  const left = banner.querySelector('.banner-left');
+  const statusEl = banner.querySelector('.banner-footer .banner-status');
+  if (!left || !statusEl) return;
+
+  let line = left.querySelector('.banner-status-mobile');
+  if (!line) {
+    line = document.createElement('div');
+    line.className = 'banner-status-mobile';
+    left.appendChild(line);
+  }
+  const text = statusEl.dataset.short || statusEl.textContent.trim();
+  // Only write when changed — setting textContent is a childList mutation that
+  // would otherwise re-trigger the banner observer in a loop.
+  if (line.textContent !== text) line.textContent = text;
+}
+
+function refreshMobileBanner() {
+  arrangeMobileBannerStatus();
+  fitBannerChampName();
+}
+
 function watchBanner() {
   const banner = document.getElementById('champion-banner');
   if (!banner) return;
 
-  // Re-fit whenever the banner content is (re)rendered. Observe childList only
-  // so our own inline font-size tweaks (attribute changes) don't re-trigger it.
-  new MutationObserver(() => fitBannerChampName()).observe(banner, {
+  // Re-run whenever the banner content is (re)rendered. Observe childList only
+  // so our own inline tweaks (attribute changes) don't re-trigger it.
+  new MutationObserver(() => refreshMobileBanner()).observe(banner, {
     childList: true,
     subtree: true,
   });
@@ -188,12 +217,12 @@ function watchBanner() {
   let resizeTimer = null;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(fitBannerChampName, 150);
+    resizeTimer = setTimeout(refreshMobileBanner, 150);
   });
 
-  fitBannerChampName();
+  refreshMobileBanner();
   // Re-fit after web fonts finish loading (metrics can shift).
-  setTimeout(fitBannerChampName, 500);
+  setTimeout(refreshMobileBanner, 500);
 }
 
 // ── Scoreboard landing transforms ─────────────────────────────────

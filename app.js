@@ -2341,18 +2341,33 @@ function renderChampionBanner() {
     const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
 
+    // Season status + period are wrapped in distinct spans (with a short
+    // status form in data-short) so the layout can split them: desktop shows
+    // them together in the footer; mobile moves the short status under the
+    // title and keeps only the period in the footer (see js/mobile.js).
     if (period) {
       // Season has data — show round name + week number
       const weekPart = `Week ${period.weekNum} of ${period.totalRoundWeeks}`;
-      footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Season In Progress &nbsp;|&nbsp; ${period.roundName} — ${weekPart}</div>`;
+      footerHtml =
+        `<div class="banner-footer">` +
+        `<span class="banner-status" data-short="In Progress">${SELECTED_SEASON} Season In Progress</span>` +
+        `<span class="banner-sep"> &nbsp;|&nbsp; </span>` +
+        `<span class="banner-period">${period.roundName} — ${weekPart}</span>` +
+        `</div>`;
     } else {
       // No data yet — preseason
       const dates = sd ? sd.schedule_dates : null;
-      let week1Part = '';
+      let periodHtml = '';
       if (dates && dates[0] && dates[0].start) {
-        week1Part = ` &nbsp;|&nbsp; Week 1 starts ${fmtShortDate(dates[0].start)}`;
+        periodHtml =
+          `<span class="banner-sep"> &nbsp;|&nbsp; </span>` +
+          `<span class="banner-period">Week 1 starts ${fmtShortDate(dates[0].start)}</span>`;
       }
-      footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Preseason${week1Part}</div>`;
+      footerHtml =
+        `<div class="banner-footer">` +
+        `<span class="banner-status" data-short="Preseason">${SELECTED_SEASON} Preseason</span>` +
+        periodHtml +
+        `</div>`;
     }
   }
 
