@@ -249,6 +249,15 @@ function readManagersSeed() {
   return [];
 }
 
+// Format a pool value as a label without doubling "Pool" (manager records use a
+// bare pool like "1"/"A", but some data has the full "Pool 1"). Mirrors the
+// client-side formatPool() in app.js.
+function formatPool(pool) {
+  if (pool === null || pool === undefined || pool === '') return '';
+  const s = String(pool).trim();
+  return /^pool\b/i.test(s) ? s : `Pool ${s}`;
+}
+
 function writeManagersSeed(managers) {
   try {
     // Strip credentials (password + Google auth token) — they belong in db.json
@@ -2552,7 +2561,7 @@ function buildScoreboardBlocks(db, year) {
   // Group by pool — already sorted desc so last entry = pool's last place
   const pools = {};
   poolStandings.forEach((m) => {
-    const key = m.pool ? `Pool ${m.pool}` : 'Unassigned';
+    const key = m.pool ? formatPool(m.pool) : 'Unassigned';
     if (!pools[key]) pools[key] = [];
     pools[key].push(m);
   });

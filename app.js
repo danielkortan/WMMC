@@ -4613,7 +4613,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           .replace(/\s+/g, '_')
           .replace(/[^a-zA-Z0-9_]/g, '')}`;
         html += `<div class="pool-card">
-        <h3>Pool ${poolNum} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
+        <h3>${formatPool(poolNum)} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -5048,14 +5048,14 @@ function renderTrends() {
   const poolBtnsHtml = hasPools
     ? `<div class="trends-control-row">
             <span class="trends-label">By Pool</span>
-            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}">Pool ${p}</button>`).join('')}
+            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}">${formatPool(p)}</button>`).join('')}
           </div>`
     : '';
   const mgrPoolBtnsHtml = (prefix) =>
     hasPools
       ? `<div class="trends-control-row">
             <span class="trends-label">By Pool</span>
-            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}" data-prefix="${prefix}">Pool ${p}</button>`).join('')}
+            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}" data-prefix="${prefix}">${formatPool(p)}</button>`).join('')}
           </div>`
       : '';
 
@@ -6166,7 +6166,7 @@ function buildTeamWeekly(seasonData) {
   // Build manager-to-pool lookup
   const managerPool = {};
   managers.forEach((m) => {
-    if (m.pool) managerPool[m.name] = 'Pool ' + m.pool;
+    if (m.pool) managerPool[m.name] = formatPool(m.pool);
   });
 
   const key = (r, w, m) => `${r}|${w}|${m}`;
@@ -9853,7 +9853,7 @@ function _mgrPwCell(m) {
 }
 
 function _mgrNormalRow(m, idx) {
-  const poolLabel = m.pool ? 'Pool ' + m.pool : '—';
+  const poolLabel = m.pool ? formatPool(m.pool) : '—';
   return `<tr id="mgr-row-${idx}">
     <td><strong>${esc(m.name)}</strong></td>
     <td style="font-size:0.85rem;">${m.email}</td>
@@ -13384,6 +13384,16 @@ function isLoggedInCommissioner() {
   if (!LOGGED_IN_EMAIL) return false;
   const email = LOGGED_IN_EMAIL.toLowerCase();
   return getManagers().some((m) => m.email && m.email.toLowerCase() === email && m.commissioner);
+}
+
+// Format a pool value as a display label without doubling the word "Pool".
+// Manager records assign a bare pool ("1"/"2"/"A"), but some data sources store
+// the full label ("Pool 1"); prefixing blindly produced "Pool Pool A". Prefix
+// only when the value isn't already a "Pool …" label.
+function formatPool(pool) {
+  if (pool === null || pool === undefined || pool === '') return '';
+  const s = String(pool).trim();
+  return /^pool\b/i.test(s) ? s : `Pool ${s}`;
 }
 
 function getPool(manager) {
