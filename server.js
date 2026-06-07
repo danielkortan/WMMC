@@ -4757,6 +4757,56 @@ app.post('/api/seasons/:year/rebuild-roster-arrays', requireCommissioner, (req, 
   });
 });
 
+// POST /api/seasons/:year/dedupe-repair-swaps
+// Removes 'repair-...' swaps that duplicate a real (non-repair) swap for the same move
+// (manager + player_out + player_in + week_key). The old auto-repair band-aids (since deleted)
+// recreated some swaps that the real record also covers, leaving doubles. Idempotent and safe:
+// keeps any repair- swap that is the SOLE record of a move (deleting it would erase the move).
+// Reports the removed entries + a before/after total check (totals should not move).
+app.post('/api/seasons/:year/dedupe-repair-swaps', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const swaps = Array.isArray(sd.swaps) ? sd.swaps : [];
+  const moveKey = (s) => `${s.manager}|${s.player_out || ''}|${s.player_in || ''}|${s.week_key || ''}`;
+  const realMoves = new Set(swaps.filter((s) => !String(s.id).startsWith('repair-')).map(moveKey));
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const before = captureScoreSnapshot(sd, todayET).totals;
+
+  const removed = [];
+  sd.swaps = swaps.filter((s) => {
+    if (String(s.id).startsWith('repair-') && realMoves.has(moveKey(s))) {
+      removed.push({
+        id: s.id,
+        manager: s.manager,
+        player_out: s.player_out,
+        player_in: s.player_in,
+        week_key: s.week_key,
+      });
+      return false;
+    }
+    return true;
+  });
+
+  const after = captureScoreSnapshot(sd, todayET).totals;
+  const movedTotals = [];
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[m] || {}).total || 0;
+    const a = (after[m] || {}).total || 0;
+    if (Math.abs(a - b) >= 0.01) {
+      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+    }
+  }
+
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'dedupe_repair_swaps', { year, removed: removed.length }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true, removed, removed_count: removed.length, moved_totals: movedTotals });
+});
+
 // POST /api/seasons/:year/initial-submission  { manager, batters, pitchers }
 // Commissioner set/override of a manager's initial (Pool Play 1) submission, at any
 // time. This is the generic, reusable replacement for the hardcoded "missing initial

@@ -6713,6 +6713,15 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         if (entry.add_date && (!addDate || entry.add_date < addDate)) addDate = entry.add_date;
         if (entry.drop_date && (!dropDate || entry.drop_date > dropDate)) dropDate = entry.drop_date;
       }
+      // Guard corrupt/backwards dates. A "drop" recorded before the player's own add — or
+      // before the season even started (e.g. a pre-season roster change made before the
+      // submission-edit feature existed) — is meaningless: the player never rostered for a real
+      // span, so don't render a backwards range.
+      const seasonStart = scheduleDates && scheduleDates[0] ? scheduleDates[0].start : null;
+      if (addDate && dropDate && dropDate < addDate) dropDate = null;
+      if (!addDate && dropDate && seasonStart && dropDate < seasonStart) {
+        return ' <span class="wrs-hist-tag">not rostered</span>';
+      }
       if (addDate || dropDate) {
         const label =
           addDate && dropDate

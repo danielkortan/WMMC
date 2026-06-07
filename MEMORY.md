@@ -1,5 +1,28 @@
 # WMMC — Decisions Log
 
+## Roster-date display hardening + duplicate repair-swap dedup (2026-06-07)
+
+Commissioner flagged odd roster displays. Diagnosed from `/api/diag/manager`:
+
+- **"Missing stats" (Juan Soto on Daniel Kortan)** was NOT a scoring bug — the engine credits
+  Soto 19+72+13=104 across PP1 Wk3–5 and the Overall total already includes it. The **My Roster
+  per-player view** read **stale roster arrays** (Wk3–5 still listed Yordan Alvarez, never updated
+  when Soto was swapped in 5/22 — scoring runs off `roster_dates`, not arrays), so Soto's line
+  only showed his first week. Fix = run the existing **`POST /api/seasons/:year/rebuild-roster-arrays`**
+  (additive; totals don't move). No code needed.
+- **"Backwards date" (Ryan Weathers)** = an intentional pre-season drop (drop_date 2026-04-29,
+  before the 5/04 season start; made before the submission-edit feature existed). His 0 is correct;
+  only the display was wrong. Hardened `notRosteredTag` (app.js): a drop earlier than the add, or a
+  drop before the season start with no add, no longer renders as a backwards range (shows
+  "not rostered").
+- **Duplicate `repair-` swaps:** a league-wide scan found 7 `repair-…` swaps (artifacts of the
+  deleted Phase-3 band-aids), 3 of which **duplicate a real swap** (Daniel/Alvarez→Soto,
+  Austin/Walker→Chisholm, Bentivegna/Cease→Suarez). Added **`POST /api/seasons/:year/dedupe-repair-swaps`**
+  (commissioner): removes only `repair-` swaps whose (manager, player_out, player_in, week_key)
+  matches a non-repair swap; keeps the 4 that are the SOLE record of a move (deleting them would
+  erase the move). Idempotent; reports removed + before/after totals (should not move, swap
+  application is idempotent — this is hygiene, not a points fix).
+
 ## Approving a not-yet-started period's submission was purged by carry-forward repair (2026-06-06)
 
 Staging smoke-test of the atomic-submission PR: approving a PP2 submission marked it approved
