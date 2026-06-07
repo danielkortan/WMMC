@@ -241,13 +241,77 @@ function applyMobilePoolPlayDefaults() {
   });
 }
 
-// Tap a period header (Pool Play 1 / 2) to collapse the whole period;
-// tap a pool header to collapse that pool. Delegated so it survives the
-// scoreboard's frequent re-renders. Manager rows keep their own toggle.
+// Organize the scoreboard into accordion sections (mobile only): rename the
+// card to "Scoreboard", group Pool Play (Overall + PP1 + PP2) under one header,
+// and give each playoff round that has data its own header. Idempotent — safe
+// to re-run on every scoreboard re-render (guards on inserted element ids).
+function buildScoreboardSections() {
+  if (!isMobile()) return;
+  const sb = document.getElementById('scoreboard-content');
+  if (!sb) return;
+
+  // Card title: "Pool Play Scoreboard" → "Scoreboard" (Pool Play is a section).
+  const title = sb.querySelector('.sb-poolplay-header h2');
+  if (title && title.textContent.trim() !== 'Scoreboard') title.textContent = 'Scoreboard';
+
+  // "Pool Play" group header above the Overall standings.
+  const overall = document.getElementById('sb-pp-overall');
+  if (overall && !document.getElementById('mob-pp-group-header')) {
+    const hdr = document.createElement('div');
+    hdr.id = 'mob-pp-group-header';
+    hdr.className = 'mob-group-header';
+    hdr.textContent = 'Pool Play';
+    overall.parentNode.insertBefore(hdr, overall);
+  }
+
+  // Playoff rounds: each gets its own header + is revealed only when it has
+  // data (a populated table). No data → stays hidden, no empty section.
+  [
+    { id: 'sb-qf', label: 'Quarterfinals' },
+    { id: 'sb-sf', label: 'Semifinals' },
+    { id: 'sb-finals', label: 'Finals' },
+  ].forEach(({ id, label }) => {
+    const sec = document.getElementById(id);
+    if (!sec) return;
+    const hasData = !!sec.querySelector('table tbody tr');
+    const hdrId = 'mob-hdr-' + id;
+    let hdr = document.getElementById(hdrId);
+    if (hasData) {
+      sec.classList.add('mob-round-section');
+      if (!hdr) {
+        hdr = document.createElement('div');
+        hdr.id = hdrId;
+        hdr.className = 'mob-group-header';
+        hdr.textContent = label;
+        sec.parentNode.insertBefore(hdr, sec);
+      }
+    } else {
+      sec.classList.remove('mob-round-section', 'mob-round-collapsed');
+      if (hdr) hdr.remove();
+    }
+  });
+}
+
+// Delegated toggles (survive the scoreboard's frequent re-renders):
+//  - accordion section header → collapse its group/round
+//  - period header (Pool Play 1 / 2) → collapse the whole period
+//  - pool header → collapse that pool
+// Manager rows keep their own (app.js) detail toggle.
 function setupPoolPlayToggles() {
   document.addEventListener('click', (e) => {
     if (!isMobile()) return;
     if (!e.target.closest('#scoreboard-content')) return;
+
+    const groupHeader = e.target.closest('.mob-group-header');
+    if (groupHeader) {
+      const collapsed = groupHeader.classList.toggle('collapsed');
+      if (groupHeader.id === 'mob-pp-group-header') {
+        document.getElementById('sb-poolplay-body')?.classList.toggle('pp-group-collapsed', collapsed);
+      } else {
+        groupHeader.nextElementSibling?.classList.toggle('mob-round-collapsed', collapsed);
+      }
+      return;
+    }
 
     const poolHeader = e.target.closest('.pool-card-header');
     if (poolHeader) {
@@ -269,6 +333,7 @@ function watchScoreboard() {
   const run = () => {
     if (!isMobile()) return;
     transformScoreboardTables();
+    buildScoreboardSections();
     applyMobilePoolPlayDefaults();
   };
 
