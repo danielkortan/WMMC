@@ -6381,52 +6381,13 @@ app.get('/api/mlb/live', async (req, res) => {
       collect(pitching, 'pitching', calculatePitchingScore);
     }
 
-    // Resolve manager + team for each player and compute running scores.
-    // Only include rostered players in the live view — unrostered names are noise here.
-    const playerRows = [];
-    for (const [, agg] of Object.entries(playerAgg)) {
-      const { name } = agg;
-      const manager =
-        findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) || findManagerForPlayer(sd, name, agg.type);
-      if (!manager) continue;
-      // Skip players dropped in an earlier week but carried forward into this week's roster
-      // object — they are excluded from the certified total, so they must not appear here either.
-      if (wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, start)) continue;
-      const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
-      const score = agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
-      const hasLive = agg.games.some((g) => g.state === 'Live');
-      const hasFinal = agg.games.some((g) => g.state === 'Final');
-      // today_score = sum of just today's game contributions, so the standings can show
-      // both this week's total and what a manager added in the current day.
-      // Respect player_dates: a player dropped before today or not yet effective today
-      // is still in the roster object (auto-advance carry-forward) but must not be credited.
-      const eligibleToday = isDateEligibleForPlayer(sd, name, agg.type, weekRound, weekName, today);
-      const todayScore = eligibleToday
-        ? agg.games.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0)
-        : 0;
-      playerRows.push({
-        name,
-        manager,
-        team: teamMap?.[name] || null,
-        type: agg.type,
-        running_score: Math.round(score * 100) / 100,
-        today_score: Math.round(todayScore * 100) / 100,
-        stats: agg.stats,
-        games_played: agg.games.length,
-        any_live: hasLive,
-        any_final: hasFinal,
-        games: agg.games.sort((a, b) => a.date.localeCompare(b.date)),
-      });
-    }
-    playerRows.sort((a, b) => b.running_score - a.running_score);
-
     // Build per-manager rosters for the active week. This league tracks rosters via roster_dates +
-    // submissions (carry-forward), so the sd.rosters arrays are usually empty — seeding only from
-    // them leaves the standings blank until a player accrues stats today. Derive each manager's
-    // active-week roster from roster_dates (most-recent add not superseded by a drop as of the
-    // week's end), classified by pool, unioned with any explicit stored arrays. Mirrors
-    // rebuildRosterArraysFromDates and managerWeekSubtotal's eligibility, so Live's roster view
-    // matches the Scoreboard's.
+    // submissions (carry-forward), so the sd.rosters arrays are usually empty — relying on them
+    // (as findManagerForPlayer* do) leaves both the standings and the per-player scoring blank.
+    // Derive each manager's active-week roster from roster_dates (most-recent add not superseded by
+    // a drop as of the week's end), classified by pool, unioned with any explicit stored arrays.
+    // Mirrors rebuildRosterArraysFromDates and managerWeekSubtotal's eligibility, so Live's roster
+    // view matches the Scoreboard's.
     const weekKey = `${weekRound}|${weekName}`;
     const batPool = new Set(sd.batters_pool || []);
     const pitPool = new Set(sd.pitchers_pool || []);
@@ -6472,6 +6433,59 @@ app.get('/api/mlb/live', async (req, res) => {
         managerPitchers[manager] = pits;
       }
     }
+
+    // Reverse index for player→manager attribution this week, built from the carry-forward rosters
+    // above. findManagerForPlayer* read the empty sd.rosters arrays and would attribute nothing, so
+    // without this the per-player scoring (Daily/Weekly + the expand panels) stays at zero. Keyed by
+    // lowercased name + type so a two-way player resolves per role.
+    const weekManagerByPlayer = {};
+    for (const [m, names] of Object.entries(managerBatters)) {
+      for (const n of names) weekManagerByPlayer[`${n.toLowerCase()}::batting`] = m;
+    }
+    for (const [m, names] of Object.entries(managerPitchers)) {
+      for (const n of names) weekManagerByPlayer[`${n.toLowerCase()}::pitching`] = m;
+    }
+
+    // Resolve manager + team for each player and compute running scores.
+    // Only include rostered players in the live view — unrostered names are noise here.
+    const playerRows = [];
+    for (const [, agg] of Object.entries(playerAgg)) {
+      const { name } = agg;
+      const manager =
+        weekManagerByPlayer[`${name.toLowerCase()}::${agg.type}`] ||
+        findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) ||
+        findManagerForPlayer(sd, name, agg.type);
+      if (!manager) continue;
+      // Skip players dropped in an earlier week but carried forward into this week's roster
+      // object — they are excluded from the certified total, so they must not appear here either.
+      if (wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, start)) continue;
+      const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
+      const score = agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
+      const hasLive = agg.games.some((g) => g.state === 'Live');
+      const hasFinal = agg.games.some((g) => g.state === 'Final');
+      // today_score = sum of just today's game contributions, so the standings can show
+      // both this week's total and what a manager added in the current day.
+      // Respect player_dates: a player dropped before today or not yet effective today
+      // is still in the roster object (auto-advance carry-forward) but must not be credited.
+      const eligibleToday = isDateEligibleForPlayer(sd, name, agg.type, weekRound, weekName, today);
+      const todayScore = eligibleToday
+        ? agg.games.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0)
+        : 0;
+      playerRows.push({
+        name,
+        manager,
+        team: teamMap?.[name] || null,
+        type: agg.type,
+        running_score: Math.round(score * 100) / 100,
+        today_score: Math.round(todayScore * 100) / 100,
+        stats: agg.stats,
+        games_played: agg.games.length,
+        any_live: hasLive,
+        any_final: hasFinal,
+        games: agg.games.sort((a, b) => a.date.localeCompare(b.date)),
+      });
+    }
+    playerRows.sort((a, b) => b.running_score - a.running_score);
 
     // For each team, classify their day relative to today's games:
     //   ACTIVE     — at least one game today is Live
