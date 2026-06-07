@@ -282,51 +282,58 @@
   }
 
   .champion-banner {
-    padding: 1.1rem 1rem 0.9rem;
+    padding: 1rem 1rem 0.85rem;
     border-radius: 12px;
-    text-align: center;
     margin-bottom: 0.75rem;
   }
 
+  /* Top row: "WMMC (year)" left, reigning champion right — balanced and
+     justified to opposite edges. Wraps to two rows on narrow screens so
+     neither side gets crowded. The season info line sits below (separate
+     .banner-footer element). */
   .banner-main {
-    flex-direction: column;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    justify-content: center;
-    gap: 0.7rem;
+    justify-content: space-between;
+    gap: 0.4rem 1rem;
   }
 
   .banner-left {
-    justify-content: center;
+    text-align: left;
   }
 
   .banner-title {
-    font-size: clamp(1.7rem, 8vw, 2.4rem);
+    font-size: clamp(1.5rem, 7vw, 2.2rem);
     letter-spacing: 1.5px;
   }
 
   .banner-right {
-    text-align: center;
-    justify-content: center;
+    text-align: right;
+    justify-content: flex-end;
+    margin-left: auto;
   }
 
   .banner-champ-label {
-    font-size: 0.78rem;
+    font-size: 0.72rem;
   }
 
   .banner-champ-name {
-    font-size: clamp(1.3rem, 6vw, 1.7rem);
+    font-size: clamp(1.15rem, 5vw, 1.5rem);
   }
 
   .banner-champ-year {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     opacity: 0.85;
   }
 
   .banner-footer {
-    font-size: clamp(0.78rem, 3.4vw, 0.95rem);
-    letter-spacing: 1px;
+    text-align: center;
+    font-size: clamp(0.74rem, 3.2vw, 0.92rem);
+    letter-spacing: 0.8px;
     opacity: 0.9;
-    margin-top: 0.85rem;
+    margin-top: 0.75rem;
   }
 
   /* ── Cards ─────────────────────────────────────────────────────── */
