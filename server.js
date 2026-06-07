@@ -1236,6 +1236,73 @@ function purgeCarriedForwardDropRecords(db) {
   return true;
 }
 
+// One-shot maintenance: undo period-boundary auto-advances. The Sunday auto-advance
+// now skips period (round) boundaries — PP1→PP2, PP2→QF, QF→SF, SF→Finals — because
+// those are populated via the roster-submission workflow. A run before that fix carried
+// a boundary week (e.g. PP2 Week 1) forward and marked it advanced. This removes those
+// carry-forward roster copies, their zero-stat weekly rows, and the advanced /
+// auto_advanced markers so the boundary week is empty again and submissions own it.
+// Safe by construction: active season only, and a week is skipped untouched if any of
+// its weekly rows carry real points (so an already-played boundary is never disturbed).
+// Score-neutral. Gated by a db flag → runs once.
+function purgeBoundaryAutoAdvance(db) {
+  if (!db || db.boundary_auto_advance_purge_done) return false;
+
+  let rostersRemoved = 0;
+  let weeklyRemoved = 0;
+  const weeksCleared = [];
+
+  for (const sd of Object.values(db.seasons || {})) {
+    if (!sd || sd.status !== 'active') continue;
+    const autoAdvanced = Array.isArray(sd.auto_advanced_weeks) ? sd.auto_advanced_weeks : [];
+    const candidates = autoAdvanced.filter((i) => isPeriodBoundaryWeek(i));
+    if (candidates.length === 0) continue;
+
+    const cleared = [];
+    for (const i of candidates) {
+      const { round, week } = SEASON_SCHEDULE[i];
+      const rowMatches = (r) => r.round === round && r.week === week;
+
+      // Never disturb a boundary week that has actually been played.
+      const hasRealStats =
+        (sd.weekly_batting || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0) ||
+        (sd.weekly_pitching || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0);
+      if (hasRealStats) continue;
+
+      const weekKey = `${round}|${week}`;
+      for (const mgrRoster of Object.values(sd.rosters || {})) {
+        if (mgrRoster[weekKey]) {
+          delete mgrRoster[weekKey];
+          rostersRemoved++;
+        }
+      }
+
+      const before = (sd.weekly_batting || []).length + (sd.weekly_pitching || []).length;
+      sd.weekly_batting = (sd.weekly_batting || []).filter((r) => !rowMatches(r));
+      sd.weekly_pitching = (sd.weekly_pitching || []).filter((r) => !rowMatches(r));
+      weeklyRemoved += before - ((sd.weekly_batting || []).length + (sd.weekly_pitching || []).length);
+
+      cleared.push(i);
+      weeksCleared.push(weekKey);
+    }
+
+    // Drop the markers for the weeks we cleared so the every-boot roster repair
+    // treats the boundary week as un-advanced and submissions can own it.
+    if (cleared.length > 0) {
+      sd.advanced_weeks = (sd.advanced_weeks || []).filter((i) => !cleared.includes(i));
+      sd.auto_advanced_weeks = autoAdvanced.filter((i) => !cleared.includes(i));
+    }
+  }
+
+  db.boundary_auto_advance_purge_done = true;
+  if (rostersRemoved > 0 || weeklyRemoved > 0) {
+    console.log(
+      `[Boundary purge] Cleared ${weeksCleared.join(', ')}: ${rostersRemoved} roster(s), ${weeklyRemoved} weekly row(s).`
+    );
+  }
+  return true;
+}
+
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
 // v6: carry-forward now folds swaps effective in a trusted seed week into the
 // baseline, so an in-season move made during the first week propagates forward.
@@ -7936,6 +8003,16 @@ async function main() {
       if (ran) writeDB(dbForPurge);
     } catch (e) {
       console.error('[Carry-forward purge] Error (continuing):', e.message);
+    }
+
+    // One-shot: undo any period-boundary auto-advance (e.g. PP2 Week 1 carried
+    // forward before boundaries were excluded). Gated by a db flag so it runs once.
+    try {
+      const dbForBoundaryPurge = readDB();
+      const ran = purgeBoundaryAutoAdvance(dbForBoundaryPurge);
+      if (ran) writeDB(dbForBoundaryPurge);
+    } catch (e) {
+      console.error('[Boundary purge] Error (continuing):', e.message);
     }
 
     // Fill / recompute per-week roster entries carrying forward approved swaps.
