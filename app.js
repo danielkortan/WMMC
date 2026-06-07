@@ -2841,23 +2841,44 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
   // Per-player date tag clipped to a single period's window, so a player's PP2 add (e.g. 6/08)
   // never renders inside their PP1 subsection. Shows only adds/drops that fall in this period.
   function periodPlayerTag(player, periodStart, periodEnd) {
-    let minAdd = null;
-    let maxDrop = null;
+    // Pair the player's add/drop events into rostered spans, then clip each to this period.
+    const events = [];
     for (const players of Object.values(detailMgrRosterDates)) {
       const e = players[player];
       if (!e) continue;
-      if (e.add_date && (!minAdd || e.add_date < minAdd)) minAdd = e.add_date;
-      if (e.drop_date && (!maxDrop || e.drop_date > maxDrop)) maxDrop = e.drop_date;
+      if (e.add_date) events.push({ date: e.add_date, type: 'add' });
+      if (e.drop_date) events.push({ date: e.drop_date, type: 'drop' });
     }
-    const addInPeriod =
-      minAdd && periodStart && minAdd > periodStart && (!periodEnd || minAdd <= periodEnd) ? minAdd : null;
-    const dropInPeriod =
-      maxDrop && (!periodStart || maxDrop >= periodStart) && (!periodEnd || maxDrop <= periodEnd) ? maxDrop : null;
-    if (!addInPeriod && !dropInPeriod) return '';
-    const a = addInPeriod ? fmtSlashDate(addInPeriod) : '';
-    const d = dropInPeriod ? fmtSlashDate(dropInPeriod) : '';
-    const label = addInPeriod && dropInPeriod ? `${a}–${d}` : addInPeriod ? `${a}–` : `–${d}`;
-    return ` <span class="wrs-hist-tag">${label}</span>`;
+    // Chronological; an add sorts before a drop on a same-day tie.
+    events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.type === 'add' ? -1 : 1));
+    const spans = [];
+    let openAdd = null;
+    for (const ev of events) {
+      if (ev.type === 'add') {
+        if (openAdd === null) openAdd = ev.date;
+      } else {
+        // A drop with no preceding add means the player was rostered from the period start
+        // (e.g. an initial-submission player later dropped) — anchor the span at periodStart.
+        spans.push([openAdd !== null ? openAdd : periodStart, ev.date]);
+        openAdd = null;
+      }
+    }
+    if (openAdd !== null) spans.push([openAdd, null]);
+
+    const parts = [];
+    for (const [s, e] of spans) {
+      if (e !== null && periodStart && e < periodStart) continue; // span ended before this period
+      if (s && periodEnd && s > periodEnd) continue; // span starts after this period
+      const cs = s && periodStart && s < periodStart ? periodStart : s; // clip start up to periodStart
+      // Only treat a drop as "in this period" when it actually falls inside the window.
+      const ce = e !== null && (!periodEnd || e <= periodEnd) && (!periodStart || e >= periodStart) ? e : null;
+      // A player rostered from the period start and never dropped within it needs no tag.
+      if (ce === null && (!periodStart || !cs || cs <= periodStart)) continue;
+      if (!cs) continue;
+      parts.push(ce ? `${fmtSlashDate(cs)}–${fmtSlashDate(ce)}` : `${fmtSlashDate(cs)}–`);
+    }
+    if (parts.length === 0) return '';
+    return ` <span class="wrs-hist-tag">${parts.join(', ')}</span>`;
   }
 
   // Whether the player is still rostered as of a period's end (latest add with no later drop).
@@ -2882,6 +2903,50 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
     return !latestDrop || (latestAdd && latestAdd > latestDrop);
   }
 
+  // Order players so a swapped-in player sits directly beneath the player he replaced (e.g. Logan
+  // Webb → Kyle Harrison), making a drop/add easy to trace. Each chain sorts by its best scorer so
+  // a strong swap-in still floats near the top, carrying its predecessor with it.
+  function orderWithSwapChains(names, scoreByPlayer) {
+    const nameSet = new Set(names);
+    const chainSwaps = (sd.swaps || [])
+      .filter((s) => {
+        if (!s.player_out || !s.player_in) return false; // only true 1-for-1 swaps can pair
+        if (s.status && s.status !== 'approved') return false; // skip pending/denied
+        const swapMgr = s.manager || (findManagerByEmail(s.email) || {}).name;
+        return swapMgr === managerName && nameSet.has(s.player_out) && nameSet.has(s.player_in);
+      })
+      .slice()
+      .sort((a, b) => (a.swap_date || a.timestamp || '').localeCompare(b.swap_date || b.timestamp || ''));
+    const childrenByParent = {};
+    const isSwapIn = new Set();
+    chainSwaps.forEach((s) => {
+      (childrenByParent[s.player_out] = childrenByParent[s.player_out] || []).push(s.player_in);
+      isSwapIn.add(s.player_in);
+    });
+    const chainMax = (name) => {
+      let best = scoreByPlayer[name] || 0;
+      (childrenByParent[name] || []).forEach((c) => (best = Math.max(best, chainMax(c))));
+      return best;
+    };
+    const ordered = [];
+    const seen = new Set();
+    const visit = (name) => {
+      if (seen.has(name)) return;
+      seen.add(name);
+      ordered.push(name);
+      (childrenByParent[name] || [])
+        .slice()
+        .sort((a, b) => chainMax(b) - chainMax(a))
+        .forEach(visit);
+    };
+    names
+      .filter((n) => !isSwapIn.has(n))
+      .sort((a, b) => chainMax(b) - chainMax(a))
+      .forEach(visit);
+    names.forEach(visit); // safety net for swap cycles / leftovers
+    return ordered;
+  }
+
   // Build one period's Batters or Pitchers table. Per-player points use the same carry-forward
   // subtotal (managerWeekSubtotal + detailOut) that feeds the manager's period totals, so the
   // rows reconcile to the period subtotal — a swapped-in/never-dropped player (a mid-period add
@@ -2904,8 +2969,7 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
     const body =
       names.length === 0
         ? '<tr><td colspan="2" class="text-muted" style="font-size:0.82rem;">None</td></tr>'
-        : names
-            .sort((a, b) => (scoreByPlayer[b] || 0) - (scoreByPlayer[a] || 0))
+        : orderWithSwapChains(names, scoreByPlayer)
             .map((name) => {
               const pts = Math.round((scoreByPlayer[name] || 0) * 100) / 100;
               const active = activeAsOf(name, p.lastEnd);
