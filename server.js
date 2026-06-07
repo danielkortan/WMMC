@@ -628,6 +628,24 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
       }
     }
 
+    // schedule_dates (per-week start/end) defines every add/drop scoring window and is written
+    // only by Season Setup's schedule computation — it is otherwise stable for the whole season.
+    // A stale client save that lacks it (a browser whose cached season predates setup) must never
+    // blank it: an empty schedule silently turns every `add_date <= weekEnd` eligibility check into
+    // "always eligible", leaking dropped and future-period players across all weeks and corrupting
+    // scoring league-wide. Preserve the server's copy unless the payload carries a complete schedule
+    // (>= the stored length) — a real Season Setup save always sends all 16 weeks.
+    if (Array.isArray(existingSd.schedule_dates) && existingSd.schedule_dates.length > 0) {
+      const incomingDates = Array.isArray(sd.schedule_dates) ? sd.schedule_dates : [];
+      if (incomingDates.length < existingSd.schedule_dates.length) {
+        console.error(
+          `[Save guard] Save for ${req.params.year} carried ${incomingDates.length} schedule_dates vs ` +
+            `${existingSd.schedule_dates.length} stored — preserving the stored schedule to protect add/drop windows.`
+        );
+        sd.schedule_dates = existingSd.schedule_dates;
+      }
+    }
+
     // Roster submissions are server-authoritative: they are written only via the atomic
     // /api/seasons/:year/submissions endpoints (POST upsert, DELETE remove/clear). Preserve
     // the server's copy here so a stale full-season save from one browser can't clobber a
