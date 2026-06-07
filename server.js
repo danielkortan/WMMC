@@ -7240,9 +7240,20 @@ function getNextEasternSunday(hour) {
   return new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 }
 
+// A period (round) boundary is a week whose round differs from the prior week's
+// — e.g. PP1 Week 5 → PP2 Week 1, PP2 Week 5 → QF Week 1, QF → SF, SF → Finals.
+// Auto-advance never crosses these: managers populate the new period via the
+// roster-submission workflow, not carry-forward. Mid-period week changes
+// (Week 1 → 2, 2 → 3, and the mid-round week change inside a playoff round)
+// DO auto-advance.
+function isPeriodBoundaryWeek(i) {
+  return i > 0 && SEASON_SCHEDULE[i].round !== SEASON_SCHEDULE[i - 1].round;
+}
+
 // Determine which week index should be auto-advanced on Sunday at 6am.
 // Prefers the week whose start date is tomorrow (the Monday that begins it).
 // Falls back to the first un-advanced week that has prior-week roster data.
+// Period-boundary weeks are skipped — those are handled by submissions.
 function findAutoAdvanceWeekIndex(sd) {
   const TZ = 'America/New_York';
   const dates = sd.schedule_dates || [];
@@ -7252,6 +7263,7 @@ function findAutoAdvanceWeekIndex(sd) {
   const tomorrowET = new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(tomorrow);
 
   for (let i = 1; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    if (isPeriodBoundaryWeek(i)) continue;
     const { start } = dates[i] || {};
     if (start === tomorrowET && !advanced.includes(i)) return i;
   }
@@ -7260,6 +7272,7 @@ function findAutoAdvanceWeekIndex(sd) {
   const rosters = sd.rosters || {};
   for (let i = 1; i < SEASON_SCHEDULE.length; i++) {
     if (advanced.includes(i)) continue;
+    if (isPeriodBoundaryWeek(i)) continue;
     const priorSched = SEASON_SCHEDULE[i - 1];
     const priorKey = `${priorSched.round}|${priorSched.week}`;
     const hasPriorData = Object.values(rosters).some((r) => r[priorKey] && (r[priorKey].batters || []).length > 0);
@@ -7941,7 +7954,9 @@ async function main() {
     scheduleMLBApiSync();
     // Start the daily scoreboard post scheduler (7am)
     scheduleScoreboardPost();
-    // Auto-advance all active players to the next week every Sunday at 6am Eastern.
+    // Auto-advance active rosters to the next week every Sunday at 6am Eastern,
+    // for mid-period week changes only. Period (round) boundaries — PP1→PP2,
+    // PP2→QF, QF→SF, SF→Finals — are skipped; those use roster submissions.
     scheduleWeeklyAutoAdvance();
   });
 }
