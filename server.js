@@ -26,6 +26,9 @@ const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'Welcome2Hell';
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || '';
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 const UPSTASH_KEY = 'wmmc_db';
+// Dated, auto-expiring backup keys (wmmc_db_bak_YYYY-MM-DD) give a rolling history of restore
+// points — the primary UPSTASH_KEY is overwritten on every save and keeps none. ~14 days.
+const DB_BACKUP_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 // General notifications webhook (roster swaps, sync errors, etc.)
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
@@ -235,6 +238,57 @@ async function saveToUpstash(data) {
   } catch (e) {
     console.error('[Upstash] Save failed:', `(${body.length} bytes)`, e.message);
     return { ok: false, bytes: body.length, error: e.message };
+  }
+}
+
+// Write a dated, auto-expiring snapshot of the DB under wmmc_db_bak_<YYYY-MM-DD>. Unlike the
+// live UPSTASH_KEY (overwritten on every save, no history), these rotate themselves via EX and
+// give ~2 weeks of daily restore points — so a bad write or boot migration is recoverable
+// instead of lost. Called on boot, capturing the as-restored (pre-migration) state.
+async function saveTimestampedBackup(data) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return { ok: false, skipped: true };
+  const dateKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD; later deploys refresh same-day key
+  const key = `${UPSTASH_KEY}_bak_${dateKey}`;
+  const body = JSON.stringify(JSON.stringify(data));
+  try {
+    const resp = await fetch(`${UPSTASH_URL}/set/${key}?EX=${DB_BACKUP_TTL_SECONDS}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+      body,
+    });
+    if (!resp.ok) {
+      console.error('[Upstash] Backup save error:', resp.status, `(${body.length} bytes)`);
+      return { ok: false, status: resp.status };
+    }
+    return { ok: true, key };
+  } catch (e) {
+    console.error('[Upstash] Backup save failed:', `(${body.length} bytes)`, e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Boot-time data-integrity audit. The schedule_dates wipe was invisible for hours because
+// nothing watched for it; this surfaces that class of silent corruption by logging and posting
+// a Slack alert when an active season is missing data its scoring depends on. Detection only —
+// it never mutates state.
+async function auditSeasonIntegrity(db) {
+  const problems = [];
+  for (const [year, sd] of Object.entries((db && db.seasons) || {})) {
+    if (!sd || sd.status !== 'active') continue;
+    const schedLen = Array.isArray(sd.schedule_dates) ? sd.schedule_dates.length : 0;
+    if (schedLen < 16) {
+      problems.push(`${year}: schedule_dates has ${schedLen}/16 weeks — every add/drop scoring window is disabled.`);
+    }
+    if (!Array.isArray(sd.score_snapshots) || sd.score_snapshots.length === 0) {
+      problems.push(`${year}: no score-guard snapshots stored — swing detection is blind.`);
+    }
+  }
+  if (problems.length === 0) return;
+  console.error('[Integrity]', problems.join(' | '));
+  try {
+    await postSlack(':rotating_light: *WMMC integrity check found issues at startup:*\n• ' + problems.join('\n• '));
+  } catch (e) {
+    console.error('[Integrity] Slack alert failed:', e.message);
   }
 }
 
@@ -531,6 +585,13 @@ app.post('/api/seasons', requireCommissioner, (req, res) => {
 });
 
 // POST /api/seasons/:year — save a single season
+// Build identifier — ASSET_VERSION is set once per process start, so it changes on every
+// deploy/restart. The client polls this and prompts a reload when it differs from the value it
+// loaded with, so an open tab can't keep running stale code after a deploy.
+app.get('/api/build', (req, res) => {
+  res.json({ build: ASSET_VERSION });
+});
+
 app.post('/api/seasons/:year', requireAuth, (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
@@ -8203,6 +8264,17 @@ async function main() {
     }
   }
 
+  // Snapshot the as-restored DB to a dated, auto-expiring backup key before this boot's
+  // migrations run, so we always keep a pre-deploy restore point (the live key keeps none).
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      const r = await saveTimestampedBackup(readDB());
+      if (r.ok) console.log(`[Upstash] Dated backup written: ${r.key}`);
+    } catch (e) {
+      console.error('[Upstash] Dated backup error (continuing):', e.message);
+    }
+  }
+
   app.listen(PORT, async () => {
     console.log(`WMMC server running at http://localhost:${PORT}`);
     if (!fs.existsSync(DB_FILE)) {
@@ -8350,6 +8422,35 @@ async function main() {
       if (healed) writeDB(dbForArrayHeal);
     } catch (e) {
       console.error('[Roster array heal] Error (continuing):', e.message);
+    }
+
+    // One-time: seed a score-guard baseline snapshot for any active season whose trail is empty,
+    // so the guard has a reference to diff against and the audit below doesn't flag an empty trail.
+    // Runs after this boot's recompute/heals, so the baseline reflects corrected totals. Idempotent
+    // — skips once a trail exists.
+    try {
+      const dbForSeed = readDB();
+      const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      let seeded = false;
+      for (const sd of Object.values(dbForSeed.seasons || {})) {
+        if (!sd || sd.status !== 'active') continue;
+        if (Array.isArray(sd.score_snapshots) && sd.score_snapshots.length > 0) continue;
+        recordScoreSnapshot(sd, captureScoreSnapshot(sd, todayET));
+        seeded = true;
+      }
+      if (seeded) {
+        writeDB(dbForSeed);
+        console.log('[Score guard] Seeded baseline snapshot for active season(s) with an empty trail.');
+      }
+    } catch (e) {
+      console.error('[Score guard] Snapshot seed error (continuing):', e.message);
+    }
+
+    // Surface silent data corruption (e.g. a wiped schedule_dates) loudly at startup.
+    try {
+      await auditSeasonIntegrity(readDB());
+    } catch (e) {
+      console.error('[Integrity] audit error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler (no-op while config.enabled=false,

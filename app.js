@@ -993,6 +993,7 @@ async function loadData() {
 
   setupLoginHandlers();
   initGoogleSignIn();
+  startVersionWatcher();
 }
 
 // ============================================================
@@ -1474,6 +1475,64 @@ function buildSeasonSelector() {
     SELECTED_SEASON = select.value;
     await syncFromServer();
     init();
+  });
+}
+
+// ============================================================
+// Version watcher — prompt a reload when a new build is deployed
+// ============================================================
+// GET /api/build returns ASSET_VERSION, which changes on every deploy/restart. We capture it
+// once on load, then poll; when it changes, this tab is running stale code, so we surface a
+// non-blocking "Reload" prompt. Gentle alternative to forcing logout on every deploy.
+let _versionWatcherStarted = false;
+let _loadedBuild = null;
+
+async function fetchBuild() {
+  try {
+    const r = await fetch('/api/build', { cache: 'no-store' });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d && d.build != null ? d.build : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function showVersionUpdateBanner() {
+  if (document.getElementById('version-update-banner')) return;
+  const bar = document.createElement('div');
+  bar.id = 'version-update-banner';
+  bar.setAttribute('role', 'alert');
+  bar.style.cssText =
+    'position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#1e3a5f;color:#fff;' +
+    'padding:0.75rem 1rem;display:flex;align-items:center;justify-content:center;gap:0.75rem;' +
+    'font-size:0.9rem;box-shadow:0 -2px 10px rgba(0,0,0,0.25);';
+  const msg = document.createElement('span');
+  msg.textContent = 'A new version of WMMC is available.';
+  const btn = document.createElement('button');
+  btn.textContent = 'Reload';
+  btn.style.cssText =
+    'background:#fff;color:#1e3a5f;border:none;border-radius:6px;padding:0.35rem 0.9rem;font-weight:600;cursor:pointer;';
+  btn.onclick = () => window.location.reload();
+  bar.appendChild(msg);
+  bar.appendChild(btn);
+  document.body.appendChild(bar);
+}
+
+async function checkBuild() {
+  if (_loadedBuild == null) return;
+  const current = await fetchBuild();
+  if (current != null && current !== _loadedBuild) showVersionUpdateBanner();
+}
+
+async function startVersionWatcher() {
+  if (_versionWatcherStarted) return;
+  _versionWatcherStarted = true;
+  _loadedBuild = await fetchBuild();
+  if (_loadedBuild == null) return; // endpoint unavailable (older server) — watcher stays inert
+  setInterval(checkBuild, 60000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkBuild();
   });
 }
 
