@@ -6420,16 +6420,57 @@ app.get('/api/mlb/live', async (req, res) => {
     }
     playerRows.sort((a, b) => b.running_score - a.running_score);
 
-    // Build per-manager roster team sets for the active week. Also keep the player lists
-    // so we can count Live/Done/Remaining at the player level (today only) below.
+    // Build per-manager rosters for the active week. This league tracks rosters via roster_dates +
+    // submissions (carry-forward), so the sd.rosters arrays are usually empty — seeding only from
+    // them leaves the standings blank until a player accrues stats today. Derive each manager's
+    // active-week roster from roster_dates (most-recent add not superseded by a drop as of the
+    // week's end), classified by pool, unioned with any explicit stored arrays. Mirrors
+    // rebuildRosterArraysFromDates and managerWeekSubtotal's eligibility, so Live's roster view
+    // matches the Scoreboard's.
     const weekKey = `${weekRound}|${weekName}`;
+    const batPool = new Set(sd.batters_pool || []);
+    const pitPool = new Set(sd.pitchers_pool || []);
     const managerBatters = {}; // manager -> string[]
     const managerPitchers = {}; // manager -> string[]
-    for (const [manager, weekRosters] of Object.entries(sd.rosters || {})) {
-      const roster = weekRosters?.[weekKey];
-      if (!roster) continue;
-      managerBatters[manager] = [...(roster.batters || [])];
-      managerPitchers[manager] = [...(roster.pitchers || [])];
+    const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
+    for (const manager of allManagerNames) {
+      const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
+      const bats = [...(stored.batters || [])];
+      const pits = [...(stored.pitchers || [])];
+
+      const mgrDates = (sd.roster_dates || {})[manager];
+      if (mgrDates && typeof mgrDates === 'object') {
+        // Latest add / drop for each player as of this week's end.
+        const latestAdd = {};
+        const latestDrop = {};
+        for (const players of Object.values(mgrDates)) {
+          if (!players || typeof players !== 'object') continue;
+          for (const [p, d] of Object.entries(players)) {
+            if (d.add_date && (!end || d.add_date <= end) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+              latestAdd[p] = d.add_date;
+            }
+            if (d.drop_date && (!end || d.drop_date <= end) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+              latestDrop[p] = d.drop_date;
+            }
+          }
+        }
+        for (const p of Object.keys(latestAdd)) {
+          if (latestDrop[p] && latestAdd[p] <= latestDrop[p]) continue; // dropped and not re-added
+          const inBat = batPool.has(p);
+          const inPit = pitPool.has(p);
+          if (inBat && !inPit) {
+            if (!bats.includes(p)) bats.push(p);
+          } else if (inPit && !inBat) {
+            if (!pits.includes(p)) pits.push(p);
+          }
+          // both/neither pool: can't classify confidently — rely on the stored arrays.
+        }
+      }
+
+      if (bats.length || pits.length) {
+        managerBatters[manager] = bats;
+        managerPitchers[manager] = pits;
+      }
     }
 
     // For each team, classify their day relative to today's games:
