@@ -2563,6 +2563,23 @@ function buildScoreboardBlocks(db, year) {
   const blocks = [];
 
   blocks.push({ type: 'header', text: { type: 'plain_text', text: `⚾ WMMC Scoreboard — ${year}`, emoji: true } });
+
+  // Warn managers when the most recent automated compile failed/was blocked, so they
+  // know these numbers may be stale. Cleared automatically by the next successful sync.
+  const syncStatus = seasonData.last_sync_status;
+  if (syncStatus && syncStatus.ok === false) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          '\u{26A0}\u{FE0F} *Heads up — this morning’s score update did not complete.* ' +
+          'Yesterday’s stats may be missing or incomplete. The commissioner has been notified and is reviewing; ' +
+          'standings below reflect the last verified totals.',
+      },
+    });
+  }
+
   const periodLabel = currentWeek ? `${currentRoundLabel} - ${currentWeek}` : currentRoundLabel;
   const roundEndLabel = roundEndDate
     ? new Date(roundEndDate + 'T12:00:00Z').toLocaleDateString('en-US', {
@@ -4695,6 +4712,7 @@ app.post('/api/mlb/sync-current', requireCommissioner, async (req, res) => {
       });
     }
     recordScoreSnapshot(sd, guard.snapshot);
+    sd.last_sync_status = { ok: true, date: todayET, at: new Date().toISOString() };
 
     db.seasons[year] = sd;
     writeDB(db);
@@ -4732,6 +4750,7 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
       });
     }
     recordScoreSnapshot(sd, guard.snapshot);
+    sd.last_sync_status = { ok: true, date: todayET, at: new Date().toISOString() };
 
     db.seasons[year] = sd;
     addAuditEntry(db, 'mlbapi_sync', {
@@ -7847,6 +7866,23 @@ function detectScheduleWeekForDate(sd, dateISO) {
 //    round never goes back and re-syncs the previous round.
 //
 //  Commissioner Sync Now — same as Wednesday correction (current + prior week).
+
+// Persist a small last-sync status marker on the active season so the Slack scoreboard
+// can warn managers when the most recent automated compile failed/was blocked. Reads a
+// FRESH db copy so a blocked run (whose in-memory sd holds rejected scores) records only
+// the status, never the bad numbers. Self-derives the season from config.
+function recordSyncStatus(status) {
+  try {
+    const sdb = readDB();
+    const season = (sdb.google_sheets_config || {}).season || new Date().getFullYear().toString();
+    if (!sdb.seasons || !sdb.seasons[season]) return;
+    sdb.seasons[season].last_sync_status = status;
+    writeDB(sdb);
+  } catch (e) {
+    console.error('[MLB-API] Failed to record sync status:', e.message);
+  }
+}
+
 function scheduleMLBApiSync() {
   if (mlbApiSyncTimer) clearTimeout(mlbApiSyncTimer);
 
@@ -7949,14 +7985,24 @@ function scheduleMLBApiSync() {
             trigger: 'auto-4am',
             year: season,
           });
+          const nowISO = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
           if (guard.blocked) {
             const lines = guard.report.blockers.map((s) => `${s.manager} ${s.delta}`).join(', ');
             console.error(`[MLB-API] Score guard BLOCKED write — not persisting. Drops: ${lines}`);
-            // Don't writeDB — the Slack alert (sent by evaluateScoreGuard) is the
-            // durable record; an audit entry here would be discarded with the db.
+            // Don't writeDB the rejected scores — but record a status marker (fresh db
+            // copy) so the 7am scoreboard can warn managers. The Slack alert (sent by
+            // evaluateScoreGuard) remains the commissioner-facing record.
+            recordSyncStatus({
+              ok: false,
+              reason: 'guard_blocked',
+              date: nowISO,
+              at: new Date().toISOString(),
+              detail: lines,
+            });
             dirty = false; // skip the write below — keep last-good scores
           } else {
             recordScoreSnapshot(sd, guard.snapshot);
+            sd.last_sync_status = { ok: true, date: nowISO, at: new Date().toISOString() };
           }
         }
 
@@ -7976,6 +8022,13 @@ function scheduleMLBApiSync() {
     } catch (e) {
       console.error('[MLB-API] Daily sync error:', e.message);
       postSlack(`*MLB API daily sync failed*\n${e.message}`).catch(() => {});
+      recordSyncStatus({
+        ok: false,
+        reason: 'error',
+        date: now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }),
+        at: new Date().toISOString(),
+        detail: e.message,
+      });
     }
 
     const next = getNextEasternHour(4);
