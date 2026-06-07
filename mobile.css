@@ -657,7 +657,13 @@
   }
 
   /* ── Manager detail (player list) pop-down — full width, readable ── */
-  #scoreboard-content .sb-manager-detail-row,
+  /* Leave the <tr> display to JS — it toggles inline display:none to collapse
+     the panel. Forcing display here would pin every panel open (stuck on its
+     "Loading…" placeholder). Only the <td> becomes a full-width block. */
+  #scoreboard-content .sb-manager-detail-row {
+    width: 100% !important;
+  }
+
   #scoreboard-content .sb-manager-detail-row td {
     display: block !important;
     width: 100% !important;
