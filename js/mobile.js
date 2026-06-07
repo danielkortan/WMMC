@@ -149,6 +149,53 @@ function watchCommissioner() {
   update();
 }
 
+// ── Banner: auto-fit the reigning-champion name ───────────────────
+// The title is fixed-width and the trophy is fixed, so the champion block has
+// a fixed amount of room. Shrink ONLY the champion name's font until it fits
+// that room — a long name scales down instead of pushing, wrapping, or
+// resizing anything else in the banner.
+function fitBannerChampName() {
+  if (!isMobile()) return;
+  const banner = document.getElementById('champion-banner');
+  const nameEl = banner && banner.querySelector('.banner-champ-name');
+  if (!nameEl) return;
+
+  // Reset to the CSS (clamp) size, then measure once layout settles.
+  nameEl.style.fontSize = '';
+  requestAnimationFrame(() => {
+    let size = parseFloat(getComputedStyle(nameEl).fontSize) || 16;
+    const MIN = 10;
+    let guard = 60;
+    // scrollWidth is the text's intrinsic width; clientWidth is the bounded box.
+    while (nameEl.scrollWidth > nameEl.clientWidth + 0.5 && size > MIN && guard-- > 0) {
+      size -= 0.5;
+      nameEl.style.fontSize = size + 'px';
+    }
+  });
+}
+
+function watchBanner() {
+  const banner = document.getElementById('champion-banner');
+  if (!banner) return;
+
+  // Re-fit whenever the banner content is (re)rendered. Observe childList only
+  // so our own inline font-size tweaks (attribute changes) don't re-trigger it.
+  new MutationObserver(() => fitBannerChampName()).observe(banner, {
+    childList: true,
+    subtree: true,
+  });
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(fitBannerChampName, 150);
+  });
+
+  fitBannerChampName();
+  // Re-fit after web fonts finish loading (metrics can shift).
+  setTimeout(fitBannerChampName, 500);
+}
+
 // ── Scoreboard landing transforms ─────────────────────────────────
 
 // Tag manager summary rows so the CSS can lay them out as flex cards
@@ -237,6 +284,7 @@ function watchScoreboard() {
 function init() {
   if (!isMobile()) return;
   buildMobileNav();
+  watchBanner();
   setupPoolPlayToggles();
   watchScoreboard();
 }

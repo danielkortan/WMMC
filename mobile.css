@@ -300,10 +300,11 @@
     gap: 0.5rem;
   }
 
+  /* Title is fixed-width — it is never resized by a long champion name. */
   .banner-left {
     text-align: left;
+    flex: 0 0 auto;
     min-width: 0;
-    flex: 0 1 auto;
   }
 
   .banner-title {
@@ -312,18 +313,29 @@
     white-space: nowrap;
   }
 
+  /* Champion block takes the leftover space (a fixed amount, since the title
+     is fixed). The name auto-fits into it via fitBannerChampName() in
+     js/mobile.js, so a long name shrinks instead of resizing anything else. */
   .banner-right {
     text-align: right;
     justify-content: flex-end;
     align-items: center;
     gap: 0.4rem !important; /* tighten trophy ↔ text (overrides inline gap) */
+    flex: 1 1 auto;
     min-width: 0;
-    flex: 0 1 auto;
+    overflow: hidden;
   }
 
-  /* Shrink the trophy glyph (overrides the inline 2.5rem set in app.js) */
+  /* Trophy: shrink the glyph (overrides inline 2.5rem) and never let it shrink */
   .banner-right > div:first-child {
     font-size: 1.4rem !important;
+    flex-shrink: 0;
+  }
+
+  /* label / name / year text block — bounded so the name can be measured + fit */
+  .banner-right > div:last-child {
+    min-width: 0;
+    overflow: hidden;
   }
 
   .banner-champ-label {
@@ -335,6 +347,8 @@
   .banner-champ-name {
     font-size: clamp(1rem, 4.6vw, 1.5rem);
     white-space: nowrap;
+    display: block;
+    overflow: hidden;
   }
 
   .banner-champ-year {
