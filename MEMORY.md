@@ -1,5 +1,88 @@
 # WMMC — Decisions Log
 
+## Approving a not-yet-started period's submission was purged by carry-forward repair (2026-06-06)
+
+Staging smoke-test of the atomic-submission PR: approving a PP2 submission marked it approved
+but the 7 players never appeared on the manager's PP2 Week 1 roster (no error). Server side was
+proven correct (the full-save persists the roster); the culprit is **client-only**
+`repairCarryForwardRosters`, which runs on every `renderRosterData` and **purges any future-week
+roster (weekStart > today) whose index isn't in `advanced_weeks`** ("speculative future write"
+guard). Submission windows open _before_ a round starts, so an approved PP2/QF/SF/Finals roster
+(and now PP1, since its window opens early too) is written to a future week and immediately wiped
+on the next render.
+
+Fix: in `approvePeriodSubmission` / `approveInitialSubmission`, when the period's Week 1 is still
+in the future (`weekStart > todayET`), push that week index into `sd.advanced_weeks` so the purge
+treats it as a legitimate write. Surgical — only marks the week when it's actually future
+(current/past-week approvals, e.g. PP1 at normal season start, are untouched). Pre-existing latent
+bug, exposed by the early submission windows; fixed as part of the submission PR since it blocks
+the very flow being shipped.
+
+## Atomic roster-submission endpoints — stop lost/clobbered submissions (2026-06-06)
+
+Commissioner saw a manager's PP2 submission on the manager's device (pending) but not in
+their own queue. Root cause: roster submissions (PP1 + PP2/playoff) were written **only**
+through the fire-and-forget full-season save (`saveSeason` → background `POST /api/seasons/:year`
+with `.catch(()=>{})`). Two failure modes: (1) the POST fails silently on a weak connection →
+submission lives in localStorage only; (2) `initial_submissions`/`period_submissions` were **not**
+merge-protected on the server, so a stale full-season save from another browser (e.g. the
+commissioner working the queue) overwrote a submission someone else just made. Same class of
+bug as the lost-swaps fix (#257, `d7286a6`); submissions just never got the same treatment.
+
+Fix mirrors the swap fix:
+
+- **Server:** `POST /api/seasons/:year/submissions` (upsert one manager's submission for a
+  period; server stamps `submitted_at`/`approved_at`), `DELETE …/submissions/:period/:manager`
+  (remove one), `DELETE …/submissions` (clear all — for Reset Season Data). `submissionBucket()`
+  routes pp1→`initial_submissions`, others→`period_submissions[period]`.
+- **Server full-save is now server-authoritative for submissions:** in `POST /api/seasons/:year`
+  the `existingSd` merge block resets `sd.initial_submissions`/`sd.period_submissions` to the
+  server's copy, so a full-season save can never clobber them. (Brand-new season has no
+  `existingSd`, so its first save still establishes the empty buckets.)
+- **Client:** added `persistSubmission(period, manager, sub)` + `removeSubmissionRemote()` +
+  `mirrorSubmissionLocally()` (await a confirmed response, mirror into localStorage, alert on
+  failure). Rewired **all 14** submission handlers (add/remove/submit/approve/deny/edit/delete
+  for PP1 and the periods) to await these instead of `saveSeason`. Approve/edit-approved persist
+  the submission **first**, then do their roster/`roster_dates` side-effects via `saveSeason`
+  (rosters are still saved the old way; only the submission buckets moved). Reset Season Data
+  also calls the bulk `DELETE …/submissions`.
+
+Note: `backfillSubmissionTimestamps` still uses `saveSeason`, so its cosmetic timestamp fills
+no longer persist server-side (they apply to the local view each load — harmless). Auth posture
+unchanged (`requireAuth` on upsert/delete, matching the full-season save it replaces).
+
+## PP1 submission window gating + delete capability (2026-06-06)
+
+Commissioner saw stray "Pool Play 1 / Pending" entries during the PP2 window and
+read them as misrouted PP2 submissions. They weren't — PP1/PP2 routing is correct
+(`getPeriodSub`/`ensurePeriodSub` keep `initial_submissions` vs
+`period_submissions[period]` strictly separate). Root cause: the legacy PP1
+("initial") submission card never closed. Unlike `buildPeriodSubmissionCard`
+(pp2/qf/sf/finals), the PP1 card's editable branch had **no `isPeriodTimeOpen`
+check**, so a manager whose PP1 was never approved still saw a fully editable +
+submittable PP1 form mid-season and could drop a fresh `pending` PP1 into the queue.
+Worse: `repairGhostInitialRosterPlayers` (runs every active-season render) treats any
+**populated** `initial_submissions` record — even `pending` — as the authoritative
+Week-1 roster and purges Week-1 players/stats not in it, so a stray PP1 re-submission
+with a different roster can silently corrupt PP1 scores.
+
+- **PP1 now uses the same window as every other period:** added `pp1: 'PP1'` to
+  `PERIOD_OPEN_ROUND`, so PP1 opens the Friday before its Week 1 (3 days before the
+  Monday start) and closes at its first games (`getPeriodFirstGame`, already had pp1).
+  Behavior change for **future** seasons only (PP1 used to open as soon as the pool
+  was uploaded); current season's PP1 is long past so it now reads as closed.
+- **Gated the PP1 card's editable form** on `isPeriodTimeOpen(sd,'pp1')`, mirroring the
+  playoff cards' "opens X" / "window has closed" states. No more editable/submittable
+  PP1 form after PP1 has begun.
+- **Added `deleteInitialSubmission(manager)`** (+ a "Delete" button on the commissioner
+  PP1 pending entry). Unlike Deny (leaves an empty `draft` record), this removes the
+  `initial_submissions[manager]` key entirely. Safe: the season-save POST does not
+  merge-protect `initial_submissions`, and the actual Week-1 roster lives in
+  `sd.rosters` — deletion clears only the submission artifact and drops the manager
+  from the ghost-purge loop. Used to clear the stray PP1 entries.
+
+Frontend-only (`app.js`); no `SCORING`/`SEASON_SCHEDULE`/server changes.
+
 ## Phase 3 — retire the hardcoded band-aids (2026-06-06)
 
 After the eligibility + array fixes stabilized the league, removed the first-season

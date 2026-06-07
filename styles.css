@@ -1105,12 +1105,18 @@ input[type='file'] {
   margin-top: 0;
 }
 
-.tl-submission-deadline {
-  font-size: 0.72rem;
+.tl-submission-window {
+  font-size: 0.76rem;
   font-weight: 500;
   text-transform: none;
   letter-spacing: 0;
   color: var(--text-muted);
+  margin: 0 0 0.5rem -0.5rem;
+}
+
+.tl-submission-window strong {
+  color: var(--text);
+  font-weight: 700;
 }
 
 .tl-item {

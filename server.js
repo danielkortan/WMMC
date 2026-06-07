@@ -602,6 +602,14 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
         }
       }
     }
+
+    // Roster submissions are server-authoritative: they are written only via the atomic
+    // /api/seasons/:year/submissions endpoints (POST upsert, DELETE remove/clear). Preserve
+    // the server's copy here so a stale full-season save from one browser can't clobber a
+    // submission another user just made — the exact bug this replaces. (A brand-new season
+    // has no existingSd, so its first save still establishes the empty buckets normally.)
+    sd.initial_submissions = existingSd.initial_submissions || {};
+    sd.period_submissions = existingSd.period_submissions || {};
   }
 
   // Propagate roster add dates into player_dates for mid-week adds, then zero out
@@ -686,6 +694,115 @@ app.post('/api/seasons/:year/swaps', requireAuth, (req, res) => {
   postSlack(
     `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
   ).catch(() => {});
+});
+
+// ---- Atomic roster-submission endpoints (PP1 + PP2/playoff periods) ----
+//
+// Roster submissions used to ride the full-season save (POST /api/seasons/:year), whose
+// background, error-swallowing call meant a submission could land in localStorage only
+// (invisible to the server) or be silently clobbered by a stale full-season save from a
+// different browser. These small atomic endpoints own the submission buckets instead — and
+// the full-season save now treats those buckets as server-authoritative (see below) — so a
+// submission persists reliably and can't be wiped by an unrelated save. Mirrors the
+// /api/seasons/:year/swaps fix.
+const SUBMISSION_PERIODS = ['pp1', 'pp2', 'qf', 'sf', 'finals'];
+
+function submissionBucket(sd, period) {
+  if (period === 'pp1') {
+    if (!sd.initial_submissions) sd.initial_submissions = {};
+    return sd.initial_submissions;
+  }
+  if (!sd.period_submissions) sd.period_submissions = {};
+  if (!sd.period_submissions[period]) sd.period_submissions[period] = {};
+  return sd.period_submissions[period];
+}
+
+// POST /api/seasons/:year/submissions — upsert one manager's submission for a period.
+// Body: { period, manager, batters[], pitchers[], status }. The server stamps
+// submitted_at / approved_at so timestamps reflect the real moment, not a client clock.
+app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { period, manager, batters, pitchers, status } = req.body || {};
+  if (
+    !manager ||
+    !SUBMISSION_PERIODS.includes(period) ||
+    !Array.isArray(batters) ||
+    !Array.isArray(pitchers) ||
+    !['draft', 'pending', 'approved'].includes(status)
+  ) {
+    return res.status(400).json({ error: 'period, manager, batters[], pitchers[] and a valid status are required' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const bucket = submissionBucket(sd, period);
+  const existing = bucket[manager] || {};
+  const now = new Date().toISOString();
+  const submission = { ...existing, batters, pitchers, status };
+  if (status === 'draft') {
+    delete submission.submitted_at;
+    delete submission.approved_at;
+  } else {
+    submission.submitted_at = existing.submitted_at || now;
+    if (status === 'approved') submission.approved_at = now;
+    else delete submission.approved_at;
+  }
+  bucket[manager] = submission;
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'submission_saved',
+    { year: req.params.year, period, manager, status, batters: batters.length, pitchers: pitchers.length },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, submission });
+});
+
+// DELETE /api/seasons/:year/submissions/:period/:manager — remove one submission record
+// entirely (commissioner Delete). Distinct from Deny, which leaves an empty draft.
+app.delete('/api/seasons/:year/submissions/:period/:manager', requireAuth, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { period } = req.params;
+  const manager = decodeURIComponent(req.params.manager);
+  if (!SUBMISSION_PERIODS.includes(period)) {
+    return res.status(400).json({ error: 'Invalid period' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const bucket = submissionBucket(sd, period);
+  const removed = Object.prototype.hasOwnProperty.call(bucket, manager);
+  delete bucket[manager];
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(db, 'submission_deleted', { year: req.params.year, period, manager }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true, removed });
+});
+
+// DELETE /api/seasons/:year/submissions — clear ALL submissions for a season (used by the
+// commissioner "Reset Season Data" action, which can no longer clear them via the full save).
+app.delete('/api/seasons/:year/submissions', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  sd.initial_submissions = {};
+  sd.period_submissions = { pp2: {}, qf: {}, sf: {}, finals: {} };
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(db, 'submissions_cleared', { year: req.params.year }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true });
 });
 
 // GET /api/pending-count — number of pending swaps for a given season year
