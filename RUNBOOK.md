@@ -127,9 +127,23 @@ It installs `wmmc.*` helpers:
       console.log(d);
       return d;
     },
+    // Read-only: list "ghost" players credited to a manager with no legitimate origin
+    // (not in their submission or any approved swap) — review before purging.
+    ghosts: async () => {
+      const d = await (await fetch(`/api/mlb/ghost-audit?year=${Y}`, { headers: h() })).json();
+      console.table(
+        (d.ghosts || []).map((g) => ({
+          manager: g.manager,
+          player: g.player,
+          points: g.points,
+          weeks: (g.weeks || []).length,
+        }))
+      );
+      return d;
+    },
   };
   console.log(
-    'wmmc ready: wmmc.dates() · wmmc.diff("YYYY-MM-DD","YYYY-MM-DD") · wmmc.mgr("Manager Name") · wmmc.forceSync() · wmmc.snapshot()'
+    'wmmc ready: wmmc.dates() · wmmc.diff("YYYY-MM-DD","YYYY-MM-DD") · wmmc.mgr("Manager Name") · wmmc.forceSync() · wmmc.snapshot() · wmmc.ghosts()'
   );
 })();
 ```
