@@ -2935,16 +2935,23 @@ function repairGhostInitialRosterPlayers(sd) {
     const submittedPitchers = new Set(sub.pitchers || []);
 
     const weekRosterDates = (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) || {};
-    const allBattersPool = new Set(sd.batters_pool || []);
-    const allPitchersPool = new Set(sd.pitchers_pool || []);
+    // Match pool membership accent/format-insensitively: an accented roster_dates name
+    // (e.g. "Iván Herrera") must still match its pool entry, or it slips the candidate
+    // filter and a ghost survives the purge.
+    const battersPoolNorm = new Set((sd.batters_pool || []).map(normalizeName));
+    const pitchersPoolNorm = new Set((sd.pitchers_pool || []).map(normalizeName));
 
     const candidateBatters = new Set([
       ...(mgrRoster[weekKey].batters || []),
-      ...Object.keys(weekRosterDates).filter((p) => allBattersPool.size === 0 || allBattersPool.has(p)),
+      ...Object.keys(weekRosterDates).filter(
+        (p) => battersPoolNorm.size === 0 || battersPoolNorm.has(normalizeName(p))
+      ),
     ]);
     const candidatePitchers = new Set([
       ...(mgrRoster[weekKey].pitchers || []),
-      ...Object.keys(weekRosterDates).filter((p) => allPitchersPool.size > 0 && allPitchersPool.has(p)),
+      ...Object.keys(weekRosterDates).filter(
+        (p) => pitchersPoolNorm.size > 0 && pitchersPoolNorm.has(normalizeName(p))
+      ),
     ]);
 
     const ghostBatters = [...candidateBatters].filter((b) => !submittedBatters.has(b) && !commAdded.has(b));
@@ -4768,6 +4775,27 @@ app.get('/api/mlb/score-guard', requireCommissioner, (req, res) => {
     retained: MAX_SCORE_SNAPSHOTS,
     snapshots: snaps.map((s) => ({ date: s.date, captured_at: s.captured_at, totals: s.totals })),
   });
+});
+
+// POST /api/mlb/snapshot?year=YYYY
+// Capture the current Overall totals as a dated score-guard snapshot WITHOUT running a
+// sync. Use it to seed/refresh the baseline the next compile diffs against — e.g. after a
+// manual correction, or to recover when the trail is empty because recent compiles were
+// blocked. Same-day re-run replaces that day's entry (recordScoreSnapshot dedupes by date).
+app.post('/api/mlb/snapshot', requireCommissioner, (req, res) => {
+  const year = ((req.query && req.query.year) || (req.body && req.body.year) || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const dateISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const snapshot = captureScoreSnapshot(sd, dateISO);
+  recordScoreSnapshot(sd, snapshot);
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'score_snapshot_manual', { year, date: dateISO }, req.get('X-User-Email') || '');
+  writeDB(db);
+
+  res.json({ ok: true, year, date: dateISO, totals: snapshot.totals });
 });
 
 // GET /api/diag/manager?year=YYYY&name=Manager Name
