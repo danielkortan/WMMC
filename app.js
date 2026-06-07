@@ -222,6 +222,18 @@ function isPeriodTimeOpen(sd, period) {
   return !deadline || now < deadline.getTime();
 }
 
+// Stricter than isPeriodTimeOpen: returns true only when we can confirm the window
+// has actually opened — i.e. the period's open date is known AND has passed (and its
+// deadline, if known, hasn't). Unlike isPeriodTimeOpen, an unconfigured/unknown open
+// date counts as "not open" rather than "no restriction yet". Used by the reminder
+// banner so it never nags about a period whose schedule the commissioner hasn't set.
+function isPeriodWindowConfirmedOpen(sd, period) {
+  const openDate = getPeriodOpenDate(sd, period);
+  if (!openDate || Date.now() < openDate.getTime()) return false;
+  const deadline = getPeriodDeadline(sd, period);
+  return !deadline || Date.now() < deadline.getTime();
+}
+
 // ---- Playoff Qualification Helpers ----
 
 // Returns array of up to 8 QF qualifier names based on PP1+PP2 scores (or null if pools not configured)
@@ -12460,7 +12472,7 @@ function updateSubmissionWarningBanner() {
   const warnings = [];
 
   // PP2 submission incomplete
-  if (isPeriodTimeOpen(sd, 'pp2')) {
+  if (isPeriodWindowConfirmedOpen(sd, 'pp2')) {
     const sub = getPeriodSub(sd, 'pp2', me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
       warnings.push('Your <strong>Pool Play 2</strong> lineup is not submitted.');
@@ -12468,7 +12480,7 @@ function updateSubmissionWarningBanner() {
   }
 
   // QF submission incomplete (only for qualified managers)
-  if (isPeriodTimeOpen(sd, 'qf') && isManagerQualifiedForPeriod(me.name, 'qf', sd)) {
+  if (isPeriodWindowConfirmedOpen(sd, 'qf') && isManagerQualifiedForPeriod(me.name, 'qf', sd)) {
     const sub = getPeriodSub(sd, 'qf', me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
       warnings.push('Your <strong>Quarterfinals</strong> lineup is not submitted.');
