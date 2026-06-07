@@ -589,6 +589,22 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     sd.batters_team = { ...(existingSd.batters_team || {}), ...(sd.batters_team || {}) };
     sd.pitchers_team = { ...(existingSd.pitchers_team || {}), ...(sd.pitchers_team || {}) };
 
+    // Player pools are built by server-side MLB API bootstrap and by commissioner CSV
+    // uploads (both of which go through saveSeason). A stale client save (loaded before
+    // the pool existed) would overwrite the server's populated arrays with empty ones —
+    // same class of bug as the stat-reset. Union-merge: keep everything the server has
+    // that the client doesn't, so bootstrap additions and CSV uploads are never lost to
+    // a stale save. Client entries always win (CSV adds propagate normally).
+    const mergePool = (incoming, existing) => {
+      const arr = Array.isArray(incoming) ? [...incoming] : [];
+      if (!Array.isArray(existing) || existing.length === 0) return arr;
+      const have = new Set(arr);
+      for (const name of existing) if (!have.has(name)) arr.push(name);
+      return arr;
+    };
+    sd.batters_pool = mergePool(sd.batters_pool, existingSd.batters_pool);
+    sd.pitchers_pool = mergePool(sd.pitchers_pool, existingSd.pitchers_pool);
+
     // roster_dates (add/drop windows) are written by server-side repairs (e.g. the gated
     // roster-chain repair, swap-date backfill) as well as the client. Re-append any
     // manager/week/player entry the incoming payload is missing so a stale client can't
