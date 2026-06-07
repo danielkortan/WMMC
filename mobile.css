@@ -287,45 +287,60 @@
     margin-bottom: 0.75rem;
   }
 
-  /* Top row: "WMMC (year)" left, reigning champion right — balanced and
-     justified to opposite edges. Wraps to two rows on narrow screens so
-     neither side gets crowded. The season info line sits below (separate
-     .banner-footer element). */
+  /* Top row: "WMMC (year)" left, reigning champion right — both kept on a
+     single row (no wrap), vertically centered against each other. Fonts are
+     viewport-sized (clamp + vw) so they shrink to fit narrow screens instead
+     of wrapping. The season info line sits below (separate .banner-footer). */
   .banner-main {
     display: flex;
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
-    gap: 0.4rem 1rem;
+    gap: 0.5rem;
   }
 
   .banner-left {
     text-align: left;
+    min-width: 0;
+    flex: 0 1 auto;
   }
 
   .banner-title {
-    font-size: clamp(1.5rem, 7vw, 2.2rem);
-    letter-spacing: 1.5px;
+    font-size: clamp(1.2rem, 6.2vw, 2.2rem);
+    letter-spacing: 1px;
+    white-space: nowrap;
   }
 
   .banner-right {
     text-align: right;
     justify-content: flex-end;
-    margin-left: auto;
+    align-items: center;
+    gap: 0.4rem !important; /* tighten trophy ↔ text (overrides inline gap) */
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+
+  /* Shrink the trophy glyph (overrides the inline 2.5rem set in app.js) */
+  .banner-right > div:first-child {
+    font-size: 1.4rem !important;
   }
 
   .banner-champ-label {
-    font-size: 0.72rem;
+    font-size: 0.62rem;
+    letter-spacing: 1px;
+    white-space: nowrap;
   }
 
   .banner-champ-name {
-    font-size: clamp(1.15rem, 5vw, 1.5rem);
+    font-size: clamp(1rem, 4.6vw, 1.5rem);
+    white-space: nowrap;
   }
 
   .banner-champ-year {
-    font-size: 0.8rem;
+    font-size: 0.72rem;
     opacity: 0.85;
+    white-space: nowrap;
   }
 
   .banner-footer {
