@@ -6703,32 +6703,36 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
 
-    // Prefer specific add/drop dates stored in roster_dates
+    // Prefer specific add/drop dates stored in roster_dates. A player can be rostered in more
+    // than one span (added, swapped out, swapped back in), so pair adds→drops chronologically
+    // and render every span, e.g. "5/4–5/21, 6/2–". A drop with no open add (e.g. a pre-season /
+    // orphan drop made before the submission-edit feature existed) produces no span and falls
+    // through to the schedule-based fallback below (→ "not rostered").
     if (seasonData.roster_dates && seasonData.roster_dates[managerName]) {
-      let addDate = null,
-        dropDate = null;
+      const events = [];
       for (const weekDates of Object.values(seasonData.roster_dates[managerName])) {
         const entry = weekDates[player];
         if (!entry) continue;
-        if (entry.add_date && (!addDate || entry.add_date < addDate)) addDate = entry.add_date;
-        if (entry.drop_date && (!dropDate || entry.drop_date > dropDate)) dropDate = entry.drop_date;
+        if (entry.add_date) events.push({ date: entry.add_date, type: 'add' });
+        if (entry.drop_date) events.push({ date: entry.drop_date, type: 'drop' });
       }
-      // Guard corrupt/backwards dates. A "drop" recorded before the player's own add — or
-      // before the season even started (e.g. a pre-season roster change made before the
-      // submission-edit feature existed) — is meaningless: the player never rostered for a real
-      // span, so don't render a backwards range.
-      const seasonStart = scheduleDates && scheduleDates[0] ? scheduleDates[0].start : null;
-      if (addDate && dropDate && dropDate < addDate) dropDate = null;
-      if (!addDate && dropDate && seasonStart && dropDate < seasonStart) {
-        return ' <span class="wrs-hist-tag">not rostered</span>';
+      // Chronological; on a same-day tie, an add sorts before a drop.
+      events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.type === 'add' ? -1 : 1));
+      const spans = [];
+      let openAdd = null;
+      for (const ev of events) {
+        if (ev.type === 'add') {
+          if (openAdd === null) openAdd = ev.date;
+        } else if (openAdd !== null) {
+          spans.push([openAdd, ev.date]);
+          openAdd = null;
+        }
       }
-      if (addDate || dropDate) {
-        const label =
-          addDate && dropDate
-            ? `${fmtSlashDate(addDate)}–${fmtSlashDate(dropDate)}`
-            : addDate
-              ? `from ${fmtSlashDate(addDate)}`
-              : `thru ${fmtSlashDate(dropDate)}`;
+      if (openAdd !== null) spans.push([openAdd, null]);
+      if (spans.length > 0) {
+        const label = spans
+          .map(([a, d]) => (d ? `${fmtSlashDate(a)}–${fmtSlashDate(d)}` : `${fmtSlashDate(a)}–`))
+          .join(', ');
         return ` <span class="wrs-hist-tag">${label}</span>`;
       }
     }
