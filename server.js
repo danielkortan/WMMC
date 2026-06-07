@@ -612,6 +612,20 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     sd.period_submissions = existingSd.period_submissions || {};
   }
 
+  // Heal per-week roster arrays from roster_dates whenever a save lands (swap/submission
+  // approval, commissioner add/drop). The per-player scoreboard & My-Roster breakdowns attribute
+  // points via the arrays, so a mid-period swap-in that was never carried into later weeks' arrays
+  // would otherwise under-count in those views even though the canonical totals (carry-forward via
+  // managerWeekSubtotal) already include it. This pass is additive + idempotent + score-neutral —
+  // it only adds players already active per roster_dates, so totals never move.
+  if (sd && sd.status === 'active') {
+    try {
+      rebuildRosterArraysFromDates(sd);
+    } catch (e) {
+      console.error('[Roster array heal] Error (continuing):', e.message);
+    }
+  }
+
   // Propagate roster add dates into player_dates for mid-week adds, then zero out
   // any pre-add scores for newly rostered players.  We do NOT call recomputeAllWeeklyScores
   // here because it would zero out dropped players' correctly banked scores when their
@@ -8252,6 +8266,23 @@ async function main() {
       if (ran) writeDB(dbForRosterRepair);
     } catch (e) {
       console.error('[Roster Repair] Error (continuing):', e.message);
+    }
+
+    // Heal per-week roster arrays from roster_dates so the per-player breakdowns reconcile with
+    // the carry-forward totals (a mid-period swap-in not carried into later weeks' arrays would
+    // otherwise under-count in those views). Additive + idempotent + score-neutral — runs after
+    // the carry-forward repair so it operates on the settled week keys.
+    try {
+      const dbForArrayHeal = readDB();
+      let healed = false;
+      for (const sd of Object.values(dbForArrayHeal.seasons || {})) {
+        if (!sd || sd.status !== 'active') continue;
+        const changes = rebuildRosterArraysFromDates(sd);
+        if (changes && changes.length) healed = true;
+      }
+      if (healed) writeDB(dbForArrayHeal);
+    } catch (e) {
+      console.error('[Roster array heal] Error (continuing):', e.message);
     }
 
     // Start the Google Sheets sync scheduler (no-op while config.enabled=false,

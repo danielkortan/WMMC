@@ -1,5 +1,51 @@
 # WMMC — Decisions Log
 
+## Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile (2026-06-07)
+
+**Symptom (commissioner).** In the scoreboard's per-manager expandable, a swapped-in/never-dropped
+player (Juan Soto, added 5/22) showed greyed in his add week and was missing from later weeks, and
+the whole current roster showed "6/08–" tags. Two distinct things were conflated:
+
+- **"6/08–" tags = the PP2 roster submission** (PP2 starts 6/08; submission writes roster*dates
+  under PP2 week keys with add 6/08). Confirmed \_not* a scoring bug — `activeByDates` caps
+  eligibility at `add_date <= weekEnd`, so a 6/08 add can't leak into PP1 weeks. The merged
+  (PP1+PP2) player list just made it look wrong.
+- **Soto showing only 19 = a real under-count in the _breakdown_, not the total.** Manager totals
+  come from the carry-forward engine (`managerWeekSubtotal` + `activeByDates`) and are correct. The
+  per-player breakdown attributed via `playerPts → weeklyRowOwner → buildRosterLookup`, which keys
+  off the per-week roster _arrays_. A mid-period swap-in lives in `roster_dates` only under its add
+  week's bucket; the later weeks' arrays never got him (carry-forward repair skips already-populated
+  weeks unless `ROSTER_REPAIR_VERSION` bumps), so `weeklyRowOwner` returned no owner for those rows.
+  Same stale-array root cause as the My-Roster per-week view.
+
+**Fixes (this PR):**
+
+- **Frontend (`app.js`) — `toggleManagerDetails` rewritten to group by scoring period.** Each period
+  (PP1 / PP2 / QF / SF / Finals present in `SEASON_SCHEDULE`) is its own collapsible subsection;
+  the period whose date window contains today is auto-expanded (`PP1` today, `PP2` once 6/08
+  arrives), others collapsed. Per-player points now come from `managerWeekSubtotal` with a new
+  `detailOut` param (added to the client copy, mirroring server.js), summed across the period's
+  weeks — so the rows reconcile to the period subtotal and a carried-forward swap-in scores every
+  eligible week. Date tags are clipped to each period's window (`periodPlayerTag`), so a PP2 6/08
+  add never renders inside the PP1 subsection. Removed the old `playerPts`/`playerHistory`/
+  `buildPlayerRows` helpers. New `window.toggleSbmdPeriod`; styles under `.sbmd-*` in styles.css.
+- **`managerWeekSubtotal` (client) gained `detailOut`** — pushes `{player, score}` for every
+  eligible player _of that type_ (type-restricted via the week's roster array since the eligibility
+  set is type-agnostic); scores still sum to the returned subtotal (array-only/0-stat players
+  contribute 0). Server copy already had `detailOut`.
+- **Server (`server.js`) — auto-heal roster arrays from roster_dates.** Added
+  `rebuildRosterArraysFromDates(sd)` to (a) the full-season save handler (active seasons), so every
+  swap/submission approval keeps arrays in sync, and (b) startup after `repairCarryForwardRosters`,
+  so the deploy heals existing data. Additive + idempotent + **score-neutral** (the engine already
+  counts these players via `activeByDates`), so totals never move and the guard can't fire. This is
+  the "durable fix" — it stops the per-player breakdowns (scoreboard _and_ My Roster) from
+  under-counting after an in-season swap, instead of relying on the manual
+  `POST /api/seasons/:year/rebuild-roster-arrays` one-shot.
+
+**Gotcha reinforced:** per-player _display_ paths historically read roster _arrays_
+(`weeklyRowOwner` / `onRoster`), while _scoring_ reads `roster_dates` carry-forward. Keeping the
+arrays healed from roster_dates is what makes the two agree.
+
 ## Ghost player caused recurring 4am score-guard block — Joey Auclair / Iván Herrera (2026-06-07)
 
 **Symptom.** Every morning the guard BLOCKED the 4am compile (Joey ~−177), the 7am Slack post

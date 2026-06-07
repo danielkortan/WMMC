@@ -595,7 +595,7 @@ function getCurrentScoringPeriod(seasonData) {
 // same number. Mirrors renderRosterData's per-week pipeline exactly:
 // wasDroppedBefore -> eligibility set -> manager/null dedup -> sum.
 // ============================================================
-function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey) {
+function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut) {
   if (!seasonData || !managerName) return 0;
   const round = schedWeek.round;
   const week = schedWeek.week;
@@ -717,7 +717,20 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
     }
   });
 
-  return allWeekRows.filter((r) => eligible.has(r[playerKey])).reduce((s, r) => s + (r.weekly_score || 0), 0);
+  const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
+  if (detailOut) {
+    // Per-player points for this week, restricted to players of this type (the eligibility
+    // set is type-agnostic — activeByDates / roster_dates keys span both lists — so include a
+    // player only when they have a row of this type or sit in this type's roster array). The
+    // scores still sum to the returned subtotal: array-only players contribute 0.
+    const scoreByPlayer = {};
+    for (const r of finalRows) scoreByPlayer[r[playerKey]] = (scoreByPlayer[r[playerKey]] || 0) + (r.weekly_score || 0);
+    const typeRoster = new Set(weekRoster[listKey] || []);
+    for (const p of eligible) {
+      if (p in scoreByPlayer || typeRoster.has(p)) detailOut.push({ player: p, score: scoreByPlayer[p] || 0 });
+    }
+  }
+  return finalRows.reduce((s, r) => s + (r.weekly_score || 0), 0);
 }
 
 // ============================================================
@@ -2785,264 +2798,173 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
     return;
   }
 
-  const mgrRosters = (sd.rosters || {})[managerName] || {};
-  const allBatters = new Set();
-  const allPitchers = new Set();
-  Object.values(mgrRosters).forEach((weekRoster) => {
-    (weekRoster.batters || []).forEach((b) => allBatters.add(b));
-    (weekRoster.pitchers || []).forEach((p) => allPitchers.add(p));
-  });
-  // Also include players who were dropped mid-week (appear in roster_dates but not roster arrays)
-  const sbBatPool = new Set(sd.batters_pool || []);
-  const sbPitPool = new Set(sd.pitchers_pool || []);
-  const mgrRosterDates = (sd.roster_dates || {})[managerName] || {};
-  Object.values(mgrRosterDates).forEach((weekDates) => {
-    Object.keys(weekDates).forEach((player) => {
-      if (sbBatPool.size === 0 || sbBatPool.has(player)) allBatters.add(player);
-      if (sbPitPool.size === 0 || sbPitPool.has(player)) allPitchers.add(player);
-    });
-  });
-
-  // Precompute weekKey → start date (needed for carry-over and active-roster filtering).
-  const detailScheduleDates = getScheduleDates();
-  const detailWeekKeyToStart = {};
-  SEASON_SCHEDULE.forEach((s, i) => {
-    if (detailScheduleDates && detailScheduleDates[i]) {
-      detailWeekKeyToStart[`${s.round}|${s.week}`] = detailScheduleDates[i].start;
-    }
-  });
-
-  // Find current (most recent) roster
-  const sortedWeeks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`).filter((k) => mgrRosters[k]);
-  const currentWeekKey = sortedWeeks[sortedWeeks.length - 1] || null;
-  const currentRoster = currentWeekKey ? mgrRosters[currentWeekKey] : { batters: [], pitchers: [] };
-  // Exclude carry-over players (dropped before the current week) and players dropped during
-  // the current week (drop_date present in current week's roster_dates).
-  const currentWeekRosterDates = currentWeekKey ? mgrRosterDates[currentWeekKey] || {} : {};
-  const sbDroppedThisWeek = new Set(
-    Object.entries(currentWeekRosterDates)
-      .filter(([, d]) => d.drop_date)
-      .map(([p]) => p)
-  );
-  const activeBatters = new Set(
-    (currentRoster.batters || []).filter(
-      (p) =>
-        !sbDroppedThisWeek.has(p) && !playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, p, currentWeekKey)
-    )
-  );
-  const activePitchers = new Set(
-    (currentRoster.pitchers || []).filter(
-      (p) =>
-        !sbDroppedThisWeek.has(p) && !playerDroppedBeforeWeek(sd, detailWeekKeyToStart, managerName, p, currentWeekKey)
-    )
-  );
-  // Track the opening-week roster so we can tell original players from mid-season adds
-  const firstWeekKey = sortedWeeks[0] || null;
-  const firstRoster = firstWeekKey
-    ? mgrRosters[firstWeekKey] || { batters: [], pitchers: [] }
-    : { batters: [], pitchers: [] };
-
-  // Compute total points per player (includes null-manager entries for players rostered that week)
-  const detailRosterLookup = buildRosterLookup(sd);
-  const detailApprovedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
   const detailMgrRosterDates = (sd.roster_dates || {})[managerName] || {};
-  function playerPts(name, type) {
-    const arr = type === 'batting' ? sd.weekly_batting || [] : sd.weekly_pitching || [];
-    const playerKey = type === 'batting' ? 'batter' : 'pitcher';
-    const dailyArr = type === 'batting' ? sd.daily_batting || [] : sd.daily_pitching || [];
-    const dailyPlayerKey = type === 'batting' ? 'batter' : 'pitcher';
-    const scoreFn = type === 'batting' ? calculateBattingScore : calculatePitchingScore;
-    return (
-      Math.round(
-        arr
-          .filter((r) => {
-            if (r[playerKey] !== name) return false;
-            return weeklyRowOwner(sd, detailRosterLookup, detailWeekKeyToStart, r, playerKey) === managerName;
-          })
-          .reduce((total, r) => {
-            const weekKey = `${r.round}|${r.week}`;
-            const rd = detailMgrRosterDates[weekKey] && detailMgrRosterDates[weekKey][name];
-            let addDate = rd ? rd.add_date || null : null;
-            let dropDate = rd ? rd.drop_date || null : null;
-            if (!addDate) {
-              const addSwap = detailApprovedSwaps.find((s) => s.player_in === name && s.week_key === weekKey);
-              if (addSwap && addSwap.swap_date) addDate = addSwap.swap_date;
-            }
-            if (!dropDate) {
-              const dropSwap = detailApprovedSwaps.find((s) => s.player_out === name && s.week_key === weekKey);
-              if (dropSwap && dropSwap.swap_date) dropDate = dropSwap.swap_date;
-            }
-            if (!addDate && !dropDate) return total + (r.weekly_score || 0);
-            const daily = dailyArr.filter(
-              (d) => d[dailyPlayerKey] === name && d.round === r.round && d.week === r.week
-            );
-            if (!daily.length) return total + (r.weekly_score || 0);
-            const eligible = daily.filter((d) => {
-              if (addDate && d.date < addDate) return false;
-              if (dropDate && d.date > dropDate) return false;
-              return true;
-            });
-            return total + Math.round(eligible.reduce((s, d) => s + scoreFn(d.delta || {}), 0) * 100) / 100;
-          }, 0) * 100
-      ) / 100
-    );
-  }
+  const battingRows = sd.weekly_batting || [];
+  const pitchingRows = sd.weekly_pitching || [];
+  const sbScheduleDates = getScheduleDates();
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
-  // Find player roster history: first/last week seen, swap reason
-  function playerHistory(name, batOrPit) {
-    let addDate = null,
-      dropDate = null,
-      swapReason = null;
-
-    // Walk through schedule weeks in order
-    let seenActive = false;
-    for (const sched of SEASON_SCHEDULE) {
-      const wk = `${sched.round}|${sched.week}`;
-      const weekRoster = mgrRosters[wk];
-      if (!weekRoster) continue;
-      const onRoster = (weekRoster[batOrPit] || []).includes(name);
-      if (onRoster && !seenActive) {
-        // Find week start date
-        const wi = SEASON_SCHEDULE.findIndex((s) => s.round === sched.round && s.week === sched.week);
-        const dates = sd.schedule_dates;
-        addDate = dates && dates[wi] ? fmtShortDate(dates[wi].start) : wk;
-        seenActive = true;
-      } else if (!onRoster && seenActive && !dropDate) {
-        const wi = SEASON_SCHEDULE.findIndex((s) => s.round === sched.round && s.week === sched.week);
-        const dates = sd.schedule_dates;
-        dropDate = dates && dates[wi] ? fmtShortDate(dates[wi].start) : wk;
+  // Group the schedule into scoring periods (PP1, PP2, playoffs). Each period gets its own
+  // collapsible subsection so a future-period roster submission (e.g. a PP2 roster submitted
+  // before PP2 starts, dated to PP2's first week) never visually bleeds into the current period.
+  const periodInfo = BREAKDOWN_PERIODS.map((p) => {
+    const weeks = [];
+    let firstStart = null;
+    let lastEnd = null;
+    SEASON_SCHEDULE.forEach((s, idx) => {
+      if (s.round !== p.key) return;
+      weeks.push({ schedWeek: s, idx });
+      const d = sbScheduleDates && sbScheduleDates[idx];
+      if (d) {
+        if (!firstStart || d.start < firstStart) firstStart = d.start;
+        if (!lastEnd || d.end > lastEnd) lastEnd = d.end;
       }
-    }
-
-    // Check explicit roster_dates
-    const rdDates = (sd.roster_dates || {})[managerName] || {};
-    for (const players of Object.values(rdDates)) {
-      if (players[name]) {
-        if (players[name].add_date) addDate = fmtShortDate(players[name].add_date);
-        if (players[name].drop_date) dropDate = fmtShortDate(players[name].drop_date);
-      }
-    }
-
-    // Check swaps
-    const swaps = (sd.swaps || []).filter(
-      (s) => s.manager === managerName && s.player_out === name && s.status === 'approved'
-    );
-    if (swaps.length > 0) {
-      const last = swaps[swaps.length - 1];
-      swapReason = last.reason;
-      // Prefer the effective drop_date from roster_dates (the last day actually
-      // rostered); fall back to the raw swap_date only when none was recorded.
-      if (!dropDate && last.swap_date) dropDate = fmtShortDate(last.swap_date);
-    }
-
-    // An original player later dropped (a drop_date but no add_date) was rostered
-    // from the season's first day, so surface that as the start of their range.
-    if (!addDate && dropDate) {
-      const d0 = sd.schedule_dates && sd.schedule_dates[0];
-      if (d0 && d0.start) addDate = fmtShortDate(d0.start);
-    }
-
-    return { addDate, dropDate, swapReason };
-  }
-
-  // Build HTML for the pop-down
-  function buildPlayerRows(names, type, activeSet) {
-    const batOrPit = type === 'batting' ? 'batters' : 'pitchers';
-    if (names.size === 0) return '<tr><td colspan="3" class="text-muted" style="font-size:0.82rem;">None</td></tr>';
-    // Convert "Mon DD" string (from fmtShortDate) → "M/DD"
-    const toMD = (s) => {
-      if (!s) return '';
-      const mo = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
-      const [mon, day] = s.split(' ');
-      const m = mo[mon];
-      return m ? `${m}/${String(parseInt(day)).padStart(2, '0')}` : s;
-    };
-    // Order players so a swapped-in player sits directly below the player he replaced.
-    // "Root" players (originals / un-swapped) keep their alphabetical order; every swap chain
-    // (e.g. Drake Baldwin → Christian Yelich, Max Muncy → Ronald Acuña) is nested directly
-    // beneath its anchor. Applies to all 1-for-1 swaps for the manager, across seasons.
-    const chainSwaps = (sd.swaps || [])
-      .filter((s) => {
-        if (!s.player_out || !s.player_in) return false; // only true 1-for-1 swaps can pair
-        if (s.status && s.status !== 'approved') return false; // skip pending/denied
-        // Older seed swaps may carry only an email; resolve those to a manager name.
-        const swapMgr = s.manager || (findManagerByEmail(s.email) || {}).name;
-        return swapMgr === managerName;
-      })
-      .slice()
-      .sort((a, b) => (a.swap_date || a.timestamp || '').localeCompare(b.swap_date || b.timestamp || ''));
-    const childrenByParent = {}; // player_out -> [player_in, ...] in swap-date order
-    const isSwapIn = new Set();
-    chainSwaps.forEach((s) => {
-      if (!names.has(s.player_out) || !names.has(s.player_in)) return;
-      (childrenByParent[s.player_out] = childrenByParent[s.player_out] || []).push(s.player_in);
-      isSwapIn.add(s.player_in);
     });
-    const ordered = [];
-    const seen = new Set();
-    const visit = (name) => {
-      if (seen.has(name)) return;
-      seen.add(name);
-      ordered.push(name);
-      (childrenByParent[name] || []).forEach(visit);
-    };
-    // Roots = players that weren't swapped in for someone already in this list, kept alphabetical.
-    [...names]
-      .filter((n) => !isSwapIn.has(n))
-      .sort()
-      .forEach(visit);
-    // Safety net: emit any leftovers (e.g. swap cycles) in alphabetical order.
-    [...names].sort().forEach(visit);
-    return ordered
-      .map((name) => {
-        const pts = playerPts(name, type);
-        const isActive = activeSet.has(name);
-        const { addDate, dropDate } = playerHistory(name, batOrPit);
-        // A player carrying an explicit add_date in roster_dates was added mid-season
-        // (e.g. a Week-1 swap-in that now also sits in the seed array) and is NOT an
-        // original, so their start date should still show.
-        const hasExplicitAdd = Object.values(detailMgrRosterDates || {}).some((wk) => wk[name] && wk[name].add_date);
-        const wasOriginal = (firstRoster[batOrPit] || []).includes(name) && !hasExplicitAdd;
-        // Only show a date range when the player was actually swapped in or out
-        let dateCell = '';
-        if (!isActive) {
-          const s = toMD(addDate),
-            e = toMD(dropDate);
-          dateCell = s && e ? `${s}–${e}` : e || s;
-        } else if (!wasOriginal && addDate) {
-          dateCell = `${toMD(addDate)}–`;
-        }
-        const safeName = jsStr(name);
-        const safeMgr = jsStr(managerName);
-        return `<tr class="${isActive ? '' : 'dropped-player'}">
-        <td>${name}</td>
-        <td class="num"><button class="pqv-pts-btn" onclick="showPlayerQuickView('${safeName}','${type}','${safeMgr}')"><strong>${fmt(pts)}</strong></button></td>
-        <td class="mgr-detail-date">${dateCell}</td>
-      </tr>`;
-      })
-      .join('');
+    return { key: p.key, label: p.label, weeks, firstStart, lastEnd };
+  }).filter((p) => p.weeks.length > 0);
+
+  // Pick the period to auto-expand: the one whose date window contains today, else the most
+  // recently started, else the first. Drives the "auto show the current period" behavior.
+  let currentPeriodKey = null;
+  for (const p of periodInfo) {
+    if (p.firstStart && p.lastEnd && todayISO >= p.firstStart && todayISO <= p.lastEnd) {
+      currentPeriodKey = p.key;
+      break;
+    }
+  }
+  if (!currentPeriodKey) {
+    const started = periodInfo.filter((p) => p.firstStart && p.firstStart <= todayISO);
+    if (started.length) currentPeriodKey = started[started.length - 1].key;
+    else if (periodInfo.length) currentPeriodKey = periodInfo[0].key;
   }
 
-  const colspan = row.querySelector('td').getAttribute('colspan') || '6';
-  row.innerHTML = `<td colspan="${colspan}">
-    <div class="mgr-detail-panel">
-      <div class="mgr-detail-cols">
-        <div class="mgr-detail-section">
-          <div class="mgr-detail-header">Batters</div>
-          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th></th></tr></thead>
-          <tbody>${buildPlayerRows(allBatters, 'batting', activeBatters)}</tbody></table>
-        </div>
-        <div class="mgr-detail-section">
-          <div class="mgr-detail-header">Pitchers</div>
-          <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th><th></th></tr></thead>
-          <tbody>${buildPlayerRows(allPitchers, 'pitching', activePitchers)}</tbody></table>
+  // Per-player date tag clipped to a single period's window, so a player's PP2 add (e.g. 6/08)
+  // never renders inside their PP1 subsection. Shows only adds/drops that fall in this period.
+  function periodPlayerTag(player, periodStart, periodEnd) {
+    let minAdd = null;
+    let maxDrop = null;
+    for (const players of Object.values(detailMgrRosterDates)) {
+      const e = players[player];
+      if (!e) continue;
+      if (e.add_date && (!minAdd || e.add_date < minAdd)) minAdd = e.add_date;
+      if (e.drop_date && (!maxDrop || e.drop_date > maxDrop)) maxDrop = e.drop_date;
+    }
+    const addInPeriod =
+      minAdd && periodStart && minAdd > periodStart && (!periodEnd || minAdd <= periodEnd) ? minAdd : null;
+    const dropInPeriod =
+      maxDrop && (!periodStart || maxDrop >= periodStart) && (!periodEnd || maxDrop <= periodEnd) ? maxDrop : null;
+    if (!addInPeriod && !dropInPeriod) return '';
+    const a = addInPeriod ? fmtSlashDate(addInPeriod) : '';
+    const d = dropInPeriod ? fmtSlashDate(dropInPeriod) : '';
+    const label = addInPeriod && dropInPeriod ? `${a}–${d}` : addInPeriod ? `${a}–` : `–${d}`;
+    return ` <span class="wrs-hist-tag">${label}</span>`;
+  }
+
+  // Whether the player is still rostered as of a period's end (latest add with no later drop).
+  // Used to grey out players dropped within/before the period.
+  function activeAsOf(player, periodEnd) {
+    let latestAdd = null;
+    let latestDrop = null;
+    let hasDates = false;
+    for (const players of Object.values(detailMgrRosterDates)) {
+      const e = players[player];
+      if (!e) continue;
+      if (e.add_date && (!periodEnd || e.add_date <= periodEnd)) {
+        hasDates = true;
+        if (!latestAdd || e.add_date > latestAdd) latestAdd = e.add_date;
+      }
+      if (e.drop_date && (!periodEnd || e.drop_date <= periodEnd)) {
+        hasDates = true;
+        if (!latestDrop || e.drop_date > latestDrop) latestDrop = e.drop_date;
+      }
+    }
+    if (!hasDates) return true; // array-only member (original); treat as active
+    return !latestDrop || (latestAdd && latestAdd > latestDrop);
+  }
+
+  // Build one period's Batters or Pitchers table. Per-player points use the same carry-forward
+  // subtotal (managerWeekSubtotal + detailOut) that feeds the manager's period totals, so the
+  // rows reconcile to the period subtotal — a swapped-in/never-dropped player (a mid-period add
+  // not yet carried into later weeks' roster arrays) scores every eligible week, not just one.
+  function periodTypeTable(p, rowsArr, playerKey, listKey) {
+    const scoreByPlayer = {};
+    p.weeks.forEach(({ schedWeek, idx }) => {
+      const detail = [];
+      managerWeekSubtotal(sd, managerName, schedWeek, idx, rowsArr, playerKey, listKey, detail);
+      detail.forEach(({ player, score }) => {
+        scoreByPlayer[player] = (scoreByPlayer[player] || 0) + (score || 0);
+      });
+    });
+    const names = Object.keys(scoreByPlayer);
+    let total = 0;
+    names.forEach((n) => (total += scoreByPlayer[n] || 0));
+    total = Math.round(total * 100) / 100;
+    const typeArg = playerKey === 'batter' ? 'batting' : 'pitching';
+    const safeMgr = jsStr(managerName);
+    const body =
+      names.length === 0
+        ? '<tr><td colspan="2" class="text-muted" style="font-size:0.82rem;">None</td></tr>'
+        : names
+            .sort((a, b) => (scoreByPlayer[b] || 0) - (scoreByPlayer[a] || 0))
+            .map((name) => {
+              const pts = Math.round((scoreByPlayer[name] || 0) * 100) / 100;
+              const active = activeAsOf(name, p.lastEnd);
+              const tag = periodPlayerTag(name, p.firstStart, p.lastEnd);
+              const safeName = jsStr(name);
+              return `<tr class="${active ? '' : 'dropped-player'}">
+        <td>${displayPlayer(name, sd)}${tag}</td>
+        <td class="num"><button class="pqv-pts-btn" onclick="showPlayerQuickView('${safeName}','${typeArg}','${safeMgr}')"><strong>${fmt(pts)}</strong></button></td>
+      </tr>`;
+            })
+            .join('');
+    return { total, count: names.length, body };
+  }
+
+  let panelHtml = '';
+  let anyPeriod = false;
+  periodInfo.forEach((p) => {
+    const bat = periodTypeTable(p, battingRows, 'batter', 'batters');
+    const pit = periodTypeTable(p, pitchingRows, 'pitcher', 'pitchers');
+    if (bat.count === 0 && pit.count === 0) return; // skip periods this manager has no roster in
+    anyPeriod = true;
+    const periodTotal = Math.round((bat.total + pit.total) * 100) / 100;
+    const isCurrent = p.key === currentPeriodKey;
+    const secId = `sbmd-${mgrKey}-${p.key}`;
+    panelHtml += `<div class="sbmd-period${isCurrent ? ' sbmd-current' : ''}">
+      <div class="sbmd-period-header" onclick="toggleSbmdPeriod('${secId}')">
+        <span class="sbmd-period-label">${esc(p.label)}${isCurrent ? ' <span class="sbmd-current-badge">Current</span>' : ''}</span>
+        <span class="sbmd-period-pts">${fmt(periodTotal)} pts</span>
+      </div>
+      <div class="sbmd-period-body" id="${secId}" style="display:${isCurrent ? 'block' : 'none'};">
+        <div class="mgr-detail-cols">
+          <div class="mgr-detail-section">
+            <div class="mgr-detail-header">Batters <span class="sbmd-subtotal">${fmt(bat.total)}</span></div>
+            <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th></tr></thead>
+            <tbody>${bat.body}</tbody></table>
+          </div>
+          <div class="mgr-detail-section">
+            <div class="mgr-detail-header">Pitchers <span class="sbmd-subtotal">${fmt(pit.total)}</span></div>
+            <table class="data-table compact-table"><thead><tr><th>Player</th><th>Pts</th></tr></thead>
+            <tbody>${pit.body}</tbody></table>
+          </div>
         </div>
       </div>
-    </div>
-  </td>`;
+    </div>`;
+  });
+  if (!anyPeriod) panelHtml = '<div class="text-muted" style="padding:0.5rem;">No roster data yet.</div>';
+
+  const colspan = row.querySelector('td').getAttribute('colspan') || '6';
+  row.innerHTML = `<td colspan="${colspan}"><div class="mgr-detail-panel sbmd-grouped">${panelHtml}</div></td>`;
 
   row.style.display = '';
   if (arrow) arrow.innerHTML = '&#9650;';
+};
+
+// Expand/collapse a single period subsection inside a manager's scoreboard detail panel.
+window.toggleSbmdPeriod = function (id) {
+  const body = document.getElementById(id);
+  if (!body) return;
+  body.style.display = body.style.display === 'none' ? 'block' : 'none';
 };
 
 window.showPlayerQuickView = function (playerName, type, managerName) {
