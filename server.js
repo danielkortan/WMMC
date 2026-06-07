@@ -8424,6 +8424,28 @@ async function main() {
       console.error('[Roster array heal] Error (continuing):', e.message);
     }
 
+    // One-time: seed a score-guard baseline snapshot for any active season whose trail is empty,
+    // so the guard has a reference to diff against and the audit below doesn't flag an empty trail.
+    // Runs after this boot's recompute/heals, so the baseline reflects corrected totals. Idempotent
+    // — skips once a trail exists.
+    try {
+      const dbForSeed = readDB();
+      const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      let seeded = false;
+      for (const sd of Object.values(dbForSeed.seasons || {})) {
+        if (!sd || sd.status !== 'active') continue;
+        if (Array.isArray(sd.score_snapshots) && sd.score_snapshots.length > 0) continue;
+        recordScoreSnapshot(sd, captureScoreSnapshot(sd, todayET));
+        seeded = true;
+      }
+      if (seeded) {
+        writeDB(dbForSeed);
+        console.log('[Score guard] Seeded baseline snapshot for active season(s) with an empty trail.');
+      }
+    } catch (e) {
+      console.error('[Score guard] Snapshot seed error (continuing):', e.message);
+    }
+
     // Surface silent data corruption (e.g. a wiped schedule_dates) loudly at startup.
     try {
       await auditSeasonIntegrity(readDB());
