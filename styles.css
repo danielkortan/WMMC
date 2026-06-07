@@ -28,6 +28,69 @@
   --shadow-lg: 0 4px 6px rgba(0, 0, 0, 0.06), 0 10px 15px rgba(0, 0, 0, 0.08);
 }
 
+/* ===================================================================
+   Dark theme — opt-in via <html class="theme-dark"> (toggled per user
+   account; see app.js applyTheme / setupThemeToggle). Applies on both
+   desktop and mobile. The UI is largely driven by the variables above,
+   so overriding them here flips most surfaces; a handful of targeted
+   rules below cover spots that hardcode light colors.
+   =================================================================== */
+html.theme-dark {
+  color-scheme: dark;
+  --primary: #4a9eff;
+  --primary-light: #6ab4ff;
+  --accent: #ff4560;
+  --accent-light: #ff6b80;
+  --bg: #0f0f1a;
+  --card-bg: #1a1a2e;
+  --text: #e8eaf6;
+  --text-light: #9fa8da;
+  --text-muted: #6c7a9c;
+  --border: #2a2a45;
+  --success: #4caf6e;
+  --danger: #ff4560;
+  --winner: rgba(255, 215, 0, 0.1);
+  --rank1: #ffd700;
+  --rank2: #c0c0c0;
+  --rank3: #cd7f32;
+  --field-green: #3a7d44;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.5), 0 10px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* Targeted dark-theme fixes for surfaces that hardcode light colors. */
+html.theme-dark .data-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+html.theme-dark input[type='text'],
+html.theme-dark input[type='email'],
+html.theme-dark input[type='password'],
+html.theme-dark input[type='number'],
+html.theme-dark input[type='date'],
+html.theme-dark input[type='datetime-local'],
+html.theme-dark select,
+html.theme-dark textarea {
+  background: #12122a;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+html.theme-dark input::placeholder,
+html.theme-dark textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* Header + banner use a navy gradient driven partly by hardcoded stops;
+   give them a darker gradient in dark mode so they don't glow light-blue. */
+html.theme-dark header {
+  background: linear-gradient(135deg, #090918 0%, #10183a 100%);
+}
+
+html.theme-dark .champion-banner {
+  background: linear-gradient(135deg, #10183a 0%, #0d1b34 50%, #16224a 100%);
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   background: var(--bg);

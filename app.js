@@ -46,6 +46,44 @@ async function apiFetch(url, options = {}) {
   return resp;
 }
 
+// ============================================================
+// Theme (light / dark) — global, persisted per account
+// ============================================================
+// Default is light. The locally cached value (wmmc_theme) is applied before
+// first paint by the inline script in index.html; once logged in, the account
+// preference (manager.theme from /api/managers) becomes authoritative.
+function getStoredTheme() {
+  try {
+    return localStorage.getItem('wmmc_theme') === 'dark' ? 'dark' : 'light';
+  } catch (e) {
+    return 'light';
+  }
+}
+
+function applyTheme(theme) {
+  const dark = theme === 'dark';
+  document.documentElement.classList.toggle('theme-dark', dark);
+  try {
+    localStorage.setItem('wmmc_theme', dark ? 'dark' : 'light');
+  } catch (e) {
+    /* localStorage unavailable — DOM class still applied */
+  }
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) btn.textContent = dark ? 'Light Mode' : 'Dark Mode';
+}
+
+async function persistTheme(theme) {
+  if (!LOGGED_IN_EMAIL) return;
+  try {
+    await apiFetch(`/api/managers/${encodeURIComponent(LOGGED_IN_EMAIL)}/theme`, {
+      method: 'POST',
+      body: JSON.stringify({ theme }),
+    });
+  } catch (e) {
+    /* best-effort — the local copy is already applied and cached */
+  }
+}
+
 // SCORING and SEASON_SCHEDULE live in js/scoring.js (loaded via window
 // globals by js/index.js). Server-side copies are kept in sync in server.js.
 
@@ -993,6 +1031,10 @@ function enterApp(mgr) {
   document.getElementById('user-display-name').textContent = mgr.name;
   setupUserBar();
 
+  // Apply the user's saved theme. The account preference wins; if the account has
+  // none yet, fall back to whatever was cached locally (defaults to light).
+  applyTheme(mgr.theme === 'dark' || mgr.theme === 'light' ? mgr.theme : getStoredTheme());
+
   // Auto-auth commissioner if applicable
   if (mgr.commissioner) {
     COMMISSIONER_EMAIL = LOGGED_IN_EMAIL;
@@ -1180,6 +1222,17 @@ function setupUserBar() {
     dropdown.classList.remove('open');
     openChangePasswordModal();
   };
+
+  const themeBtn = document.getElementById('theme-toggle-btn');
+  if (themeBtn) {
+    themeBtn.textContent = getStoredTheme() === 'dark' ? 'Light Mode' : 'Dark Mode';
+    themeBtn.onclick = () => {
+      const next = getStoredTheme() === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      persistTheme(next);
+      dropdown.classList.remove('open');
+    };
+  }
 }
 
 function openChangePasswordModal() {
@@ -1462,35 +1515,6 @@ function setupNav() {
       else stopLivePolling();
     });
   });
-  pinMobileNavToVisualViewport();
-}
-
-// Keep the mobile bottom nav pinned to the *visual* viewport during pinch-zoom.
-// A position:fixed element is anchored to the layout viewport, so on pinch-zoom it
-// scrolls/scales out of view until you zoom back out. We counter that: translate the
-// nav to the visual viewport's bottom edge and scale by 1/scale so it stays put at
-// natural size while only the page contents zoom. No-ops where VisualViewport is
-// unsupported (the nav then behaves as a normal fixed element).
-function pinMobileNavToVisualViewport() {
-  const vv = window.visualViewport;
-  if (!vv) return;
-  const nav = document.querySelector('.mobile-bottom-nav');
-  if (!nav) return;
-  let raf = null;
-  const apply = () => {
-    raf = null;
-    const scale = vv.scale || 1;
-    // Gap between the layout-viewport bottom (where the nav is fixed) and the
-    // visual-viewport bottom; lift the nav by it, align left, and undo the zoom.
-    const bottomGap = window.innerHeight - (vv.height + vv.offsetTop);
-    nav.style.transform = `translate(${vv.offsetLeft}px, ${-bottomGap}px) scale(${1 / scale})`;
-  };
-  const schedule = () => {
-    if (raf == null) raf = requestAnimationFrame(apply);
-  };
-  vv.addEventListener('resize', schedule);
-  vv.addEventListener('scroll', schedule);
-  apply();
 }
 
 // ============================================================
@@ -2288,18 +2312,33 @@ function renderChampionBanner() {
     const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
 
+    // Season status + period are wrapped in distinct spans (with a short
+    // status form in data-short) so the layout can split them: desktop shows
+    // them together in the footer; mobile moves the short status under the
+    // title and keeps only the period in the footer (see js/mobile.js).
     if (period) {
       // Season has data — show round name + week number
       const weekPart = `Week ${period.weekNum} of ${period.totalRoundWeeks}`;
-      footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Season In Progress &nbsp;|&nbsp; ${period.roundName} — ${weekPart}</div>`;
+      footerHtml =
+        `<div class="banner-footer">` +
+        `<span class="banner-status" data-short="In Progress">${SELECTED_SEASON} Season In Progress</span>` +
+        `<span class="banner-sep"> &nbsp;|&nbsp; </span>` +
+        `<span class="banner-period">${period.roundName} — ${weekPart}</span>` +
+        `</div>`;
     } else {
       // No data yet — preseason
       const dates = sd ? sd.schedule_dates : null;
-      let week1Part = '';
+      let periodHtml = '';
       if (dates && dates[0] && dates[0].start) {
-        week1Part = ` &nbsp;|&nbsp; Week 1 starts ${fmtShortDate(dates[0].start)}`;
+        periodHtml =
+          `<span class="banner-sep"> &nbsp;|&nbsp; </span>` +
+          `<span class="banner-period">Week 1 starts ${fmtShortDate(dates[0].start)}</span>`;
       }
-      footerHtml = `<div class="banner-footer">${SELECTED_SEASON} Preseason${week1Part}</div>`;
+      footerHtml =
+        `<div class="banner-footer">` +
+        `<span class="banner-status" data-short="Preseason">${SELECTED_SEASON} Preseason</span>` +
+        periodHtml +
+        `</div>`;
     }
   }
 
@@ -4574,7 +4613,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           .replace(/\s+/g, '_')
           .replace(/[^a-zA-Z0-9_]/g, '')}`;
         html += `<div class="pool-card">
-        <h3>Pool ${poolNum} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
+        <h3>${formatPool(poolNum)} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -5009,14 +5048,14 @@ function renderTrends() {
   const poolBtnsHtml = hasPools
     ? `<div class="trends-control-row">
             <span class="trends-label">By Pool</span>
-            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}">Pool ${p}</button>`).join('')}
+            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}">${formatPool(p)}</button>`).join('')}
           </div>`
     : '';
   const mgrPoolBtnsHtml = (prefix) =>
     hasPools
       ? `<div class="trends-control-row">
             <span class="trends-label">By Pool</span>
-            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}" data-prefix="${prefix}">Pool ${p}</button>`).join('')}
+            ${poolNums.map((p) => `<button class="btn btn-sm btn-secondary pool-filter-btn" data-pool="${p}" data-prefix="${prefix}">${formatPool(p)}</button>`).join('')}
           </div>`
       : '';
 
@@ -6127,7 +6166,7 @@ function buildTeamWeekly(seasonData) {
   // Build manager-to-pool lookup
   const managerPool = {};
   managers.forEach((m) => {
-    if (m.pool) managerPool[m.name] = 'Pool ' + m.pool;
+    if (m.pool) managerPool[m.name] = formatPool(m.pool);
   });
 
   const key = (r, w, m) => `${r}|${w}|${m}`;
@@ -9814,7 +9853,7 @@ function _mgrPwCell(m) {
 }
 
 function _mgrNormalRow(m, idx) {
-  const poolLabel = m.pool ? 'Pool ' + m.pool : '—';
+  const poolLabel = m.pool ? formatPool(m.pool) : '—';
   return `<tr id="mgr-row-${idx}">
     <td><strong>${esc(m.name)}</strong></td>
     <td style="font-size:0.85rem;">${m.email}</td>
@@ -13345,6 +13384,16 @@ function isLoggedInCommissioner() {
   if (!LOGGED_IN_EMAIL) return false;
   const email = LOGGED_IN_EMAIL.toLowerCase();
   return getManagers().some((m) => m.email && m.email.toLowerCase() === email && m.commissioner);
+}
+
+// Format a pool value as a display label without doubling the word "Pool".
+// Manager records assign a bare pool ("1"/"2"/"A"), but some data sources store
+// the full label ("Pool 1"); prefixing blindly produced "Pool Pool A". Prefix
+// only when the value isn't already a "Pool …" label.
+function formatPool(pool) {
+  if (pool === null || pool === undefined || pool === '') return '';
+  const s = String(pool).trim();
+  return /^pool\b/i.test(s) ? s : `Pool ${s}`;
 }
 
 function getPool(manager) {

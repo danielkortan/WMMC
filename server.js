@@ -249,6 +249,15 @@ function readManagersSeed() {
   return [];
 }
 
+// Format a pool value as a label without doubling "Pool" (manager records use a
+// bare pool like "1"/"A", but some data has the full "Pool 1"). Mirrors the
+// client-side formatPool() in app.js.
+function formatPool(pool) {
+  if (pool === null || pool === undefined || pool === '') return '';
+  const s = String(pool).trim();
+  return /^pool\b/i.test(s) ? s : `Pool ${s}`;
+}
+
 function writeManagersSeed(managers) {
   try {
     // Strip credentials (password + Google auth token) — they belong in db.json
@@ -926,6 +935,30 @@ app.post('/api/managers/:email/change-password', (req, res) => {
   manager.password = newPassword.trim();
   addAuditEntry(db, 'manager_password_changed', { email }, email);
   writeDB(db);
+  writeManagersSeed(db.managers);
+  res.json({ ok: true });
+});
+
+// POST /api/managers/:email/theme — self-service UI theme preference (logged-in manager)
+app.post('/api/managers/:email/theme', requireAuth, (req, res) => {
+  const email = decodeURIComponent(req.params.email).toLowerCase();
+  // A user may only change their own theme.
+  if (req.manager.email.toLowerCase() !== email) {
+    return res.status(403).json({ error: "Cannot change another user's theme" });
+  }
+  const { theme } = req.body || {};
+  if (theme !== 'light' && theme !== 'dark') {
+    return res.status(400).json({ error: 'Theme must be "light" or "dark"' });
+  }
+  const db = readDB();
+  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
+  if (!manager) {
+    return res.status(404).json({ error: 'Manager not found' });
+  }
+  manager.theme = theme;
+  writeDB(db);
+  // Theme is a non-credential identity preference — keep it in the committed seed
+  // so it survives a redeploy (same as a manager's name/active flag).
   writeManagersSeed(db.managers);
   res.json({ ok: true });
 });
@@ -2528,7 +2561,7 @@ function buildScoreboardBlocks(db, year) {
   // Group by pool — already sorted desc so last entry = pool's last place
   const pools = {};
   poolStandings.forEach((m) => {
-    const key = m.pool ? `Pool ${m.pool}` : 'Unassigned';
+    const key = m.pool ? formatPool(m.pool) : 'Unassigned';
     if (!pools[key]) pools[key] = [];
     pools[key].push(m);
   });

@@ -1,5 +1,6 @@
-// Mobile experience: bottom nav, more sheet, weekly score cards,
-// scoreboard + live table card layout
+// Mobile experience (rebuilt): bottom nav + "more" sheet, and the
+// Scoreboard landing transforms (manager rows → cards, tap-to-expand
+// Pool Play 1 / Pool Play 2 sections). Other tabs use the desktop layout.
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -7,7 +8,7 @@ function isMobile() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
-// ── Bottom nav + more sheet ─────────────────────────────────────
+// ── Bottom nav + more sheet ───────────────────────────────────────
 
 function buildMobileNav() {
   const primaryTabs = [
@@ -148,330 +149,209 @@ function watchCommissioner() {
   update();
 }
 
-// ── Live detail: rebuild player tables as flex rows ──────────────
-// CSS table display rules are unreliable on mobile browsers when nested
-// inside block-display ancestors. Replace the <table> entirely with
-// <div> flex rows — flex layout is immune to CSS table cascade issues.
-function watchLiveDetails() {
-  const container = document.getElementById('live-managers');
-  if (!container) return;
+// ── Banner: auto-fit the reigning-champion name ───────────────────
+// The title is fixed-width and the trophy is fixed, so the champion block has
+// a fixed amount of room. Shrink ONLY the champion name's font until it fits
+// that room — a long name scales down instead of pushing, wrapping, or
+// resizing anything else in the banner.
+function fitBannerChampName() {
+  if (!isMobile()) return;
+  const banner = document.getElementById('champion-banner');
+  const nameEl = banner && banner.querySelector('.banner-champ-name');
+  if (!nameEl) return;
 
-  const TEAM_COL = 1; // index of Team column (hidden on mobile, saves space)
-
-  const buildFlexTable = (table) => {
-    const ths = Array.from(table.querySelectorAll('thead tr th'));
-    const trs = Array.from(table.querySelectorAll('tbody tr'));
-    if (!ths.length) return null;
-
-    const visThs = ths.filter((_, i) => i !== TEAM_COL);
-
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'width:100%;';
-
-    trs.forEach((tr) => {
-      const tds = Array.from(tr.querySelectorAll('td')).filter((_, i) => i !== TEAM_COL);
-      if (!tds.length) return;
-
-      const card = document.createElement('div');
-      card.style.cssText = 'border-bottom:1px solid #2a2a45;padding:6px 8px;';
-
-      // Row 1: player name + pts side by side, same font size, no truncation
-      const row1 = document.createElement('div');
-      row1.style.cssText = 'display:flex;align-items:baseline;gap:8px;';
-
-      const nameTd = tds[0];
-      const nameCls = nameTd.className || '';
-      const nameColor = nameCls.includes('player-name-live')
-        ? '#4caf6e'
-        : nameCls.includes('player-name-final')
-          ? '#6c7a9c'
-          : '#e8eaf6';
-
-      const nameEl = document.createElement('div');
-      nameEl.style.cssText =
-        `flex:1;font-size:15px;font-weight:700;color:${nameColor};` + 'word-break:break-word;line-height:1.3;';
-      nameEl.textContent = nameTd.textContent.trim();
-
-      const ptsTd = tds[tds.length - 1];
-      const ptsEl = document.createElement('div');
-      ptsEl.style.cssText = 'flex-shrink:0;font-size:15px;font-weight:700;color:#4a9eff;white-space:nowrap;';
-      ptsEl.innerHTML = ptsTd.innerHTML;
-
-      row1.appendChild(nameEl);
-      row1.appendChild(ptsEl);
-      card.appendChild(row1);
-
-      // Row 2: stat columns with inline labels, horizontally scrollable
-      const statTds = tds.slice(1, -1);
-      const statThs = visThs.slice(1, -1);
-      if (statTds.length) {
-        const row2 = document.createElement('div');
-        row2.style.cssText =
-          'display:flex;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;' +
-          'gap:0;margin-top:4px;padding-bottom:2px;';
-        statTds.forEach((td, i) => {
-          const label = statThs[i]?.textContent.trim() || '';
-          const statEl = document.createElement('div');
-          statEl.style.cssText = 'flex:0 0 auto;text-align:center;padding:0 5px;min-width:30px;';
-          statEl.innerHTML =
-            `<div style="font-size:9px;color:#5a6690;font-weight:700;letter-spacing:0.3px;">${label}</div>` +
-            `<div style="font-size:11px;color:#9fa8da;">${td.textContent.trim()}</div>`;
-          row2.appendChild(statEl);
-        });
-        card.appendChild(row2);
-      }
-
-      wrap.appendChild(card);
-    });
-
-    return wrap;
-  };
-
-  const applyDetail = (row) => {
-    if (row.style.display === 'none') return;
-    const panel = row.querySelector('.mgr-detail-panel');
-    if (!panel) return;
-
-    // Panel layout
-    Object.assign(panel.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.75rem',
-      overflow: 'visible',
-      padding: '0.5rem',
-      background: '#13132a',
-    });
-
-    row.querySelectorAll('.live-mgr-detail-section').forEach((s) => {
-      Object.assign(s.style, { flex: 'none', width: '100%', overflow: 'visible' });
-
-      // Replace each .table-wrapper with our flex-based table
-      s.querySelectorAll('.table-wrapper').forEach((wrapper) => {
-        const table = wrapper.querySelector('table');
-        if (!table) return;
-        const replacement = buildFlexTable(table);
-        if (replacement) wrapper.replaceWith(replacement);
-      });
-    });
-  };
-
-  new MutationObserver((mutations) => {
-    for (const m of mutations) {
-      if (m.type === 'attributes' && m.target.classList?.contains('live-mgr-detail-row')) {
-        applyDetail(m.target);
-      } else if (m.type === 'childList') {
-        container.querySelectorAll('.live-mgr-detail-row').forEach(applyDetail);
-      }
-    }
-  }).observe(container, {
-    attributes: true,
-    attributeFilter: ['style'],
-    childList: true,
-    subtree: true,
-  });
-}
-
-// ── Compact mobile banner injected above scoreboard ─────────────
-// The original #champion-banner has complex CSS that is hard to style
-// compactly on mobile. We hide it and build a simple 2-line version
-// by reading its rendered content via MutationObserver.
-function buildMobileBanner() {
-  const source = document.getElementById('champion-banner');
-  if (!source) return;
-
-  const banner = document.createElement('div');
-  banner.id = 'mobile-banner';
-  source.after(banner);
-
-  const sync = () => {
-    const title = source.querySelector('.banner-title')?.textContent.trim() || '';
-    const champName = source.querySelector('.banner-champ-name')?.textContent.trim() || '';
-    const footer = source.querySelector('.banner-footer')?.textContent.trim() || '';
-    if (!title && !footer) return;
-    banner.innerHTML =
-      `<div class="mb-row">` +
-      `<span class="mb-title">${title}</span>` +
-      (champName ? `<span class="mb-champ">🏆 ${champName}</span>` : '') +
-      `</div>` +
-      (footer ? `<div class="mb-status">${footer}</div>` : '');
-  };
-
-  new MutationObserver(sync).observe(source, { childList: true, subtree: true, characterData: true });
-  sync();
-}
-
-// ── Scoreboard sub-tabs: mirror in fixed bar above bottom nav ───
-// CSS hides #scoreboard-content .scoreboard-tabs entirely on mobile.
-// JS clones the buttons into a fixed bar and forwards clicks back to
-// the originals so app.js tab-switching handlers still fire.
-function setupScoreboardTabsBar() {
-  const bar = document.createElement('div');
-  bar.id = 'mobile-sb-tabs-bar';
-  bar.style.display = 'none';
-  document.body.appendChild(bar);
-
-  const scoreboardContent = document.getElementById('scoreboard-content');
-  if (!scoreboardContent) return;
-
-  const syncTabsBar = () => {
-    const origTabs = Array.from(scoreboardContent.querySelectorAll('.scoreboard-tabs .sb-tab'));
-    if (!origTabs.length) {
-      bar.style.display = 'none';
-      document.body.classList.remove('mob-sb-tabs-visible');
-      return;
-    }
-
-    bar.innerHTML = '';
-    const wrap = document.createElement('div');
-    wrap.className = 'scoreboard-tabs';
-
-    origTabs.forEach((orig) => {
-      const btn = document.createElement('button');
-      btn.className = orig.className;
-      btn.textContent = orig.textContent;
-      btn.addEventListener('click', () => orig.click());
-      wrap.appendChild(btn);
-    });
-
-    bar.appendChild(wrap);
-    bar.style.display = 'block';
-    document.body.classList.add('mob-sb-tabs-visible');
-  };
-
-  new MutationObserver((mutations) => {
-    const relevant = mutations.some(
-      (m) => m.type === 'childList' || (m.type === 'attributes' && m.target.classList?.contains('sb-tab'))
-    );
-    if (relevant) syncTabsBar();
-  }).observe(scoreboardContent, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['class'],
-  });
-
-  // Show bar when navigating back to scoreboard; hide when leaving
-  document.addEventListener(
-    'click',
-    (e) => {
-      const btn = e.target.closest('.mobile-nav-btn[data-tab], .nav-btn[data-tab]');
-      if (!btn) return;
-      if (btn.dataset.tab === 'dashboard') {
-        // Re-sync after a tick so app.js has time to render
-        setTimeout(syncTabsBar, 50);
-      } else {
-        bar.style.display = 'none';
-        document.body.classList.remove('mob-sb-tabs-visible');
-      }
-    },
-    { capture: true }
-  );
-
-  // Retry on initial load — app.js may render scoreboard after mobile.js runs
-  syncTabsBar();
-  setTimeout(syncTabsBar, 300);
-  setTimeout(syncTabsBar, 1000);
-}
-
-// ── Pool Play: stack PP1/PP2 below PP-Overall on mobile ──────────
-function stackPoolPlayPeriods() {
-  const overall = document.getElementById('sb-pp-overall');
-  if (!overall || overall.style.display === 'none') return;
-
-  [
-    { id: 'sb-pp1', label: 'Pool Play 1' },
-    { id: 'sb-pp2', label: 'Pool Play 2' },
-  ].forEach(({ id, label }) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (el.style.display === 'none') el.style.display = '';
-    if (!el.querySelector('.mob-section-header')) {
-      const hdr = document.createElement('h3');
-      hdr.className = 'mob-section-header';
-      hdr.textContent = label;
-      el.prepend(hdr);
+  // Reset to the CSS (clamp) size, then measure once layout settles.
+  nameEl.style.fontSize = '';
+  requestAnimationFrame(() => {
+    let size = parseFloat(getComputedStyle(nameEl).fontSize) || 16;
+    const MIN = 10;
+    let guard = 60;
+    // scrollWidth is the text's intrinsic width; clientWidth is the bounded box.
+    while (nameEl.scrollWidth > nameEl.clientWidth + 0.5 && size > MIN && guard-- > 0) {
+      size -= 0.5;
+      nameEl.style.fontSize = size + 'px';
     }
   });
 }
 
-// ── Scoreboard table card transformation ─────────────────────────
+// Move the short season status ("In Progress" / "Preseason") out of the footer
+// and under the WMMC title on the left. This frees the footer to show the full
+// period status (e.g. "Pool Play 2 — Week 5 of 5") on a single row. The footer
+// copy is hidden via CSS; here we mirror its short text into the title block.
+function arrangeMobileBannerStatus() {
+  if (!isMobile()) return;
+  const banner = document.getElementById('champion-banner');
+  if (!banner) return;
+  const left = banner.querySelector('.banner-left');
+  const statusEl = banner.querySelector('.banner-footer .banner-status');
+  if (!left || !statusEl) return;
 
-// Attach a score-tap breakdown row to one manager row.
-// Columns are identified by counting from the right:
-//   last = total, last-2 = pitching, last-3 = batting
-// Tables with >7 columns (e.g. the 9-col historical overall) are skipped.
-function attachScoreTap(row) {
-  if (row.dataset.mobScoreTap) return;
-  row.dataset.mobScoreTap = '1';
-
-  const cells = row.querySelectorAll('td');
-  const n = cells.length;
-  if (n < 4 || n > 7) return; // skip trivial or complex tables
-
-  const bat = cells[n - 3]?.textContent.trim() || '—';
-  const pit = cells[n - 2]?.textContent.trim() || '—';
-  const totalCell = cells[n - 1];
-  if (!totalCell) return;
-
-  const breakdownRow = document.createElement('tr');
-  breakdownRow.className = 'mob-score-breakdown-row';
-  breakdownRow.innerHTML = `<td><span>🏏 Bat &nbsp;<strong>${bat}</strong></span><span>⚾ Pit &nbsp;<strong>${pit}</strong></span></td>`;
-
-  // Insert between this row and the detail row (if any)
-  const next = row.nextElementSibling;
-  if (next) {
-    next.before(breakdownRow);
-  } else {
-    row.after(breakdownRow);
+  let line = left.querySelector('.banner-status-mobile');
+  if (!line) {
+    line = document.createElement('div');
+    line.className = 'banner-status-mobile';
+    left.appendChild(line);
   }
-
-  totalCell.addEventListener('click', (e) => {
-    e.stopPropagation(); // prevent row-level player-list toggle
-    const isOpen = breakdownRow.classList.contains('open');
-    breakdownRow.classList.toggle('open', !isOpen);
-
-    // If player list is open, close it when showing score breakdown
-    if (!isOpen) {
-      const detailRow = breakdownRow.nextElementSibling;
-      if (detailRow?.classList.contains('sb-manager-detail-row') && detailRow.style.display !== 'none') {
-        detailRow.style.display = 'none';
-        const mgrKey = detailRow.id?.replace('mgr-detail-', '');
-        const arrow = mgrKey ? document.getElementById('sb-arrow-' + mgrKey) : null;
-        if (arrow) arrow.innerHTML = '&#9660;';
-      }
-    }
-  });
+  const text = statusEl.dataset.short || statusEl.textContent.trim();
+  // Only write when changed — setting textContent is a childList mutation that
+  // would otherwise re-trigger the banner observer in a loop.
+  if (line.textContent !== text) line.textContent = text;
 }
 
+function refreshMobileBanner() {
+  arrangeMobileBannerStatus();
+  fitBannerChampName();
+}
+
+function watchBanner() {
+  const banner = document.getElementById('champion-banner');
+  if (!banner) return;
+
+  // Re-run whenever the banner content is (re)rendered. Observe childList only
+  // so our own inline tweaks (attribute changes) don't re-trigger it.
+  new MutationObserver(() => refreshMobileBanner()).observe(banner, {
+    childList: true,
+    subtree: true,
+  });
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(refreshMobileBanner, 150);
+  });
+
+  refreshMobileBanner();
+  // Re-fit after web fonts finish loading (metrics can shift).
+  setTimeout(refreshMobileBanner, 500);
+}
+
+// ── Scoreboard landing transforms ─────────────────────────────────
+
+// Tag manager summary rows so the CSS can lay them out as flex cards
+// ([rank] [name] [score]) and color the top-3 rank cells.
 function transformScoreboardTables() {
   if (!isMobile()) return;
 
-  // Active season: rows already have sb-manager-row class + onclick handlers
-  document.querySelectorAll('#scoreboard-content .sb-manager-row').forEach((row) => {
-    row.classList.add('mob-sbrow');
-    attachScoreTap(row);
-  });
+  const rows = document.querySelectorAll(
+    '#scoreboard-content .sb-manager-row,' +
+      ' #scoreboard-content .pool-card-body table tbody tr,' +
+      ' #scoreboard-content .sb-period table tbody tr'
+  );
 
-  // Historical season: plain tbody rows inside pool-card tables
-  document.querySelectorAll('#scoreboard-content .pool-card-body table tbody tr').forEach((row) => {
-    if (row.classList.contains('mob-sbrow')) return;
+  rows.forEach((row) => {
+    // Skip rows that live inside an expanded player-detail panel.
+    if (row.closest('.mgr-detail-panel') || row.closest('.sb-manager-detail-row')) return;
     row.classList.add('mob-sbrow');
-    attachScoreTap(row);
-  });
 
-  // Playoff period tables (QF/SF/Finals) inside active scoreboard — plain tbody rows
-  document.querySelectorAll('#scoreboard-content .sb-period table tbody tr').forEach((row) => {
-    if (row.classList.contains('sb-manager-row') || row.classList.contains('mob-sbrow')) return;
-    row.classList.add('mob-sbrow');
-    attachScoreTap(row);
+    const rankCell = row.querySelector('td:first-child');
+    if (rankCell && !rankCell.dataset.mobRanked) {
+      const n = parseInt(rankCell.textContent.trim(), 10);
+      const cls = n === 1 ? 'rank-1' : n === 2 ? 'rank-2' : n === 3 ? 'rank-3' : '';
+      if (cls) rankCell.classList.add(cls);
+      rankCell.dataset.mobRanked = '1';
+    }
   });
+}
 
-  // Color rank cells for top 3 by reading the text content
-  document.querySelectorAll('#scoreboard-content .mob-sbrow td:first-child').forEach((rankCell) => {
-    const n = parseInt(rankCell.textContent.trim(), 10);
-    if (n === 1) rankCell.classList.add('rank-1');
-    else if (n === 2) rankCell.classList.add('rank-2');
-    else if (n === 3) rankCell.classList.add('rank-3');
+// Default the stacked PP1 / PP2 sections to "current period open, other
+// collapsed". Runs once per render (guarded) so it doesn't fight a user's
+// manual taps until the scoreboard is re-rendered.
+function applyMobilePoolPlayDefaults() {
+  if (!isMobile()) return;
+
+  const footer = document.querySelector('#champion-banner .banner-footer');
+  const openPeriod = footer && /Pool Play 2/i.test(footer.textContent) ? 'pp2' : 'pp1';
+
+  ['pp1', 'pp2'].forEach((p) => {
+    const sec = document.getElementById('sb-' + p);
+    if (!sec || sec.dataset.mobInit === '1') return;
+    sec.dataset.mobInit = '1';
+    sec.classList.toggle('mob-pp-collapsed', p !== openPeriod);
+  });
+}
+
+// Organize the scoreboard into accordion sections (mobile only): rename the
+// card to "Scoreboard", group Pool Play (Overall + PP1 + PP2) under one header,
+// and give each playoff round that has data its own header. Idempotent — safe
+// to re-run on every scoreboard re-render (guards on inserted element ids).
+function buildScoreboardSections() {
+  if (!isMobile()) return;
+  const sb = document.getElementById('scoreboard-content');
+  if (!sb) return;
+
+  // Card title: "Pool Play Scoreboard" → "Scoreboard" (Pool Play is a section).
+  const title = sb.querySelector('.sb-poolplay-header h2');
+  if (title && title.textContent.trim() !== 'Scoreboard') title.textContent = 'Scoreboard';
+
+  // "Pool Play" group header above the Overall standings.
+  const overall = document.getElementById('sb-pp-overall');
+  if (overall && !document.getElementById('mob-pp-group-header')) {
+    const hdr = document.createElement('div');
+    hdr.id = 'mob-pp-group-header';
+    hdr.className = 'mob-group-header';
+    hdr.textContent = 'Pool Play';
+    overall.parentNode.insertBefore(hdr, overall);
+  }
+
+  // Playoff rounds: each gets its own header + is revealed only when it has
+  // data (a populated table). No data → stays hidden, no empty section.
+  [
+    { id: 'sb-qf', label: 'Quarterfinals' },
+    { id: 'sb-sf', label: 'Semifinals' },
+    { id: 'sb-finals', label: 'Finals' },
+  ].forEach(({ id, label }) => {
+    const sec = document.getElementById(id);
+    if (!sec) return;
+    const hasData = !!sec.querySelector('table tbody tr');
+    const hdrId = 'mob-hdr-' + id;
+    let hdr = document.getElementById(hdrId);
+    if (hasData) {
+      sec.classList.add('mob-round-section');
+      if (!hdr) {
+        hdr = document.createElement('div');
+        hdr.id = hdrId;
+        hdr.className = 'mob-group-header';
+        hdr.textContent = label;
+        sec.parentNode.insertBefore(hdr, sec);
+      }
+    } else {
+      sec.classList.remove('mob-round-section', 'mob-round-collapsed');
+      if (hdr) hdr.remove();
+    }
+  });
+}
+
+// Delegated toggles (survive the scoreboard's frequent re-renders):
+//  - accordion section header → collapse its group/round
+//  - period header (Pool Play 1 / 2) → collapse the whole period
+//  - pool header → collapse that pool
+// Manager rows keep their own (app.js) detail toggle.
+function setupPoolPlayToggles() {
+  document.addEventListener('click', (e) => {
+    if (!isMobile()) return;
+    if (!e.target.closest('#scoreboard-content')) return;
+
+    const groupHeader = e.target.closest('.mob-group-header');
+    if (groupHeader) {
+      const collapsed = groupHeader.classList.toggle('collapsed');
+      if (groupHeader.id === 'mob-pp-group-header') {
+        document.getElementById('sb-poolplay-body')?.classList.toggle('pp-group-collapsed', collapsed);
+      } else {
+        groupHeader.nextElementSibling?.classList.toggle('mob-round-collapsed', collapsed);
+      }
+      return;
+    }
+
+    const poolHeader = e.target.closest('.pool-card-header');
+    if (poolHeader) {
+      poolHeader.closest('.pool-card')?.classList.toggle('mob-pool-collapsed');
+      return;
+    }
+
+    const periodHeader = e.target.closest('.pool-period-header');
+    if (periodHeader) {
+      periodHeader.closest('.sb-period')?.classList.toggle('mob-pp-collapsed');
+    }
   });
 }
 
@@ -479,139 +359,28 @@ function watchScoreboard() {
   const container = document.getElementById('scoreboard-content');
   if (!container) return;
 
-  new MutationObserver((mutations) => {
+  const run = () => {
     if (!isMobile()) return;
-    const hasNewContent = mutations.some((m) => m.type === 'childList');
-    const hasPeriodSwitch = mutations.some((m) => m.type === 'attributes' && m.target.classList?.contains('sb-period'));
-    if (hasNewContent) transformScoreboardTables();
-    if (hasNewContent || hasPeriodSwitch) stackPoolPlayPeriods();
-  }).observe(container, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['style'],
-  });
+    transformScoreboardTables();
+    buildScoreboardSections();
+    applyMobilePoolPlayDefaults();
+  };
+
+  new MutationObserver((mutations) => {
+    if (mutations.some((m) => m.type === 'childList')) run();
+  }).observe(container, { childList: true, subtree: true });
+
+  run();
 }
 
-// ── Weekly score cards ──────────────────────────────────────────
-
-function buildWeeklyCards() {
-  if (!isMobile()) return;
-
-  const table = document.getElementById('weekly-table');
-  if (!table) return;
-
-  document.getElementById('mobile-weekly-cards')?.remove();
-
-  const rows = Array.from(table.querySelectorAll('tbody tr'));
-  if (!rows.length) return;
-
-  const firstCells = rows[0]?.querySelectorAll('td');
-  if (!firstCells || firstCells.length < 10) return;
-  const hasDateCol = firstCells.length >= 15;
-  const o = hasDateCol ? 1 : 0;
-
-  const container = document.createElement('div');
-  container.className = 'mobile-weekly-cards';
-  container.id = 'mobile-weekly-cards';
-
-  rows.forEach((row) => {
-    const cells = row.querySelectorAll('td');
-    if (cells.length < 10) return;
-
-    const get = (i) => cells[i]?.textContent.trim() ?? '';
-
-    const rnd = get(0);
-    const wk = get(1);
-    const manager = get(2 + o);
-    const pool = get(3 + o);
-    const bat = get(4 + o) || '—';
-    const batRk = get(5 + o);
-    const pit = get(6 + o) || '—';
-    const pitRk = get(7 + o);
-    const total = get(8 + o) || '—';
-    const totRk = get(9 + o);
-    const cumBat = get(10 + o) || '—';
-    const cumPit = get(11 + o) || '—';
-    const cumTot = get(12 + o) || '—';
-    const poolRk = get(13 + o);
-
-    const rank = parseInt(totRk, 10);
-    const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : '';
-
-    const card = document.createElement('div');
-    card.className = 'mobile-weekly-card';
-    card.innerHTML = `
-      <div class="mwc-summary">
-        <div class="mwc-rank ${rankClass}">${totRk || '—'}</div>
-        <div class="mwc-info">
-          <div class="mwc-name">${manager}</div>
-          <div class="mwc-meta">${rnd} · ${wk}${pool ? ' · ' + pool : ''}</div>
-        </div>
-        <div class="mwc-score">
-          <div class="mwc-total">${total}</div>
-          <div class="mwc-bat-pit">🏏 ${bat} &nbsp;⚾ ${pit}</div>
-        </div>
-        <span class="mwc-chevron">▼</span>
-      </div>
-      <div class="mwc-detail">
-        <div class="mwc-stat">
-          <span class="mwc-stat-label">Batting Rank</span>
-          <span class="mwc-stat-value">${batRk ? '#' + batRk : '—'}</span>
-        </div>
-        <div class="mwc-stat">
-          <span class="mwc-stat-label">Pitching Rank</span>
-          <span class="mwc-stat-value">${pitRk ? '#' + pitRk : '—'}</span>
-        </div>
-        <div class="mwc-stat">
-          <span class="mwc-stat-label">Cum. Batting</span>
-          <span class="mwc-stat-value">${cumBat}</span>
-        </div>
-        <div class="mwc-stat">
-          <span class="mwc-stat-label">Cum. Pitching</span>
-          <span class="mwc-stat-value">${cumPit}</span>
-        </div>
-        <div class="mwc-stat">
-          <span class="mwc-stat-label">Cum. Total</span>
-          <span class="mwc-stat-value">${cumTot}</span>
-        </div>
-        <div class="mwc-stat">
-          <span class="mwc-stat-label">Pool Rank</span>
-          <span class="mwc-stat-value">${poolRk ? '#' + poolRk : '—'}</span>
-        </div>
-      </div>
-    `;
-
-    card.querySelector('.mwc-summary').addEventListener('click', () => {
-      card.classList.toggle('expanded');
-    });
-
-    container.appendChild(card);
-  });
-
-  const wrapper = table.closest('.table-wrapper') || table;
-  wrapper.after(container);
-}
-
-function watchWeeklyTable() {
-  const table = document.getElementById('weekly-table');
-  if (!table) return;
-
-  new MutationObserver(() => {
-    if (isMobile()) buildWeeklyCards();
-  }).observe(table, { childList: true, subtree: true });
-}
-
-// ── Init ────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────
 
 function init() {
   if (!isMobile()) return;
   buildMobileNav();
-  buildMobileBanner();
-  watchLiveDetails();
-  watchWeeklyTable();
+  watchBanner();
+  setupPoolPlayToggles();
   watchScoreboard();
-  setupScoreboardTabsBar();
 }
 
 if (document.readyState === 'loading') {
