@@ -3781,6 +3781,68 @@ body::before {
   opacity: 0.65;
 }
 
+/* Scoreboard manager detail — per-period (PP1 / PP2 / playoffs) subsections */
+.sbmd-grouped {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.sbmd-period {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, #fff);
+  overflow: hidden;
+}
+
+.sbmd-period.sbmd-current {
+  border-color: var(--accent, #1b3a6b);
+}
+
+.sbmd-period-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+  background: var(--bg-alt, #f1f3f6);
+  font-weight: 700;
+  font-size: 0.82rem;
+  user-select: none;
+}
+
+.sbmd-period.sbmd-current .sbmd-period-header {
+  background: var(--accent, #1b3a6b);
+  color: #fff;
+}
+
+.sbmd-current-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  margin-left: 0.35rem;
+}
+
+.sbmd-period-pts {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.sbmd-period-body {
+  padding: 0.4rem 0.5rem;
+}
+
+.sbmd-subtotal {
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-left: 0.3rem;
+}
+
 /* ============================================================
    Player Quick-View Popup
    ============================================================ */
