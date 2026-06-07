@@ -118,9 +118,18 @@ It installs `wmmc.*` helpers:
       console.log(d);
       return d;
     },
+    // Capture current totals as today's baseline snapshot (no sync) — seeds the
+    // trail the next compile diffs against, e.g. to recover when it's empty.
+    snapshot: async () => {
+      const d = await (
+        await fetch('/api/mlb/snapshot', { method: 'POST', headers: h(), body: JSON.stringify({ year: Y }) })
+      ).json();
+      console.log(d);
+      return d;
+    },
   };
   console.log(
-    'wmmc ready: wmmc.dates() · wmmc.diff("YYYY-MM-DD","YYYY-MM-DD") · wmmc.mgr("Manager Name") · wmmc.forceSync()'
+    'wmmc ready: wmmc.dates() · wmmc.diff("YYYY-MM-DD","YYYY-MM-DD") · wmmc.mgr("Manager Name") · wmmc.forceSync() · wmmc.snapshot()'
   );
 })();
 ```

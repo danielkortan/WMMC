@@ -111,12 +111,21 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 ## Passphrases / triggers
 
 - **`SCOREFIX`** — the user pastes this (or says "the score-swing guard fired" / "scoring swing
-  Slack alert") when PR #247's score-swing guard posts a Slack alert. Open
-  `RUNBOOK.md` → "Score-swing guard fired (Slack alert) — troubleshooting" and walk them
-  through it step by step: have them run the `wmmc.*` console helpers (`wmmc.dates()`,
-  `wmmc.diff()`, `wmmc.mgr()`), read back the diff to find the manager → week → player that
-  moved, then either guide a `wmmc.forceSync()` (legit MLB correction) or diagnose the bad
-  roster/swap/date and propose the fix. The guard blocks ≥40-pt drops and warns on >200-pt jumps.
+  Slack alert") when PR #247's score-swing guard posts a Slack alert. The guard blocks ≥40-pt
+  drops and warns on >200-pt jumps.
+  **Walk them through it entirely inside the chat — do NOT tell them to open `RUNBOOK.md` or
+  navigate anywhere.** Paste, inline in your reply, the full self-contained code they need:
+  1. A single copy-paste console block that installs the `wmmc.*` helpers **and immediately runs
+     `wmmc.dates()`** (combine install + first read so they get the saved-totals table in one
+     paste). The canonical helper source is `RUNBOOK.md` → "Score-swing guard fired" — copy it
+     verbatim, don't rewrite it from memory.
+  2. Ask them to paste back the `wmmc.dates()` table (and `wmmc.mgr("<manager>")` for the flagged
+     manager). Give the exact `wmmc.mgr(...)` line to paste.
+  3. From the table, give them the exact `wmmc.diff("<lastGood>","<bad>")` line (dates filled in)
+     to find the manager → week → player that moved.
+  4. Decide with them: legit MLB correction → `wmmc.forceSync()` (give the exact call); bad
+     data → diagnose the roster/swap/date and propose the fix. Always hand them ready-to-run
+     code, never a pointer to docs.
 
 ## Memory files
 
