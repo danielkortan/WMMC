@@ -305,6 +305,76 @@ async function auditSeasonIntegrity(db) {
   }
 }
 
+// Pre-commit integrity guard for the full-season save (SAVE_HARDENING_PLAN.md, Layer 3). Compares
+// the candidate season against the stored one and flags DESTRUCTIVE changes a stale full-season
+// overwrite would otherwise apply silently: a roster/attribution wipe, a vanished manager, lost
+// roster_dates/swaps, or a manager's total cratering. Detection only — the caller blocks. This is
+// the backstop that catches the next not-yet-guarded field the way the rosters wipe slipped past
+// the per-field guards. `captureScoreSnapshot` is hoisted (declared below).
+function assessSeasonWriteIntegrity(existingSd, candidateSd) {
+  const reasons = [];
+  if (!existingSd) return { destructive: false, reasons };
+  const objCount = (o) => (o && typeof o === 'object' ? Object.keys(o).length : 0);
+  const mgrCount = (sd) => objCount(sd && sd.rosters);
+  const rdCount = (sd) => objCount(sd && sd.roster_dates);
+  const swapCount = (sd) => ((sd && sd.swaps) || []).filter((s) => s.status === 'approved').length;
+
+  const exMgrs = mgrCount(existingSd);
+  const caMgrs = mgrCount(candidateSd);
+  if (exMgrs > 0 && caMgrs === 0) reasons.push(`rosters wiped (managers ${exMgrs} → 0)`);
+  else if (caMgrs < exMgrs) reasons.push(`rosters lost ${exMgrs - caMgrs} manager(s) (${exMgrs} → ${caMgrs})`);
+
+  const exRd = rdCount(existingSd);
+  const caRd = rdCount(candidateSd);
+  if (exRd > 0 && caRd < exRd) reasons.push(`roster_dates lost ${exRd - caRd} manager(s) (${exRd} → ${caRd})`);
+
+  const exSw = swapCount(existingSd);
+  const caSw = swapCount(candidateSd);
+  if (exSw > 0 && caSw < exSw) reasons.push(`approved swaps dropped ${exSw - caSw} (${exSw} → ${caSw})`);
+
+  // Structural: catch a stale clobber that strips players without the matching swap, even when the
+  // score swing is under 40. A legit swap is net-zero on a week's roster and a single add/drop is
+  // ±1, so a week's batter or pitcher list shrinking by more than MAX_WEEK_ROSTER_SHRINK — or a
+  // populated week disappearing entirely — signals a stale/partial overwrite. (Comparison runs
+  // after the save's roster_dates heal, so unchanged rosters compare equal.)
+  const MAX_WEEK_ROSTER_SHRINK = 1;
+  const exRosters = existingSd.rosters && typeof existingSd.rosters === 'object' ? existingSd.rosters : {};
+  const caRosters = candidateSd.rosters && typeof candidateSd.rosters === 'object' ? candidateSd.rosters : {};
+  for (const [mgr, weeks] of Object.entries(exRosters)) {
+    if (!weeks || typeof weeks !== 'object') continue;
+    const caWeeks = caRosters[mgr] && typeof caRosters[mgr] === 'object' ? caRosters[mgr] : {};
+    for (const [wk, wr] of Object.entries(weeks)) {
+      if (!wr || typeof wr !== 'object') continue;
+      const exB = Array.isArray(wr.batters) ? wr.batters.length : 0;
+      const exP = Array.isArray(wr.pitchers) ? wr.pitchers.length : 0;
+      const cw = caWeeks[wk] || {};
+      const caB = Array.isArray(cw.batters) ? cw.batters.length : 0;
+      const caP = Array.isArray(cw.pitchers) ? cw.pitchers.length : 0;
+      if (exB - caB > MAX_WEEK_ROSTER_SHRINK || exP - caP > MAX_WEEK_ROSTER_SHRINK) {
+        reasons.push(`${mgr} ${wk} roster shrank (B ${exB}→${caB}, P ${exP}→${caP})`);
+      }
+    }
+  }
+
+  // Per-manager total swing — reuse the score-guard 40-pt threshold for a destructive DROP. A
+  // normal roster edit (a swap, an add/drop) never craters a cumulative total by 40+.
+  try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const before = captureScoreSnapshot(existingSd, todayET).totals;
+    const after = captureScoreSnapshot(candidateSd, todayET).totals;
+    for (const m of Object.keys(before)) {
+      const b = (before[m] || {}).total || 0;
+      const a = (after[m] || {}).total || 0;
+      if (b - a >= 40) reasons.push(`${m} total drops ${Math.round((b - a) * 10) / 10} (${b} → ${a})`);
+    }
+  } catch (e) {
+    // A snapshot failure must not block a legitimate save — log and skip the score check.
+    console.error('[Save guard] integrity snapshot error (continuing):', e.message);
+  }
+
+  return { destructive: reasons.length > 0, reasons };
+}
+
 function readManagersSeed() {
   try {
     if (fs.existsSync(MANAGERS_SEED_FILE)) {
@@ -804,6 +874,31 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
       if (!incomingIds.has(serverSwap.id)) sd.swaps.push(serverSwap);
     }
   }
+
+  // Integrity guard (SAVE_HARDENING_PLAN.md, Layer 3): refuse a full-season save that would destroy
+  // rosters/attribution, drop a manager, lose roster_dates/swaps, or crater a manager's total — the
+  // stale-tab clobber class. The per-field guards above protect known fields; this is the backstop
+  // for the next field nobody remembered to guard (exactly how the 06-08 rosters wipe slipped
+  // through). Commissioner can override a true positive by re-sending with `force: true`.
+  if (existingSd && req.body.force !== true) {
+    const integrity = assessSeasonWriteIntegrity(existingSd, sd);
+    if (integrity.destructive) {
+      console.error(`[Save guard] BLOCKED destructive save for ${req.params.year}: ${integrity.reasons.join('; ')}`);
+      addAuditEntry(
+        db,
+        'season_save_blocked',
+        { year: req.params.year, reasons: integrity.reasons },
+        req.get('X-User-Email')
+      );
+      writeDB(db); // persist the audit record only; db.seasons[year] is still the stored (good) copy
+      postSlack(
+        `:no_entry: *Blocked a destructive season save (${req.params.year})* — likely a stale browser tab.\n• ` +
+          `${integrity.reasons.join('\n• ')}\nThe saved state was preserved; no change was applied.`
+      ).catch(() => {});
+      return res.status(409).json({ error: 'destructive_save_blocked', reasons: integrity.reasons });
+    }
+  }
+
   db.seasons[req.params.year] = sd;
   writeDB(db);
   res.json({ ok: true });
