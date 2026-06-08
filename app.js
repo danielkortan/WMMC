@@ -825,15 +825,64 @@ function displayPlayer(name, sd) {
 function getSeasons() {
   return JSON.parse(localStorage.getItem('wmmc_seasons') || '{}');
 }
-function saveSeason(year, data) {
+// Persist a season to the server. The payload carries the `_rev` token the client loaded from
+// GET /api/seasons; the server rejects the save with 409 if that token is stale (another save/sync
+// changed the data, or it's a tab on old JS with no token), which means our snapshot is out of date
+// and would clobber newer state. On 409 we refresh from the server and (for user-initiated saves)
+// reload so the view reflects reality. On success we record the new `_rev` so the next save isn't
+// falsely rejected. Pass { silent: true } for automatic/render-time saves so they never alert/reload
+// (which could loop) — they simply re-run on the next render. See SAVE_HARDENING_PLAN.md, Layer 1.
+async function saveSeason(year, data, opts = {}) {
+  const { silent = false } = opts;
   const seasons = getSeasons();
   seasons[year] = data;
   localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
-  // Persist to server in background
-  apiFetch('/api/seasons/' + year, {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }).catch(() => {});
+  try {
+    const resp = await apiFetch('/api/seasons/' + year, { method: 'POST', body: JSON.stringify(data) });
+    if (resp.status === 409) {
+      // Stale snapshot (or a blocked destructive save). Pull the current server state down so the
+      // local cache is correct again.
+      try {
+        const fresh = await fetch('/api/seasons');
+        if (fresh.ok) {
+          const srv = await fresh.json();
+          if (srv && Object.keys(srv).length > 0) localStorage.setItem('wmmc_seasons', JSON.stringify(srv));
+        }
+      } catch (_) {
+        /* offline — keep what we have */
+      }
+      if (!silent) {
+        alert(
+          'Your view was out of date, so that change was not saved — the latest data has been loaded. ' +
+            'Please re-check and re-apply your change.'
+        );
+        // One-shot reload guard so a mis-classified caller can never loop. Cleared by loadData().
+        if (!sessionStorage.getItem('wmmc_stale_reload')) {
+          sessionStorage.setItem('wmmc_stale_reload', '1');
+          location.reload();
+        }
+      }
+      return false;
+    }
+    if (!resp.ok) {
+      if (!silent) alert(`Save failed (${resp.status}). Please try again.`);
+      return false;
+    }
+    // Success — capture the new concurrency token for subsequent saves.
+    const body = await resp.json().catch(() => ({}));
+    if (body && body._rev) {
+      if (data && typeof data === 'object') data._rev = body._rev;
+      const s = getSeasons();
+      if (s[year]) {
+        s[year]._rev = body._rev;
+        localStorage.setItem('wmmc_seasons', JSON.stringify(s));
+      }
+    }
+    return true;
+  } catch (e) {
+    if (!silent) console.warn('saveSeason error:', e.message);
+    return false;
+  }
 }
 
 // ---- Atomic submission persistence ----
@@ -927,6 +976,12 @@ async function loadData() {
       const serverSeasons = await seasonsResp.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
         localStorage.setItem('wmmc_seasons', JSON.stringify(serverSeasons));
+        // Fresh data loaded — release the one-shot stale-save reload guard.
+        try {
+          sessionStorage.removeItem('wmmc_stale_reload');
+        } catch (_) {
+          /* sessionStorage unavailable — ignore */
+        }
       }
     }
     if (managersResp.ok) {
@@ -6499,9 +6554,10 @@ function renderRosterData(managerName, isCommissioner) {
   // Migrate old flat rosters to per-week format if needed
   if (isActive) migrateRostersToWeekly(seasonData);
   // Ensure roster_dates has drop/add dates for all approved swaps.
-  if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  // Automatic render-time saves: silent so a stale-rev 409 never alerts/reloads (it re-runs next render).
+  if (isActive && backfillRosterDatesFromSwaps(seasonData)) saveSeason(SELECTED_SEASON, seasonData, { silent: true });
   // Fill / recompute per-week roster entries by carrying forward the last known roster.
-  if (isActive && repairCarryForwardRosters(seasonData)) saveSeason(SELECTED_SEASON, seasonData);
+  if (isActive && repairCarryForwardRosters(seasonData)) saveSeason(SELECTED_SEASON, seasonData, { silent: true });
 
   // Compute per-period scores for this manager
   const periodScores = computeRosterPeriodScores(managerName, seasonData);
@@ -11223,7 +11279,8 @@ window.updateCommRosterWeekView = function (managerName) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
   if (!sd.rosters) sd.rosters = {};
-  if (backfillRosterDatesFromSwaps(sd)) saveSeason(SELECTED_SEASON, sd);
+  // Automatic render-time save — silent so a stale-rev 409 never alerts/reloads (re-runs next render).
+  if (backfillRosterDatesFromSwaps(sd)) saveSeason(SELECTED_SEASON, sd, { silent: true });
   const safeMgr = jsStr(managerName);
 
   const [round, week] = weekKey.split('|');

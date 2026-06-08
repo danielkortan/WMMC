@@ -650,9 +650,47 @@ app.post('/api/auth/google', async (req, res) => {
 // ============================================================
 
 // GET /api/seasons — return all seasons
+// Deterministic JSON (sorted object keys) so a content hash is stable regardless of key order.
+function stableStringify(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return (
+      '{' +
+      Object.keys(value)
+        .sort()
+        .map((k) => JSON.stringify(k) + ':' + stableStringify(value[k]))
+        .join(',') +
+      '}'
+    );
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+// Optimistic-concurrency token (SAVE_HARDENING_PLAN.md, Layer 1). A content hash over ONLY the
+// fields a stale full-season overwrite can corrupt: rosters, roster_dates, swaps, schedule_dates,
+// and the submission buckets. Returned by GET /api/seasons as `_rev`; the full-season save must
+// echo the value it loaded or the server rejects it (409). A stats-only sync never touches these
+// fields, so it won't false-trip the gate. Computed on the fly — nothing to bump or persist.
+function computeSeasonRev(sd) {
+  if (!sd || typeof sd !== 'object') return '0';
+  const relevant = {
+    rosters: sd.rosters || {},
+    roster_dates: sd.roster_dates || {},
+    swaps: sd.swaps || [],
+    schedule_dates: sd.schedule_dates || [],
+    initial_submissions: sd.initial_submissions || {},
+    period_submissions: sd.period_submissions || {},
+  };
+  return crypto.createHash('sha1').update(stableStringify(relevant)).digest('hex').slice(0, 16);
+}
+
 app.get('/api/seasons', (req, res) => {
   const db = readDB();
-  res.json(db.seasons || {});
+  const seasons = db.seasons || {};
+  // Attach the concurrency token per season (not persisted) so the client can echo it on save.
+  const out = {};
+  for (const [year, sd] of Object.entries(seasons)) out[year] = { ...sd, _rev: computeSeasonRev(sd) };
+  res.json(out);
 });
 
 // POST /api/seasons — save all seasons (full replace)
@@ -691,9 +729,27 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
   const incomingSwaps = req.body.swaps || [];
   const newPending = incomingSwaps.filter((s) => s.status === 'pending' && !existingIds.has(s.id));
 
-  addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
   const sd = req.body;
   const existingSd = (db.seasons || {})[req.params.year];
+
+  // Optimistic-concurrency gate (SAVE_HARDENING_PLAN.md, Layer 1). The client must echo the `_rev`
+  // it loaded from GET /api/seasons. If it's missing (a tab on old JS) or no longer matches the
+  // server's current state (someone/something changed rosters/swaps/etc. since the client loaded),
+  // the payload is a stale full-season snapshot — refuse it so it can't clobber newer state, and
+  // make the client reload. A brand-new season (no existingSd) has nothing to clobber, so it's
+  // allowed and seeds the first state. This closes the stale-overwrite class for ALL fields at once.
+  if (existingSd) {
+    const currentRev = computeSeasonRev(existingSd);
+    if (sd._rev !== currentRev) {
+      console.warn(
+        `[Save gate] Rejected stale save for ${req.params.year} (client _rev=${sd._rev || 'none'} vs ${currentRev})`
+      );
+      return res.status(409).json({ error: 'stale_save', current_rev: currentRev });
+    }
+  }
+  delete sd._rev; // transient token — never persist it onto the season
+
+  addAuditEntry(db, 'season_save', { year: req.params.year }, req.get('X-User-Email'));
 
   // Stat records (daily_*/weekly_*) and team maps are server-authoritative — populated by the
   // MLB sync / backfill, never edited through this full-season save. A client that loaded
@@ -901,7 +957,8 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
 
   db.seasons[req.params.year] = sd;
   writeDB(db);
-  res.json({ ok: true });
+  // Return the new concurrency token so the client can keep saving without a stale 409.
+  res.json({ ok: true, _rev: computeSeasonRev(sd) });
 
   // Fire-and-forget Slack notifications for each new pending swap
   for (const swap of newPending) {
