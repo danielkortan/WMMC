@@ -69,6 +69,22 @@ with anything BEYOND the date-windowed active set inflates totals, because `mana
 counts a manager's stat rows gated on the player being in the week's eligible set (arrays ∪
 activeByDates).
 
+**Follow-up — carry-forward was not period-aware (2026-06-08).** After recovery, PP2 Week 1 showed
+PP1 holdovers (Sal Stewart, Gavin Williams) that were never in the PP2 submission. Cause:
+`activeByDates` (managerWeekSubtotal) and `rebuildRosterArraysFromDates` carried a player forward
+globally — a PP1 add with no drop reads as "active" at PP2's date. But PP2/QF/SF/Finals each start
+fresh from their own submission (the Sunday auto-advance already skips `isPeriodBoundaryWeek` for
+exactly this reason). Fix: new `periodStartForRound(sd, round)` (server + app.js mirror); the
+carry-forward now only counts adds/drops dated on/after the week's PERIOD start. Returns null for
+PP1 (initial period) so PP1 scoring/rosters are untouched. Also: `reconstruct-rosters` now seeds
+each started non-initial period's first week directly from the approved `period_submissions[period]`
+(belt-and-suspenders so a kept player is never lost), skipping anyone dropped within the period.
+Confirmed PP2 submission players carry explicit `add_date` = period start in `roster_dates`, so the
+date heal already includes them; the submission seed is the safety net. NOTE (open): the swap-form
+"current roster" helpers in app.js (`isStillActiveForMgr`, `isCurrentlyTaken`, ~7611/7639) still use
+global carry-forward — they drive the swap request dropdowns only (not scoring/scoreboard), but
+should get the same period scoping for full correctness.
+
 ## Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile (2026-06-07)
 
 **Symptom (commissioner).** In the scoreboard's per-manager expandable, a swapped-in/never-dropped

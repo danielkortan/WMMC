@@ -537,6 +537,19 @@ function weekIndexFromKey(round, week) {
   return SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
 }
 
+// Start date of the PERIOD (round) a week belongs to — the schedule start of that round's first
+// week. Used to scope add/drop carry-forward to within a period so a prior period's players don't
+// leak into a new submission period (PP2/QF/SF/Finals). Returns null for the initial period (PP1),
+// leaving its behavior unchanged. Mirrors the server's periodStartForRound.
+function periodStartForRound(seasonData, round) {
+  if (!round || round === SEASON_SCHEDULE[0].round) return null;
+  const scheduleDates = (seasonData && seasonData.schedule_dates) || [];
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    if (SEASON_SCHEDULE[i].round === round) return scheduleDates[i] ? scheduleDates[i].start : null;
+  }
+  return null;
+}
+
 // Determine the current scoring period from loaded stats data
 function getCurrentScoringPeriod(seasonData) {
   const batting = seasonData.weekly_batting || [];
@@ -713,16 +726,29 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   // week after it was added (e.g. Devers added 5/9 vanished from Weeks 2+). Mirrors
   // isStillActiveForMgr but evaluated as of this week's end.
   const weekEnd = scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+  // Scope carry-forward to this week's PERIOD so a prior period's players don't leak into a new
+  // submission period (matches the server's managerWeekSubtotal). null for PP1 leaves it unchanged.
+  const periodStart = periodStartForRound(seasonData, round);
   const activeByDates = [];
   if (allMgrDates) {
     const latestAdd = {};
     const latestDrop = {};
     for (const players of Object.values(allMgrDates)) {
       for (const [p, d] of Object.entries(players)) {
-        if (d.add_date && (!weekEnd || d.add_date <= weekEnd) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+        if (
+          d.add_date &&
+          (!periodStart || d.add_date >= periodStart) &&
+          (!weekEnd || d.add_date <= weekEnd) &&
+          (!latestAdd[p] || d.add_date > latestAdd[p])
+        ) {
           latestAdd[p] = d.add_date;
         }
-        if (d.drop_date && (!weekEnd || d.drop_date <= weekEnd) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+        if (
+          d.drop_date &&
+          (!periodStart || d.drop_date >= periodStart) &&
+          (!weekEnd || d.drop_date <= weekEnd) &&
+          (!latestDrop[p] || d.drop_date > latestDrop[p])
+        ) {
           latestDrop[p] = d.drop_date;
         }
       }
