@@ -1266,6 +1266,20 @@ function getScheduleWeekIndex(round, week) {
   return SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
 }
 
+// Start date of the PERIOD (round) a week belongs to — the schedule start of that round's first
+// week. Used to scope add/drop carry-forward to within a period: each new submission period (PP2,
+// QF, SF, Finals) starts from its own submission, so a prior period's players must not carry over.
+// Returns null for the initial period (PP1) — there's no prior period to exclude, so its scoring
+// and roster derivation are left exactly as-is.
+function periodStartForRound(sd, round) {
+  if (!round || !Array.isArray(SEASON_SCHEDULE) || round === SEASON_SCHEDULE[0].round) return null;
+  const scheduleDates = sd.schedule_dates || [];
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    if (SEASON_SCHEDULE[i].round === round) return scheduleDates[i] ? scheduleDates[i].start : null;
+  }
+  return null;
+}
+
 // Compute effective weekly batting score from daily deltas filtered by player_dates.
 // Returns null when no daily records exist (caller falls back to stored weekly_score).
 function computeEffectiveBattingScore(sd, batter, round, week) {
@@ -2100,16 +2114,31 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   // week after it was added (e.g. Devers added 5/9 vanished from Weeks 2+). Mirrors
   // the frontend's isStillActiveForMgr but evaluated as of this week's end.
   const weekEnd = scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+  // Carry-forward is scoped to the player's PERIOD: a new submission period (PP2/QF/SF/Finals)
+  // starts fresh from its own submission, so an add/drop in a PRIOR period must not keep a player
+  // "active" here. Without this, a PP1 holdover with no drop reads as active in PP2 and gets
+  // credited once PP2 scores. null (initial period) = no lower bound, leaving PP1 untouched.
+  const periodStart = periodStartForRound(sd, round);
   const activeByDates = [];
   if (allMgrDates) {
     const latestAdd = {};
     const latestDrop = {};
     for (const players of Object.values(allMgrDates)) {
       for (const [p, d] of Object.entries(players)) {
-        if (d.add_date && (!weekEnd || d.add_date <= weekEnd) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+        if (
+          d.add_date &&
+          (!periodStart || d.add_date >= periodStart) &&
+          (!weekEnd || d.add_date <= weekEnd) &&
+          (!latestAdd[p] || d.add_date > latestAdd[p])
+        ) {
           latestAdd[p] = d.add_date;
         }
-        if (d.drop_date && (!weekEnd || d.drop_date <= weekEnd) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+        if (
+          d.drop_date &&
+          (!periodStart || d.drop_date >= periodStart) &&
+          (!weekEnd || d.drop_date <= weekEnd) &&
+          (!latestDrop[p] || d.drop_date > latestDrop[p])
+        ) {
           latestDrop[p] = d.drop_date;
         }
       }
@@ -2447,16 +2476,30 @@ function rebuildRosterArraysFromDates(sd) {
     for (const weekKey of Object.keys(weeks)) {
       const idx = weekIdxByKey[weekKey];
       const weekEnd = idx != null && scheduleDates[idx] ? scheduleDates[idx].end : null;
+      // Scope carry-forward to this week's PERIOD so a prior period's players don't leak into a new
+      // submission period (PP2/QF/SF/Finals start from their own submission). Mirrors the same
+      // guard in managerWeekSubtotal; null for the initial period leaves PP1 unchanged.
+      const periodStart = periodStartForRound(sd, weekKey.split('|')[0]);
 
       // Players whose most-recent roster_dates event as of this week's end is an add.
       const latestAdd = {};
       const latestDrop = {};
       for (const players of Object.values(mgrDates)) {
         for (const [p, d] of Object.entries(players)) {
-          if (d.add_date && (!weekEnd || d.add_date <= weekEnd) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+          if (
+            d.add_date &&
+            (!periodStart || d.add_date >= periodStart) &&
+            (!weekEnd || d.add_date <= weekEnd) &&
+            (!latestAdd[p] || d.add_date > latestAdd[p])
+          ) {
             latestAdd[p] = d.add_date;
           }
-          if (d.drop_date && (!weekEnd || d.drop_date <= weekEnd) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+          if (
+            d.drop_date &&
+            (!periodStart || d.drop_date >= periodStart) &&
+            (!weekEnd || d.drop_date <= weekEnd) &&
+            (!latestDrop[p] || d.drop_date > latestDrop[p])
+          ) {
             latestDrop[p] = d.drop_date;
           }
         }
@@ -2509,6 +2552,7 @@ function reconstructRostersFromSurvivingData(sd) {
   const ensure = (mgr, key) => {
     if (!sd.rosters[mgr]) sd.rosters[mgr] = {};
     if (!sd.rosters[mgr][key]) sd.rosters[mgr][key] = { batters: [], pitchers: [] };
+    return sd.rosters[mgr][key];
   };
 
   // Seed an entry for every manager × already-started week so the (additive) heal has a slot.
@@ -2527,6 +2571,42 @@ function reconstructRostersFromSurvivingData(sd) {
 
   // Populate each seeded week from roster_dates + swaps, honoring every add/drop window.
   rebuildRosterArraysFromDates(sd);
+
+  // Belt-and-suspenders: guarantee each already-started NON-initial period's first week contains
+  // its approved submission roster. The date heal above already includes these players (their
+  // submission writes a period add_date), but sourcing them straight from period_submissions means
+  // a player kept from a prior period can never be lost even if that add is missing — directly
+  // honoring "don't drop a PP1 player's status when the period rolls over". A player the manager
+  // has since dropped within the period (latest period action is a drop) is skipped so a real
+  // in-period drop isn't undone.
+  const periodKeyByRound = { PP2: 'pp2', QF: 'qf', SF: 'sf', Finals: 'finals' };
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    if (!isPeriodBoundaryWeek(i)) continue; // first week of a new submission period only
+    const d = scheduleDates[i];
+    if (!d || !d.start || d.start > todayET) continue; // period hasn't started
+    const { round, week } = SEASON_SCHEDULE[i];
+    const pStart = periodStartForRound(sd, round);
+    const bucket = (sd.period_submissions || {})[periodKeyByRound[round]] || {};
+    const key = `${round}|${week}`;
+    for (const [mgr, sub] of Object.entries(bucket)) {
+      if (!sub || sub.status !== 'approved') continue;
+      const mgrDates = (sd.roster_dates || {})[mgr] || {};
+      const droppedInPeriod = (player) => {
+        let la = null;
+        let ld = null;
+        for (const wkDates of Object.values(mgrDates)) {
+          const e = wkDates[player];
+          if (!e) continue;
+          if (e.add_date && (!pStart || e.add_date >= pStart) && (!la || e.add_date > la)) la = e.add_date;
+          if (e.drop_date && (!pStart || e.drop_date >= pStart) && (!ld || e.drop_date > ld)) ld = e.drop_date;
+        }
+        return !!ld && (!la || ld >= la);
+      };
+      const wr = ensure(mgr, key);
+      for (const b of sub.batters || []) if (!droppedInPeriod(b) && !wr.batters.includes(b)) wr.batters.push(b);
+      for (const p of sub.pitchers || []) if (!droppedInPeriod(p) && !wr.pitchers.includes(p)) wr.pitchers.push(p);
+    }
+  }
 
   // Drop weeks that stayed empty (manager not rostered that week) so the arrays stay tidy and
   // findManagerForPlayerWeek never matches an empty slot.
