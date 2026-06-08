@@ -2488,54 +2488,76 @@ function rebuildRosterArraysFromDates(sd) {
 
 // Rebuild a WIPED rosters object from scratch. rebuildRosterArraysFromDates (above) is purely
 // additive — it only augments week entries that already exist — so it cannot recover from a
-// stale-save wipe that left sd.rosters === {}. This recreates the entries themselves from the
-// surviving data, in order of authority:
-//   1. The `manager` field stored on weekly_batting / weekly_pitching rows. That is the exact
-//      attribution the live scoreboard already reflects (computeRoundScores reads these rows),
-//      so reconstructing from it reproduces current standings precisely for every week with stats.
-//   2. roster_dates carry-forward (via rebuildRosterArraysFromDates) to populate weeks that have
-//      no stats yet — e.g. a period that just started — and any rostered player without a stat line.
-// Score-neutral by construction: it rebuilds only the attribution cache; no weekly_score is touched.
+// stale-save wipe that left sd.rosters === {}. This recreates the entries themselves, picking the
+// authoritative source PER WEEK so it stays score-neutral and idempotent:
+//
+//   - Weeks that HAVE stat rows: rebuilt SOLELY from the `manager` field on those weekly rows.
+//     rebuildWeeklyFromDaily wrote that field from the original (pre-wipe) arrays using
+//     findManagerForPlayerWeek, so it already honors every swap/add/drop window — it is the exact
+//     attribution the scoreboard showed before the wipe. We must NOT layer roster_dates
+//     carry-forward on top of these weeks: carry-forward credits a player for the whole period
+//     regardless of swap dates, so it would re-credit swapped/dropped players and double-count
+//     anyone the weekly row attributes elsewhere — inflating already-scored weeks by hundreds.
+//   - Weeks with NO stat rows yet (e.g. a period that just started): there is nothing to honor
+//     yet, so fall back to roster_dates carry-forward (rebuildRosterArraysFromDates) to seed the
+//     roster. These weeks contribute 0 until games are played, so the fallback is score-neutral.
+//
+// Idempotent: full reset each run yields the identical result.
 function reconstructRostersFromSurvivingData(sd) {
-  if (!sd.rosters || typeof sd.rosters !== 'object') sd.rosters = {};
+  // Authoritative per-week rosters from the weekly stat rows (swap-honored, pre-wipe attribution).
+  const statRosters = {}; // mgr -> weekKey -> { batters:Set, pitchers:Set }
+  const weeksWithStats = new Set();
+  const addStat = (mgr, key, listKey, name) => {
+    if (!statRosters[mgr]) statRosters[mgr] = {};
+    if (!statRosters[mgr][key]) statRosters[mgr][key] = { batters: new Set(), pitchers: new Set() };
+    statRosters[mgr][key][listKey].add(name);
+    weeksWithStats.add(key);
+  };
+  for (const r of sd.weekly_batting || []) {
+    if (r.manager && r.batter) addStat(r.manager, `${r.round}|${r.week}`, 'batters', r.batter);
+  }
+  for (const r of sd.weekly_pitching || []) {
+    if (r.manager && r.pitcher) addStat(r.manager, `${r.round}|${r.week}`, 'pitchers', r.pitcher);
+  }
+
+  // Full reset so repeat runs are deterministic (no accumulation across runs).
+  sd.rosters = {};
   const ensure = (mgr, key) => {
     if (!sd.rosters[mgr]) sd.rosters[mgr] = {};
     if (!sd.rosters[mgr][key]) sd.rosters[mgr][key] = { batters: [], pitchers: [] };
     return sd.rosters[mgr][key];
   };
 
-  // 1) Ground truth: the manager attribution already stored on weekly stat rows.
-  for (const r of sd.weekly_batting || []) {
-    if (!r.manager || !r.batter) continue;
-    const wr = ensure(r.manager, `${r.round}|${r.week}`);
-    if (!wr.batters.includes(r.batter)) wr.batters.push(r.batter);
-  }
-  for (const r of sd.weekly_pitching || []) {
-    if (!r.manager || !r.pitcher) continue;
-    const wr = ensure(r.manager, `${r.round}|${r.week}`);
-    if (!wr.pitchers.includes(r.pitcher)) wr.pitchers.push(r.pitcher);
-  }
-
-  // 2) Seed empty entries for every manager × already-started schedule week so the roster_dates
-  //    heal can populate weeks with no stats yet and players who haven't recorded a stat line.
+  // 1) Seed entries ONLY for already-started weeks that have NO stats yet, so the roster_dates
+  //    heal populates them without ever touching a scored week (which would double-credit).
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const scheduleDates = sd.schedule_dates || [];
-  const managers = new Set(Object.keys(sd.roster_dates || {}));
-  Object.keys(sd.rosters).forEach((m) => managers.add(m));
+  const managers = new Set([...Object.keys(sd.roster_dates || {}), ...Object.keys(statRosters)]);
   for (const mgr of managers) {
     for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
       const d = scheduleDates[i];
       if (!d || !d.start || d.start > todayET) continue; // only weeks that have started
-      ensure(mgr, `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`);
+      const key = `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`;
+      if (weeksWithStats.has(key)) continue; // scored weeks come from stat rows below
+      ensure(mgr, key);
     }
   }
 
-  // 3) Fill from roster_dates carry-forward (additive; respects add/drop windows).
+  // 2) Fill the seeded (statless) weeks from roster_dates carry-forward.
   rebuildRosterArraysFromDates(sd);
+
+  // 3) Lay down the authoritative rosters for every week that has stats.
+  for (const [mgr, weeks] of Object.entries(statRosters)) {
+    for (const [key, sets] of Object.entries(weeks)) {
+      ensure(mgr, key);
+      sd.rosters[mgr][key] = { batters: [...sets.batters], pitchers: [...sets.pitchers] };
+    }
+  }
 
   return {
     managers: Object.keys(sd.rosters).length,
     week_entries: Object.values(sd.rosters).reduce((n, w) => n + Object.keys(w || {}).length, 0),
+    stat_weeks: weeksWithStats.size,
   };
 }
 

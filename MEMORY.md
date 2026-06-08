@@ -46,6 +46,18 @@ a NO-OP on a full wipe (additive over existing entries).
 from the surviving 6/07 daily rows with restored attribution; standings move up, Best/Worst
 returns) → verify.
 
+**Follow-up fix (same branch).** First cut of `reconstructRostersFromSurvivingData` layered
+`rebuildRosterArraysFromDates` (roster_dates carry-forward) on top of ALL weeks including
+already-scored ones. Carry-forward credits a player for the whole period regardless of swap
+dates, so it re-credited swapped/dropped players and double-counted anyone the weekly row
+attributed elsewhere — inflating a manager's PP1 total by several hundred (Daniel jumped
+1,372→1,644), and making the endpoint non-idempotent (2nd run still moved 8). Rewrote it to pick
+the authoritative source PER WEEK: weeks WITH stat rows are rebuilt solely from the weekly-row
+`manager` field (already swap-honored — it was written by findManagerForPlayerWeek pre-wipe);
+only statless started weeks (e.g. a just-opened period) fall back to roster_dates carry-forward.
+Full reset each run → idempotent. Lesson: weekly-row `manager` is the swap-honored truth for
+scored weeks; never re-derive a scored week from roster_dates carry-forward.
+
 ## Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile (2026-06-07)
 
 **Symptom (commissioner).** In the scoreboard's per-manager expandable, a swapped-in/never-dropped
