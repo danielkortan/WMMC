@@ -276,24 +276,31 @@ period_submissions}`; no counter to bump, no 20-site retrofit, and a stats-only 
 ## 9. Implementation status
 
 - **Phase 1a — DONE (merged #286):** destructive-save integrity guard + structural limit + invariant.
-- **Phase 1b — IMPLEMENTED, in review (do not merge until app-tested):** content-hash `rev` gate.
-  `GET /api/seasons` attaches `_rev`; `POST /api/seasons/:year` rejects a missing/stale `_rev` with
-  409; the client (`saveSeason`) sends `_rev`, refreshes + reloads on 409 (one-shot guarded), and
-  records the new `_rev` on success. Automatic render-time saves pass `{ silent: true }`.
+- **Phase 1b — DONE (merged #288):** content-hash `rev` gate. `GET /api/seasons` attaches `_rev`;
+  `POST /api/seasons/:year` rejects a missing/stale `_rev` with 409; the client sends `_rev`,
+  refreshes + reloads on 409 (one-shot guarded), records the new `_rev` on success; automatic
+  render-time saves are `{ silent: true }`. The `/swaps` and `/submissions` atomic endpoints return
+  the new `_rev` and the client adopts it, so a follow-up full-season save (e.g. approving a swap)
+  doesn't false-trip the gate. Verified on staging.
+- **Layer 4 — DONE (merged #289):** roster/manager provenance audit (boot + on-demand endpoint).
 
-### Verify during testing / follow-ups
+### Phase 2
 
-- **Atomic-endpoint interaction:** `/submissions` and `/swaps` change the hashed fields, so they
-  bump `_rev`. A same-user full-season save that follows an atomic op (without a reload) will 409
-  once and reload. If that friction shows in testing, have those endpoints return the new `_rev`
-  and update the client's local token (small follow-up).
-- **Bulk `POST /api/seasons` (no `:year`, line ~697):** raw `db.seasons = req.body`, commissioner-
-  only, **bypasses the gate AND every field/integrity guard**. The current client does not call it.
-  Phase 2: remove it or route it through the same guards.
-- **Rollout note:** after deploy, a tab still on old JS sends no `_rev` → 409 (silent on the old
-  client). Reload the tab to pick up the rev-aware client. `version.json` asset-busting nudges this.
+- **Layer 2 (protect-by-default merge) — SKIPPED (intentional).** With the rev gate live, it is
+  redundant: the gate already rejects every stale/missing-token save, closing the unguarded-field
+  class for all fields. A true "server-authoritative by default" rule would also conflict with the
+  legitimate full-season roster/date edits (commissioner roster editor, swap approval). Revisit only
+  if the full-season save is ever fully retired in favor of atomic endpoints.
+- **Bulk `POST /api/seasons` cleanup — DONE.** The unused, guard-bypassing bulk full-replace now runs
+  the destructive-save integrity check per season and refuses a destructive replacement (409) unless
+  `force: true`. Closes the bypass hole without removing the endpoint.
+- **Layer 5 test harness — DONE.** `js/eligibility.js` isolates the date-window + period rules as
+  pure functions, unit-tested in `tests/eligibility.test.js` (full-week / mid-week add / drop / swap
+  pair / re-add / **PP1→PP2 period boundary** / game-date window). It is the canonical spec; the
+  server/app inline copies are kept in sync with it (the server can't import ESM `js/` — same
+  arrangement as SCORING / detectScoreSwings).
 
-### Still open
+### Rollout note (Phase 1b)
 
-- **Layer 5 placement:** extract eligibility into `js/` (more refactor, properly testable) vs test a
-  server-side copy (less refactor, risks drift)?
+- After a deploy, a tab still on old JS sends no `_rev` → 409 (silent on the old client). Reload the
+  tab to pick up the rev-aware client; `version.json` asset-busting nudges this.
