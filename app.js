@@ -891,6 +891,18 @@ async function saveSeason(year, data, opts = {}) {
 // authoritative). Each call awaits a confirmed server response and mirrors it into
 // localStorage so the local view matches the server. Returns the saved record (or true for
 // delete) on success, or null/false on failure — callers surface the error to the user.
+// Adopt the fresh concurrency token returned by an atomic endpoint (swap/submission). Those
+// endpoints change hashed fields, so without adopting the new token a following full-season save
+// (e.g. approving a swap) would falsely 409 as stale. See SAVE_HARDENING_PLAN.md, Layer 1.
+function adoptRev(rev) {
+  if (!rev) return;
+  const seasons = getSeasons();
+  if (seasons[SELECTED_SEASON]) {
+    seasons[SELECTED_SEASON]._rev = rev;
+    localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+  }
+}
+
 function mirrorSubmissionLocally(period, manager, submission) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -924,8 +936,9 @@ async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.error || `Server error (${resp.status})`);
     }
-    const { submission } = await resp.json();
+    const { submission, _rev } = await resp.json();
     mirrorSubmissionLocally(period, manager, submission);
+    adoptRev(_rev);
     return submission;
   } catch (e) {
     if (!quiet) {
@@ -945,7 +958,9 @@ async function removeSubmissionRemote(period, manager) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.error || `Server error (${resp.status})`);
     }
+    const { _rev } = await resp.json().catch(() => ({}));
     mirrorSubmissionLocally(period, manager, null);
+    adoptRev(_rev);
     return true;
   } catch (e) {
     alert(`Delete failed — ${e.message}. Please try again.`);
@@ -8563,7 +8578,7 @@ window.submitSwapRequest = async function (managerName) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.error || `Server error (${resp.status})`);
     }
-    const { swap: savedSwap } = await resp.json();
+    const { swap: savedSwap, _rev } = await resp.json();
 
     // Mirror the confirmed server swap into localStorage so the view is consistent.
     const freshSeasons = getSeasons();
@@ -8571,6 +8586,7 @@ window.submitSwapRequest = async function (managerName) {
     if (freshSd) {
       if (!Array.isArray(freshSd.swaps)) freshSd.swaps = [];
       freshSd.swaps.push(savedSwap);
+      if (_rev) freshSd._rev = _rev; // adopt the token bumped by this swap so the next save isn't stale
       localStorage.setItem('wmmc_seasons', JSON.stringify(freshSeasons));
     }
 

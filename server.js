@@ -1005,7 +1005,10 @@ app.post('/api/seasons/:year/swaps', requireAuth, (req, res) => {
     req.get('X-User-Email')
   );
   writeDB(db);
-  res.json({ ok: true, swap });
+  // Return the new concurrency token: this write changed `swaps` (a hashed field), so a client that
+  // follows up with a full-season save (e.g. the commissioner approving the swap) must adopt it or
+  // it would falsely 409 as stale.
+  res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 
   postSlack(
     `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
@@ -1076,7 +1079,9 @@ app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
     req.get('X-User-Email')
   );
   writeDB(db);
-  res.json({ ok: true, submission });
+  // Changed a submission bucket (a hashed field) — hand back the new token so a following
+  // full-season save doesn't falsely 409.
+  res.json({ ok: true, submission, _rev: computeSeasonRev(sd) });
 });
 
 // DELETE /api/seasons/:year/submissions/:period/:manager — remove one submission record
@@ -1101,7 +1106,7 @@ app.delete('/api/seasons/:year/submissions/:period/:manager', requireAuth, (req,
   db.seasons[req.params.year] = sd;
   addAuditEntry(db, 'submission_deleted', { year: req.params.year, period, manager }, req.get('X-User-Email'));
   writeDB(db);
-  res.json({ ok: true, removed });
+  res.json({ ok: true, removed, _rev: computeSeasonRev(sd) });
 });
 
 // DELETE /api/seasons/:year/submissions — clear ALL submissions for a season (used by the
@@ -1118,7 +1123,7 @@ app.delete('/api/seasons/:year/submissions', requireCommissioner, (req, res) => 
   db.seasons[req.params.year] = sd;
   addAuditEntry(db, 'submissions_cleared', { year: req.params.year }, req.get('X-User-Email'));
   writeDB(db);
-  res.json({ ok: true });
+  res.json({ ok: true, _rev: computeSeasonRev(sd) });
 });
 
 // GET /api/pending-count — number of pending swaps for a given season year
