@@ -5753,6 +5753,150 @@ app.post('/api/seasons/:year/purge-orphan-boundary-rosters', requireCommissioner
   res.json({ ok: true, dryRun, cleared, kept, skipped, moved_totals: movedTotals });
 });
 
+// POST /api/seasons/:year/reseed-approved-boundary-rosters[?dryRun=1]
+// Rewrites a started period-boundary week (PP2/QF/SF/Finals Week 1) from a manager's APPROVED
+// submission when the approval's roster side-effect never landed. Approving a period submission
+// persists the submission record atomically, but the roster + roster_dates write goes through the
+// clobber-prone full-season save — if that save was clobbered, the manager keeps showing the
+// PRIOR period's carry-forward roster (wrong players) even though their submission reads approved
+// (e.g. PP2 Week 1 still holding PP1 holdovers). This sets the array + roster_dates (add_date =
+// period start) from the submission and prunes the stale zero-stat carry-forward rows. To avoid
+// clobbering a LEGITIMATE in-period swap, it only acts on managers who have NO period-dated
+// roster_dates AND no approved swap effective in the period — i.e. the submission is provably the
+// only source of truth for that week. Skips any week with real (nonzero) points. Score-neutral
+// while the period is unplayed. Pass ?dryRun=1 (or { dryRun: true }) to preview.
+app.post('/api/seasons/:year/reseed-approved-boundary-rosters', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const dryRun = req.query.dryRun === '1' || (req.body && req.body.dryRun === true);
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const scheduleDates = sd.schedule_dates || [];
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const periodKeyByRound = { PP2: 'pp2', QF: 'qf', SF: 'sf', Finals: 'finals' };
+  const approvedSwaps = (sd.swaps || []).filter((s) => s.status === 'approved');
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+
+  const reseeded = [];
+  const skipped = [];
+
+  for (let i = 1; i < SEASON_SCHEDULE.length; i++) {
+    const { round, week } = SEASON_SCHEDULE[i];
+    if (round === SEASON_SCHEDULE[i - 1].round) continue; // boundaries only
+    const period = periodKeyByRound[round];
+    if (!period) continue;
+    const weekKey = `${round}|${week}`;
+    const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
+    if (weekStart && weekStart > todayET) continue; // only started periods
+    const periodStart = periodStartForRound(sd, round);
+    if (!periodStart) continue;
+
+    const subBucket = (sd.period_submissions || {})[period] || {};
+
+    for (const [mgr, sub] of Object.entries(subBucket)) {
+      if (!sub || sub.status !== 'approved') continue;
+      const desiredBat = Array.isArray(sub.batters) ? sub.batters.slice() : [];
+      const desiredPit = Array.isArray(sub.pitchers) ? sub.pitchers.slice() : [];
+      if (desiredBat.length === 0 && desiredPit.length === 0) continue;
+
+      // Don't clobber a legitimate in-period move: skip if this manager already has any
+      // roster_dates event dated within the period, or an approved swap effective in it.
+      const mgrDates = (sd.roster_dates || {})[mgr] || {};
+      let hasPeriodActivity = false;
+      for (const wk of Object.values(mgrDates)) {
+        for (const d of Object.values(wk || {})) {
+          if ((d.add_date && d.add_date >= periodStart) || (d.drop_date && d.drop_date >= periodStart)) {
+            hasPeriodActivity = true;
+            break;
+          }
+        }
+        if (hasPeriodActivity) break;
+      }
+      if (!hasPeriodActivity) {
+        hasPeriodActivity = approvedSwaps.some((s) => s.manager === mgr && s.swap_date && s.swap_date >= periodStart);
+      }
+      if (hasPeriodActivity) {
+        skipped.push({ manager: mgr, week: weekKey, reason: 'has_period_roster_activity' });
+        continue;
+      }
+
+      // Never rewrite a week this manager has actually played.
+      const rowMatches = (r) => r.round === round && r.week === week && r.manager === mgr;
+      const hasRealStats =
+        (sd.weekly_batting || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0) ||
+        (sd.weekly_pitching || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0);
+      if (hasRealStats) {
+        skipped.push({ manager: mgr, week: weekKey, reason: 'has_real_points' });
+        continue;
+      }
+
+      const mgrRosters = (sd.rosters || {})[mgr] || {};
+      const current = mgrRosters[weekKey] || { batters: [], pitchers: [] };
+      const curBat = current.batters || [];
+      const curPit = current.pitchers || [];
+      const removed = [
+        ...curBat.filter((p) => !desiredBat.includes(p)),
+        ...curPit.filter((p) => !desiredPit.includes(p)),
+      ];
+      const added = [
+        ...desiredBat.filter((p) => !curBat.includes(p)),
+        ...desiredPit.filter((p) => !curPit.includes(p)),
+      ];
+      if (removed.length === 0 && added.length === 0) {
+        // Array already matches the submission; just ensure roster_dates are stamped.
+        if (!dryRun) {
+          if (!sd.roster_dates) sd.roster_dates = {};
+          if (!sd.roster_dates[mgr]) sd.roster_dates[mgr] = {};
+          const dates = {};
+          for (const p of [...desiredBat, ...desiredPit]) dates[p] = { add_date: periodStart };
+          sd.roster_dates[mgr][weekKey] = dates;
+        }
+        skipped.push({ manager: mgr, week: weekKey, reason: 'array_matches_submission_dates_stamped' });
+        continue;
+      }
+
+      if (!dryRun) {
+        if (!sd.rosters) sd.rosters = {};
+        if (!sd.rosters[mgr]) sd.rosters[mgr] = {};
+        sd.rosters[mgr][weekKey] = { batters: desiredBat.slice(), pitchers: desiredPit.slice() };
+
+        if (!sd.roster_dates) sd.roster_dates = {};
+        if (!sd.roster_dates[mgr]) sd.roster_dates[mgr] = {};
+        const dates = {};
+        for (const p of [...desiredBat, ...desiredPit]) dates[p] = { add_date: periodStart };
+        sd.roster_dates[mgr][weekKey] = dates;
+
+        // Prune stale zero-stat weekly rows for players no longer on the week's roster.
+        sd.weekly_batting = (sd.weekly_batting || []).filter((r) => !(rowMatches(r) && !desiredBat.includes(r.batter)));
+        sd.weekly_pitching = (sd.weekly_pitching || []).filter(
+          (r) => !(rowMatches(r) && !desiredPit.includes(r.pitcher))
+        );
+      }
+      reseeded.push({ manager: mgr, week: weekKey, removed, added });
+    }
+  }
+
+  const reseedAfter = dryRun ? before : captureScoreSnapshot(sd, todayET).totals;
+  const reseedMoved = [];
+  for (const m of new Set([...Object.keys(before), ...Object.keys(reseedAfter)])) {
+    const b = (before[m] || {}).total || 0;
+    const a = (reseedAfter[m] || {}).total || 0;
+    if (Math.abs(a - b) >= 0.01) {
+      reseedMoved.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+    }
+  }
+
+  if (!dryRun && (reseeded.length > 0 || skipped.some((s) => s.reason === 'array_matches_submission_dates_stamped'))) {
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'reseed_approved_boundary_rosters', { year, reseeded: reseeded.length }, req.get('X-User-Email'));
+    writeDB(db);
+  }
+
+  res.json({ ok: true, dryRun, reseeded, skipped, moved_totals: reseedMoved });
+});
+
 // GET /api/seasons/:year/roster-audit
 // Read-only roster/manager provenance report (SAVE_HARDENING_PLAN.md, Layer 4). Verifies the core
 // invariant: managers come only from db.managers, and every rostered player traces to a submission
