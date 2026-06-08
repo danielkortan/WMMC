@@ -1,5 +1,28 @@
 # WMMC — Decisions Log
 
+## reconcile-boundary-rosters endpoint — prune array-only orphans from a backed roster (2026-06-08)
+
+**Symptom.** After fixing Joey's approval, the stale-extras probe still flagged Taj Bradley. The
+roster editor / My-Roster view showed his correct 3 pitchers, but the raw `rosters['Joey']['PP2|
+Week 1'].pitchers` array held a 4th (Bradley) with NO matching `roster_dates` entry — an array-only
+orphan that resurfaced (a stale pre-#291 client re-added it via carry-forward; non-empty client
+array wins the save). The purge endpoint only clears managers with NO roster_dates (Joey has a real
+roster); reseed only acts on managers with no period roster_dates — so neither removes a single
+stray extra from an otherwise-backed roster.
+
+**Fix.** New `POST /api/seasons/:year/reconcile-boundary-rosters[?dryRun=1]` (commissioner,
+re-runnable). For each STARTED period-boundary week (PP2/QF/SF/Finals Week 1), for each manager who
+already has a roster_dates-backed roster there, prune any array player NOT present in that week's
+`roster_dates` (+ their zero-stat weekly rows). Boundary weeks ONLY — mid-period weeks legitimately
+hold carried-forward players whose roster_dates live under an earlier week, so they're never
+touched. Skips played weeks; score-neutral (orphans have 0 pts while unplayed); dry-run + before/
+after totals. This is the precise tool for "a backed roster picked up a stray extra"; purge =
+whole-week no-submission orphans, reseed = approved-but-unwritten roster, reconcile = prune extras.
+
+**Recurrence note:** array-only orphans keep resurfacing while any manager runs pre-#291 client code
+(their carry-forward re-save re-adds the holdover). reconcile is the mop-up; the recurrence ends as
+clients reload onto the boundary-aware client (version.json forces it on next visit).
+
 ## Approval conflict check + roster write read/wrote the array, not authoritative sources (2026-06-08)
 
 **Symptoms (commissioner).** (1) After clearing orphans, the false "Yamamoto already on Edgar's

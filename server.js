@@ -5897,6 +5897,94 @@ app.post('/api/seasons/:year/reseed-approved-boundary-rosters', requireCommissio
   res.json({ ok: true, dryRun, reseeded, skipped, moved_totals: reseedMoved });
 });
 
+// POST /api/seasons/:year/reconcile-boundary-rosters[?dryRun=1]
+// Prunes ARRAY-ONLY orphan players from started period-BOUNDARY weeks (PP2/QF/SF/Finals Week 1).
+// A boundary week's roster array must exactly equal that week's roster_dates (the period starts
+// fresh from its submission, which writes both). A stale pre-boundary-fix client can re-add a prior
+// period's holdover to the array via carry-forward (a non-empty client array wins the full-season
+// save), leaving a player in the array with NO roster_dates entry for the week — an orphan that
+// shows as an extra roster slot and scores via the array. This removes any array player not present
+// in that week's roster_dates (+ their zero-stat weekly rows). Only touches managers who already
+// have a roster_dates roster for the week (a real, submission-backed roster — pure no-submission
+// orphans are the purge endpoint's job). Skips weeks with real points. Score-neutral (orphans have
+// 0 points while the period is unplayed). Boundary weeks ONLY — mid-period weeks legitimately hold
+// carried-forward players whose roster_dates live under an earlier week, so they are never touched.
+// Re-runnable; pass ?dryRun=1 (or { dryRun: true }) to preview.
+app.post('/api/seasons/:year/reconcile-boundary-rosters', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const dryRun = req.query.dryRun === '1' || (req.body && req.body.dryRun === true);
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const scheduleDates = sd.schedule_dates || [];
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+
+  const reconciled = [];
+  const skipped = [];
+
+  for (let i = 1; i < SEASON_SCHEDULE.length; i++) {
+    const { round, week } = SEASON_SCHEDULE[i];
+    if (round === SEASON_SCHEDULE[i - 1].round) continue; // boundaries only
+    const weekKey = `${round}|${week}`;
+    const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
+    if (weekStart && weekStart > todayET) continue; // only started periods
+
+    for (const [mgr, weeks] of Object.entries(sd.rosters || {})) {
+      const wr = weeks[weekKey];
+      if (!wr) continue;
+      const rdWeek = ((sd.roster_dates || {})[mgr] || {})[weekKey] || {};
+      const backed = new Set(Object.keys(rdWeek));
+      // Only act on a manager who has a real (roster_dates-backed) roster for this week; pure
+      // no-submission orphans (empty roster_dates) are cleared wholesale by the purge endpoint.
+      if (backed.size === 0) continue;
+
+      const orphanBat = (wr.batters || []).filter((p) => !backed.has(p));
+      const orphanPit = (wr.pitchers || []).filter((p) => !backed.has(p));
+      if (orphanBat.length === 0 && orphanPit.length === 0) continue;
+
+      // Never disturb a week that has actually been played.
+      const rowMatches = (r) => r.round === round && r.week === week && r.manager === mgr;
+      const hasRealStats =
+        (sd.weekly_batting || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0) ||
+        (sd.weekly_pitching || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0);
+      if (hasRealStats) {
+        skipped.push({ manager: mgr, week: weekKey, reason: 'has_real_points', orphans: [...orphanBat, ...orphanPit] });
+        continue;
+      }
+
+      if (!dryRun) {
+        wr.batters = (wr.batters || []).filter((p) => backed.has(p));
+        wr.pitchers = (wr.pitchers || []).filter((p) => backed.has(p));
+        const orphans = new Set([...orphanBat, ...orphanPit]);
+        sd.weekly_batting = (sd.weekly_batting || []).filter((r) => !(rowMatches(r) && orphans.has(r.batter)));
+        sd.weekly_pitching = (sd.weekly_pitching || []).filter((r) => !(rowMatches(r) && orphans.has(r.pitcher)));
+      }
+      reconciled.push({ manager: mgr, week: weekKey, removed: [...orphanBat, ...orphanPit] });
+    }
+  }
+
+  const after = dryRun ? before : captureScoreSnapshot(sd, todayET).totals;
+  const movedTotals = [];
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[m] || {}).total || 0;
+    const a = (after[m] || {}).total || 0;
+    if (Math.abs(a - b) >= 0.01) {
+      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+    }
+  }
+
+  if (!dryRun && reconciled.length > 0) {
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'reconcile_boundary_rosters', { year, reconciled: reconciled.length }, req.get('X-User-Email'));
+    writeDB(db);
+  }
+
+  res.json({ ok: true, dryRun, reconciled, skipped, moved_totals: movedTotals });
+});
+
 // GET /api/seasons/:year/roster-audit
 // Read-only roster/manager provenance report (SAVE_HARDENING_PLAN.md, Layer 4). Verifies the core
 // invariant: managers come only from db.managers, and every rostered player traces to a submission
