@@ -46,17 +46,28 @@ a NO-OP on a full wipe (additive over existing entries).
 from the surviving 6/07 daily rows with restored attribution; standings move up, Best/Worst
 returns) → verify.
 
-**Follow-up fix (same branch).** First cut of `reconstructRostersFromSurvivingData` layered
-`rebuildRosterArraysFromDates` (roster_dates carry-forward) on top of ALL weeks including
-already-scored ones. Carry-forward credits a player for the whole period regardless of swap
-dates, so it re-credited swapped/dropped players and double-counted anyone the weekly row
-attributed elsewhere — inflating a manager's PP1 total by several hundred (Daniel jumped
-1,372→1,644), and making the endpoint non-idempotent (2nd run still moved 8). Rewrote it to pick
-the authoritative source PER WEEK: weeks WITH stat rows are rebuilt solely from the weekly-row
-`manager` field (already swap-honored — it was written by findManagerForPlayerWeek pre-wipe);
-only statless started weeks (e.g. a just-opened period) fall back to roster_dates carry-forward.
-Full reset each run → idempotent. Lesson: weekly-row `manager` is the swap-honored truth for
-scored weeks; never re-derive a scored week from roster_dates carry-forward.
+**Follow-up — two wrong cuts before the right one (key lesson).** The standings were ALREADY
+correct this morning with `rosters === {}` — `managerWeekSubtotal` derives eligibility from
+`roster_dates` + swaps (`activeByDates`), so the empty arrays only broke findManagerForPlayerWeek
+(Best/Worst, Live tab), not the totals. The wipe-recovery just needs to repopulate the arrays
+with each week's **date-windowed** roster, matching that eligibility.
+
+- **Wrong cut 1:** rebuild via `rebuildRosterArraysFromDates` carry-forward over ALL weeks —
+  inflated (credited dropped/swapped players for the whole period). Daniel 1,372→1,644.
+- **Wrong cut 2:** rebuild scored weeks from the weekly-row `manager` field. That field is
+  **sticky** — a dropped/swapped player keeps `manager: X` on later-week rows — so it re-added
+  players to weeks they'd left (a PP2-only player in PP1; a Week-3 add scoring in Weeks 1–2) and
+  re-inflated. Also non-idempotent.
+- **Right cut:** reset → seed an entry per manager × already-started week → `rebuildRosterArraysFromDates`
+  to fill them with the date-windowed active set (`roster_dates` + swaps, honoring add/drop). The
+  arrays then equal `activeByDates`, so they're a subset of the scoring eligibility set —
+  restoring findManagerForPlayerWeek WITHOUT moving any total. Idempotent (full reset each run).
+
+**Lessons:** (1) weekly-row `manager` is NOT swap-honored — never reconstruct rosters from it.
+(2) `roster_dates` + swaps (date windows) is the only swap-honored source. (3) populating arrays
+with anything BEYOND the date-windowed active set inflates totals, because `managerWeekSubtotal`
+counts a manager's stat rows gated on the player being in the week's eligible set (arrays ∪
+activeByDates).
 
 ## Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile (2026-06-07)
 
