@@ -1,5 +1,34 @@
 # WMMC — Decisions Log
 
+## Approval conflict check + roster write read/wrote the array, not authoritative sources (2026-06-08)
+
+**Symptoms (commissioner).** (1) After clearing orphans, the false "Yamamoto already on Edgar's
+roster" block RETURNED — Edgar's PP2 Week-1 ARRAY held Yamamoto again (`roster_dates=false`,
+`submission=false`): a carry-forward orphan resurrected (a stale-code client re-saved it; non-empty
+client array wins over the server's cleared one). The period-scoped check (PR #293) was loaded and
+working, but it reads the raw array, so the bogus entry still blocked. (2) Joey's PP2 Week 1 showed
+a 5th batter (Jonathan Aranda) — a resurrected carry-forward; approval **appended** his 4 submitted
+batters to the polluted array instead of replacing it.
+
+**Root cause.** The roster ARRAY is a derived cache that can hold stale carry-forward/orphan
+entries. Both the duplicate-roster check and the approval roster-write trusted it.
+
+**Fix (`app.js`, client-only — PR).**
+
+- New `playersClaimedByOthers(sd, period, roundKey, excludeManager)`: builds the "taken by another
+  manager" set from **approved submissions + period-scoped roster_dates** (honoring drops via latest
+  add/drop), NOT the arrays. Used by both `approvePeriodSubmission` and `approveInitialSubmission`.
+  An orphan array entry with no submission/roster_dates behind it can no longer cause a false block.
+- `approvePeriodSubmission` now **replaces** the period Week-1 array + roster_dates with EXACTLY the
+  submission (was append) — so a stale carry-forward player is dropped on approval, not kept as an
+  extra slot. In-period swaps happen after approval and are re-applied from swap records by
+  `repairCarryForwardRosters`.
+
+**Existing pollution (e.g. Joey's Aranda):** the replace only fixes FUTURE approvals; an
+already-approved manager with a stale extra is fixed by the commissioner roster editor "Remove", or
+by re-approving (deny → approve) once deployed. Orphans keep resurfacing while any manager's browser
+runs pre-#291 code — durable end-state is everyone on the new client (version.json forces reload).
+
 ## "Your view is out of date" 409 on submission approval → submission approved but roster lost (2026-06-08)
 
 **Symptom (commissioner).** Approving a PP2 submission threw the "out of date / not in sync" alert

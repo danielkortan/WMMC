@@ -10810,29 +10810,48 @@ window.submitInitialRoster = async function (manager) {
   renderRosterData(manager, isComm);
 };
 
+// Players claimed by ANOTHER manager within `roundKey`'s period — the authoritative ownership for
+// an approval conflict check. Sources: each OTHER manager's APPROVED submission for the period plus
+// their period-scoped roster_dates (honoring drops via the latest add/drop per player). Deliberately
+// NOT the raw roster arrays: those are a derived cache that can hold stale carry-forward / orphan
+// entries (e.g. a PP1 holdover resurrected into a PP2 array), which would cause a false "already on
+// another roster" block. Returns { player: managerName }.
+function playersClaimedByOthers(sd, period, roundKey, excludeManager) {
+  const claimed = {};
+  const subBucket = period === 'pp1' ? sd.initial_submissions || {} : (sd.period_submissions || {})[period] || {};
+  for (const [mgrName, s] of Object.entries(subBucket)) {
+    if (mgrName === excludeManager || !s || s.status !== 'approved') continue;
+    for (const p of [...(s.batters || []), ...(s.pitchers || [])]) claimed[p] = mgrName;
+  }
+  for (const [mgrName, weeks] of Object.entries(sd.roster_dates || {})) {
+    if (mgrName === excludeManager) continue;
+    const latestAdd = {};
+    const latestDrop = {};
+    for (const [wKey, players] of Object.entries(weeks || {})) {
+      if (wKey.split('|')[0] !== roundKey) continue;
+      for (const [p, d] of Object.entries(players || {})) {
+        if (d.add_date && (!latestAdd[p] || d.add_date > latestAdd[p])) latestAdd[p] = d.add_date;
+        if (d.drop_date && (!latestDrop[p] || d.drop_date > latestDrop[p])) latestDrop[p] = d.drop_date;
+      }
+    }
+    for (const p of Object.keys(latestAdd)) {
+      if (!latestDrop[p] || latestAdd[p] >= latestDrop[p]) claimed[p] = mgrName;
+    }
+  }
+  return claimed;
+}
+
 window.approveInitialSubmission = async function (manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
   const sub = sd.initial_submissions[manager];
 
-  // Check for players already rostered by another manager — scoped to the initial period (PP1)
-  // only. Each scoring period is drafted fresh, so a player on another manager's later-period
-  // roster must not block this PP1 approval; only a same-period (PP1) conflict is real.
+  // Players already claimed by another manager in the initial period (PP1). Read from approved
+  // submissions + period roster_dates (authoritative), never the raw arrays, so a stale
+  // carry-forward entry can't cause a false conflict.
   const initialRound = SEASON_SCHEDULE[0].round;
-  const rosteredPlayers = {};
-  for (const [mgrName, mgrRoster] of Object.entries(sd.rosters || {})) {
-    if (mgrName === manager) continue;
-    for (const [weekKey, weekRoster] of Object.entries(mgrRoster)) {
-      if (weekKey.split('|')[0] !== initialRound) continue;
-      (weekRoster.batters || []).forEach((b) => {
-        rosteredPlayers[b] = mgrName;
-      });
-      (weekRoster.pitchers || []).forEach((p) => {
-        rosteredPlayers[p] = mgrName;
-      });
-    }
-  }
+  const rosteredPlayers = playersClaimedByOthers(sd, 'pp1', initialRound, manager);
   const duplicates = [];
   (sub.batters || []).forEach((b) => {
     if (rosteredPlayers[b]) duplicates.push(`${b} (rostered by ${rosteredPlayers[b]})`);
@@ -11109,23 +11128,12 @@ window.approvePeriodSubmission = async function (period, manager) {
   const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
   const roundKey = periodToRound[period];
 
-  // Duplicate-roster check against other managers — scoped to THIS period only. Each scoring
-  // period is drafted fresh from its own submission, so a player on another manager's PRIOR-period
-  // roster (e.g. a PP1 holdover) must NOT block this period's submission; only a player already on
-  // another manager's roster in the SAME period (round) is a real conflict.
-  const rosteredByOther = {};
-  for (const [mgrName, mgrRoster] of Object.entries(sd.rosters || {})) {
-    if (mgrName === manager) continue;
-    for (const [wKey, wRoster] of Object.entries(mgrRoster)) {
-      if (roundKey && wKey.split('|')[0] !== roundKey) continue;
-      (wRoster.batters || []).forEach((b) => {
-        rosteredByOther[b] = mgrName;
-      });
-      (wRoster.pitchers || []).forEach((p) => {
-        rosteredByOther[p] = mgrName;
-      });
-    }
-  }
+  // Duplicate-roster check against other managers — scoped to THIS period, read from approved
+  // submissions + period roster_dates (authoritative), never the raw roster arrays. Each scoring
+  // period is drafted fresh, so a PRIOR-period holdover must not block; and a stale carry-forward
+  // entry sitting in another manager's array (no submission/roster_dates behind it) must not cause
+  // a false conflict either. Only a genuine same-period claim blocks.
+  const rosteredByOther = playersClaimedByOthers(sd, period, roundKey, manager);
   const dups = [];
   (sub.batters || []).forEach((b) => {
     if (rosteredByOther[b]) dups.push(`${b} (${rosteredByOther[b]})`);
@@ -11142,7 +11150,7 @@ window.approvePeriodSubmission = async function (period, manager) {
   // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
   if (!(await persistSubmission(period, manager, sub))) return;
 
-  // Add players to the first week of the corresponding round's roster
+  // Set the first week of the corresponding round to EXACTLY the submission.
   const firstEntry = roundKey ? SEASON_SCHEDULE.find((s) => s.round === roundKey && s.week === 'Week 1') : null;
   if (firstEntry) {
     const weekKey = `${firstEntry.round}|${firstEntry.week}`;
@@ -11159,26 +11167,18 @@ window.approvePeriodSubmission = async function (period, manager) {
     }
     if (!sd.rosters) sd.rosters = {};
     if (!sd.rosters[manager]) sd.rosters[manager] = {};
-    if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
+    // REPLACE, don't append: the period's Week 1 roster IS the submission. Overwriting drops any
+    // stale carry-forward / orphan player sitting in the array from a prior period (the bug where
+    // a resurrected holdover left an approved manager with a 5th batter). In-period swaps happen
+    // after approval and are re-applied by repairCarryForwardRosters from the swap records.
+    sd.rosters[manager][weekKey] = { batters: [...(sub.batters || [])], pitchers: [...(sub.pitchers || [])] };
     if (weekStart) {
       if (!sd.roster_dates) sd.roster_dates = {};
       if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
-      if (!sd.roster_dates[manager][weekKey]) sd.roster_dates[manager][weekKey] = {};
+      const dates = {};
+      for (const p of [...(sub.batters || []), ...(sub.pitchers || [])]) dates[p] = { add_date: weekStart };
+      sd.roster_dates[manager][weekKey] = dates;
     }
-    (sub.batters || []).forEach((b) => {
-      if (!sd.rosters[manager][weekKey].batters.includes(b)) sd.rosters[manager][weekKey].batters.push(b);
-      if (weekStart) {
-        if (!sd.roster_dates[manager][weekKey][b]) sd.roster_dates[manager][weekKey][b] = {};
-        sd.roster_dates[manager][weekKey][b].add_date = weekStart;
-      }
-    });
-    (sub.pitchers || []).forEach((p) => {
-      if (!sd.rosters[manager][weekKey].pitchers.includes(p)) sd.rosters[manager][weekKey].pitchers.push(p);
-      if (weekStart) {
-        if (!sd.roster_dates[manager][weekKey][p]) sd.roster_dates[manager][weekKey][p] = {};
-        sd.roster_dates[manager][weekKey][p].add_date = weekStart;
-      }
-    });
   }
 
   saveSeason(SELECTED_SEASON, sd);
