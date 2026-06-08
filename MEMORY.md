@@ -41,8 +41,24 @@ array repair was not.)
 
 **Run order on deploy:** ship the code → hard-refresh the commissioner browser (so the OLD client
 repair can't re-add the orphans on its next save) → `dryRun` the endpoint → run it for real →
-re-run the probe to confirm orphans cleared. Follow-up to verify: Chris Bentivegna & Austin
-Johnson PP2 Week-1 array matches their approved submission (they had 0 `roster_dates`).
+re-run the probe to confirm orphans cleared. **Done on prod 2026-06-08** (PR #291): 9 orphans
+cleared, `moved_totals: []`, server dry-run re-confirmed `cleared: []`.
+
+**Follow-up — approved-but-clobbered boundary rosters (PR #2, same day).** Inspecting Chris
+Bentivegna confirmed the 0-`roster_dates` case is a real bug, not cosmetic: his PP2 Week-1 ARRAY
+held his PP1 carry-forward roster (JJ Wetherholt / Ranger Suárez / Kevin Gausman), NOT his
+approved PP2 submission (Byron Buxton / Bryce Miller / Dylan Cease), and his `roster_dates` had
+only PP1 keys. Cause: approving a period submission persists the submission record atomically, but
+the roster + `roster_dates` side-effect rides the clobber-prone full-season save — Daniel's
+landed, Chris's & Austin's were clobbered, leaving the stale PP1 carry-forward in PP2. The
+boundary-aware repair (above) preserves but does not CORRECT an already-wrong boundary array, and
+the purge endpoint deliberately keeps submission-backed managers — so neither fixes it. Added
+`POST /api/seasons/:year/reseed-approved-boundary-rosters[?dryRun=1]`: for each started boundary
+week, rewrites the array + `roster_dates` (add_date = period start) from the APPROVED submission
+and prunes stale zero-stat rows — but ONLY for managers with no period-dated `roster_dates` and no
+approved swap effective in the period, so a legitimate in-period swap is never clobbered. Skips
+weeks with real points; score-neutral while the period is unplayed. Must run before the period's
+first games count.
 
 ## PP2 submission window closed ~a day early — midnight fallback in getPeriodFirstGame (2026-06-08)
 
