@@ -282,6 +282,19 @@ async function auditSeasonIntegrity(db) {
     if (!Array.isArray(sd.score_snapshots) || sd.score_snapshots.length === 0) {
       problems.push(`${year}: no score-guard snapshots stored — swing detection is blind.`);
     }
+    // An empty rosters object while stats exist means manager attribution has been wiped (e.g. a
+    // stale full-season save). Standings limp along on roster_dates carry-forward, but the next
+    // rebuildWeeklyFromDaily re-credits every row through the empty arrays and zeroes the board.
+    const rosterMgrs = sd.rosters && typeof sd.rosters === 'object' ? Object.keys(sd.rosters).length : 0;
+    const hasWeeklyStats =
+      (Array.isArray(sd.weekly_batting) && sd.weekly_batting.length > 0) ||
+      (Array.isArray(sd.weekly_pitching) && sd.weekly_pitching.length > 0);
+    if (rosterMgrs === 0 && hasWeeklyStats) {
+      problems.push(
+        `${year}: rosters object is empty while weekly stats exist — manager attribution is wiped; ` +
+          `the next stat compile will zero the scoreboard. Recover with POST /api/seasons/${year}/reconstruct-rosters.`
+      );
+    }
   }
   if (problems.length === 0) return;
   console.error('[Integrity]', problems.join(' | '));
@@ -685,6 +698,39 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
             if (!sd.roster_dates[mgr][weekKey]) sd.roster_dates[mgr][weekKey] = {};
             sd.roster_dates[mgr][weekKey][player] = dates;
           }
+        }
+      }
+    }
+
+    // rosters (per-week roster arrays) are the attribution cache that findManagerForPlayerWeek
+    // reads — they decide which manager every stat row, daily high/low, Live-tab line, and the
+    // next rebuildWeeklyFromDaily credits. They are a server-healable projection of roster_dates,
+    // but a stale full-season save that carries an empty/partial rosters object would blank a
+    // manager's arrays, and the rebuildRosterArraysFromDates heal below is purely additive — it
+    // augments existing week entries, it cannot recreate ones the save dropped. The result is
+    // silent: standings survive (managerWeekSubtotal falls back to roster_dates carry-forward),
+    // but the next stat compile re-attributes every row through the empty arrays and zeroes the
+    // scoreboard. Same stale-save defense as roster_dates/schedule_dates above: when the server
+    // holds populated arrays for a manager and the incoming payload drops or empties them,
+    // preserve the server's copy. A client that sends non-empty arrays for the manager still
+    // wins (legitimate add/drop edits propagate); only a wipe is rejected.
+    if (existingSd.rosters && typeof existingSd.rosters === 'object') {
+      if (!sd.rosters || typeof sd.rosters !== 'object') sd.rosters = {};
+      const hasRosterData = (weeks) =>
+        !!weeks &&
+        typeof weeks === 'object' &&
+        Object.values(weeks).some(
+          (w) =>
+            w &&
+            ((Array.isArray(w.batters) && w.batters.length > 0) || (Array.isArray(w.pitchers) && w.pitchers.length > 0))
+        );
+      for (const [mgr, weeks] of Object.entries(existingSd.rosters)) {
+        if (hasRosterData(weeks) && !hasRosterData(sd.rosters[mgr])) {
+          sd.rosters[mgr] = weeks;
+          console.error(
+            `[Save guard] Save for ${req.params.year} dropped roster arrays for ${mgr} — ` +
+              `preserving the stored rosters to protect manager attribution.`
+          );
         }
       }
     }
@@ -2438,6 +2484,59 @@ function rebuildRosterArraysFromDates(sd) {
     }
   }
   return changes;
+}
+
+// Rebuild a WIPED rosters object from scratch. rebuildRosterArraysFromDates (above) is purely
+// additive — it only augments week entries that already exist — so it cannot recover from a
+// stale-save wipe that left sd.rosters === {}. This recreates the entries themselves from the
+// surviving data, in order of authority:
+//   1. The `manager` field stored on weekly_batting / weekly_pitching rows. That is the exact
+//      attribution the live scoreboard already reflects (computeRoundScores reads these rows),
+//      so reconstructing from it reproduces current standings precisely for every week with stats.
+//   2. roster_dates carry-forward (via rebuildRosterArraysFromDates) to populate weeks that have
+//      no stats yet — e.g. a period that just started — and any rostered player without a stat line.
+// Score-neutral by construction: it rebuilds only the attribution cache; no weekly_score is touched.
+function reconstructRostersFromSurvivingData(sd) {
+  if (!sd.rosters || typeof sd.rosters !== 'object') sd.rosters = {};
+  const ensure = (mgr, key) => {
+    if (!sd.rosters[mgr]) sd.rosters[mgr] = {};
+    if (!sd.rosters[mgr][key]) sd.rosters[mgr][key] = { batters: [], pitchers: [] };
+    return sd.rosters[mgr][key];
+  };
+
+  // 1) Ground truth: the manager attribution already stored on weekly stat rows.
+  for (const r of sd.weekly_batting || []) {
+    if (!r.manager || !r.batter) continue;
+    const wr = ensure(r.manager, `${r.round}|${r.week}`);
+    if (!wr.batters.includes(r.batter)) wr.batters.push(r.batter);
+  }
+  for (const r of sd.weekly_pitching || []) {
+    if (!r.manager || !r.pitcher) continue;
+    const wr = ensure(r.manager, `${r.round}|${r.week}`);
+    if (!wr.pitchers.includes(r.pitcher)) wr.pitchers.push(r.pitcher);
+  }
+
+  // 2) Seed empty entries for every manager × already-started schedule week so the roster_dates
+  //    heal can populate weeks with no stats yet and players who haven't recorded a stat line.
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const scheduleDates = sd.schedule_dates || [];
+  const managers = new Set(Object.keys(sd.roster_dates || {}));
+  Object.keys(sd.rosters).forEach((m) => managers.add(m));
+  for (const mgr of managers) {
+    for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+      const d = scheduleDates[i];
+      if (!d || !d.start || d.start > todayET) continue; // only weeks that have started
+      ensure(mgr, `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}`);
+    }
+  }
+
+  // 3) Fill from roster_dates carry-forward (additive; respects add/drop windows).
+  rebuildRosterArraysFromDates(sd);
+
+  return {
+    managers: Object.keys(sd.rosters).length,
+    week_entries: Object.values(sd.rosters).reduce((n, w) => n + Object.keys(w || {}).length, 0),
+  };
 }
 
 // Compute high/low scores for a specific date (YYYY-MM-DD).
@@ -5150,6 +5249,41 @@ app.post('/api/seasons/:year/rebuild-roster-arrays', requireCommissioner, (req, 
     changes,
     moved_totals: movedTotals,
   });
+});
+
+// POST /api/seasons/:year/reconstruct-rosters
+// Recovery for a WIPED rosters object (sd.rosters === {}) — the failure mode where a stale
+// full-season save blanks the per-week roster arrays, killing findManagerForPlayerWeek
+// attribution (daily high/low, Live tab, per-player views) and arming the next stat compile to
+// zero the scoreboard. Unlike rebuild-roster-arrays (additive, no-op on a full wipe), this
+// recreates the arrays from surviving data: the manager fields on weekly stat rows plus
+// roster_dates carry-forward. Score-neutral — it only rebuilds the attribution cache — so the
+// before/after totals should match; any movement is surfaced for the commissioner to eyeball.
+// Follow with Rebuild Totals to re-roll weekly scores from daily data once attribution is back.
+app.post('/api/seasons/:year/reconstruct-rosters', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const before = captureScoreSnapshot(sd, todayET).totals;
+  const summary = reconstructRostersFromSurvivingData(sd);
+  const after = captureScoreSnapshot(sd, todayET).totals;
+
+  const movedTotals = [];
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[m] || {}).total || 0;
+    const a = (after[m] || {}).total || 0;
+    if (Math.abs(a - b) >= 0.01) {
+      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+    }
+  }
+
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'reconstruct_rosters', { year, ...summary }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true, ...summary, moved_totals: movedTotals });
 });
 
 // POST /api/seasons/:year/dedupe-repair-swaps

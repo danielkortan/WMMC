@@ -1,5 +1,51 @@
 # WMMC — Decisions Log
 
+## `sd.rosters` wiped by a stale full-season save → Best/Worst Slack section vanished, scores froze (2026-06-08)
+
+**Symptom (commissioner).** Morning 7am Slack post showed only the scoreboard, no "Yesterday's
+Best & Worst" section, no error. Overnight standings barely moved (9/12 managers unchanged; a few
+moved, some players "down ~30") despite a full Sunday (6/07) MLB slate. PP1 W5 → PP2 W1 had just
+rolled over.
+
+**Root cause.** `sd.rosters` (the per-week roster ARRAYS) had been wiped to `{}` — almost
+certainly a stale full-season `POST /api/seasons/:year` from a background browser tab whose cached
+season predated the rosters. The save handler guarded stats/pools/`roster_dates`/`schedule_dates`/
+submissions/swaps but **not `rosters`**, and the post-save `rebuildRosterArraysFromDates` heal is
+additive-only (augments existing week entries; can't recreate wiped ones).
+
+Why the symptoms diverged:
+
+- **Standings survived** — `computeRoundScores → managerWeekSubtotal` falls back to `roster_dates`
+  carry-forward (`activeByDates`), which was intact (12 mgrs). So totals limped along.
+- **Best/Worst broke** — `computeDailyHighLow → findManagerForPlayerWeek` reads ONLY the
+  `sd.rosters` arrays. Empty arrays → every 6/07 player resolved to no manager → `null` → section
+  omitted (silently, no error).
+- **"Scores froze / some down 30"** — the same stale save's `mergeStats` let the client's older
+  PP1 W5 weekly rows WIN the key match (`round|week|player`), reverting 6/07 scores; the 6/07
+  DAILY rows were re-appended by the merge and survived (confirmed: 320 bat / 135 pit for 6/07,
+  correctly tagged PP1 Week 5, nonzero deltas).
+- **Latent danger** — the next `rebuildWeeklyFromDaily` (4am sync / Rebuild Totals) re-attributes
+  through the empty arrays → sets every weekly row `manager:null` → zeroes the board.
+
+**Diagnosis tells.** `findManagerForPlayerWeek` reads arrays; `managerWeekSubtotal` reads
+`roster_dates`. When standings look right but daily high/low / Live tab / per-player views are
+empty, suspect a `sd.rosters` array problem, not a scoring-engine bug. `rebuild-roster-arrays` is
+a NO-OP on a full wipe (additive over existing entries).
+
+**Fix (PR, branch `claude/loving-archimedes-YyKvx`).**
+
+1. **Save guard** in `POST /api/seasons/:year`: preserve the server's roster arrays for any
+   manager the incoming payload drops/empties (mirrors the `roster_dates`/`schedule_dates`
+   guards). Non-empty client arrays still win, so real add/drop edits propagate.
+2. **`reconstructRostersFromSurvivingData(sd)`** + `POST /api/seasons/:year/reconstruct-rosters`:
+   rebuilds wiped arrays from scratch — weekly-row `manager` fields (exact, reproduces standings)
+   then `roster_dates` carry-forward. Score-neutral; reports any moved totals.
+3. **`auditSeasonIntegrity`** now flags an empty `rosters` object while weekly stats exist.
+
+**Recovery runbook (this incident).** `reconstruct-rosters` → then Rebuild Totals (re-rolls weekly
+from the surviving 6/07 daily rows with restored attribution; standings move up, Best/Worst
+returns) → verify.
+
 ## Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile (2026-06-07)
 
 **Symptom (commissioner).** In the scoreboard's per-manager expandable, a swapped-in/never-dropped
