@@ -1,5 +1,30 @@
 # WMMC — Decisions Log
 
+## "Your view is out of date" 409 on submission approval → submission approved but roster lost (2026-06-08)
+
+**Symptom (commissioner).** Approving a PP2 submission threw the "out of date / not in sync" alert
+and reloaded; afterward the manager's PP2 roster was empty AND no "lineup not submitted" warning
+showed (so the submission record survived as `approved`, but the roster never got written).
+
+**Root cause.** `approvePeriodSubmission` (1) approves via the atomic `persistSubmission` endpoint —
+which bumps the server `_rev` concurrency token and `adoptRev`s the new token into **localStorage**
+— then (2) mutates the in-memory `sd` and calls `saveSeason(year, sd)` to write the roster. But
+`sd._rev` was still the OLD token (`adoptRev` updated only the localStorage copy, not the live `sd`
+reference), so `saveSeason` posted a stale token → server **409** → alert + reload. The submission
+was already flipped to `approved`, but the roster's full-season save was rejected and lost. Same
+"approval roster side-effect rides the clobber-prone full save" fragility that clobbered Chris/
+Austin earlier — here triggered by the stale token (and worsened because out-of-band server writes
+this session, e.g. purge/reseed, advanced the server `_rev` while the page stayed open).
+
+**Fix (`app.js`, client-only).** In `saveSeason`, before posting, reconcile `data._rev` to the
+freshest token in localStorage (`getSeasons()[year]._rev`), which `adoptRev`/load/save-success keep
+current. So any atomic-call-then-full-save sequence (submission approve, swap approve) stops falsely
+409-ing. localStorage holds only tokens THIS client legitimately obtained, so staleness protection
+against other writers is preserved; the server Layer-3 integrity guard remains the backstop.
+
+**Recovery for already-stuck approvals:** run `reseed-approved-boundary-rosters` — it writes the
+roster + roster_dates from the `approved` submission for any manager missing period roster_dates.
+
 ## Submission-approval duplicate check wasn't period-scoped → false "already on another roster" (2026-06-08)
 
 **Symptom (commissioner).** Approving Joey Auclair's PP2 submission errored "Yamamoto is already
