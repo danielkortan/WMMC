@@ -332,6 +332,30 @@ function assessSeasonWriteIntegrity(existingSd, candidateSd) {
   const caSw = swapCount(candidateSd);
   if (exSw > 0 && caSw < exSw) reasons.push(`approved swaps dropped ${exSw - caSw} (${exSw} → ${caSw})`);
 
+  // Structural: catch a stale clobber that strips players without the matching swap, even when the
+  // score swing is under 40. A legit swap is net-zero on a week's roster and a single add/drop is
+  // ±1, so a week's batter or pitcher list shrinking by more than MAX_WEEK_ROSTER_SHRINK — or a
+  // populated week disappearing entirely — signals a stale/partial overwrite. (Comparison runs
+  // after the save's roster_dates heal, so unchanged rosters compare equal.)
+  const MAX_WEEK_ROSTER_SHRINK = 1;
+  const exRosters = existingSd.rosters && typeof existingSd.rosters === 'object' ? existingSd.rosters : {};
+  const caRosters = candidateSd.rosters && typeof candidateSd.rosters === 'object' ? candidateSd.rosters : {};
+  for (const [mgr, weeks] of Object.entries(exRosters)) {
+    if (!weeks || typeof weeks !== 'object') continue;
+    const caWeeks = caRosters[mgr] && typeof caRosters[mgr] === 'object' ? caRosters[mgr] : {};
+    for (const [wk, wr] of Object.entries(weeks)) {
+      if (!wr || typeof wr !== 'object') continue;
+      const exB = Array.isArray(wr.batters) ? wr.batters.length : 0;
+      const exP = Array.isArray(wr.pitchers) ? wr.pitchers.length : 0;
+      const cw = caWeeks[wk] || {};
+      const caB = Array.isArray(cw.batters) ? cw.batters.length : 0;
+      const caP = Array.isArray(cw.pitchers) ? cw.pitchers.length : 0;
+      if (exB - caB > MAX_WEEK_ROSTER_SHRINK || exP - caP > MAX_WEEK_ROSTER_SHRINK) {
+        reasons.push(`${mgr} ${wk} roster shrank (B ${exB}→${caB}, P ${exP}→${caP})`);
+      }
+    }
+  }
+
   // Per-manager total swing — reuse the score-guard 40-pt threshold for a destructive DROP. A
   // normal roster edit (a swap, an add/drop) never craters a cumulative total by 40+.
   try {

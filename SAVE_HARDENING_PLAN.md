@@ -259,13 +259,18 @@ Any change touching **manager lists, player lists, roster windows, swaps, or sco
    description, demonstrating the totals move only as intended.
 3. State explicitly how it preserves the date-window invariant.
 
-## 8. Open questions for review
+## 8. Decisions (2026‑06‑08 review)
+
+- **Missing-`rev` policy (Phase 1b): REJECT.** A save without a `rev` token (old cached JS) gets a
+  409 + "reload required". Safest — a stale tab can never clobber. The integrity guard still
+  backstops during the brief window before assets refresh.
+- **Integrity-guard strictness: ADD a structural limit** (shipped in Phase 1a). Beyond the 40‑pt
+  total-drop block, also block when a week's roster shrinks by more than `MAX_WEEK_ROSTER_SHRINK`
+  (=1) players, catching sub‑40‑pt clobbers that strip players without a matching swap.
+
+### Still open
 
 - **Concurrency token:** integer `rev` (proposed) vs reuse root `last_saved_at` per-season? `rev` is
-  cleaner and clock-independent — confirm.
-- **Missing-`rev` policy during rollout:** reject (safer, proposed) vs allow-once-then-require?
-- **Integrity-guard thresholds:** reuse the 40‑pt score-guard drop threshold, or set roster-specific
-  structural thresholds (e.g. block any per-manager roster shrinking by > N without a matching
-  swap)?
+  cleaner and clock-independent — assumed `rev` unless told otherwise.
 - **Layer 5 placement:** extract eligibility into `js/` (more refactor, properly testable) vs test a
   server-side copy (less refactor, risks drift)?
