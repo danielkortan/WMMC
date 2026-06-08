@@ -8880,60 +8880,117 @@ function renderSubmissionStatusTable() {
   const container = document.getElementById('submission-status-table');
   if (!container) return;
 
-  const managers = getManagers().filter((m) => m.active);
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
-  const allSubs = (sd && sd.initial_submissions) || {};
+  if (!sd) {
+    container.innerHTML = '';
+    return;
+  }
+  const activeManagers = getManagers()
+    .filter((m) => m.active)
+    .map((m) => m.name);
 
   const fmtDt = (iso) => {
     if (!iso) return '';
     const d = new Date(iso);
     return (
       d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
-      ' ' +
+      ' ' +
       d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
     );
   };
 
-  let html = `<table class="data-table" style="width:100%;">
-    <thead>
-      <tr>
-        <th style="text-align:left;">Manager</th>
-        <th style="text-align:center;">Not Submitted</th>
-        <th style="text-align:center;">Submitted</th>
-        <th style="text-align:center;">Approved</th>
-      </tr>
-    </thead>
-    <tbody>`;
+  // Managers to show for a period: Pool Play = all active managers; playoff rounds = only the
+  // managers who advanced to that round (null until the prior round is finalized).
+  const participantsFor = (period) => {
+    if (period === 'pp1' || period === 'pp2') return activeManagers;
+    if (period === 'qf') return getQFQualifiers(sd);
+    if (period === 'sf') return getSFParticipants(sd);
+    if (period === 'finals') return getFinalsParticipants(sd);
+    return null;
+  };
 
-  managers.forEach((m) => {
-    const sub = allSubs[m.name];
-    const status = sub ? sub.status : 'draft';
-    const notSubmitted = !sub || status === 'draft';
-    const submitted = sub && (status === 'pending' || status === 'approved');
-    const approved = sub && status === 'approved';
+  const pendingNote = {
+    qf: 'Advancing managers appear here once Pool Play is finalized.',
+    sf: 'Semifinalists appear here once the Quarterfinals are finalized.',
+    finals: 'Finalists appear here once the Semifinals are finalized.',
+  };
 
-    const notSubCell = notSubmitted
-      ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted</td>`
-      : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+  const muted = (txt) => `<p class="text-muted" style="font-size:0.85rem;margin:0.5rem 0;">${txt}</p>`;
 
-    const subCell = submitted
-      ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}</td>`
-      : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+  // Per-period table + tallied counts.
+  const tableFor = (period, names) => {
+    let approved = 0;
+    let pending = 0;
+    let notSub = 0;
+    const rows = names
+      .map((name) => {
+        const sub = getPeriodSub(sd, period, name);
+        const status = sub ? sub.status : 'draft';
+        const isApproved = !!sub && status === 'approved';
+        const isPending = !!sub && status === 'pending';
+        const isSubmitted = isApproved || isPending;
+        if (isApproved) approved++;
+        else if (isPending) pending++;
+        else notSub++;
 
-    const appCell = approved
-      ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
-      : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+        const notCell = !isSubmitted
+          ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted</td>`
+          : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+        const subCell = isSubmitted
+          ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}</td>`
+          : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+        const appCell = isApproved
+          ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
+          : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
-    html += `<tr>
-      <td style="font-weight:500;">${esc(m.name)}</td>
-      ${notSubCell}
-      ${subCell}
-      ${appCell}
-    </tr>`;
+        return `<tr><td style="font-weight:500;">${esc(name)}</td>${notCell}${subCell}${appCell}</tr>`;
+      })
+      .join('');
+    const table =
+      `<table class="data-table" style="width:100%;margin:0.3rem 0 0.6rem;">` +
+      `<thead><tr><th style="text-align:left;">Manager</th><th style="text-align:center;">Not Submitted</th>` +
+      `<th style="text-align:center;">Submitted</th><th style="text-align:center;">Approved</th></tr></thead>` +
+      `<tbody>${rows}</tbody></table>`;
+    return { table, approved, pending, notSub };
+  };
+
+  // Auto-expand the latest period whose submission window has already opened and has participants
+  // (= the round currently in play: PP2 while its window is open, then QF when that opens, etc.).
+  const periods = ['pp1', 'pp2', 'qf', 'sf', 'finals'];
+  const now = new Date();
+  let defaultOpen = 'pp1';
+  periods.forEach((p) => {
+    const od = getPeriodOpenDate(sd, p);
+    const opened = od ? od <= now : true;
+    const names = participantsFor(p);
+    if (opened && names && names.length) defaultOpen = p;
   });
 
-  html += '</tbody></table>';
+  let html = '';
+  periods.forEach((period) => {
+    const names = participantsFor(period);
+    let meta;
+    let body;
+    if (!names) {
+      meta = 'pending finalization';
+      body = muted(pendingNote[period] || 'Not yet available.');
+    } else if (names.length === 0) {
+      meta = 'no managers';
+      body = muted('No managers for this round.');
+    } else {
+      const t = tableFor(period, names);
+      const tail = t.notSub > 0 ? `${t.notSub} not submitted` : 'all submitted';
+      meta = `${t.approved} approved &middot; ${t.pending} pending &middot; ${tail} (${names.length})`;
+      body = t.table;
+    }
+    const openAttr = period === defaultOpen ? ' open' : '';
+    html +=
+      `<details class="sub-status-period"${openAttr}>` +
+      `<summary><span class="sub-status-label">${PERIOD_LABELS[period]}</span>` +
+      `<span class="sub-status-meta">${meta}</span></summary>${body}</details>`;
+  });
+
   container.innerHTML = html;
 }
 
