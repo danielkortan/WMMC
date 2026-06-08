@@ -268,9 +268,32 @@ Any change touching **manager lists, player lists, roster windows, swaps, or sco
   total-drop block, also block when a week's roster shrinks by more than `MAX_WEEK_ROSTER_SHRINK`
   (=1) players, catching sub‑40‑pt clobbers that strip players without a matching swap.
 
+- **Concurrency token: content-hash `rev`** (chosen over a stored counter). Computed on the fly by
+  `computeSeasonRev(sd)` over `{rosters, roster_dates, swaps, schedule_dates, initial_submissions,
+period_submissions}`; no counter to bump, no 20-site retrofit, and a stats-only sync can't
+  false-trip it.
+
+## 9. Implementation status
+
+- **Phase 1a — DONE (merged #286):** destructive-save integrity guard + structural limit + invariant.
+- **Phase 1b — IMPLEMENTED, in review (do not merge until app-tested):** content-hash `rev` gate.
+  `GET /api/seasons` attaches `_rev`; `POST /api/seasons/:year` rejects a missing/stale `_rev` with
+  409; the client (`saveSeason`) sends `_rev`, refreshes + reloads on 409 (one-shot guarded), and
+  records the new `_rev` on success. Automatic render-time saves pass `{ silent: true }`.
+
+### Verify during testing / follow-ups
+
+- **Atomic-endpoint interaction:** `/submissions` and `/swaps` change the hashed fields, so they
+  bump `_rev`. A same-user full-season save that follows an atomic op (without a reload) will 409
+  once and reload. If that friction shows in testing, have those endpoints return the new `_rev`
+  and update the client's local token (small follow-up).
+- **Bulk `POST /api/seasons` (no `:year`, line ~697):** raw `db.seasons = req.body`, commissioner-
+  only, **bypasses the gate AND every field/integrity guard**. The current client does not call it.
+  Phase 2: remove it or route it through the same guards.
+- **Rollout note:** after deploy, a tab still on old JS sends no `_rev` → 409 (silent on the old
+  client). Reload the tab to pick up the rev-aware client. `version.json` asset-busting nudges this.
+
 ### Still open
 
-- **Concurrency token:** integer `rev` (proposed) vs reuse root `last_saved_at` per-season? `rev` is
-  cleaner and clock-independent — assumed `rev` unless told otherwise.
 - **Layer 5 placement:** extract eligibility into `js/` (more refactor, properly testable) vs test a
   server-side copy (less refactor, risks drift)?
