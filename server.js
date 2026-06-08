@@ -267,6 +267,75 @@ async function saveTimestampedBackup(data) {
   }
 }
 
+// Roster/manager integrity audit (SAVE_HARDENING_PLAN.md, Layer 4). Enforces the core invariant:
+// managers come only from db.managers (the commissioner source of truth) and players enter rosters
+// only via a submission or an approved swap, stamped with a date + period. Read-only classifier;
+// it distinguishes GENUINE problems from a known-benign case so it never cries wolf:
+//   - unknownManagers: a name referenced in rosters/roster_dates/stat rows/swaps/submissions that
+//     is NOT in db.managers.
+//   - ghosts: a rostered player (in roster_dates) with no submission origin AND no swap in/out —
+//     truly no provenance.
+//   - swapInNoAdd: a swap player_in (not in any submission) with zero add_dates across roster_dates
+//     — would score from the week start instead of the add date (a real mis-score).
+//   - cosmetic (NOT a problem): an original-draft player dropped early who isn't recorded in
+//     initial_submissions (adds:0, has a drop, is a swap player_out). Scores correctly from the
+//     period start to the drop; only the origin record is incomplete.
+function auditRosterIntegrity(db, sd) {
+  const canon = new Set(((db && db.managers) || []).map((m) => m.name));
+  const approved = ((sd && sd.swaps) || []).filter((s) => s.status === 'approved');
+
+  const referenced = new Set();
+  Object.keys(sd.rosters || {}).forEach((m) => referenced.add(m));
+  Object.keys(sd.roster_dates || {}).forEach((m) => referenced.add(m));
+  (sd.weekly_batting || []).forEach((r) => r.manager && referenced.add(r.manager));
+  (sd.weekly_pitching || []).forEach((r) => r.manager && referenced.add(r.manager));
+  approved.forEach((s) => s.manager && referenced.add(s.manager));
+  Object.keys(sd.initial_submissions || {}).forEach((m) => referenced.add(m));
+  Object.values(sd.period_submissions || {}).forEach((b) => Object.keys(b || {}).forEach((m) => referenced.add(m)));
+  const unknownManagers = [...referenced].filter((m) => !canon.has(m));
+
+  const submittedPlayers = (mgr) => {
+    const set = new Set();
+    const init = (sd.initial_submissions || {})[mgr];
+    if (init) {
+      (init.batters || []).forEach((p) => set.add(p));
+      (init.pitchers || []).forEach((p) => set.add(p));
+    }
+    Object.values(sd.period_submissions || {}).forEach((b) => {
+      const s = (b || {})[mgr];
+      if (s) {
+        (s.batters || []).forEach((p) => set.add(p));
+        (s.pitchers || []).forEach((p) => set.add(p));
+      }
+    });
+    return set;
+  };
+
+  const ghosts = [];
+  const swapInNoAdd = [];
+  const cosmetic = [];
+  for (const [mgr, weeks] of Object.entries(sd.roster_dates || {})) {
+    const sub = submittedPlayers(mgr);
+    const agg = {};
+    for (const players of Object.values(weeks || {})) {
+      for (const [p, d] of Object.entries(players || {})) {
+        if (!agg[p]) agg[p] = { adds: 0, drops: 0 };
+        if (d && d.add_date) agg[p].adds++;
+        if (d && d.drop_date) agg[p].drops++;
+      }
+    }
+    for (const [p, a] of Object.entries(agg)) {
+      const inSub = sub.has(p);
+      const sIn = approved.some((s) => s.manager === mgr && s.player_in === p);
+      const sOut = approved.some((s) => s.manager === mgr && s.player_out === p);
+      if (!inSub && !sIn && !sOut) ghosts.push({ manager: mgr, player: p });
+      else if (sIn && !inSub && a.adds === 0) swapInNoAdd.push({ manager: mgr, player: p });
+      else if (!inSub && sOut && !sIn) cosmetic.push({ manager: mgr, player: p });
+    }
+  }
+  return { unknownManagers, ghosts, swapInNoAdd, cosmetic };
+}
+
 // Boot-time data-integrity audit. The schedule_dates wipe was invisible for hours because
 // nothing watched for it; this surfaces that class of silent corruption by logging and posting
 // a Slack alert when an active season is missing data its scoring depends on. Detection only —
@@ -293,6 +362,26 @@ async function auditSeasonIntegrity(db) {
       problems.push(
         `${year}: rosters object is empty while weekly stats exist — manager attribution is wiped; ` +
           `the next stat compile will zero the scoreboard. Recover with POST /api/seasons/${year}/reconstruct-rosters.`
+      );
+    }
+    // Roster/manager provenance (Layer 4). Alarm only on GENUINE problems — never the benign
+    // cosmetic case (dropped original-draft players missing from initial_submissions).
+    const ri = auditRosterIntegrity(db, sd);
+    if (ri.unknownManagers.length) {
+      problems.push(
+        `${year}: ${ri.unknownManagers.length} manager(s) referenced but not in db.managers: ${ri.unknownManagers.join(', ')}.`
+      );
+    }
+    if (ri.ghosts.length) {
+      problems.push(
+        `${year}: ${ri.ghosts.length} rostered player(s) with no submission/swap origin (ghosts): ` +
+          `${ri.ghosts.map((g) => `${g.player} (${g.manager})`).join(', ')}.`
+      );
+    }
+    if (ri.swapInNoAdd.length) {
+      problems.push(
+        `${year}: ${ri.swapInNoAdd.length} swapped-in player(s) missing an add_date (will mis-score from the week start): ` +
+          `${ri.swapInNoAdd.map((g) => `${g.player} (${g.manager})`).join(', ')}.`
       );
     }
   }
@@ -5464,6 +5553,30 @@ app.post('/api/seasons/:year/reconstruct-rosters', requireCommissioner, (req, re
   addAuditEntry(db, 'reconstruct_rosters', { year, ...summary }, req.get('X-User-Email'));
   writeDB(db);
   res.json({ ok: true, ...summary, moved_totals: movedTotals });
+});
+
+// GET /api/seasons/:year/roster-audit
+// Read-only roster/manager provenance report (SAVE_HARDENING_PLAN.md, Layer 4). Verifies the core
+// invariant: managers come only from db.managers, and every rostered player traces to a submission
+// or approved swap with a date + period. Returns genuine problems (unknown managers, origin-less
+// ghosts, swap-ins missing an add_date) separately from the known-benign cosmetic case (an
+// original-draft player dropped early and not recorded in initial_submissions — scores correctly).
+app.get('/api/seasons/:year/roster-audit', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+  const r = auditRosterIntegrity(db, sd);
+  const ok = r.unknownManagers.length === 0 && r.ghosts.length === 0 && r.swapInNoAdd.length === 0;
+  res.json({
+    ok,
+    genuine: {
+      unknown_managers: r.unknownManagers,
+      ghosts: r.ghosts,
+      swap_in_missing_add_date: r.swapInNoAdd,
+    },
+    cosmetic: r.cosmetic,
+  });
 });
 
 // POST /api/seasons/:year/dedupe-repair-swaps
