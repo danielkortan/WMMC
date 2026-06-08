@@ -10805,11 +10805,15 @@ window.approveInitialSubmission = async function (manager) {
   if (!sd.initial_submissions || !sd.initial_submissions[manager]) return;
   const sub = sd.initial_submissions[manager];
 
-  // Check for players already rostered by another manager
+  // Check for players already rostered by another manager — scoped to the initial period (PP1)
+  // only. Each scoring period is drafted fresh, so a player on another manager's later-period
+  // roster must not block this PP1 approval; only a same-period (PP1) conflict is real.
+  const initialRound = SEASON_SCHEDULE[0].round;
   const rosteredPlayers = {};
   for (const [mgrName, mgrRoster] of Object.entries(sd.rosters || {})) {
     if (mgrName === manager) continue;
-    for (const weekRoster of Object.values(mgrRoster)) {
+    for (const [weekKey, weekRoster] of Object.entries(mgrRoster)) {
+      if (weekKey.split('|')[0] !== initialRound) continue;
       (weekRoster.batters || []).forEach((b) => {
         rosteredPlayers[b] = mgrName;
       });
@@ -11091,11 +11095,18 @@ window.approvePeriodSubmission = async function (period, manager) {
   const sub = getPeriodSub(sd, period, manager);
   if (!sub) return;
 
-  // Duplicate-roster check against other managers
+  const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+  const roundKey = periodToRound[period];
+
+  // Duplicate-roster check against other managers — scoped to THIS period only. Each scoring
+  // period is drafted fresh from its own submission, so a player on another manager's PRIOR-period
+  // roster (e.g. a PP1 holdover) must NOT block this period's submission; only a player already on
+  // another manager's roster in the SAME period (round) is a real conflict.
   const rosteredByOther = {};
   for (const [mgrName, mgrRoster] of Object.entries(sd.rosters || {})) {
     if (mgrName === manager) continue;
-    for (const wRoster of Object.values(mgrRoster)) {
+    for (const [wKey, wRoster] of Object.entries(mgrRoster)) {
+      if (roundKey && wKey.split('|')[0] !== roundKey) continue;
       (wRoster.batters || []).forEach((b) => {
         rosteredByOther[b] = mgrName;
       });
@@ -11121,8 +11132,6 @@ window.approvePeriodSubmission = async function (period, manager) {
   if (!(await persistSubmission(period, manager, sub))) return;
 
   // Add players to the first week of the corresponding round's roster
-  const periodToRound = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
-  const roundKey = periodToRound[period];
   const firstEntry = roundKey ? SEASON_SCHEDULE.find((s) => s.round === roundKey && s.week === 'Week 1') : null;
   if (firstEntry) {
     const weekKey = `${firstEntry.round}|${firstEntry.week}`;

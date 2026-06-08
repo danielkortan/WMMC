@@ -1,5 +1,23 @@
 # WMMC — Decisions Log
 
+## Submission-approval duplicate check wasn't period-scoped → false "already on another roster" (2026-06-08)
+
+**Symptom (commissioner).** Approving Joey Auclair's PP2 submission errored "Yamamoto is already
+on another player's roster (Edgar)", but Edgar had no PP2 submission — Yamamoto was only on Edgar's
+PP1 roster (before an in-PP1 trade). A fresh PP2 draft should make him available.
+
+**Root cause.** `approvePeriodSubmission` (and `approveInitialSubmission`) built the
+"rostered by another manager" set by scanning **every week of every other manager's roster arrays
+with no period scoping** (`for (const wRoster of Object.values(mgrRoster))`). So any PP1 holdover
+blocked a PP2 submission — i.e. no player another manager _ever_ rostered in PP1 could be drafted
+in PP2. Same period-leak family as the carry-forward bug.
+
+**Fix (`app.js`, client-only — approval is client-driven).** Scope both duplicate checks to the
+submission's own period: skip week keys whose round (`wKey.split('|')[0]`) isn't the period being
+approved (`PP2` for Joey; `PP1` for the initial path). Only a player on another manager's
+SAME-period roster is a real conflict. Hoisted `roundKey` above the check in
+`approvePeriodSubmission` (removed the later duplicate declaration). No server twin.
+
 ## Carry-forward repair leaked across period boundaries → orphan PP2 Week-1 rosters (2026-06-08)
 
 **Symptom (commissioner).** Cam McCallum, Anton Capria, Alex Thalacker (and others) saw the
