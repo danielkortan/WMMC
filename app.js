@@ -5856,7 +5856,10 @@ function backfillRosterDatesFromSwaps(seasonData) {
 // full-recompute pass runs again on next load. Mirrors server.js — bump both.
 // v6: carry-forward now folds swaps effective in a trusted seed week into the
 // baseline, so an in-season move made during the first week propagates forward.
-const ROSTER_REPAIR_VERSION = 6;
+// v7: carry-forward no longer crosses period (round) boundaries — a new period
+// (PP2/QF/SF/Finals) starts fresh from its own submission, never the prior period's
+// Week-5 roster (previously the boundary week was re-filled from carry-forward).
+const ROSTER_REPAIR_VERSION = 7;
 
 // Fill / recompute per-week roster entries by carrying forward the most recent
 // trusted roster and applying approved swaps in chronological order.
@@ -5923,6 +5926,17 @@ function repairCarryForwardRosters(seasonData) {
     for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
       const { round, week } = SEASON_SCHEDULE[i];
       const weekKey = `${round}|${week}`;
+
+      // A new scoring period starts fresh from its own submission — never carry the prior
+      // period's roster across a period (round) boundary (PP2/QF/SF/Finals Week 1). Reset the
+      // carry-forward baseline so the boundary week is owned by its submission, not by the
+      // previous period's Week-5 holdovers. (Mirrors the boundary skips already in the Sunday
+      // auto-advance and managerWeekSubtotal's period-scoped eligibility.)
+      if (i > 0 && SEASON_SCHEDULE[i].round !== SEASON_SCHEDULE[i - 1].round) {
+        prevBatters = null;
+        prevPitchers = null;
+      }
+
       const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
       const isFuture = weekStart && weekStart > todayET;
 

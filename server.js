@@ -1834,7 +1834,10 @@ function purgeGhostHerreraFromJoey(db) {
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
 // v6: carry-forward now folds swaps effective in a trusted seed week into the
 // baseline, so an in-season move made during the first week propagates forward.
-const ROSTER_REPAIR_VERSION = 6;
+// v7: carry-forward no longer crosses period (round) boundaries — a new period
+// (PP2/QF/SF/Finals) starts fresh from its own submission, never the prior period's
+// Week-5 roster (previously the boundary week was re-filled from carry-forward).
+const ROSTER_REPAIR_VERSION = 7;
 
 // Fill / recompute per-week roster entries by carrying forward the most recent trusted
 // roster and applying approved swaps whose swap_date falls in each week.
@@ -1902,6 +1905,17 @@ function repairCarryForwardRosters(db) {
       for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
         const { round, week } = SEASON_SCHEDULE[i];
         const weekKey = `${round}|${week}`;
+
+        // A new scoring period starts fresh from its own submission — never carry the prior
+        // period's roster across a period (round) boundary (PP2/QF/SF/Finals Week 1). Reset the
+        // carry-forward baseline so the boundary week is owned by its submission, not by the
+        // previous period's Week-5 holdovers. (Mirrors the boundary skips already in the Sunday
+        // auto-advance and managerWeekSubtotal's period-scoped eligibility.)
+        if (i > 0 && SEASON_SCHEDULE[i].round !== SEASON_SCHEDULE[i - 1].round) {
+          prevBatters = null;
+          prevPitchers = null;
+        }
+
         const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
         const isFuture = weekStart && weekStart > todayET;
 
@@ -5642,6 +5656,101 @@ app.post('/api/seasons/:year/reconstruct-rosters', requireCommissioner, (req, re
   addAuditEntry(db, 'reconstruct_rosters', { year, ...summary }, req.get('X-User-Email'));
   writeDB(db);
   res.json({ ok: true, ...summary, moved_totals: movedTotals });
+});
+
+// POST /api/seasons/:year/purge-orphan-boundary-rosters[?dryRun=1]
+// Clears period-BOUNDARY week-1 rosters (PP2/QF/SF/Finals Week 1) that are NOT backed by a
+// submission for that period. A boundary week must be owned by its own submission — never by the
+// prior period's carry-forward. repairCarryForwardRosters used to re-fill the boundary week from
+// the previous period's Week-5 roster (fixed in ROSTER_REPAIR_VERSION 7 to reset at boundaries),
+// which left managers who never submitted showing a full (wrong) carry-forward roster while the
+// "lineup not submitted" warning kept firing (the warning keys off the submission, not the
+// roster). This removes those orphaned arrays + their roster_dates + zero-stat weekly rows so the
+// boundary week is empty until the manager submits. Managers WITH a pending/approved submission
+// for the period are left untouched. Any boundary week that already has real (nonzero) points is
+// skipped. Score-neutral by construction (an unplayed boundary week scores 0). Pass ?dryRun=1 (or
+// { dryRun: true }) to preview without writing. Returns a before/after per-manager total check.
+app.post('/api/seasons/:year/purge-orphan-boundary-rosters', requireCommissioner, (req, res) => {
+  const year = req.params.year;
+  const dryRun = req.query.dryRun === '1' || (req.body && req.body.dryRun === true);
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const scheduleDates = sd.schedule_dates || [];
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const periodKeyByRound = { PP2: 'pp2', QF: 'qf', SF: 'sf', Finals: 'finals' };
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+
+  const cleared = [];
+  const kept = [];
+  const skipped = [];
+
+  for (let i = 1; i < SEASON_SCHEDULE.length; i++) {
+    const { round, week } = SEASON_SCHEDULE[i];
+    // Only period (round) boundaries — the weeks owned by a submission, not carry-forward.
+    if (round === SEASON_SCHEDULE[i - 1].round) continue;
+    const period = periodKeyByRound[round];
+    if (!period) continue;
+    const weekKey = `${round}|${week}`;
+    const weekStart = scheduleDates[i] ? scheduleDates[i].start : null;
+    // Only act once the period has started; future weeks are handled by the normal future-purge.
+    if (weekStart && weekStart > todayET) continue;
+
+    const subBucket = (sd.period_submissions || {})[period] || {};
+
+    for (const [mgr, weeks] of Object.entries(sd.rosters || {})) {
+      const wr = weeks[weekKey];
+      const filled = wr ? (wr.batters || []).length + (wr.pitchers || []).length : 0;
+      if (filled === 0) continue;
+
+      const sub = subBucket[mgr];
+      const hasSub = sub && (sub.status === 'pending' || sub.status === 'approved');
+      if (hasSub) {
+        kept.push({ manager: mgr, week: weekKey, sub_status: sub.status, players: filled });
+        continue;
+      }
+
+      // Never disturb a boundary week this manager has actually played (real points).
+      const rowMatches = (r) => r.round === round && r.week === week && r.manager === mgr;
+      const hasRealStats =
+        (sd.weekly_batting || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0) ||
+        (sd.weekly_pitching || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0);
+      if (hasRealStats) {
+        skipped.push({ manager: mgr, week: weekKey, players: filled, reason: 'has_real_points' });
+        continue;
+      }
+
+      const batters = (wr.batters || []).slice();
+      const pitchers = (wr.pitchers || []).slice();
+      if (!dryRun) {
+        delete weeks[weekKey];
+        if (sd.roster_dates && sd.roster_dates[mgr]) delete sd.roster_dates[mgr][weekKey];
+        sd.weekly_batting = (sd.weekly_batting || []).filter((r) => !rowMatches(r));
+        sd.weekly_pitching = (sd.weekly_pitching || []).filter((r) => !rowMatches(r));
+      }
+      cleared.push({ manager: mgr, week: weekKey, sub_status: sub ? sub.status : 'none', batters, pitchers });
+    }
+  }
+
+  const after = dryRun ? before : captureScoreSnapshot(sd, todayET).totals;
+  const movedTotals = [];
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[m] || {}).total || 0;
+    const a = (after[m] || {}).total || 0;
+    if (Math.abs(a - b) >= 0.01) {
+      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+    }
+  }
+
+  if (!dryRun && cleared.length > 0) {
+    db.seasons[year] = sd;
+    addAuditEntry(db, 'purge_orphan_boundary_rosters', { year, cleared: cleared.length }, req.get('X-User-Email'));
+    writeDB(db);
+  }
+
+  res.json({ ok: true, dryRun, cleared, kept, skipped, moved_totals: movedTotals });
 });
 
 // GET /api/seasons/:year/roster-audit
