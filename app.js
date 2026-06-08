@@ -856,6 +856,17 @@ function getSeasons() {
 async function saveSeason(year, data, opts = {}) {
   const { silent = false } = opts;
   const seasons = getSeasons();
+  // Adopt the freshest concurrency token before saving. An atomic submission/swap endpoint
+  // (persistSubmission/removeSubmissionRemote → adoptRev) may have bumped _rev in localStorage
+  // AFTER `data` was captured, while the caller's in-memory object still holds the older token —
+  // so this save would falsely 409 as stale (the bug that left an approved submission's roster
+  // unwritten: the submission flipped to 'approved' via the atomic call, then the roster's
+  // full-season save was rejected and reloaded away). localStorage._rev only ever holds tokens
+  // THIS client legitimately obtained (load / save-success / adoptRev), so staleness protection
+  // against OTHER writers is preserved. See SAVE_HARDENING_PLAN.md, Layer 1.
+  if (data && typeof data === 'object' && seasons[year] && seasons[year]._rev) {
+    data._rev = seasons[year]._rev;
+  }
   seasons[year] = data;
   localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
   try {
