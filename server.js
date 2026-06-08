@@ -788,8 +788,35 @@ app.post('/api/seasons', requireCommissioner, (req, res) => {
     return res.status(400).json({ error: 'Request body must be an object' });
   }
   const db = readDB();
-  addAuditEntry(db, 'seasons_save_all', { seasonCount: Object.keys(req.body).length }, req.get('X-User-Email'));
-  db.seasons = req.body;
+  const incoming = req.body;
+
+  // This bulk full-replace bypasses the per-season optimistic-concurrency gate and the per-field
+  // merge guards — a stale or buggy caller could wipe every season's rosters/scores in one shot.
+  // The current client never uses it (it saves per-year), so rather than leave the hole open, run
+  // the same destructive-save integrity check per season and refuse a destructive replacement
+  // unless explicitly forced. (SAVE_HARDENING_PLAN.md Phase 2 — bulk-endpoint cleanup.)
+  if (req.body.force !== true) {
+    const blocked = [];
+    for (const [year, candidate] of Object.entries(incoming)) {
+      if (year === 'force') continue;
+      const existing = (db.seasons || {})[year];
+      const integrity = assessSeasonWriteIntegrity(existing, candidate);
+      if (integrity.destructive) blocked.push(`${year}: ${integrity.reasons.join('; ')}`);
+    }
+    if (blocked.length) {
+      console.error(`[Save guard] BLOCKED destructive bulk season save: ${blocked.join(' | ')}`);
+      addAuditEntry(db, 'seasons_save_all_blocked', { reasons: blocked }, req.get('X-User-Email'));
+      writeDB(db);
+      postSlack(
+        `:no_entry: *Blocked a destructive bulk season save* (POST /api/seasons).\n• ${blocked.join('\n• ')}\nNo change was applied.`
+      ).catch(() => {});
+      return res.status(409).json({ error: 'destructive_bulk_save_blocked', reasons: blocked });
+    }
+  }
+
+  const { force: _force, ...seasons } = incoming;
+  addAuditEntry(db, 'seasons_save_all', { seasonCount: Object.keys(seasons).length }, req.get('X-User-Email'));
+  db.seasons = seasons;
   writeDB(db);
   res.json({ ok: true });
 });
