@@ -7632,6 +7632,20 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     // also get their drop_dates populated.
     const orderedWks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
 
+    // Current scoring period start — a new submission period (PP2/QF/SF/Finals) starts fresh from
+    // its own submission, so "currently rostered" must only consider this period's adds/drops.
+    // Without this, a prior period's holdover (an old add with no drop) reads as still-rostered and
+    // wrongly appears in Player Out / out of the available pool. null for PP1 leaves it unchanged.
+    const swapTodayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+    const swapSchedDates = seasonData.schedule_dates || [];
+    let swapCurRound = null;
+    for (let i = 0; i < SEASON_SCHEDULE.length && i < swapSchedDates.length; i++) {
+      if (swapSchedDates[i] && swapSchedDates[i].start && swapSchedDates[i].start <= swapTodayET) {
+        swapCurRound = SEASON_SCHEDULE[i].round;
+      }
+    }
+    const curPeriodStart = periodStartForRound(seasonData, swapCurRound);
+
     // Returns true if `player` is currently on THIS manager's active roster
     // (most recent roster_dates action was an add, or no dates but in latest week).
     const isStillActiveForMgr = (player) => {
@@ -7641,8 +7655,20 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
       for (const weekDates of Object.values(mgrDates)) {
         const entry = weekDates[player];
         if (!entry) continue;
-        if (entry.add_date && (!latestAdd || entry.add_date > latestAdd)) latestAdd = entry.add_date;
-        if (entry.drop_date && (!latestDrop || entry.drop_date > latestDrop)) latestDrop = entry.drop_date;
+        if (
+          entry.add_date &&
+          (!curPeriodStart || entry.add_date >= curPeriodStart) &&
+          (!latestAdd || entry.add_date > latestAdd)
+        ) {
+          latestAdd = entry.add_date;
+        }
+        if (
+          entry.drop_date &&
+          (!curPeriodStart || entry.drop_date >= curPeriodStart) &&
+          (!latestDrop || entry.drop_date > latestDrop)
+        ) {
+          latestDrop = entry.drop_date;
+        }
       }
       if (latestAdd || latestDrop) {
         return !latestDrop || (latestAdd && latestAdd > latestDrop);
@@ -7667,8 +7693,20 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         for (const weekDates of Object.values(mgrDates)) {
           const entry = weekDates[player];
           if (!entry) continue;
-          if (entry.add_date && (!latestAdd || entry.add_date > latestAdd)) latestAdd = entry.add_date;
-          if (entry.drop_date && (!latestDrop || entry.drop_date > latestDrop)) latestDrop = entry.drop_date;
+          if (
+            entry.add_date &&
+            (!curPeriodStart || entry.add_date >= curPeriodStart) &&
+            (!latestAdd || entry.add_date > latestAdd)
+          ) {
+            latestAdd = entry.add_date;
+          }
+          if (
+            entry.drop_date &&
+            (!curPeriodStart || entry.drop_date >= curPeriodStart) &&
+            (!latestDrop || entry.drop_date > latestDrop)
+          ) {
+            latestDrop = entry.drop_date;
+          }
         }
         if (latestAdd || latestDrop) {
           // Dates available: active only when most recent action was an add

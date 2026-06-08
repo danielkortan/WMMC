@@ -80,10 +80,13 @@ PP1 (initial period) so PP1 scoring/rosters are untouched. Also: `reconstruct-ro
 each started non-initial period's first week directly from the approved `period_submissions[period]`
 (belt-and-suspenders so a kept player is never lost), skipping anyone dropped within the period.
 Confirmed PP2 submission players carry explicit `add_date` = period start in `roster_dates`, so the
-date heal already includes them; the submission seed is the safety net. NOTE (open): the swap-form
-"current roster" helpers in app.js (`isStillActiveForMgr`, `isCurrentlyTaken`, ~7611/7639) still use
-global carry-forward — they drive the swap request dropdowns only (not scoring/scoreboard), but
-should get the same period scoping for full correctness.
+date heal already includes them; the submission seed is the safety net. Verified live:
+reconstruct's `moved_totals` came back `[]` (idempotent, PP1 totals unchanged) and PP2 dropped its
+holdovers. Follow-up PR period-scoped the swap-form "current roster" helpers too
+(`isStillActiveForMgr`, `isCurrentlyTaken`): they now scope adds/drops to the CURRENT period (the
+latest round whose first week has started), so a prior period's holdover no longer appears in
+Player Out or out of the available pool. The existing latest-week-array fallback stays correct
+because the reconstructed period arrays are clean.
 
 ## Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile (2026-06-07)
 
