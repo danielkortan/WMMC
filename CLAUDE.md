@@ -59,6 +59,29 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 
 These are always true. Apply to every session. If a task conflicts with one, flag it before proceeding.
 
+- **THE CORE SCORING INVARIANT (this is the heart of the app — protect it above all else).** A
+  manager's score is the sum, over each player they roster, of the points that player earns **only
+  within that player's roster window** (`add_date` → `drop_date`), within the **period** (PP1/PP2/
+  QF/SF/Finals) they were rostered for. Consequences that are non-negotiable:
+  - **Source of truth for "who is rostered, when" = `roster_dates` + approved `swaps` (date
+    windows), scoped to the period.** A new submission period starts fresh from its submission;
+    players do **not** carry across a period boundary. Use `periodStartForRound` to scope
+    carry-forward.
+  - **Managers** come from **one place only: the commissioner page (`db.managers`)**. That is the
+    canonical manager list; every other view must read managers from it, never invent or infer them.
+  - **Players enter a roster only via** an initial/period **submission** or a **swap** (including a
+    commissioner swap) — always stamped with a **date and a period identifier**. Nothing else may
+    add a player to a roster.
+  - `sd.rosters` (per-week arrays), the `manager` field on `weekly_*`/`daily_*` rows, and weekly
+    rollups are **derived caches** — rebuild them from the date windows; never treat them as
+    authoritative (the sticky stat-row `manager` is NOT swap-honored).
+  - Every view (scoreboard, Slack, Live tab, swap form, exports) must read managers and the
+    date-windowed rosters **completely, every time** — no partial/stale snapshots.
+  - **Any change touching managers, player lists, roster windows, swaps, or scoring must be vetted
+    with a before/after per-manager totals comparison** (see `SAVE_HARDENING_PLAN.md` §7) and must
+    state how it preserves this invariant. The full-season save is clobber-prone; prefer the atomic
+    endpoints (`/submissions`, `/swaps`) and never wipe a server-authoritative field from a client
+    payload.
 - `SCORING` and `SEASON_SCHEDULE` are hardcoded in **both** `server.js` and `js/scoring.js` and must be kept in sync — every edit goes in both files. (They were moved out of `app.js` during modularization; `app.js` now reads them from `window`, populated by `js/index.js`.)
 - Never commit `db.json` — it is gitignored and contains passwords.
 - `managers_seed.json` stores manager identities but never passwords — the server strips passwords before writing it.
