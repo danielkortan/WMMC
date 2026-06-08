@@ -1,5 +1,18 @@
 # WMMC — Decisions Log
 
+## Per-round Manager Submission Status (collapsible, auto-open current period) (2026-06-08)
+
+Commissioner "Manager Submission Status" table was PP1-only; now there are multiple submission
+periods. Rewrote `renderSubmissionStatusTable` (app.js) to render one section per period (PP1, PP2,
+QF, SF, Finals), each a native `<details>`/`<summary>` collapsible. Pool Play sections list all
+active managers; **playoff sections list only advancers** via `getQFQualifiers` / `getSFParticipants`
+/ `getFinalsParticipants` (a muted "pending finalization" note until the prior round is finalized).
+Each summary shows an at-a-glance tally (`N approved · N pending · N not submitted (total)`). The
+section auto-expanded is the latest period whose submission window has already opened
+(`getPeriodOpenDate <= now`) and has participants — i.e. the round currently in play (PP2 now, QF
+when its window opens, etc.). Styling is theme-aware (`.sub-status-period` in styles.css, using
+`var(--border)`/`var(--card-bg)`/`var(--text-muted)`). Frontend-only; no server/SCORING changes.
+
 ## reconcile-boundary-rosters endpoint — prune array-only orphans from a backed roster (2026-06-08)
 
 **Symptom.** After fixing Joey's approval, the stale-extras probe still flagged Taj Bradley. The

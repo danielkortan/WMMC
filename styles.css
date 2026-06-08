@@ -4709,3 +4709,32 @@ body::before {
   position: relative;
   z-index: 1;
 }
+
+/* Commissioner: per-round Manager Submission Status (collapsible sections) */
+.sub-status-period {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  margin-bottom: 0.6rem;
+  padding: 0 0.85rem;
+}
+.sub-status-period:last-child {
+  margin-bottom: 0;
+}
+.sub-status-period > summary {
+  cursor: pointer;
+  padding: 0.65rem 0;
+}
+.sub-status-period[open] > summary {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+.sub-status-label {
+  font-weight: 600;
+  font-size: 1.02rem;
+}
+.sub-status-meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-left: 0.6rem;
+}
