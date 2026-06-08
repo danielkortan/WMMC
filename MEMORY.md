@@ -1,5 +1,49 @@
 # WMMC — Decisions Log
 
+## Carry-forward repair leaked across period boundaries → orphan PP2 Week-1 rosters (2026-06-08)
+
+**Symptom (commissioner).** Cam McCallum, Anton Capria, Alex Thalacker (and others) saw the
+"Your Pool Play 2 lineup is not submitted" banner even though the Commissioner Roster editor
+showed a full PP2 Week-1 roster. A prior unexpected auto-advance was suspected (and its markers
+had been cleared), yet the rosters persisted.
+
+**Diagnosis (read-only console probe on live).** PP2 Week 1 (idx 5) was NOT in
+`auto_advanced_weeks`/`advanced_weeks`, but **all 12** managers had exactly 7 players in the
+`PP2|Week 1` array. Only Daniel Kortan had `roster_dates` for that week (real approved
+submission); 9 managers had a NONE submission + 0 `roster_dates` (orphan carry-forward); Chris
+Bentivegna / Austin Johnson had approved subs but 0 `roster_dates` (array possibly stale vs
+submission — flagged, not touched).
+
+**Root cause.** The "lineup not submitted" banner (`app.js` `updateSubmissionWarningBanner`) keys
+off `period_submissions.pp2[mgr]` status only — it ignores the roster. So a roster with no
+submission backing still triggers it. The roster itself came from **`repairCarryForwardRosters`**
+(server.js + app.js), the one carry-forward path the 2026-06-08 period-aware fix missed: it
+rebuilt an empty non-future, non-trusted week from the prior week's carry-forward **without
+skipping period (round) boundaries**, so it re-filled `PP2|Week 1` from `PP1|Week 5` every
+boot/render. The stripped auto-advance markers couldn't stop it. (`activeByDates`,
+`rebuildRosterArraysFromDates`, and the Sunday auto-advance were already boundary-aware; this
+array repair was not.)
+
+**Fix (this PR).**
+
+- **Durable:** `repairCarryForwardRosters` now resets the carry-forward baseline
+  (`prevBatters/prevPitchers = null`) at every period boundary (`SEASON_SCHEDULE[i].round !==
+[i-1].round`) in BOTH `server.js` and `app.js`. A boundary week becomes a trusted seed owned by
+  its own submission (kept if it has submission data, left empty otherwise) — the prior period
+  never carries across. Bumped `ROSTER_REPAIR_VERSION` 6 → 7 (both files) so the recompute pass
+  re-runs on deploy.
+- **Cleanup:** new `POST /api/seasons/:year/purge-orphan-boundary-rosters[?dryRun=1]`
+  (commissioner). For each started boundary week, clears the array + `roster_dates` + zero-stat
+  weekly rows for managers with NO pending/approved submission for that period; leaves
+  submission-backed managers untouched; skips any week with real points. Returns
+  `cleared`/`kept`/`skipped` + a before/after per-manager total check (must be score-neutral — an
+  unplayed boundary week scores 0).
+
+**Run order on deploy:** ship the code → hard-refresh the commissioner browser (so the OLD client
+repair can't re-add the orphans on its next save) → `dryRun` the endpoint → run it for real →
+re-run the probe to confirm orphans cleared. Follow-up to verify: Chris Bentivegna & Austin
+Johnson PP2 Week-1 array matches their approved submission (they had 0 `roster_dates`).
+
 ## PP2 submission window closed ~a day early — midnight fallback in getPeriodFirstGame (2026-06-08)
 
 **Symptom (managers).** PP2 "Player Submission" card read "Submission window has closed" all day,
