@@ -191,10 +191,24 @@ function getPeriodOpenDate(sd, period) {
 // Round each submission period maps to, for deriving its first-games date from the schedule.
 const PERIOD_FIRST_GAME_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
 
+// Estimated first-game (first-pitch) time per period. Explicit `period_deadlines[period]`
+// (set by the commissioner, or auto-filled from the MLB Stats API) always wins; these are the
+// fallback the autofill uses when the API is unavailable, and the time-of-day getPeriodFirstGame
+// applies to the schedule date when no explicit deadline is stored. Verify against the MLB
+// schedule before each season — the dates are season-specific, only the evening time-of-day is
+// reused as a sane default.
+const PERIOD_DEADLINE_DEFAULTS = {
+  pp1: '2026-05-04T17:40', // May 4  — earliest game 5:40 PM ET (Braves/Mariners)
+  pp2: '2026-06-08T18:35', // June 8 — estimated; verify against MLB schedule
+  qf: '2026-07-20T19:05', // July 20 — 7:05 PM ET (Pirates @ Yankees)
+  sf: '2026-08-03T20:05', // Aug 3  — 8:05 PM ET (Dodgers @ Cubs)
+  finals: '2026-08-17T19:00', // Aug 17 — 7:00 PM ET (ESPN: Tigers @ Pirates)
+};
+
 // Returns a Date for the first MLB game of a period. Prefers an explicitly configured
 // first-game time (sd.period_deadlines[period]); otherwise falls back to the period's first
-// scheduled games (Week 1 start of that round), so a submission stays editable right up until
-// that period's first games even when no explicit deadline was set. Null when neither exists.
+// scheduled day, so a submission stays editable right up until that period's first games even
+// when no explicit deadline was set. Null when neither exists.
 function getPeriodFirstGame(sd, period) {
   const val = sd && sd.period_deadlines && sd.period_deadlines[period];
   if (val) return new Date(val);
@@ -203,7 +217,14 @@ function getPeriodFirstGame(sd, period) {
   if (!dates || !round) return null;
   const idx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === 'Week 1');
   if (idx < 0 || !dates[idx] || !dates[idx].start) return null;
-  return new Date(dates[idx].start + 'T00:00:00');
+  // No explicit first-game time stored. Fall back to the period's first scheduled day at a
+  // realistic first-pitch time of day — NOT midnight. Midnight (T00:00:00) would put the
+  // deadline (first game − 5 min) at 23:55 the *night before*, closing the window ~a full day
+  // before games actually start. Use the period's default first-pitch time-of-day applied to
+  // the authoritative schedule date; an explicit period_deadlines[period] still wins above.
+  const def = PERIOD_DEADLINE_DEFAULTS[period];
+  const timeOfDay = def && def.includes('T') ? def.slice(def.indexOf('T')) : 'T00:00:00';
+  return new Date(dates[idx].start + timeOfDay);
 }
 
 // Returns the submission deadline Date (first game − 5 min) for a period, or null
@@ -9730,14 +9751,6 @@ function setupASGDateInput() {
 
 // Per-period defaults: earliest MLB game found on each WMMC start date for the 2026 season
 // (ASG = July 14 2026 → PP1 starts May 4, PP2 June 8, QF July 20, SF Aug 3, Finals Aug 17)
-const PERIOD_DEADLINE_DEFAULTS = {
-  pp1: '2026-05-04T17:40', // May 4  — earliest game 5:40 PM ET (Braves/Mariners)
-  pp2: '2026-06-08T18:35', // June 8 — estimated; verify against MLB schedule
-  qf: '2026-07-20T19:05', // July 20 — 7:05 PM ET (Pirates @ Yankees)
-  sf: '2026-08-03T20:05', // Aug 3  — 8:05 PM ET (Dodgers @ Cubs)
-  finals: '2026-08-17T19:00', // Aug 17 — 7:00 PM ET (ESPN: Tigers @ Pirates)
-};
-
 function setupPeriodDeadlineInputs() {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];

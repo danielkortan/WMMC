@@ -1,5 +1,25 @@
 # WMMC — Decisions Log
 
+## PP2 submission window closed ~a day early — midnight fallback in getPeriodFirstGame (2026-06-08)
+
+**Symptom (managers).** PP2 "Player Submission" card read "Submission window has closed" all day,
+even though PP2's first games weren't until ~6:30 PM ET that evening. The window should stay open
+until first pitch.
+
+**Root cause.** No explicit `period_deadlines.pp2` was stored, so `getPeriodFirstGame` (app.js)
+fell back to `new Date(dates[idx].start + 'T00:00:00')` — **midnight at the start** of PP2's first
+day. The deadline is first game − 5 min, i.e. **23:55 the night before**, so the window closed
+~18 h before games actually started. (The window check is client-only — server.js does NOT enforce
+the deadline on `POST /submissions`.)
+
+**Fix.** Relocated `PERIOD_DEADLINE_DEFAULTS` (already held a sane evening first-pitch time per
+period, e.g. `pp2: 18:35`) up next to the period config, and changed the `getPeriodFirstGame`
+fallback to apply that **time-of-day** to the authoritative schedule date instead of midnight.
+Explicit `period_deadlines[period]` (commissioner / MLB-API autofill) still wins. So a missing
+deadline now closes at a realistic first-pitch time, not the previous midnight. Frontend-only
+(`app.js`); no `SCORING`/`SEASON_SCHEDULE`/server changes. Supersedes the 2026-06-06 follow-up
+note below that said the fallback uses the Week-1 start (it was midnight = too early).
+
 ## `sd.rosters` wiped by a stale full-season save → Best/Worst Slack section vanished, scores froze (2026-06-08)
 
 **Symptom (commissioner).** Morning 7am Slack post showed only the scoreboard, no "Yesterday's
