@@ -7248,6 +7248,10 @@ app.get('/api/mlb/live', async (req, res) => {
     const weekKey = `${weekRound}|${weekName}`;
     const batPool = new Set(sd.batters_pool || []);
     const pitPool = new Set(sd.pitchers_pool || []);
+    // Scope carry-forward to the current period: PP2/QF/SF/Finals each start fresh from
+    // their own submission, so a PP1 holdover with no drop must not appear here.
+    // Mirrors managerWeekSubtotal and rebuildRosterArraysFromDates. null = PP1 (no bound).
+    const periodStart = periodStartForRound(sd, weekRound);
     const managerBatters = {}; // manager -> string[]
     const managerPitchers = {}; // manager -> string[]
     const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
@@ -7255,6 +7259,7 @@ app.get('/api/mlb/live', async (req, res) => {
       // Build add/drop history first so we can filter both the stored arrays and the
       // roster_dates additions with the same drop logic. Without this, stored roster
       // arrays from earlier carries included dropped players in the live view.
+      // Constrain to the current period so prior-period adds don't leak forward.
       const mgrDates = (sd.roster_dates || {})[manager];
       const latestAdd = {};
       const latestDrop = {};
@@ -7262,16 +7267,31 @@ app.get('/api/mlb/live', async (req, res) => {
         for (const players of Object.values(mgrDates)) {
           if (!players || typeof players !== 'object') continue;
           for (const [p, d] of Object.entries(players)) {
-            if (d.add_date && (!end || d.add_date <= end) && (!latestAdd[p] || d.add_date > latestAdd[p])) {
+            if (
+              d.add_date &&
+              (!periodStart || d.add_date >= periodStart) &&
+              (!end || d.add_date <= end) &&
+              (!latestAdd[p] || d.add_date > latestAdd[p])
+            ) {
               latestAdd[p] = d.add_date;
             }
-            if (d.drop_date && (!end || d.drop_date <= end) && (!latestDrop[p] || d.drop_date > latestDrop[p])) {
+            if (
+              d.drop_date &&
+              (!periodStart || d.drop_date >= periodStart) &&
+              (!end || d.drop_date <= end) &&
+              (!latestDrop[p] || d.drop_date > latestDrop[p])
+            ) {
               latestDrop[p] = d.drop_date;
             }
           }
         }
       }
-      const isCurrentlyRostered = (p) => !(latestDrop[p] && (!latestAdd[p] || latestAdd[p] <= latestDrop[p]));
+      // In a new period (periodStart set), a player must have a current-period add to be rostered;
+      // a PP1 holdover with no drop has no latestAdd entry after period scoping and is excluded.
+      const isCurrentlyRostered = (p) => {
+        if (!latestAdd[p]) return !periodStart && !latestDrop[p];
+        return !latestDrop[p] || latestAdd[p] > latestDrop[p];
+      };
 
       // Seed from stored arrays, but strip any player whose drop date is ≥ their add date.
       const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
