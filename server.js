@@ -7252,15 +7252,13 @@ app.get('/api/mlb/live', async (req, res) => {
     const managerPitchers = {}; // manager -> string[]
     const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
     for (const manager of allManagerNames) {
-      const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
-      const bats = [...(stored.batters || [])];
-      const pits = [...(stored.pitchers || [])];
-
+      // Build add/drop history first so we can filter both the stored arrays and the
+      // roster_dates additions with the same drop logic. Without this, stored roster
+      // arrays from earlier carries included dropped players in the live view.
       const mgrDates = (sd.roster_dates || {})[manager];
+      const latestAdd = {};
+      const latestDrop = {};
       if (mgrDates && typeof mgrDates === 'object') {
-        // Latest add / drop for each player as of this week's end.
-        const latestAdd = {};
-        const latestDrop = {};
         for (const players of Object.values(mgrDates)) {
           if (!players || typeof players !== 'object') continue;
           for (const [p, d] of Object.entries(players)) {
@@ -7272,17 +7270,25 @@ app.get('/api/mlb/live', async (req, res) => {
             }
           }
         }
-        for (const p of Object.keys(latestAdd)) {
-          if (latestDrop[p] && latestAdd[p] <= latestDrop[p]) continue; // dropped and not re-added
-          const inBat = batPool.has(p);
-          const inPit = pitPool.has(p);
-          if (inBat && !inPit) {
-            if (!bats.includes(p)) bats.push(p);
-          } else if (inPit && !inBat) {
-            if (!pits.includes(p)) pits.push(p);
-          }
-          // both/neither pool: can't classify confidently — rely on the stored arrays.
+      }
+      const isCurrentlyRostered = (p) => !(latestDrop[p] && (!latestAdd[p] || latestAdd[p] <= latestDrop[p]));
+
+      // Seed from stored arrays, but strip any player whose drop date is ≥ their add date.
+      const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
+      const bats = (stored.batters || []).filter(isCurrentlyRostered);
+      const pits = (stored.pitchers || []).filter(isCurrentlyRostered);
+
+      // Add players known only from roster_dates (not already present via stored arrays).
+      for (const p of Object.keys(latestAdd)) {
+        if (!isCurrentlyRostered(p)) continue;
+        const inBat = batPool.has(p);
+        const inPit = pitPool.has(p);
+        if (inBat && !inPit) {
+          if (!bats.includes(p)) bats.push(p);
+        } else if (inPit && !inBat) {
+          if (!pits.includes(p)) pits.push(p);
         }
+        // both/neither pool: can't classify confidently — rely on the stored arrays.
       }
 
       if (bats.length || pits.length) {
@@ -7308,10 +7314,10 @@ app.get('/api/mlb/live', async (req, res) => {
     const playerRows = [];
     for (const [, agg] of Object.entries(playerAgg)) {
       const { name } = agg;
-      const manager =
-        weekManagerByPlayer[`${name.toLowerCase()}::${agg.type}`] ||
-        findManagerForPlayerWeek(sd, name, agg.type, weekRound, weekName) ||
-        findManagerForPlayer(sd, name, agg.type);
+      // Only show players whose roster membership was derived from this week's roster_dates
+      // + stored arrays (already drop-filtered above). The findManagerForPlayer* fallbacks
+      // search ALL weeks' rosters and would re-introduce players dropped in prior weeks.
+      const manager = weekManagerByPlayer[`${name.toLowerCase()}::${agg.type}`];
       if (!manager) continue;
       // Skip players dropped in an earlier week but carried forward into this week's roster
       // object — they are excluded from the certified total, so they must not appear here either.
