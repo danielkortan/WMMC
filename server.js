@@ -774,25 +774,13 @@ function computeSeasonRev(sd) {
   return crypto.createHash('sha1').update(stableStringify(relevant)).digest('hex').slice(0, 16);
 }
 
-app.get('/api/seasons', (req, res) => {
-  const db = readDB();
-  const seasons = db.seasons || {};
-  // Attach the concurrency token per season (not persisted) so the client can echo it on save.
-  // score_snapshots is stripped: the client never reads it (it's the score guard's diagnostic
-  // trail, written only by recordScoreSnapshot server-side) and it's one of the largest fields
-  // in the payload. The save handlers restore it from the stored season (server-authoritative),
-  // so its absence from a client's later full-season save can never wipe it.
-  const out = {};
-  for (const [year, sd] of Object.entries(seasons)) {
-    const { score_snapshots: _serverOnly, ...clientSd } = sd;
-    out[year] = { ...clientSd, _rev: computeSeasonRev(sd) };
-  }
-  // This payload is multi-MB and re-fetched on every page load and tab switch. ETag + 304 makes
-  // an unchanged re-fetch cost zero body bytes (Cache-Control: no-cache = browsers always
-  // revalidate, never serve stale without asking); gzip shrinks an actual transfer ~10x.
-  // Express compresses nothing by default, and its automatic ETag is set too late to short-
-  // circuit the JSON work, so both are handled explicitly here.
-  const body = JSON.stringify(out);
+// Send a JSON payload with ETag revalidation + gzip. Used for the large, frequently re-fetched
+// read endpoints (seasons, daily stats). Cache-Control: no-cache = browsers always revalidate,
+// never serve stale without asking; an unchanged re-fetch is a 304 with zero body bytes, and an
+// actual transfer is gzipped (~10x smaller for JSON). Express compresses nothing by default, and
+// its automatic ETag is set too late to short-circuit the JSON work, so both are explicit here.
+function sendJsonRevalidated(req, res, obj) {
+  const body = JSON.stringify(obj);
   const etag = '"' + crypto.createHash('sha1').update(body).digest('hex') + '"';
   res.set('ETag', etag);
   res.set('Cache-Control', 'no-cache');
@@ -806,6 +794,26 @@ app.get('/api/seasons', (req, res) => {
     return res.send(zlib.gzipSync(body));
   }
   res.send(body);
+}
+
+app.get('/api/seasons', (req, res) => {
+  const db = readDB();
+  const seasons = db.seasons || {};
+  // Attach the concurrency token per season (not persisted) so the client can echo it on save.
+  // Server-only fields are stripped from the client payload:
+  // - score_snapshots: the score guard's diagnostic trail, written only by recordScoreSnapshot.
+  // - daily_batting / daily_pitching: per-game rows from the MLB sync — the largest field and
+  //   growing daily. Scoring reads weekly rows; the two client views that display daily data
+  //   (Trends charts, per-week roster stat windows) fetch GET /api/seasons/:year/daily-stats
+  //   on demand instead.
+  // The save handlers restore all three from the stored season (server-authoritative), so their
+  // absence from a client's later full-season save can never wipe them.
+  const out = {};
+  for (const [year, sd] of Object.entries(seasons)) {
+    const { score_snapshots: _snaps, daily_batting: _db, daily_pitching: _dp, ...clientSd } = sd;
+    out[year] = { ...clientSd, _rev: computeSeasonRev(sd) };
+  }
+  sendJsonRevalidated(req, res, out);
 });
 
 // POST /api/seasons — save all seasons (full replace)
@@ -841,11 +849,16 @@ app.post('/api/seasons', requireCommissioner, (req, res) => {
   }
 
   const { force: _force, ...seasons } = incoming;
-  // score_snapshots is server-authoritative (see the per-year save) — carry each stored season's
-  // trail through a bulk replace too, so even a forced replace can't blind the swing guard.
+  // score_snapshots and daily rows are server-authoritative (see the per-year save) — carry each
+  // stored season's copies through a bulk replace too, so even a forced replace can't blind the
+  // swing guard or destroy the per-game stat history the weekly rebuild derives from.
   for (const [year, sdy] of Object.entries(seasons)) {
     const existing = (db.seasons || {})[year];
-    if (existing && sdy && typeof sdy === 'object') sdy.score_snapshots = existing.score_snapshots || [];
+    if (existing && sdy && typeof sdy === 'object') {
+      sdy.score_snapshots = existing.score_snapshots || [];
+      sdy.daily_batting = existing.daily_batting || [];
+      sdy.daily_pitching = existing.daily_pitching || [];
+    }
   }
   addAuditEntry(db, 'seasons_save_all', { seasonCount: Object.keys(seasons).length }, req.get('X-User-Email'));
   db.seasons = seasons;
@@ -903,9 +916,9 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
   // MLB sync / backfill, never edited through this full-season save. A client that loaded
   // before a sync holds a stale, smaller copy; without this guard its saveSeason() silently
   // wipes the weeks the server fetched after the client loaded (the recurring "stats reset"
-  // bug). Re-append any server stat record missing from the incoming payload (keyed per
-  // game/week/player), mirroring the swap protection below; a client record with a matching
-  // key still wins, so legitimate edits propagate.
+  // bug). Weekly rows: re-append any server record missing from the incoming payload (keyed per
+  // week/player), mirroring the swap protection below; a client record with a matching key still
+  // wins so commissioner CSV edits propagate. Daily rows: server copy wholesale (see below).
   if (existingSd) {
     const mergeStats = (incoming, existing, keyFn) => {
       const arr = Array.isArray(incoming) ? incoming : [];
@@ -914,16 +927,14 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
       for (const r of existing) if (!have.has(keyFn(r))) arr.push(r);
       return arr;
     };
-    sd.daily_batting = mergeStats(
-      sd.daily_batting,
-      existingSd.daily_batting,
-      (r) => `${r.round}|${r.week}|${r.game_id}|${r.batter}`
-    );
-    sd.daily_pitching = mergeStats(
-      sd.daily_pitching,
-      existingSd.daily_pitching,
-      (r) => `${r.round}|${r.week}|${r.game_id}|${r.pitcher}`
-    );
+    // Daily rows are fully server-authoritative — stronger than the weekly merge below. They are
+    // written only server-side (MLB sync, the commissioner daily-stats endpoint, gated repairs)
+    // and are no longer sent to clients at all (GET /api/seasons strips them), so there is no
+    // legitimate client edit to honor. Taking the server copy wholesale also closes the
+    // key-match regression vector the weekly merge still carries: a stale client's old copy of
+    // a row can never again overwrite the server's fresher one (the 06-08 "scores froze" class).
+    sd.daily_batting = existingSd.daily_batting || [];
+    sd.daily_pitching = existingSd.daily_pitching || [];
     sd.weekly_batting = mergeStats(
       sd.weekly_batting,
       existingSd.weekly_batting,
@@ -8160,7 +8171,9 @@ app.get('/api/seasons/:year/daily-stats', (req, res) => {
 
   if (type === 'batter') return res.json((sd.daily_batting || []).filter(filterBat));
   if (type === 'pitcher') return res.json((sd.daily_pitching || []).filter(filterPit));
-  res.json({
+  // The unfiltered form is the client's on-demand source for daily data (Trends, per-week roster
+  // windows) now that GET /api/seasons omits daily rows — multi-MB, so ETag/304 + gzip it.
+  sendJsonRevalidated(req, res, {
     batting: (sd.daily_batting || []).filter(filterBat),
     pitching: (sd.daily_pitching || []).filter(filterPit),
   });

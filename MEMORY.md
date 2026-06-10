@@ -1,5 +1,36 @@
 # WMMC — Decisions Log
 
+## Daily rows off the seasons payload — on-demand fetch + server-authoritative (2026-06-10)
+
+Second slimming pass (after score_snapshots, below): `daily_batting`/`daily_pitching` — the
+largest field, growing every game day — no longer ride `GET /api/seasons`.
+
+- **Server:** GET strips daily rows (alongside snapshots). On save, daily rows are now FULLY
+  server-authoritative (`sd.daily_* = existingSd.daily_*` — stronger than the weekly key-merge,
+  which stays because commissioner CSV edits legitimately update weekly rows by key). This also
+  closes the remaining stale-client daily-row regression vector from the 06-08 "scores froze"
+  incident: a stale client's old copy of a daily row can never again win a key match. The bulk
+  replace preserves daily rows too. Extracted `sendJsonRevalidated(req,res,obj)` (ETag/304/gzip)
+  and applied it to both `GET /api/seasons` and the unfiltered `GET /api/seasons/:year/daily-stats`.
+- **Client:** new session cache `DAILY_STATS_CACHE` + `ensureDailyStats(year, onLoaded)` in
+  app.js. The only two real daily consumers — Trends daily charts (`renderTrends`) and the
+  per-week roster date-window helpers (`getEffBatStats`/`getEffPitStats` in `buildPerWeekRoster`)
+  — read `getDailyStatsCached(SELECTED_SEASON)` and render immediately (both already degrade to
+  weekly totals), then re-render ONCE when the fetch lands. Cache invalidates whenever the
+  seasons JSON string changes (a sync writes weekly+daily together), so daily views refetch after
+  syncs; the endpoint's ETag makes a false-positive refetch a 304.
+- **Why the client repair flows didn't block this after all** (corrects the earlier deferral
+  note): the client-side daily/weekly FILTERING in `repairGhostInitialRosterPlayers` and the
+  initial-submission reconcile never stuck server-side anyway — the save's mergeStats re-appended
+  every omitted row by key. The real purges are the server-side copies (boot/sync) and dedicated
+  endpoints. Those client filters remain as guarded no-ops (`if (sd.daily_batting)`).
+- **Verified headless (Playwright) against a live local server:** seasons payload daily-free;
+  Trends renders charts with exactly 1 daily fetch, no loop; My Roster windowed stats render;
+  endpoint-500 probe → graceful weekly fallback, no retry storm; tampered-daily save → server
+  copy wins; save round-trip byte-identical (totals cannot move).
+- **Gotcha found while fixturing:** an active season with EMPTY `schedule_dates` throws
+  `TypeError: reading 'start'` in `renderWeekly` (pre-existing, unrelated to this change).
+
 ## GET /api/seasons slimmed + score_snapshots made server-authoritative (2026-06-10)
 
 Follow-up to the localStorage-quota incident (below): shrink the seasons payload and close the

@@ -864,10 +864,45 @@ function readSeasonsJSON() {
   return SEASONS_JSON;
 }
 
+// ---- On-demand daily stats ----
+// Daily stat rows (daily_batting/daily_pitching) no longer ride GET /api/seasons — they are the
+// largest field, grow every game day, and scoring reads weekly rows. The two views that display
+// daily data (Trends charts, the per-week roster's date-windowed stat tables) pull them from
+// GET /api/seasons/:year/daily-stats via this cache instead. Sync read + async fill: render
+// immediately with whatever is cached (both views already degrade gracefully without daily
+// rows), then re-render once when the fetch lands.
+let DAILY_STATS_CACHE = {}; // { [year]: { batting: [], pitching: [] } }
+const DAILY_STATS_PENDING = {};
+
+function getDailyStatsCached(year) {
+  return DAILY_STATS_CACHE[year] || null;
+}
+
+function ensureDailyStats(year, onLoaded) {
+  if (DAILY_STATS_CACHE[year] || DAILY_STATS_PENDING[year]) return;
+  DAILY_STATS_PENDING[year] = true;
+  fetch(`/api/seasons/${year}/daily-stats`)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+    .then((d) => {
+      DAILY_STATS_CACHE[year] = { batting: d.batting || [], pitching: d.pitching || [] };
+      delete DAILY_STATS_PENDING[year];
+      if (onLoaded) onLoaded();
+    })
+    .catch((e) => {
+      // Not cached — the next render retries. Views fall back to weekly totals meanwhile.
+      delete DAILY_STATS_PENDING[year];
+      console.warn('daily-stats fetch failed:', e.message);
+    });
+}
+
 // Accepts the seasons object or its pre-stringified JSON. Never throws — a quota failure on the
 // localStorage mirror must not abort the caller (that's the bug this layer exists to fix).
 function setSeasonsLocal(seasonsOrJson) {
   const json = typeof seasonsOrJson === 'string' ? seasonsOrJson : JSON.stringify(seasonsOrJson);
+  // Season data changed (a sync writes weekly + daily together) — invalidate the daily cache so
+  // the daily views refetch. Cheap false positives (roster-only saves) just cause a revalidated
+  // (ETag/304) refetch on the next Trends/My-Roster render.
+  if (SEASONS_JSON !== json) DAILY_STATS_CACHE = {};
   SEASONS_JSON = json;
   try {
     localStorage.setItem('wmmc_seasons', json);
@@ -5211,16 +5246,22 @@ function renderTrends() {
   }
 
   // ---- Daily data (for daily manager view) ----
+  // Daily rows are fetched on demand (no longer part of the seasons payload). First visit
+  // renders the weekly charts immediately and re-renders once the daily data lands.
+  const dailyStats = getDailyStatsCached(SELECTED_SEASON);
+  ensureDailyStats(SELECTED_SEASON, renderTrends);
+  const dailyBattingRows = (dailyStats && dailyStats.batting) || [];
+  const dailyPitchingRows = (dailyStats && dailyStats.pitching) || [];
   const dailyRosterLookup = buildRosterLookup(seasonData);
   const dailyManagerScores = {};
-  (seasonData.daily_batting || []).forEach((rec) => {
+  dailyBattingRows.forEach((rec) => {
     const mgr = rec.manager || dailyRosterLookup[rosterLookupKey(rec.batter, rec.round, rec.week)];
     if (!mgr || !registeredNames.has(mgr)) return;
     const score = calculateBattingScore(rec.delta || {});
     if (!dailyManagerScores[rec.date]) dailyManagerScores[rec.date] = {};
     dailyManagerScores[rec.date][mgr] = (dailyManagerScores[rec.date][mgr] || 0) + score;
   });
-  (seasonData.daily_pitching || []).forEach((rec) => {
+  dailyPitchingRows.forEach((rec) => {
     const mgr = rec.manager || dailyRosterLookup[rosterLookupKey(rec.pitcher, rec.round, rec.week)];
     if (!mgr || !registeredNames.has(mgr)) return;
     const score = calculatePitchingScore(rec.delta || {});
@@ -5229,13 +5270,13 @@ function renderTrends() {
   });
 
   const dailyPlayerBattingScores = {};
-  (seasonData.daily_batting || []).forEach((rec) => {
+  dailyBattingRows.forEach((rec) => {
     const score = calculateBattingScore(rec.delta || {});
     if (!dailyPlayerBattingScores[rec.date]) dailyPlayerBattingScores[rec.date] = {};
     dailyPlayerBattingScores[rec.date][rec.batter] = (dailyPlayerBattingScores[rec.date][rec.batter] || 0) + score;
   });
   const dailyPlayerPitchingScores = {};
-  (seasonData.daily_pitching || []).forEach((rec) => {
+  dailyPitchingRows.forEach((rec) => {
     const score = calculatePitchingScore(rec.delta || {});
     if (!dailyPlayerPitchingScores[rec.date]) dailyPlayerPitchingScores[rec.date] = {};
     dailyPlayerPitchingScores[rec.date][rec.pitcher] = (dailyPlayerPitchingScores[rec.date][rec.pitcher] || 0) + score;
@@ -6787,6 +6828,10 @@ function renderRosterData(managerName, isCommissioner) {
   </div>`;
 
   // ---- Per-Week Roster Sections ----
+  // The per-week tables window a swapped player's stats to their rostered dates using daily
+  // rows, which are fetched on demand. First render falls back to weekly totals; re-render
+  // once when the daily data lands.
+  ensureDailyStats(SELECTED_SEASON, () => renderRosterData(managerName, isCommissioner));
   html += `<div class="roster-tab-content" id="rtab-per-week" style="display:${activeTabKey === 'per-week' ? 'block' : 'none'};">`;
   html += buildPerWeekRoster(managerName, isCommissioner, seasonData);
   html += `</div>`;
@@ -7305,7 +7350,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         if (dropSwap && dropSwap.swap_date) dropDate = dropSwap.swap_date;
       }
       if (!addDate && !dropDate) return null;
-      const daily = (seasonData.daily_batting || []).filter(
+      const dailyStats = getDailyStatsCached(SELECTED_SEASON);
+      const daily = ((dailyStats && dailyStats.batting) || []).filter(
         (r) => r.batter === player && r.round === round && r.week === week
       );
       if (!daily.length) return null;
@@ -7340,7 +7386,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         if (dropSwap && dropSwap.swap_date) dropDate = dropSwap.swap_date;
       }
       if (!addDate && !dropDate) return null;
-      const daily = (seasonData.daily_pitching || []).filter(
+      const dailyStats = getDailyStatsCached(SELECTED_SEASON);
+      const daily = ((dailyStats && dailyStats.pitching) || []).filter(
         (r) => r.pitcher === player && r.round === round && r.week === week
       );
       if (!daily.length) return null;
