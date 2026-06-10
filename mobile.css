@@ -418,16 +418,20 @@
     display: none !important;
   }
 
-  /* Always show Overall + PP1 + PP2 (overrides the tab show/hide logic
-     and the .sb-period{display:none} default). They make up the "Pool
-     Play" accordion section (grouped under the mob-group-header inserted
-     by js/mobile.js). Playoff periods (qf/sf/finals) stay hidden by the
-     .sb-period default until buildScoreboardSections() reveals one that
-     has data via .mob-round-section. */
-  #scoreboard-content #sb-pp-overall,
-  #scoreboard-content #sb-pp1,
-  #scoreboard-content #sb-pp2 {
-    display: block !important;
+  /* Period accordion section headers */
+  .sb-section-header {
+    padding: 0.6rem 0.3rem;
+    border-top: 2px solid var(--border);
+  }
+
+  .sb-section:first-child .sb-section-header {
+    border-top: none;
+  }
+
+  .sb-section-title {
+    font-size: 1.05rem !important;
+    font-weight: 800;
+    color: var(--primary) !important;
   }
 
   /* Accordion section headers: "Pool Play", "Quarterfinals", … */
@@ -454,22 +458,6 @@
 
   .mob-group-header.collapsed::after {
     transform: rotate(-90deg);
-  }
-
-  /* Pool Play group collapse (toggled on the body) */
-  #sb-poolplay-body.pp-group-collapsed #sb-pp-overall,
-  #sb-poolplay-body.pp-group-collapsed #sb-pp1,
-  #sb-poolplay-body.pp-group-collapsed #sb-pp2 {
-    display: none !important;
-  }
-
-  /* A playoff round with data is revealed; collapsing hides its content */
-  #scoreboard-content .sb-period.mob-round-section {
-    display: block !important;
-  }
-
-  #scoreboard-content .sb-period.mob-round-section.mob-round-collapsed > * {
-    display: none !important;
   }
 
   /* Outer "Pool Play Scoreboard" header: the name itself is the toggle
@@ -500,46 +488,29 @@
     border: none;
   }
 
-  /* Period header (Pool Play 1 / 2): large + centered, tap to collapse */
+  /* Period header (Pool Play 1 / 2): inner title (not a toggle — section
+     header handles collapse). */
   .pool-period-header {
     display: flex;
     align-items: center;
     justify-content: center;
     position: relative;
-    cursor: pointer;
-    padding: 0.65rem 2rem;
-    border-top: 2px solid var(--border);
-    margin-top: 0.6rem;
+    padding: 0.4rem 0.5rem;
+    border-top: 1px solid var(--border);
+    margin-top: 0.4rem;
   }
 
   .pool-period-header h3 {
-    font-size: clamp(1.15rem, 5.2vw, 1.55rem) !important;
-    font-weight: 800;
+    font-size: clamp(0.9rem, 3.8vw, 1.1rem) !important;
+    font-weight: 700;
     text-align: center;
-    color: var(--primary) !important;
+    color: var(--text-light) !important;
     margin: 0;
     padding: 0;
     border: none;
   }
 
   .pool-expand-all-btn {
-    display: none !important;
-  }
-
-  .pool-period-header::after {
-    content: '▾';
-    position: absolute;
-    right: 0.75rem;
-    color: var(--text-muted);
-    font-size: 0.9rem;
-    transition: transform 0.2s;
-  }
-
-  .sb-period.mob-pp-collapsed .pool-period-header::after {
-    transform: rotate(-90deg);
-  }
-
-  .sb-period.mob-pp-collapsed .pool-play-grid {
     display: none !important;
   }
 

@@ -1650,6 +1650,52 @@ footer {
 }
 
 /* ============================================================ */
+/* Period Accordion Sections */
+/* ============================================================ */
+
+.sb-section {
+  border-bottom: 1px solid var(--border);
+}
+
+.sb-section:last-child {
+  border-bottom: none;
+}
+
+.sb-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  padding: 0.75rem 0.25rem;
+  border-radius: 6px;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  gap: 0.5rem;
+}
+
+.sb-section-header:hover {
+  background: rgba(0, 45, 98, 0.04);
+}
+
+.sb-section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--primary);
+  flex: 1;
+}
+
+.sb-section-arrow {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.sb-section.sb-section-collapsed .sb-section-arrow {
+  transform: rotate(-90deg);
+}
+
+/* ============================================================ */
 /* Pool Play Grid */
 /* ============================================================ */
 
