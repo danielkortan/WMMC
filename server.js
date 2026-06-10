@@ -6394,13 +6394,62 @@ function indexCatalogByName(catalog) {
   return { byNorm, byId };
 }
 
+// Every player name a season's records actually depend on: rosters, submissions
+// (initial + period), swaps, roster_dates, and manager-attributed stat rows.
+// Pool/team-map/mlb_ids keys are deliberately excluded — this set answers "would
+// touching this name affect anyone's roster or score?", which gates the duplicate
+// cleanup in bootstrapPlayerPools. Unattributed stat rows are also excluded: the
+// sync stores a row for every player in every boxscore, so a bare duplicate name
+// ("Max Muncy") always has orphan rows that say nothing about WMMC rosters.
+function referencedPlayerNames(sd) {
+  const names = new Set();
+  const add = (v) => {
+    if (v && typeof v === 'string') names.add(v);
+  };
+  for (const weekRosters of Object.values(sd.rosters || {})) {
+    for (const roster of Object.values(weekRosters)) {
+      (roster.batters || []).forEach(add);
+      (roster.pitchers || []).forEach(add);
+    }
+  }
+  for (const sub of Object.values(sd.initial_submissions || {})) {
+    (sub.batters || []).forEach(add);
+    (sub.pitchers || []).forEach(add);
+  }
+  for (const bucket of Object.values(sd.period_submissions || {})) {
+    for (const sub of Object.values(bucket || {})) {
+      (sub.batters || []).forEach(add);
+      (sub.pitchers || []).forEach(add);
+    }
+  }
+  for (const s of sd.swaps || []) {
+    add(s.player_in);
+    add(s.player_out);
+  }
+  for (const mgrDates of Object.values(sd.roster_dates || {})) {
+    for (const weekDates of Object.values(mgrDates)) Object.keys(weekDates).forEach(add);
+  }
+  (sd.weekly_batting || []).forEach((r) => r.manager && add(r.batter));
+  (sd.weekly_pitching || []).forEach((r) => r.manager && add(r.pitcher));
+  (sd.daily_batting || []).forEach((r) => r.manager && add(r.batter));
+  (sd.daily_pitching || []).forEach((r) => r.manager && add(r.pitcher));
+  return names;
+}
+
 // Seed sd.batters_pool / sd.pitchers_pool from MLB's active-player catalog so
 // every name that could earn fantasy points is searchable in the My Roster
 // autocomplete, including players who haven't appeared in a boxscore yet
 // (injured, just promoted, on bench). Two-way players (Ohtani-style) land in
 // both pools. Team maps are refreshed every call so mid-season trades stay
-// current. Names already in a pool are preserved — never removed — so any
-// commissioner-curated additions survive a refresh.
+// current. Names already in a pool are preserved through refreshes so any
+// commissioner-curated additions survive; the one exception is a bare name the
+// catalog shows to be two different players (see duplicate handling below).
+//
+// Duplicate fullNames (MLB has two "Max Muncy"s) get team-disambiguated pool
+// keys — "Max Muncy (LAD)" / "Max Muncy (ATH)" — each claimed by MLB id in
+// sd.mlb_ids so boxscore stats route to the right entry. A bare duplicate key
+// would collapse both players into one entry whose team flip-flops with catalog
+// order, leaving the other player unselectable in the swap form.
 async function bootstrapPlayerPools(sd, season, { refresh = false } = {}) {
   const catalog = await fetchMLBPlayerCatalog(season, { refresh });
 
@@ -6408,15 +6457,26 @@ async function bootstrapPlayerPools(sd, season, { refresh = false } = {}) {
   if (!sd.pitchers_pool) sd.pitchers_pool = [];
   if (!sd.batters_team) sd.batters_team = {};
   if (!sd.pitchers_team) sd.pitchers_team = {};
+  if (!sd.mlb_ids) sd.mlb_ids = {};
 
+  const nameCounts = new Map();
+  for (const p of catalog) {
+    if (p.fullName) nameCounts.set(p.fullName, (nameCounts.get(p.fullName) || 0) + 1);
+  }
+
+  const referenced = referencedPlayerNames(sd);
   const battersSet = new Set(sd.batters_pool);
   const pitchersSet = new Set(sd.pitchers_pool);
+  const idsInUse = new Set(Object.values(sd.mlb_ids).filter((v) => typeof v === 'number'));
   let battersAdded = 0;
   let pitchersAdded = 0;
+  let changed = false;
 
   for (const p of catalog) {
-    const name = p.fullName;
-    if (!name) continue;
+    const base = p.fullName;
+    if (!base) continue;
+    const dup = (nameCounts.get(base) || 0) > 1;
+    const name = dup ? `${base} (${p.team || p.id})` : base;
     const pos = p.position || '';
     const isPitcher = pos === 'P' || pos === 'SP' || pos === 'RP' || pos === 'TWP';
     const isBatter = pos !== 'P' && pos !== 'SP' && pos !== 'RP'; // TWP also bats
@@ -6427,7 +6487,10 @@ async function bootstrapPlayerPools(sd, season, { refresh = false } = {}) {
         battersSet.add(name);
         battersAdded++;
       }
-      if (p.team) sd.batters_team[name] = p.team;
+      if (p.team && sd.batters_team[name] !== p.team) {
+        sd.batters_team[name] = p.team;
+        changed = true;
+      }
     }
     if (isPitcher) {
       if (!pitchersSet.has(name)) {
@@ -6435,11 +6498,71 @@ async function bootstrapPlayerPools(sd, season, { refresh = false } = {}) {
         pitchersSet.add(name);
         pitchersAdded++;
       }
-      if (p.team) sd.pitchers_team[name] = p.team;
+      if (p.team && sd.pitchers_team[name] !== p.team) {
+        sd.pitchers_team[name] = p.team;
+        changed = true;
+      }
+    }
+    // A disambiguated entry is only routable to the right MLB player by id, so claim
+    // it now — unless that id is already claimed, or the bare name is referenced by a
+    // roster/swap without an id claim of its own (then which player the records mean
+    // is genuinely ambiguous and the commissioner must resolve it via roster-fix —
+    // auto-claiming here would silently redirect a rostered player's future stats).
+    if (
+      dup &&
+      !(name in sd.mlb_ids) &&
+      !idsInUse.has(p.id) &&
+      !(referenced.has(base) && typeof sd.mlb_ids[base] !== 'number')
+    ) {
+      sd.mlb_ids[name] = p.id;
+      idsInUse.add(p.id);
+      changed = true;
     }
   }
 
-  return { battersAdded, pitchersAdded, catalogSize: catalog.length };
+  // Retire bare duplicate-name entries that earlier bootstraps collapsed (one
+  // "Max Muncy" hiding two players) — but only when nothing in the season
+  // references the bare name and it carries no id claim, so no roster, swap,
+  // or score record is ever rewritten.
+  for (const [base, count] of nameCounts) {
+    if (count < 2) continue;
+    if (referenced.has(base) || typeof sd.mlb_ids[base] === 'number') continue;
+    if (battersSet.has(base)) {
+      sd.batters_pool = sd.batters_pool.filter((n) => n !== base);
+      battersSet.delete(base);
+      delete sd.batters_team[base];
+      changed = true;
+    }
+    if (pitchersSet.has(base)) {
+      sd.pitchers_pool = sd.pitchers_pool.filter((n) => n !== base);
+      pitchersSet.delete(base);
+      delete sd.pitchers_team[base];
+      changed = true;
+    }
+  }
+
+  // Names claimed via sd.mlb_ids (roster-fix renames like "Nicholas Kurtz", or the
+  // disambiguated duplicates above) otherwise only get a team label when they appear
+  // in a synced boxscore — an injured or just-added player showed no team on the
+  // scoreboard. Stamp their team from the catalog so the label is always current.
+  const byId = new Map(catalog.map((p) => [p.id, p]));
+  for (const [name, id] of Object.entries(sd.mlb_ids)) {
+    const entry = typeof id === 'number' ? byId.get(id) : undefined;
+    if (!entry || !entry.team) continue;
+    const pos = entry.position || '';
+    const isPitcher = pos === 'P' || pos === 'SP' || pos === 'RP' || pos === 'TWP';
+    const isBatter = pos !== 'P' && pos !== 'SP' && pos !== 'RP';
+    if (isBatter && sd.batters_team[name] !== entry.team) {
+      sd.batters_team[name] = entry.team;
+      changed = true;
+    }
+    if (isPitcher && sd.pitchers_team[name] !== entry.team) {
+      sd.pitchers_team[name] = entry.team;
+      changed = true;
+    }
+  }
+
+  return { battersAdded, pitchersAdded, changed, catalogSize: catalog.length };
 }
 
 // Build the reverse lookup MLB ID -> WMMC display name from sd.mlb_ids.
@@ -9036,8 +9159,11 @@ function scheduleMLBApiSync() {
         // Refresh player pool every day so call-ups / trades appear in autocomplete.
         try {
           const r = await bootstrapPlayerPools(sd, season, { refresh: true });
-          if (r.battersAdded > 0 || r.pitchersAdded > 0) {
-            console.log(`[MLB-API] Pool refresh: +${r.battersAdded} batters, +${r.pitchersAdded} pitchers`);
+          if (r.battersAdded > 0 || r.pitchersAdded > 0 || r.changed) {
+            console.log(
+              `[MLB-API] Pool refresh: +${r.battersAdded} batters, +${r.pitchersAdded} pitchers` +
+                (r.changed ? ' (team/id maps updated)' : '')
+            );
             dirty = true;
           }
         } catch (e) {

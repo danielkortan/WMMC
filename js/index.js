@@ -15,7 +15,7 @@ import {
   calculatePitchingScore,
   enrichTeamWeekly,
 } from './scoring.js';
-import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO } from './utils.js';
+import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO, normalizeName } from './utils.js';
 import { parseCSVLine, findColumn } from './csv.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
@@ -33,6 +33,7 @@ Object.assign(window, {
   fmtDec,
   getInitials,
   fmtDateISO,
+  normalizeName,
   parseCSVLine,
   findColumn,
 });

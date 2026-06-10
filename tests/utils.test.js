@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO } from '../js/utils.js';
+import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO, normalizeName } from '../js/utils.js';
 
 describe('esc', () => {
   it('escapes the five HTML-sensitive characters', () => {
@@ -105,6 +105,32 @@ describe('getInitials', () => {
 
   it('handles middle names by skipping them', () => {
     assert.equal(getInitials('Cal Quantrill Jr'), 'CJ');
+  });
+});
+
+describe('normalizeName', () => {
+  it('matches accent variants of the same name', () => {
+    assert.equal(normalizeName('Ronald Acuna Jr.'), normalizeName('Ronald Acuña Jr.'));
+    assert.equal(normalizeName('Ivan Herrera'), normalizeName('Iván Herrera'));
+  });
+
+  it('strips generational suffixes and punctuation', () => {
+    assert.equal(normalizeName('Ronald Acuña Jr.'), 'ronald acuna');
+    assert.equal(normalizeName('Fernando Tatis Jr'), 'fernando tatis');
+    assert.equal(normalizeName('Cal Ripken III'), 'cal ripken');
+  });
+
+  it('lowercases and collapses whitespace', () => {
+    assert.equal(normalizeName('  Max   Muncy '), 'max muncy');
+  });
+
+  it('keeps team-disambiguated pool keys distinct', () => {
+    assert.notEqual(normalizeName('Max Muncy (LAD)'), normalizeName('Max Muncy (ATH)'));
+    assert.notEqual(normalizeName('Max Muncy (LAD)'), normalizeName('Max Muncy'));
+  });
+
+  it('does not conflate genuinely different first names', () => {
+    assert.notEqual(normalizeName('Nicholas Kurtz'), normalizeName('Nick Kurtz'));
   });
 });
 

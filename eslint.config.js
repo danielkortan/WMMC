@@ -29,6 +29,7 @@ const projectGlobals = {
   fmtDec: 'readonly',
   getInitials: 'readonly',
   fmtDateISO: 'readonly',
+  normalizeName: 'readonly',
   parseCSVLine: 'readonly',
   findColumn: 'readonly',
 };
