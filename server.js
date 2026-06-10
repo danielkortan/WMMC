@@ -6994,12 +6994,22 @@ function purgePlayerFromSeason(sd, name) {
 //      name differs from the canonical fullName.
 //   3. Fuzzy fallback for rostered players with no normalized match: auto-apply when
 //      score >= 0.9 AND the target name is unique in the catalog.
-//   4. Unrostered players are PURGED entirely from the database ONLY when genuinely
-//      mismatched: no exact catalog fullName, no valid mlb_id claim, and not the target
-//      of a rename from this same pass. Catalog-exact names are ordinary pool entries
-//      (the pool is seeded from the MLB catalog) and id-claimed names are identified
-//      duplicate keys ("Max Muncy (LAD)") — purging either would gut the player pool
-//      or undo a fix applied moments earlier.
+//   4. Mismatched unrostered names (no exact catalog fullName, no valid mlb_id claim,
+//      not the target of a rename from this same pass) are cleaned up two ways:
+//      - RETIRED from the pools (history kept) when rosters/submissions/swaps/
+//        roster_dates/attributed stats still reference the name — e.g. the phantom
+//        "Nicholas Kurtz" left behind after a corrective swap to "Nick Kurtz". The
+//        referencing records are origin records (a swap legitimizes its replacement
+//        player), so a full purge would corrupt history; pulling the name from the
+//        pools is enough to stop it being swapped in again.
+//      - PURGED entirely when nothing references them (orphan typo'd entries).
+//      Catalog-exact names are ordinary pool entries (the pool is seeded from the MLB
+//      catalog) and id-claimed names are identified duplicate keys ("Max Muncy (LAD)")
+//      — neither is touched.
+//
+// The response includes a before/after per-manager totals comparison (totals_moved).
+// Renames CAN move totals upward by design: a misspelled rostered name's stat rows sat
+// unattributed under the MLB spelling, and the rename merges them into the roster window.
 //
 // sd.mlb_ids is the source of truth for player identity going forward: stats merge
 // keys boxscore rows by MLB id and routes them to the WMMC display name via this map.
@@ -7017,6 +7027,9 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
     const allWmmcNames = extractSeasonPlayerNames(sd);
     const rostered = getRosteredNames(sd);
     const manualMap = new Map((manual_mappings || []).map((m) => [m.from, m]));
+
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const totalsBefore = captureScoreSnapshot(sd, todayET).totals;
 
     if (!sd.mlb_ids) sd.mlb_ids = {};
     const idsInUse = new Map(Object.entries(sd.mlb_ids).map(([n, id]) => [id, n]));
@@ -7183,25 +7196,55 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
       purgeCandidates.push(wmmcName);
     }
 
-    // Purge only genuinely mismatched unrostered names (see rule 4 above).
+    // Clean up genuinely mismatched unrostered names (see rule 4 above). References
+    // are recomputed AFTER the rename loop so they reflect this pass's final state.
     const catalogNames = new Set(catalog.map((p) => p.fullName));
+    const referenced = referencedPlayerNames(sd);
+    const retiredFromPool = [];
     for (const name of purgeCandidates) {
       if (renameTargets.has(name)) continue;
       if (catalogNames.has(name)) continue;
       const claimedId = sd.mlb_ids[name];
       if (typeof claimedId === 'number' && byId.has(claimedId)) continue;
+      if (referenced.has(name)) {
+        // History references this name — retire it from the pools, keep every record.
+        const pools = [];
+        if ((sd.batters_pool || []).includes(name)) {
+          sd.batters_pool = sd.batters_pool.filter((n) => n !== name);
+          if (sd.batters_team) delete sd.batters_team[name];
+          pools.push('batters');
+        }
+        if ((sd.pitchers_pool || []).includes(name)) {
+          sd.pitchers_pool = sd.pitchers_pool.filter((n) => n !== name);
+          if (sd.pitchers_team) delete sd.pitchers_team[name];
+          pools.push('pitchers');
+        }
+        if (pools.length > 0) retiredFromPool.push({ name, pools });
+        continue;
+      }
       const removed = purgePlayerFromSeason(sd, name);
       purged.push({ name, records_removed: removed });
     }
 
-    if (applied.length > 0 || idsAssigned.length > 0 || purged.length > 0) {
+    const totalsAfter = captureScoreSnapshot(sd, todayET).totals;
+    const totalsMoved = [];
+    for (const m of new Set([...Object.keys(totalsBefore), ...Object.keys(totalsAfter)])) {
+      const b = (totalsBefore[m] || {}).total || 0;
+      const a = (totalsAfter[m] || {}).total || 0;
+      if (Math.abs(a - b) >= 0.01) {
+        totalsMoved.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
+      }
+    }
+
+    if (applied.length > 0 || idsAssigned.length > 0 || purged.length > 0 || retiredFromPool.length > 0) {
       db.seasons[year] = sd;
       addAuditEntry(db, 'roster_name_fix', {
         year,
         renames: applied.length,
         ids_assigned: idsAssigned.length,
         purged: purged.length,
-        detail: { applied, ids_assigned: idsAssigned, purged },
+        retired_from_pool: retiredFromPool.length,
+        detail: { applied, ids_assigned: idsAssigned, purged, retired_from_pool: retiredFromPool },
       });
       writeDB(db);
     }
@@ -7211,12 +7254,15 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
       summary: {
         renames_applied: applied.length,
         ids_assigned: idsAssigned.length,
+        players_retired: retiredFromPool.length,
         players_purged: purged.length,
         needs_manual_review: needsManual.length,
       },
       applied,
       ids_assigned: idsAssigned,
+      retired_from_pool: retiredFromPool,
       purged,
+      totals_moved: totalsMoved,
       // If non-empty: re-POST with manual_mappings entries for these players
       needs_manual: needsManual,
     });
