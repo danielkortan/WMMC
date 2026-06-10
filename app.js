@@ -833,9 +833,38 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
 // ============================================================
 // Player display helper — shows "Juan Soto (NYM)" when team data exists
 // ============================================================
+// Normalized-name → team index per team-map object, so the fallback lookup is
+// O(1) per call. WeakMap-keyed on the map object: a fresh season parse gets a
+// fresh index automatically.
+const _normTeamIndexCache = new WeakMap();
+function _normTeamLookup(map, normKey) {
+  if (!map) return null;
+  let idx = _normTeamIndexCache.get(map);
+  if (!idx) {
+    idx = new Map();
+    for (const [n, t] of Object.entries(map)) {
+      const k = normalizeName(n);
+      if (!k) continue;
+      // Two entries that normalize alike but disagree on team (e.g. the two
+      // Max Muncys) are ambiguous — never guess a team from them.
+      if (idx.has(k) && idx.get(k) !== t) idx.set(k, null);
+      else idx.set(k, t);
+    }
+    _normTeamIndexCache.set(map, idx);
+  }
+  return idx.get(normKey) || null;
+}
+
 function displayPlayer(name, sd) {
   if (!name) return '';
-  const team = (sd && sd.batters_team && sd.batters_team[name]) || (sd && sd.pitchers_team && sd.pitchers_team[name]);
+  let team = (sd && sd.batters_team && sd.batters_team[name]) || (sd && sd.pitchers_team && sd.pitchers_team[name]);
+  if (!team && sd) {
+    // Roster strings can differ from the team-map key in accents/punctuation
+    // ("Ronald Acuna Jr." vs MLB's "Ronald Acuña Jr.") — fall back to a
+    // normalized lookup so the scoreboard still shows the team.
+    const normKey = normalizeName(name);
+    team = _normTeamLookup(sd.batters_team, normKey) || _normTeamLookup(sd.pitchers_team, normKey);
+  }
   if (!team || name.endsWith(`(${team})`)) return esc(name);
   return `${esc(name)} (${esc(team)})`;
 }
@@ -8604,7 +8633,7 @@ window.swapTypeToggle = function (type) {
   const teamMap = Object.assign({}, data.battersTeam || {}, data.pitchersTeam || {});
   const dp = (name) => {
     const t = teamMap[name];
-    return t ? `${name} (${t})` : name;
+    return t && !name.endsWith(`(${t})`) ? `${name} (${t})` : name;
   };
 
   const clearSwapInSearch = () => {
@@ -10955,7 +10984,7 @@ function setupSwapPlayerSearch() {
     resultsDiv.innerHTML = matches
       .map((p) => {
         const t = teamMap[p];
-        const label = t ? `${esc(p)} (${esc(t)})` : esc(p);
+        const label = t && !p.endsWith(`(${t})`) ? `${esc(p)} (${esc(t)})` : esc(p);
         return `<div class="player-search-item" onmousedown="selectSwapPlayerIn('${jsStr(p)}')" ontouchstart="event.preventDefault();selectSwapPlayerIn('${jsStr(p)}')">${label}</div>`;
       })
       .join('');

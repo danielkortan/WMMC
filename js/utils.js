@@ -57,6 +57,21 @@ export function getInitials(name) {
   return name.substring(0, 2).toUpperCase();
 }
 
+// Accent/punctuation/suffix-insensitive form of a player name, for matching
+// names across data sources that spell them differently ("Ronald Acuna Jr."
+// vs MLB's "Ronald Acuña Jr."). Must stay identical to normalizeName in
+// server.js — the server can't import this ESM copy (see CLAUDE.md gotchas).
+export function normalizeName(name) {
+  return String(name)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Format a Date object into YYYY-MM-DD using the local timezone.
 export function fmtDateISO(d) {
   const y = d.getFullYear();
