@@ -253,104 +253,32 @@ function transformScoreboardTables() {
   });
 }
 
-// Default the stacked PP1 / PP2 sections to "current period open, other
-// collapsed". Runs once per render (guarded) so it doesn't fight a user's
-// manual taps until the scoreboard is re-rendered.
-function applyMobilePoolPlayDefaults() {
-  if (!isMobile()) return;
+// Accordion defaults are now set at render time by renderScoreboardContent()
+// and renderActiveScoreboardTabs() using getCurrentScoringPeriod().
+function applyMobilePoolPlayDefaults() {}
 
-  const footer = document.querySelector('#champion-banner .banner-footer');
-  const openPeriod = footer && /Pool Play 2/i.test(footer.textContent) ? 'pp2' : 'pp1';
-
-  ['pp1', 'pp2'].forEach((p) => {
-    const sec = document.getElementById('sb-' + p);
-    if (!sec || sec.dataset.mobInit === '1') return;
-    sec.dataset.mobInit = '1';
-    sec.classList.toggle('mob-pp-collapsed', p !== openPeriod);
-  });
-}
-
-// Organize the scoreboard into accordion sections (mobile only): rename the
-// card to "Scoreboard", group Pool Play (Overall + PP1 + PP2) under one header,
-// and give each playoff round that has data its own header. Idempotent — safe
-// to re-run on every scoreboard re-render (guards on inserted element ids).
+// Period accordion sections are now rendered directly in HTML by
+// renderScoreboardContent() / renderActiveScoreboardTabs(). This function
+// just renames the card heading for the narrower mobile viewport.
 function buildScoreboardSections() {
   if (!isMobile()) return;
   const sb = document.getElementById('scoreboard-content');
   if (!sb) return;
 
-  // Card title: "Pool Play Scoreboard" → "Scoreboard" (Pool Play is a section).
   const title = sb.querySelector('.sb-poolplay-header h2');
   if (title && title.textContent.trim() !== 'Scoreboard') title.textContent = 'Scoreboard';
-
-  // "Pool Play" group header above the Overall standings.
-  const overall = document.getElementById('sb-pp-overall');
-  if (overall && !document.getElementById('mob-pp-group-header')) {
-    const hdr = document.createElement('div');
-    hdr.id = 'mob-pp-group-header';
-    hdr.className = 'mob-group-header';
-    hdr.textContent = 'Pool Play';
-    overall.parentNode.insertBefore(hdr, overall);
-  }
-
-  // Playoff rounds: each gets its own header + is revealed only when it has
-  // data (a populated table). No data → stays hidden, no empty section.
-  [
-    { id: 'sb-qf', label: 'Quarterfinals' },
-    { id: 'sb-sf', label: 'Semifinals' },
-    { id: 'sb-finals', label: 'Finals' },
-  ].forEach(({ id, label }) => {
-    const sec = document.getElementById(id);
-    if (!sec) return;
-    const hasData = !!sec.querySelector('table tbody tr');
-    const hdrId = 'mob-hdr-' + id;
-    let hdr = document.getElementById(hdrId);
-    if (hasData) {
-      sec.classList.add('mob-round-section');
-      if (!hdr) {
-        hdr = document.createElement('div');
-        hdr.id = hdrId;
-        hdr.className = 'mob-group-header';
-        hdr.textContent = label;
-        sec.parentNode.insertBefore(hdr, sec);
-      }
-    } else {
-      sec.classList.remove('mob-round-section', 'mob-round-collapsed');
-      if (hdr) hdr.remove();
-    }
-  });
 }
 
-// Delegated toggles (survive the scoreboard's frequent re-renders):
-//  - accordion section header → collapse its group/round
-//  - period header (Pool Play 1 / 2) → collapse the whole period
-//  - pool header → collapse that pool
-// Manager rows keep their own (app.js) detail toggle.
+// Delegated toggle for pool cards within a period (survives re-renders).
+// Section-level collapse is handled by toggleScoreboardSection() via inline onclick.
 function setupPoolPlayToggles() {
   document.addEventListener('click', (e) => {
     if (!isMobile()) return;
     if (!e.target.closest('#scoreboard-content')) return;
 
-    const groupHeader = e.target.closest('.mob-group-header');
-    if (groupHeader) {
-      const collapsed = groupHeader.classList.toggle('collapsed');
-      if (groupHeader.id === 'mob-pp-group-header') {
-        document.getElementById('sb-poolplay-body')?.classList.toggle('pp-group-collapsed', collapsed);
-      } else {
-        groupHeader.nextElementSibling?.classList.toggle('mob-round-collapsed', collapsed);
-      }
-      return;
-    }
-
     const poolHeader = e.target.closest('.pool-card-header');
     if (poolHeader) {
       poolHeader.closest('.pool-card')?.classList.toggle('mob-pool-collapsed');
-      return;
-    }
-
-    const periodHeader = e.target.closest('.pool-period-header');
-    if (periodHeader) {
-      periodHeader.closest('.sb-period')?.classList.toggle('mob-pp-collapsed');
     }
   });
 }

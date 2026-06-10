@@ -3010,45 +3010,97 @@ function renderScoreboardContent() {
   const seeding = computePlayoffSeeding(leaders);
   const hasBracket = !!(DATA && DATA.bracket);
 
-  let html = '';
+  const sd = (getSeasons() || {})[SELECTED_SEASON];
+  const currentRound = sd ? getCurrentScoringPeriod(sd) : null;
+  const currentSectionId = currentRound ? (currentRound === 'Finals' ? 'finals' : currentRound.toLowerCase()) : null;
+  const inPoolPlay = currentSectionId === 'pp1' || currentSectionId === 'pp2';
 
-  // Pool Play section — collapsible when bracket data exists
+  const hasQF = !!(DATA.bracket && DATA.bracket.qf_matchups);
+  const hasSF = !!(DATA.bracket && DATA.bracket.sf_matchups);
+  const hasFinals = !!(DATA.bracket && DATA.bracket.finals);
+
   const ppCollapsed = hasBracket;
-  html += `<div class="card scoreboard-card sb-poolplay-section">
+
+  const sections = [
+    {
+      id: 'pp-overall',
+      label: 'Pool Play Overall',
+      show: true,
+      open: !currentSectionId || inPoolPlay,
+      content: renderPPOverallContent(leaders, seeding),
+    },
+    {
+      id: 'pp1',
+      label: 'Pool Play 1',
+      show: true,
+      open: !currentSectionId || currentSectionId === 'pp1',
+      content: renderPoolPeriodContent('pp1'),
+    },
+    {
+      id: 'pp2',
+      label: 'Pool Play 2',
+      show: true,
+      open: currentSectionId === 'pp2',
+      content: renderPoolPeriodContent('pp2'),
+    },
+    {
+      id: 'qf',
+      label: 'Quarterfinals',
+      show: hasQF,
+      open: currentSectionId === 'qf',
+      content: renderQFContent(),
+    },
+    {
+      id: 'sf',
+      label: 'Semifinals',
+      show: hasSF,
+      open: currentSectionId === 'sf',
+      content: renderSFContent(),
+    },
+    {
+      id: 'finals',
+      label: 'Finals',
+      show: hasFinals,
+      open: currentSectionId === 'finals',
+      content: renderFinalsContent(),
+    },
+  ];
+
+  let html = `<div class="card scoreboard-card sb-poolplay-section">
     <div class="sb-poolplay-header" onclick="togglePoolPlay()">
       <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
       <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
     </div>
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">
-      <div class="scoreboard-tabs" id="scoreboard-tabs">
-        <button class="sb-tab active" data-period="pp-overall">Pool Play Overall</button>
-        <button class="sb-tab" data-period="pp1">Pool Play 1</button>
-        <button class="sb-tab" data-period="pp2">Pool Play 2</button>
-        <button class="sb-tab" data-period="qf">Quarterfinals</button>
-        <button class="sb-tab" data-period="sf">Semifinals</button>
-        <button class="sb-tab" data-period="finals">Finals</button>
-      </div>
       <div class="highlight-legend sb-color-legend">
         <span class="legend-label">Name Colors:</span>
         <span class="legend-item"><span class="legend-swatch hl-pp1"></span> PP1 Pool Leader</span>
         <span class="legend-item"><span class="legend-swatch hl-pp2"></span> PP2 Pool Leader</span>
         <span class="legend-item"><span class="legend-swatch hl-both"></span> PP1 &amp; PP2 Leader</span>
         <span class="legend-item"><span class="legend-swatch hl-wildcard"></span> Wild Card</span>
-      </div>
-      <div class="sb-period" id="sb-pp-overall">${renderPPOverallContent(leaders, seeding)}</div>
-      <div class="sb-period" id="sb-pp1" style="display:none">${renderPoolPeriodContent('pp1')}</div>
-      <div class="sb-period" id="sb-pp2" style="display:none">${renderPoolPeriodContent('pp2')}</div>
-      <div class="sb-period" id="sb-qf" style="display:none">${renderQFContent()}</div>
-      <div class="sb-period" id="sb-sf" style="display:none">${renderSFContent()}</div>
-      <div class="sb-period" id="sb-finals" style="display:none">${renderFinalsContent()}</div>
-    </div>
+      </div>`;
+
+  sections.forEach(({ id, label, show, open, content }) => {
+    if (!show) return;
+    html += `
+      <div class="sb-section${open ? '' : ' sb-section-collapsed'}" id="sb-section-${id}">
+        <div class="sb-section-header" onclick="toggleScoreboardSection('${id}')">
+          <span class="sb-section-title">${label}</span>
+          <span class="sb-section-arrow">▾</span>
+        </div>
+        <div class="sb-period" id="sb-${id}" style="display:${open ? 'block' : 'none'}">
+          ${content}
+        </div>
+      </div>`;
+  });
+
+  html += `    </div>
   </div>`;
 
   // Awards
   html += renderAwardsContent();
 
   container.innerHTML = html;
-  setupScoreboardTabs();
 }
 
 window.togglePoolPlay = function () {
@@ -3058,6 +3110,15 @@ window.togglePoolPlay = function () {
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? 'block' : 'none';
   btn.textContent = hidden ? 'Hide' : 'Show';
+};
+
+window.toggleScoreboardSection = function (sectionId) {
+  const section = document.getElementById('sb-section-' + sectionId);
+  const body = document.getElementById('sb-' + sectionId);
+  if (!section || !body) return;
+  const isCollapsed = section.classList.contains('sb-section-collapsed');
+  section.classList.toggle('sb-section-collapsed', !isCollapsed);
+  body.style.display = isCollapsed ? 'block' : 'none';
 };
 
 window.togglePool = function (poolId) {
@@ -3539,19 +3600,6 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
 
   document.body.appendChild(overlay);
 };
-
-function setupScoreboardTabs() {
-  const tabs = document.querySelectorAll('.sb-tab');
-  tabs.forEach((tab) => {
-    tab.addEventListener('click', () => {
-      tabs.forEach((t) => t.classList.remove('active'));
-      document.querySelectorAll('.sb-period').forEach((p) => (p.style.display = 'none'));
-      tab.classList.add('active');
-      const target = document.getElementById('sb-' + tab.dataset.period);
-      if (target) target.style.display = 'block';
-    });
-  });
-}
 
 // ---- Pool Play Leaders & Seeding Logic ----
 
@@ -4608,7 +4656,6 @@ function showActiveSeason(seasonData) {
   const scoreboardContent = document.getElementById('scoreboard-content');
   if (managerScores.length > 0 || managers.some((m) => m.pool)) {
     scoreboardContent.innerHTML = renderActiveScoreboardTabs(seasonData, managerScores, managers);
-    setupScoreboardTabs();
   } else {
     // Determine why there are no scores
     const hasUploadedData = (seasonData.weekly_batting || []).length + (seasonData.weekly_pitching || []).length > 0;
@@ -4803,6 +4850,9 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
+
+  const currentRound = getCurrentScoringPeriod(seasonData);
+  const currentSectionId = currentRound ? (currentRound === 'Finals' ? 'finals' : currentRound.toLowerCase()) : null;
 
   // Pool groups from manager pool assignments (active managers only)
   const poolGroups = {};
@@ -5019,16 +5069,32 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // Pool Play 1
-  html += `<div class="scoreboard-section">
-    <h3 class="pool-period-header">Pool Play 1 <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp1" onclick="toggleAllManagerDetails('pp1')">Show</button></h3>
-    ${renderPoolSection(pp1Scores, 'Pool Play 1', 'pp1')}
-  </div>`;
+  const pp1Open = !currentSectionId || currentSectionId === 'pp1';
+  html += `
+    <div class="sb-section${pp1Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp1">
+      <div class="sb-section-header" onclick="toggleScoreboardSection('pp1')">
+        <span class="sb-section-title">Pool Play 1</span>
+        <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp1" onclick="event.stopPropagation();toggleAllManagerDetails('pp1')">Show</button>
+        <span class="sb-section-arrow">▾</span>
+      </div>
+      <div id="sb-pp1" style="display:${pp1Open ? 'block' : 'none'}">
+        ${renderPoolSection(pp1Scores, 'Pool Play 1', 'pp1')}
+      </div>
+    </div>`;
 
   // Pool Play 2
-  html += `<div class="scoreboard-section">
-    <h3 class="pool-period-header">Pool Play 2 <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp2" onclick="toggleAllManagerDetails('pp2')">Show</button></h3>
-    ${renderPoolSection(pp2Scores, 'Pool Play 2', 'pp2')}
-  </div>`;
+  const pp2Open = currentSectionId === 'pp2';
+  html += `
+    <div class="sb-section${pp2Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp2">
+      <div class="sb-section-header" onclick="toggleScoreboardSection('pp2')">
+        <span class="sb-section-title">Pool Play 2</span>
+        <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp2" onclick="event.stopPropagation();toggleAllManagerDetails('pp2')">Show</button>
+        <span class="sb-section-arrow">▾</span>
+      </div>
+      <div id="sb-pp2" style="display:${pp2Open ? 'block' : 'none'}">
+        ${renderPoolSection(pp2Scores, 'Pool Play 2', 'pp2')}
+      </div>
+    </div>`;
 
   // Playoff Advancement summary
   if (allPPWinners.size > 0 || wildcardSet.size > 0) {
@@ -5055,18 +5121,6 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const hasFinals = rounds.has('Finals');
 
   if (hasQF || hasSF || hasFinals) {
-    let tabsHtml = '';
-    let first = true;
-    [
-      { key: 'qf', has: hasQF, label: 'Quarterfinals' },
-      { key: 'sf', has: hasSF, label: 'Semifinals' },
-      { key: 'finals', has: hasFinals, label: 'Finals' },
-    ].forEach((t) => {
-      if (!t.has) return;
-      tabsHtml += `<button class="sb-tab ${first ? 'active' : ''}" data-period="${t.key}">${t.label}</button>`;
-      first = false;
-    });
-
     const renderPlayoffTable = (scores) => {
       if (scores.length === 0) return '<p>No data.</p>';
       let tbl = `<table class="data-table compact-table">
@@ -5084,20 +5138,25 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       return tbl;
     };
 
-    html += `<div class="card scoreboard-card">
-      <div class="scoreboard-tabs" id="scoreboard-tabs">${tabsHtml}</div>`;
-    let firstPeriod = true;
-    if (hasQF) {
-      html += `<div class="sb-period" id="sb-qf" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['QF']))}</div>`;
-      firstPeriod = false;
-    }
-    if (hasSF) {
-      html += `<div class="sb-period" id="sb-sf" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['SF']))}</div>`;
-      firstPeriod = false;
-    }
-    if (hasFinals) {
-      html += `<div class="sb-period" id="sb-finals" ${!firstPeriod ? 'style="display:none"' : ''}>${renderPlayoffTable(periodScores(['Finals']))}</div>`;
-    }
+    html += `<div class="card scoreboard-card">`;
+    [
+      { key: 'qf', has: hasQF, label: 'Quarterfinals', round: ['QF'] },
+      { key: 'sf', has: hasSF, label: 'Semifinals', round: ['SF'] },
+      { key: 'finals', has: hasFinals, label: 'Finals', round: ['Finals'] },
+    ].forEach(({ key, has, label, round }) => {
+      if (!has) return;
+      const open = currentSectionId === key;
+      html += `
+        <div class="sb-section${open ? '' : ' sb-section-collapsed'}" id="sb-section-${key}">
+          <div class="sb-section-header" onclick="toggleScoreboardSection('${key}')">
+            <span class="sb-section-title">${label}</span>
+            <span class="sb-section-arrow">▾</span>
+          </div>
+          <div class="sb-period" id="sb-${key}" style="display:${open ? 'block' : 'none'}">
+            ${renderPlayoffTable(periodScores(round))}
+          </div>
+        </div>`;
+    });
     html += '</div>';
   }
 
