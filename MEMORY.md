@@ -1,5 +1,39 @@
 # WMMC — Decisions Log
 
+## Scoreboard differed per device / fresh browser empty — localStorage quota, not HTTP cache (2026-06-10)
+
+**Symptom (commissioner).** Three devices showed three DIFFERENT scoreboards (mobile + Chrome both
+stuck on "PP1 Week 5" with different totals; a brand-new Firefox login showed NO data at all —
+"No roster data yet"), while the 7am Slack post (server-computed) was correct. Hard refresh did
+not help on any device.
+
+**Root cause.** The client cached the entire seasons blob in `localStorage('wmmc_seasons')` and
+**rendered from localStorage**. The blob (2025 season + 2026 daily rows + score snapshots) outgrew
+the ~5MB per-site localStorage quota, so every `setItem` threw; `loadData`/`syncFromServer` caught
+the throw as "server unavailable — using local data" and silently kept whatever vintage each device
+last managed to store. Hence: per-device frozen scoreboards (different vintages), an empty fresh
+browser (nothing ever stored), hard-refresh immunity (not an HTTP-cache problem), and a correct
+Slack post (server-side from db.json). Also: the seasons `setItem` threw BEFORE the managers
+`setItem` in the same try block, so managers updates were lost too.
+
+**Fix (`app.js`, client-only).** In-memory JSON-string cache (`SEASONS_JSON`/`MANAGERS_JSON`) is
+now the session's source of truth; ALL reads/writes go through `readSeasonsJSON`/`setSeasonsLocal`
+(+ managers twins). `getSeasons()` still returns a fresh `JSON.parse` per call (copy semantics
+preserved — no aliasing change). localStorage is demoted to a best-effort mirror: on quota failure,
+drop the old (stale) mirror and retry once (frees its quota; a stale mirror is worse than none),
+else warn and continue — never throw, never abort the caller. Fresh server data therefore always
+renders, even when it can't be persisted.
+
+**Diagnosis tells (reusable).** "Different data on different devices + fresh browser empty + hard
+refresh doesn't help + Slack/server output correct" = the client-side cache write is failing, not
+the server or HTTP caching. The version watcher (`/api/build`) only fixes stale CODE, not stale DATA.
+
+**Open follow-up (not built).** The seasons payload grows daily (~455 daily stat rows/day + up to
+21 per-player score snapshots) and is re-downloaded on every tab switch — eventually worth trimming
+GET /api/seasons (e.g. omit `score_snapshots`/daily rows from the client payload), but that
+interacts with the clobber-prone full-season save (the client POSTs back what it loaded), so it
+needs the merge guards audited first.
+
 ## Per-round Manager Submission Status (collapsible, auto-open current period) (2026-06-08)
 
 Commissioner "Manager Submission Status" table was PP1-only; now there are multiple submission
