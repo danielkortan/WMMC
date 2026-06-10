@@ -3040,8 +3040,13 @@ function renderScoreboardContent() {
   const hasBracket = !!(DATA && DATA.bracket);
 
   const sd = (getSeasons() || {})[SELECTED_SEASON];
-  const currentRound = sd ? getCurrentScoringPeriod(sd) : null;
-  const currentSectionId = currentRound ? (currentRound === 'Finals' ? 'finals' : currentRound.toLowerCase()) : null;
+  const currentPeriod = sd ? getCurrentScoringPeriod(sd) : null;
+  const currentRoundKey = currentPeriod ? currentPeriod.round : null;
+  const currentSectionId = currentRoundKey
+    ? currentRoundKey === 'Finals'
+      ? 'finals'
+      : currentRoundKey.toLowerCase()
+    : null;
   const inPoolPlay = currentSectionId === 'pp1' || currentSectionId === 'pp2';
 
   const hasQF = !!(DATA.bracket && DATA.bracket.qf_matchups);
@@ -4880,8 +4885,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  const currentRound = getCurrentScoringPeriod(seasonData);
-  const currentSectionId = currentRound ? (currentRound === 'Finals' ? 'finals' : currentRound.toLowerCase()) : null;
+  const currentPeriod = getCurrentScoringPeriod(seasonData);
+  const currentRoundKey = currentPeriod ? currentPeriod.round : null;
+  const currentSectionId = currentRoundKey
+    ? currentRoundKey === 'Finals'
+      ? 'finals'
+      : currentRoundKey.toLowerCase()
+    : null;
 
   // Pool groups from manager pool assignments (active managers only)
   const poolGroups = {};
