@@ -1,5 +1,36 @@
 # WMMC — Decisions Log
 
+## GET /api/seasons slimmed + score_snapshots made server-authoritative (2026-06-10)
+
+Follow-up to the localStorage-quota incident (below): shrink the seasons payload and close the
+snapshot-clobber vector, with zero score movement.
+
+- **GET /api/seasons now strips `score_snapshots`** from every season. The client never reads it
+  (grep-verified: zero references in app.js/js/); it's the score guard's diagnostic trail, written
+  only by server-side `recordScoreSnapshot`. One of the largest payload fields (up to 21 days ×
+  per-manager × per-week × per-player detail).
+- **`score_snapshots` is server-authoritative on save** (SAVE_HARDENING_PLAN.md Layer 2, first
+  field done): `POST /api/seasons/:year` always keeps `existingSd.score_snapshots` (mirroring the
+  submissions guard), and the bulk `POST /api/seasons` carries each stored season's trail through
+  even a forced replace. This closes a REAL pre-existing hole: any full-season save used to
+  replace the trail with whatever the client echoed — a stale tab could roll back or wipe the
+  baseline the 40-pt swing guard diffs against (blinding it). `computeSeasonRev` doesn't hash
+  snapshots, so no \_rev churn.
+- **GET /api/seasons got ETag + 304 + gzip** (built-in `zlib`, no new dependency; Express
+  compresses nothing by default and Render doesn't either). `Cache-Control: no-cache` = always
+  revalidate: an unchanged re-fetch (every tab switch triggers `syncFromServer`) is now a 304 with
+  zero body bytes; a changed one is ~10x smaller. ETag = sha1 of the exact body; If-None-Match
+  matched via `includes()` (proxies may weaken to `W/"…"`).
+- **Verified live against a local server:** snapshot-free save preserves the trail; a stale save
+  carrying rolled-back snapshots loses to the server copy; bulk replace preserves; client-visible
+  season JSON byte-identical before/after all saves (totals cannot move); 304 + gzip confirmed.
+- **Deliberately NOT done — daily-row stripping.** `daily_batting`/`daily_pitching` ARE read
+  client-side (Trends daily charts ~app.js:5216, per-player daily views ~7308) and FILTERED by
+  client repair flows (`repairGhostInitialRosterPlayers` ~6176, purge flow ~11042) whose results
+  ride the full save. Stripping them would silently disable ghost daily-row purging — leftover
+  ghost rows resurface into weekly scores on the next `rebuildWeeklyFromDaily`. Score-affecting;
+  requires moving those repair flows server-side first.
+
 ## Scoreboard differed per device / fresh browser empty — localStorage quota, not HTTP cache (2026-06-10)
 
 **Symptom (commissioner).** Three devices showed three DIFFERENT scoreboards (mobile + Chrome both
