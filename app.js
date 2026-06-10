@@ -841,10 +841,50 @@ function displayPlayer(name, sd) {
 }
 
 // ============================================================
-// Data helpers (localStorage cache + server persistence)
+// Data helpers (in-memory cache, localStorage mirror + server persistence)
 // ============================================================
+// The seasons/managers caches are held in memory as JSON strings and only MIRRORED to
+// localStorage. localStorage has a hard per-site quota (~5MB); once the season blob outgrew it,
+// every setItem threw, and the old code (which read straight from localStorage) silently fell
+// back to whatever stale copy each device last managed to store — so every browser showed a
+// different frozen scoreboard, and a fresh browser showed nothing. The in-memory string is the
+// session's source of truth: it always accepts fresh server data, even when localStorage can't
+// hold it. The localStorage mirror only seeds the next page load if the server is unreachable.
+let SEASONS_JSON = null;
+let MANAGERS_JSON = null;
+
+function readSeasonsJSON() {
+  if (SEASONS_JSON == null) {
+    try {
+      SEASONS_JSON = localStorage.getItem('wmmc_seasons') || '{}';
+    } catch (_) {
+      SEASONS_JSON = '{}';
+    }
+  }
+  return SEASONS_JSON;
+}
+
+// Accepts the seasons object or its pre-stringified JSON. Never throws — a quota failure on the
+// localStorage mirror must not abort the caller (that's the bug this layer exists to fix).
+function setSeasonsLocal(seasonsOrJson) {
+  const json = typeof seasonsOrJson === 'string' ? seasonsOrJson : JSON.stringify(seasonsOrJson);
+  SEASONS_JSON = json;
+  try {
+    localStorage.setItem('wmmc_seasons', json);
+  } catch (_) {
+    // Quota exceeded. Drop the old mirror (a stale mirror is what froze devices on different
+    // vintages of the scoreboard) and retry once — removing the old value frees its quota.
+    try {
+      localStorage.removeItem('wmmc_seasons');
+      localStorage.setItem('wmmc_seasons', json);
+    } catch (e) {
+      console.warn('wmmc_seasons localStorage mirror failed (quota?) — using in-memory data:', e.message);
+    }
+  }
+}
+
 function getSeasons() {
-  return JSON.parse(localStorage.getItem('wmmc_seasons') || '{}');
+  return JSON.parse(readSeasonsJSON());
 }
 // Persist a season to the server. The payload carries the `_rev` token the client loaded from
 // GET /api/seasons; the server rejects the save with 409 if that token is stale (another save/sync
@@ -868,7 +908,7 @@ async function saveSeason(year, data, opts = {}) {
     data._rev = seasons[year]._rev;
   }
   seasons[year] = data;
-  localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+  setSeasonsLocal(seasons);
   try {
     const resp = await apiFetch('/api/seasons/' + year, { method: 'POST', body: JSON.stringify(data) });
     if (resp.status === 409) {
@@ -878,7 +918,7 @@ async function saveSeason(year, data, opts = {}) {
         const fresh = await fetch('/api/seasons');
         if (fresh.ok) {
           const srv = await fresh.json();
-          if (srv && Object.keys(srv).length > 0) localStorage.setItem('wmmc_seasons', JSON.stringify(srv));
+          if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
         }
       } catch (_) {
         /* offline — keep what we have */
@@ -907,7 +947,7 @@ async function saveSeason(year, data, opts = {}) {
       const s = getSeasons();
       if (s[year]) {
         s[year]._rev = body._rev;
-        localStorage.setItem('wmmc_seasons', JSON.stringify(s));
+        setSeasonsLocal(s);
       }
     }
     return true;
@@ -931,7 +971,7 @@ function adoptRev(rev) {
   const seasons = getSeasons();
   if (seasons[SELECTED_SEASON]) {
     seasons[SELECTED_SEASON]._rev = rev;
-    localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+    setSeasonsLocal(seasons);
   }
 }
 
@@ -949,7 +989,7 @@ function mirrorSubmissionLocally(period, manager, submission) {
     if (submission) sd.period_submissions[period][manager] = submission;
     else delete sd.period_submissions[period][manager];
   }
-  localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+  setSeasonsLocal(seasons);
 }
 
 async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
@@ -1000,11 +1040,37 @@ async function removeSubmissionRemote(period, manager) {
   }
 }
 
+function readManagersJSON() {
+  if (MANAGERS_JSON == null) {
+    try {
+      MANAGERS_JSON = localStorage.getItem('wmmc_managers') || '[]';
+    } catch (_) {
+      MANAGERS_JSON = '[]';
+    }
+  }
+  return MANAGERS_JSON;
+}
+
+function setManagersLocal(managersOrJson) {
+  const json = typeof managersOrJson === 'string' ? managersOrJson : JSON.stringify(managersOrJson);
+  MANAGERS_JSON = json;
+  try {
+    localStorage.setItem('wmmc_managers', json);
+  } catch (_) {
+    try {
+      localStorage.removeItem('wmmc_managers');
+      localStorage.setItem('wmmc_managers', json);
+    } catch (e) {
+      console.warn('wmmc_managers localStorage mirror failed (quota?) — using in-memory data:', e.message);
+    }
+  }
+}
+
 function getManagers() {
-  return JSON.parse(localStorage.getItem('wmmc_managers') || '[]');
+  return JSON.parse(readManagersJSON());
 }
 function saveManagers(managers) {
-  localStorage.setItem('wmmc_managers', JSON.stringify(managers));
+  setManagersLocal(managers);
   // Persist to server in background
   apiFetch('/api/managers', {
     method: 'POST',
@@ -1022,7 +1088,7 @@ async function loadData() {
     if (seasonsResp.ok) {
       const serverSeasons = await seasonsResp.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        localStorage.setItem('wmmc_seasons', JSON.stringify(serverSeasons));
+        setSeasonsLocal(serverSeasons);
         // Fresh data loaded — release the one-shot stale-save reload guard.
         try {
           sessionStorage.removeItem('wmmc_stale_reload');
@@ -1034,7 +1100,7 @@ async function loadData() {
     if (managersResp.ok) {
       const serverManagers = await managersResp.json();
       if (serverManagers && serverManagers.length > 0) {
-        localStorage.setItem('wmmc_managers', JSON.stringify(serverManagers));
+        setManagersLocal(serverManagers);
       }
     }
   } catch (e) {
@@ -1049,7 +1115,7 @@ async function loadData() {
       const resp = await fetch('data.json');
       const legacy = await resp.json();
       seasons['2025'] = { status: 'completed', data: legacy };
-      localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+      setSeasonsLocal(seasons);
       // Push to server
       apiFetch('/api/seasons/2025', {
         method: 'POST',
@@ -1082,7 +1148,7 @@ async function loadData() {
       rosters: {},
       team_weekly: [],
     };
-    localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+    setSeasonsLocal(seasons);
     // Push to server
     apiFetch('/api/seasons/' + CURRENT_YEAR, {
       method: 'POST',
@@ -1136,8 +1202,8 @@ async function syncFromServer() {
       const serverSeasons = await seasonsResp.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
         const incoming = JSON.stringify(serverSeasons);
-        if (localStorage.getItem('wmmc_seasons') !== incoming) {
-          localStorage.setItem('wmmc_seasons', incoming);
+        if (readSeasonsJSON() !== incoming) {
+          setSeasonsLocal(incoming);
           changed = true;
         }
       }
@@ -1146,8 +1212,8 @@ async function syncFromServer() {
       const serverManagers = await managersResp.json();
       if (serverManagers && serverManagers.length > 0) {
         const incoming = JSON.stringify(serverManagers);
-        if (localStorage.getItem('wmmc_managers') !== incoming) {
-          localStorage.setItem('wmmc_managers', incoming);
+        if (readManagersJSON() !== incoming) {
+          setManagersLocal(incoming);
           changed = true;
         }
       }
@@ -8633,7 +8699,7 @@ window.submitSwapRequest = async function (managerName) {
       if (!Array.isArray(freshSd.swaps)) freshSd.swaps = [];
       freshSd.swaps.push(savedSwap);
       if (_rev) freshSd._rev = _rev; // adopt the token bumped by this swap so the next save isn't stale
-      localStorage.setItem('wmmc_seasons', JSON.stringify(freshSeasons));
+      setSeasonsLocal(freshSeasons);
     }
 
     succEl.textContent = 'Swap request submitted!';
@@ -9809,7 +9875,7 @@ function setupSeasonSetupToggle() {
         }
       });
 
-      localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+      setSeasonsLocal(seasons);
       apiFetch('/api/seasons/' + newYear, {
         method: 'POST',
         body: JSON.stringify(seasons[newYear]),
@@ -12470,7 +12536,7 @@ window.clearWeekData = async function (weekIndex) {
       sd.weekly_batting = (sd.weekly_batting || []).filter((b) => !(b.round === s.round && b.week === s.week));
       sd.weekly_pitching = (sd.weekly_pitching || []).filter((p) => !(p.round === s.round && p.week === s.week));
       seasons[SELECTED_SEASON] = sd;
-      localStorage.setItem('wmmc_seasons', JSON.stringify(seasons));
+      setSeasonsLocal(seasons);
     }
 
     renderWeeklyUploadSections();
@@ -12742,7 +12808,7 @@ async function generateRoastForManager(manager, round) {
     if (fresh.ok) {
       const serverSeasons = await fresh.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        localStorage.setItem('wmmc_seasons', JSON.stringify(serverSeasons));
+        setSeasonsLocal(serverSeasons);
       }
     }
   } catch (e) {
