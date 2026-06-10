@@ -12367,7 +12367,19 @@ function renderPlayerPoolDisplay() {
   const batters = sd.batters_pool || [];
   const pitchers = sd.pitchers_pool || [];
 
-  let html = '<div class="two-col">';
+  let html = `<div class="upload-section" style="margin-bottom:1rem;">
+    <h3>Pool &amp; Name Cleanup</h3>
+    <p class="upload-hint">Checks every player name in this season against the MLB catalog: phantom pool leftovers
+    (retired if roster/swap history references them, purged if nothing does), misspelled rostered names
+    (auto-renamed and id-claimed), and duplicate-name players needing a manual pick. Scan is read-only.</p>
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+      <button class="btn btn-secondary btn-sm" onclick="scanPoolCleanup()">Scan (read-only)</button>
+      <button class="btn btn-primary btn-sm" id="pool-cleanup-apply-btn" onclick="applyPoolCleanup()" style="display:none;">Apply fixes</button>
+    </div>
+    <div id="pool-cleanup-results" style="margin-top:0.75rem;"></div>
+  </div>`;
+
+  html += '<div class="two-col">';
   html += '<div>';
   html += `<h3>Batters Pool (${batters.length})</h3>`;
   if (batters.length > 0) {
@@ -12395,6 +12407,120 @@ function renderPlayerPoolDisplay() {
   html += '</div>';
   container.innerHTML = html;
 }
+
+// ---- Pool & Name Cleanup (commissioner) ----
+// Mobile-friendly UI over GET /api/mlb/roster-audit (read-only scan) and
+// POST /api/mlb/roster-fix (apply). The fix auto-renames/id-claims rostered names
+// with an unambiguous catalog match, retires history-referenced phantom pool
+// entries, and purges orphans; duplicate-name id picks stay manual.
+window.scanPoolCleanup = async function () {
+  const out = document.getElementById('pool-cleanup-results');
+  const applyBtn = document.getElementById('pool-cleanup-apply-btn');
+  if (!out) return;
+  out.innerHTML = '<p class="text-muted">Scanning…</p>';
+  try {
+    const resp = await apiFetch(`/api/mlb/roster-audit?year=${SELECTED_SEASON}`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    const a = await resp.json();
+    const section = (title, items, line) =>
+      items && items.length
+        ? `<div style="margin-top:0.5rem;"><strong>${title} (${items.length})</strong>
+           <ul style="margin:0.25rem 0 0 1.1rem;font-size:0.85rem;">${items.map(line).join('')}</ul></div>`
+        : '';
+    const auto = a.needs_id_assignment || [];
+    const phantoms = [...(a.unrostered_auto || []), ...(a.unrostered_replace || [])];
+    const dupes = a.duplicate_review || [];
+    const review = a.rostered_review || [];
+    let html = '';
+    html += section(
+      'Rostered — will auto-fix (rename + MLB id)',
+      auto,
+      (e) => `<li>${esc(e.wmmc_name)} → ${esc(e.mlb_name)}${e.team ? ` (${esc(e.team)})` : ''}</li>`
+    );
+    html += section(
+      'Phantom pool entries — will retire (history kept) or purge (no history)',
+      phantoms,
+      (e) =>
+        `<li>${esc(e.wmmc_name)}${e.mlb_name ? ` <span class="text-muted">(closest MLB: ${esc(e.mlb_name)})</span>` : ''}</li>`
+    );
+    html += section(
+      'Duplicate names — manual id pick required (not auto-fixed)',
+      dupes,
+      (e) =>
+        `<li>${esc(e.wmmc_name)}: ${(e.candidates || [])
+          .map((c) => `${esc(c.mlb_name)} (${esc(c.team || '?')}, id ${c.mlb_id})`)
+          .join(' / ')}</li>`
+    );
+    html += section(
+      'Rostered, low-confidence match — manual review (not auto-fixed)',
+      review,
+      (e) =>
+        `<li>${esc(e.wmmc_name)} <span class="text-muted">(best: ${esc(e.best_match || '—')}, ${Math.round((e.best_score || 0) * 100)}%)</span></li>`
+    );
+    if (!html) html = '<p class="success-text">All player names check out — nothing to fix.</p>';
+    out.innerHTML = html;
+    if (applyBtn) applyBtn.style.display = auto.length || phantoms.length ? 'inline-block' : 'none';
+  } catch (e) {
+    out.innerHTML = `<p class="error-text">Scan failed — ${esc(e.message)}</p>`;
+  }
+};
+
+window.applyPoolCleanup = async function () {
+  const out = document.getElementById('pool-cleanup-results');
+  if (!out) return;
+  if (
+    !confirm(
+      'Apply name fixes?\n\nRostered mismatches are renamed and id-claimed, phantom pool entries are retired or purged. Duplicate-name picks are left for manual review.'
+    )
+  ) {
+    return;
+  }
+  out.innerHTML = '<p class="text-muted">Applying…</p>';
+  try {
+    const resp = await apiFetch('/api/mlb/roster-fix', {
+      method: 'POST',
+      body: JSON.stringify({ year: SELECTED_SEASON }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    const r = await resp.json();
+    // Pools/rosters changed server-side — refresh the local cache, then re-render
+    // (which rebuilds this card, so re-acquire the results div afterwards).
+    await syncFromServer();
+    renderPlayerPoolDisplay();
+    const s = r.summary || {};
+    const li = (label, n) => `<li>${label}: <strong>${n || 0}</strong></li>`;
+    let html = `<p class="success-text">Cleanup applied.</p>
+      <ul style="margin:0.25rem 0 0 1.1rem;font-size:0.85rem;">
+        ${li('Renames', s.renames_applied)}
+        ${li('MLB ids assigned', s.ids_assigned)}
+        ${li('Retired from pool (history kept)', s.players_retired)}
+        ${li('Purged (no history)', s.players_purged)}
+        ${li('Still needs manual review', s.needs_manual_review)}
+      </ul>`;
+    if ((r.totals_moved || []).length) {
+      html += `<div style="margin-top:0.5rem;"><strong>Manager totals changed</strong> (previously uncredited stats now counting):
+        <ul style="margin:0.25rem 0 0 1.1rem;font-size:0.85rem;">${r.totals_moved
+          .map(
+            (t) =>
+              `<li>${esc(t.manager)}: ${fmt(t.before)} → ${fmt(t.after)} (${t.delta > 0 ? '+' : ''}${t.delta})</li>`
+          )
+          .join('')}</ul></div>`;
+    } else {
+      html += '<p class="text-muted" style="font-size:0.85rem;">No manager totals moved.</p>';
+    }
+    const out2 = document.getElementById('pool-cleanup-results');
+    if (out2) out2.innerHTML = html;
+  } catch (e) {
+    const outErr = document.getElementById('pool-cleanup-results');
+    if (outErr) outErr.innerHTML = `<p class="error-text">Apply failed — ${esc(e.message)}</p>`;
+  }
+};
 
 // ---- Weekly Stat Uploads ----
 
