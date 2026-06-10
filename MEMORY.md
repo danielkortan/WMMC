@@ -1,5 +1,45 @@
 # WMMC — Decisions Log
 
+## Player-name identity: duplicate-name pool keys + roster-fix purge guard (2026-06-10)
+
+Two production symptoms (PR #305): the swap form offered only "Max Muncy (ATH)" — MLB has TWO
+players named Max Muncy and `bootstrapPlayerPools` keyed pool entries by fullName, collapsing
+them into one bare entry whose team flip-flopped with catalog order — and scoreboard players
+("Nicholas Kurtz", "Ronald Acuna Jr.") showed no team because team maps are keyed by MLB
+official spellings while roster strings differ in accents/nicknames, and an id-claimed name
+only got a team label when it appeared in a synced boxscore.
+
+- **Duplicate catalog fullNames get team-disambiguated pool keys** ("Max Muncy (LAD)" /
+  "Max Muncy (ATH)"), each claimed by id in `sd.mlb_ids`. The ambiguous bare entry is retired
+  only when nothing references it (rosters/subs/swaps/roster_dates/attributed rows) and it has
+  no id claim. If the bare name IS rostered and unclaimed, nothing is auto-claimed — auto-
+  claiming would silently redirect the rostered player's future stats (commissioner resolves
+  via roster-fix duplicate_review instead).
+- **`displayPlayer` (app.js) falls back to a normalized lookup**; `normalizeName` now lives in
+  `js/utils.js` and MUST stay identical to the `server.js` copy (same pact as
+  `detectScoreSwings`). The fallback refuses to guess when two team-map keys normalize alike
+  but disagree on team.
+- **Missing-team-label is a diagnostic tell:** the team map gets the WMMC-name key stamped on
+  every synced boxscore appearance, so a rostered player with no team label either has no
+  `mlb_ids` claim under a non-canonical name (→ stats landing UNATTRIBUTED under the MLB
+  spelling — manager losing points; fix via name-fix/roster-fix) or simply hasn't played.
+- **`POST /api/mlb/roster-fix` purge guard (follow-up PR):** the unrostered branch used to
+  purge EVERY unrostered name — written pre-bootstrap, it would now gut the catalog-seeded
+  pool (~thousands of names) and, worse, purge a rename target written seconds earlier (the
+  `rostered` set is a pre-pass snapshot). Now purges only genuinely mismatched names: no exact
+  catalog fullName, no valid id claim, not a rename target from the same pass. roster-audit
+  similarly skips catalog-exact unrostered names.
+- **`renamePlayerInSeason` / `purgePlayerFromSeason` / `extractSeasonPlayerNames` now cover
+  `period_submissions`** (they only handled `initial_submissions` — a PP2-submitted player's
+  submission record kept the old name after a rename).
+- **For a wrong-name rostered player (Kurtz case), prefer the targeted rename**
+  (`POST /api/mlb/name-fix` with explicit `mappings`) — it merges the roster onto the
+  canonical name so existing unattributed rows count immediately. The commissioner-swap
+  alternative (drop old name → add canonical name, dated at period start) also works via UI
+  but leaves the old name as a dropped roster row and in the pool. NEVER do both: renaming
+  after the swap would collapse player_in/player_out to the same name and clobber the
+  add-date in `roster_dates`.
+
 ## Daily rows off the seasons payload — on-demand fetch + server-authoritative (2026-06-10)
 
 Second slimming pass (after score_snapshots, below): `daily_batting`/`daily_pitching` — the
