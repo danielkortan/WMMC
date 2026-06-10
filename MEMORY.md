@@ -15,7 +15,7 @@ snapshot-clobber vector, with zero score movement.
   even a forced replace. This closes a REAL pre-existing hole: any full-season save used to
   replace the trail with whatever the client echoed — a stale tab could roll back or wipe the
   baseline the 40-pt swing guard diffs against (blinding it). `computeSeasonRev` doesn't hash
-  snapshots, so no _rev churn.
+  snapshots, so no \_rev churn.
 - **GET /api/seasons got ETag + 304 + gzip** (built-in `zlib`, no new dependency; Express
   compresses nothing by default and Render doesn't either). `Cache-Control: no-cache` = always
   revalidate: an unchanged re-fetch (every tab switch triggers `syncFromServer`) is now a 304 with
