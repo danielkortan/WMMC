@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -777,9 +778,34 @@ app.get('/api/seasons', (req, res) => {
   const db = readDB();
   const seasons = db.seasons || {};
   // Attach the concurrency token per season (not persisted) so the client can echo it on save.
+  // score_snapshots is stripped: the client never reads it (it's the score guard's diagnostic
+  // trail, written only by recordScoreSnapshot server-side) and it's one of the largest fields
+  // in the payload. The save handlers restore it from the stored season (server-authoritative),
+  // so its absence from a client's later full-season save can never wipe it.
   const out = {};
-  for (const [year, sd] of Object.entries(seasons)) out[year] = { ...sd, _rev: computeSeasonRev(sd) };
-  res.json(out);
+  for (const [year, sd] of Object.entries(seasons)) {
+    const { score_snapshots: _serverOnly, ...clientSd } = sd;
+    out[year] = { ...clientSd, _rev: computeSeasonRev(sd) };
+  }
+  // This payload is multi-MB and re-fetched on every page load and tab switch. ETag + 304 makes
+  // an unchanged re-fetch cost zero body bytes (Cache-Control: no-cache = browsers always
+  // revalidate, never serve stale without asking); gzip shrinks an actual transfer ~10x.
+  // Express compresses nothing by default, and its automatic ETag is set too late to short-
+  // circuit the JSON work, so both are handled explicitly here.
+  const body = JSON.stringify(out);
+  const etag = '"' + crypto.createHash('sha1').update(body).digest('hex') + '"';
+  res.set('ETag', etag);
+  res.set('Cache-Control', 'no-cache');
+  res.set('Vary', 'Accept-Encoding');
+  // includes() rather than equality: proxies may weaken the tag (W/"...") or the browser may
+  // send several candidates comma-separated.
+  if (String(req.headers['if-none-match'] || '').includes(etag)) return res.status(304).end();
+  res.set('Content-Type', 'application/json; charset=utf-8');
+  if (/\bgzip\b/i.test(String(req.headers['accept-encoding'] || ''))) {
+    res.set('Content-Encoding', 'gzip');
+    return res.send(zlib.gzipSync(body));
+  }
+  res.send(body);
 });
 
 // POST /api/seasons — save all seasons (full replace)
@@ -815,6 +841,12 @@ app.post('/api/seasons', requireCommissioner, (req, res) => {
   }
 
   const { force: _force, ...seasons } = incoming;
+  // score_snapshots is server-authoritative (see the per-year save) — carry each stored season's
+  // trail through a bulk replace too, so even a forced replace can't blind the swing guard.
+  for (const [year, sdy] of Object.entries(seasons)) {
+    const existing = (db.seasons || {})[year];
+    if (existing && sdy && typeof sdy === 'object') sdy.score_snapshots = existing.score_snapshots || [];
+  }
   addAuditEntry(db, 'seasons_save_all', { seasonCount: Object.keys(seasons).length }, req.get('X-User-Email'));
   db.seasons = seasons;
   writeDB(db);
@@ -1002,6 +1034,13 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // has no existingSd, so its first save still establishes the empty buckets normally.)
     sd.initial_submissions = existingSd.initial_submissions || {};
     sd.period_submissions = existingSd.period_submissions || {};
+
+    // The score-guard snapshot trail is server-authoritative: written only by
+    // recordScoreSnapshot (4am sync, manual syncs, boot seeding) and no longer sent to clients
+    // at all (GET /api/seasons strips it). Always keep the server's copy so a full-season save —
+    // whether a slim new client or a snapshot-bearing stale one — can never wipe or roll back
+    // the trail the swing guard diffs against. (SAVE_HARDENING_PLAN.md Layer 2.)
+    sd.score_snapshots = existingSd.score_snapshots || [];
   }
 
   // Heal per-week roster arrays from roster_dates whenever a save lands (swap/submission
