@@ -3080,11 +3080,20 @@ function computeDailyHighLow(sd, date) {
     .sort((a, b) => a.score - b.score)
     .slice(0, 3);
 
+  // Fallback for the roast when nobody qualifies for worstPlayers above: the single
+  // lowest-scoring player of the day, tiebroken by strikeouts (pitchers go negative and
+  // will naturally sort last; among tied batters, more strikeouts is the worse day).
+  const worstPlayerOverall = [...allPlayers].sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    return (b.so || 0) - (a.so || 0);
+  })[0];
+
   return {
     topManagers: managers.slice(0, 3),
     bottomManagers: managers.slice(-3).reverse(),
     topPlayers: allPlayers.slice(0, 3),
     bottomPlayers: worstPlayers,
+    worstPlayerOverall,
   };
 }
 
@@ -3353,7 +3362,7 @@ function buildScoreboardBlocks(db, year) {
       day: 'numeric',
       timeZone: 'UTC',
     });
-    const { topManagers, bottomManagers, topPlayers, bottomPlayers } = dailyHL;
+    const { topManagers, bottomManagers, topPlayers, bottomPlayers, worstPlayerOverall } = dailyHL;
 
     const fmtMgr = (m, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
@@ -3376,6 +3385,26 @@ function buildScoreboardBlocks(db, year) {
       return `${label} *${p.name}* - ${typeAbbrev} (${mgrShort}) — ${fmt(p.score)} pts${badge}`;
     };
 
+    // When nobody hits the strict "bad day" bar (see worstPlayers filter in
+    // computeDailyHighLow), roast the day's single worst performance and worst manager
+    // instead of showing an empty list. Picked deterministically from the date so
+    // reloading the same day's post doesn't reroll the joke.
+    const roastTemplates = [
+      (p, mgrShort, m) =>
+        `Nobody truly bombed today, so we'll pick on *${p.name}*'s ${fmt(p.score)}-pt nothingburger instead. *${mgrShort}* still owns it, and *${m.manager}* posted the league's worst manager day at ${fmt(m.total)} pts to keep them company.`,
+      (p, mgrShort, m) =>
+        `Slim pickings for disasters — *${p.name}* (${mgrShort}) quietly put up ${fmt(p.score)} pts, the closest thing to a stinker. *${m.manager}* still found a way to finish last among managers with ${fmt(m.total)} pts.`,
+      (p, mgrShort, m) =>
+        `No certified trainwrecks today, but *${p.name}*'s ${fmt(p.score)} pts is the best worst we've got — *${mgrShort}*, maybe bench that guy. *${m.manager}* takes the wooden spoon for the day at ${fmt(m.total)} pts.`,
+    ];
+    const worstPlayerText = (() => {
+      if (bottomPlayers.length) return bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n');
+      if (!worstPlayerOverall || !bottomManagers.length) return '_None today_';
+      const seed = yesterdayET.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+      const mgrShort = shortMgrNames[worstPlayerOverall.manager] || worstPlayerOverall.manager;
+      return roastTemplates[seed % roastTemplates.length](worstPlayerOverall, mgrShort, bottomManagers[0]);
+    })();
+
     blocks.push({ type: 'divider' });
     blocks.push({
       type: 'section',
@@ -3386,11 +3415,11 @@ function buildScoreboardBlocks(db, year) {
       fields: [
         {
           type: 'mrkdwn',
-          text: `\u{1F3C6} *Best Manager Days*\n${topManagers.map((m, i) => fmtMgr(m, i, false)).join('\n')}`,
+          text: `\u{1F3C6} *Barely Competent*\n${topManagers.map((m, i) => fmtMgr(m, i, false)).join('\n')}`,
         },
         {
           type: 'mrkdwn',
-          text: `\u{1F5D1}️ *Worst Manager Days*\n${bottomManagers.map((m, i) => fmtMgr(m, i, true)).join('\n')}`,
+          text: `\u{1F5D1}️ *Monkeys Trying to Fuck a Loose Couch*\n${bottomManagers.map((m, i) => fmtMgr(m, i, true)).join('\n')}`,
         },
       ],
     });
@@ -3399,13 +3428,11 @@ function buildScoreboardBlocks(db, year) {
       fields: [
         {
           type: 'mrkdwn',
-          text: `\u{2B50} *Best Player Days*\n${topPlayers.map((p, i) => fmtPlayer(p, i, false)).join('\n')}`,
+          text: `\u{2B50} *Have a Day, Kid*\n${topPlayers.map((p, i) => fmtPlayer(p, i, false)).join('\n')}`,
         },
         {
           type: 'mrkdwn',
-          text: `\u{1F4C9} *Worst Player Days*\n${
-            bottomPlayers.length ? bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n') : '_None today_'
-          }`,
+          text: `\u{1F4C9} *Yankees Since '10*\n${worstPlayerText}`,
         },
       ],
     });
