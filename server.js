@@ -1562,7 +1562,7 @@ function convertIPDecimal(rawIP) {
 
 // Daily delta between two batting cumulative snapshots (floor at 0 to guard resets)
 function battingDelta(curr, prev) {
-  const fields = ['1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb', 'abs'];
+  const fields = ['1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb', 'abs', 'so'];
   const delta = {};
   for (const f of fields) delta[f] = Math.max(0, (curr[f] || 0) - (prev[f] || 0));
   return delta;
@@ -2072,7 +2072,9 @@ function rebuildWeeklyFromDaily(sd, round, week) {
   const batMap = {};
   for (const r of dailyBat) {
     const d = r.delta || r.cumulative || {};
-    if (!batMap[r.batter]) batMap[r.batter] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0 };
+    if (!batMap[r.batter]) {
+      batMap[r.batter] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0, so: 0 };
+    }
     for (const k of Object.keys(batMap[r.batter])) batMap[r.batter][k] += d[k] || 0;
   }
 
@@ -2969,11 +2971,17 @@ function computeDailyHighLow(sd, date) {
   const dailyPit = (sd.daily_pitching || []).filter((r) => r.date === date && hadGame(r.delta));
   if (dailyBat.length === 0 && dailyPit.length === 0) return null;
 
-  // Aggregate player scores across games on the same day (e.g. doubleheaders)
+  // Aggregate player scores (plus hits/strikeouts, for the worst-batter filter below)
+  // across games on the same day (e.g. doubleheaders).
   const batterScores = {};
+  const batterHits = {};
+  const batterSO = {};
   const batRoundWeek = {};
   for (const r of dailyBat) {
-    batterScores[r.batter] = (batterScores[r.batter] || 0) + calculateBattingScore(r.delta || {});
+    const d = r.delta || {};
+    batterScores[r.batter] = (batterScores[r.batter] || 0) + calculateBattingScore(d);
+    batterHits[r.batter] = (batterHits[r.batter] || 0) + (d['1b'] || 0) + (d['2b'] || 0) + (d['3b'] || 0) + (d.hr || 0);
+    batterSO[r.batter] = (batterSO[r.batter] || 0) + (d.so || 0);
     if (!batRoundWeek[r.batter]) batRoundWeek[r.batter] = { round: r.round, week: r.week };
   }
   const pitcherScores = {};
@@ -2984,10 +2992,13 @@ function computeDailyHighLow(sd, date) {
   }
 
   // Manager daily totals — respect player_dates date windows.
-  // Track attributed players so the player high/low only covers rostered players.
+  // Track attributed players (and their owning manager) so the player high/low only
+  // covers rostered players, and the Slack post can show who owns each one.
   const managerTotals = {};
   const attributedBatters = new Set();
   const attributedPitchers = new Set();
+  const batterManager = {};
+  const pitcherManager = {};
   const addToManager = (playerName, pdType, score, round, week) => {
     const playerType = pdType === 'batter' ? 'batting' : 'pitching';
     const mgr = findManagerForPlayerWeek(sd, playerName, playerType, round, week);
@@ -3009,8 +3020,13 @@ function computeDailyHighLow(sd, date) {
 
     if (!managerTotals[mgr]) managerTotals[mgr] = { batting: 0, pitching: 0 };
     managerTotals[mgr][playerType] += score;
-    if (pdType === 'batter') attributedBatters.add(playerName);
-    else attributedPitchers.add(playerName);
+    if (pdType === 'batter') {
+      attributedBatters.add(playerName);
+      batterManager[playerName] = mgr;
+    } else {
+      attributedPitchers.add(playerName);
+      pitcherManager[playerName] = mgr;
+    }
   };
 
   for (const [name, score] of Object.entries(batterScores)) {
@@ -3026,10 +3042,22 @@ function computeDailyHighLow(sd, date) {
   const allPlayers = [
     ...Object.entries(batterScores)
       .filter(([name]) => attributedBatters.has(name))
-      .map(([name, score]) => ({ name, score: Math.round(score * 100) / 100, type: 'Batter' })),
+      .map(([name, score]) => ({
+        name,
+        score: Math.round(score * 100) / 100,
+        type: 'Batter',
+        manager: batterManager[name],
+        hits: batterHits[name] || 0,
+        so: batterSO[name] || 0,
+      })),
     ...Object.entries(pitcherScores)
       .filter(([name]) => attributedPitchers.has(name))
-      .map(([name, score]) => ({ name, score: Math.round(score * 100) / 100, type: 'Pitcher' })),
+      .map(([name, score]) => ({
+        name,
+        score: Math.round(score * 100) / 100,
+        type: 'Pitcher',
+        manager: pitcherManager[name],
+      })),
   ];
   if (allPlayers.length === 0) return null;
   allPlayers.sort((a, b) => b.score - a.score);
@@ -3044,11 +3072,19 @@ function computeDailyHighLow(sd, date) {
 
   if (managers.length === 0) return null;
 
+  // Worst Player Days: batters can never score negative points (every batting weight is
+  // positive), so a 0.0 line doesn't mean a bad day on its own — only flag a batter if they
+  // also went hitless with 3+ strikeouts. Pitchers can go negative, so any negative day qualifies.
+  const worstPlayers = allPlayers
+    .filter((p) => (p.type === 'Pitcher' ? p.score < 0 : p.score === 0 && p.hits === 0 && p.so >= 3))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 3);
+
   return {
     topManagers: managers.slice(0, 3),
     bottomManagers: managers.slice(-3).reverse(),
     topPlayers: allPlayers.slice(0, 3),
-    bottomPlayers: allPlayers.slice(-3).reverse(),
+    bottomPlayers: worstPlayers,
   };
 }
 
@@ -3060,6 +3096,23 @@ function buildScoreboardBlocks(db, year) {
   managers.forEach((m) => {
     if (m.pool) managerPoolMap[m.name] = m.pool;
   });
+
+  // Short manager names for the player-ownership tag next to Best/Worst Player Days:
+  // first name only, unless two managers share a first name — then add the first
+  // initial of the last name to disambiguate.
+  const shortMgrNames = {};
+  {
+    const firstNameCounts = {};
+    managers.forEach((m) => {
+      const first = (m.name || '').split(' ')[0];
+      if (first) firstNameCounts[first] = (firstNameCounts[first] || 0) + 1;
+    });
+    managers.forEach((m) => {
+      const parts = (m.name || '').split(' ');
+      const first = parts[0] || m.name;
+      shortMgrNames[m.name] = firstNameCounts[first] > 1 && parts[1] ? `${first} ${parts[1][0]}.` : first;
+    });
+  }
 
   // Determine current round
   const scheduleDates = seasonData.schedule_dates || [];
@@ -3300,7 +3353,9 @@ function buildScoreboardBlocks(db, year) {
     };
     const fmtPlayer = (p, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
-      return `${label} *${p.name}* (${p.type}) — ${fmt(p.score)} pts`;
+      const typeAbbrev = p.type === 'Batter' ? 'B' : 'P';
+      const mgrShort = shortMgrNames[p.manager] || p.manager;
+      return `${label} *${p.name}* - ${typeAbbrev} (${mgrShort}) — ${fmt(p.score)} pts`;
     };
 
     blocks.push({ type: 'divider' });
@@ -3330,7 +3385,9 @@ function buildScoreboardBlocks(db, year) {
         },
         {
           type: 'mrkdwn',
-          text: `\u{1F4C9} *Worst Player Days*\n${bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n')}`,
+          text: `\u{1F4C9} *Worst Player Days*\n${
+            bottomPlayers.length ? bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n') : '_None today_'
+          }`,
         },
       ],
     });
@@ -3738,6 +3795,7 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
       sb: parseNum(findCol(row, ['sb', 'SB', 'stolen_bases', 'stolenBases']) || 0),
       bb: parseNum(findCol(row, ['bb', 'BB', 'walks']) || 0),
       abs: parseNum(findCol(row, ['ab', 'AB', 'abs', 'atBats']) || 0),
+      so: parseNum(findCol(row, ['so', 'SO', 'k', 'K', 'strikeouts']) || 0),
     };
 
     // Don't overwrite a manually-locked daily record for today
@@ -4704,6 +4762,7 @@ function parseBoxscore(box, idToWmmcName = new Map(), gameIsFinal = false) {
           sb: bs.stolenBases || 0,
           bb: bs.baseOnBalls || 0,
           abs: bs.atBats || 0,
+          so: bs.strikeOuts || 0,
         };
       }
 
@@ -4774,7 +4833,9 @@ function aggregatePerGame(gameRecords) {
     Object.assign(teamMap, gt);
 
     for (const [name, stats] of Object.entries(gb)) {
-      if (!batting[name]) batting[name] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0 };
+      if (!batting[name]) {
+        batting[name] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0, so: 0 };
+      }
       for (const k of Object.keys(batting[name])) batting[name][k] += stats[k] || 0;
     }
 
@@ -8445,6 +8506,7 @@ app.post('/api/seasons/:year/daily-stats', requireCommissioner, (req, res) => {
       sb: parseNum(delta.sb || 0),
       bb: parseNum(delta.bb || 0),
       abs: parseNum(delta.abs || 0),
+      so: parseNum(delta.so || 0),
     };
     sd.daily_batting = sd.daily_batting.filter(
       (r) => !(r.date === date && r.round === round && r.week === week && r.batter === player)
@@ -8966,6 +9028,7 @@ function serverAutoAdvancePlayers(sd, managers, weekIndex) {
           rbi: 0,
           sb: 0,
           bb: 0,
+          so: 0,
           weekly_score: 0,
           total_score: existingBatTotals[batter] || 0,
         });
