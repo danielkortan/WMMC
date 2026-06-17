@@ -3353,9 +3353,10 @@ function buildScoreboardBlocks(db, year) {
     };
     // Strikeout-milestone badges for hitless batters on the Worst Player Days list:
     // 3 K = hat trick, 4 K = golden sombrero, 5+ K = platinum sombrero.
+    // Golden/platinum sombrero use the workspace's custom :gold:/:platinum:/:sombrero: emoji.
     const strikeoutBadge = (so) => {
-      if (so >= 5) return ` \u{26AA}\u{1F920}`; // platinum sombrero
-      if (so >= 4) return ` \u{1F7E1}\u{1F920}`; // golden sombrero
+      if (so >= 5) return ` :platinum: :sombrero:`; // platinum sombrero
+      if (so >= 4) return ` :gold: :sombrero:`; // golden sombrero
       if (so >= 3) return ` \u{1F3A9}\u{1FA84}`; // hat trick
       return '';
     };
