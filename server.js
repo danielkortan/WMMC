@@ -3351,11 +3351,20 @@ function buildScoreboardBlocks(db, year) {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
       return `${label} *${m.manager}* — ${fmt(m.total)} pts\n_(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
     };
+    // Strikeout-milestone badges for hitless batters on the Worst Player Days list:
+    // 3 K = hat trick, 4 K = golden sombrero, 5+ K = platinum sombrero.
+    const strikeoutBadge = (so) => {
+      if (so >= 5) return ` \u{26AA}\u{1F920}`; // platinum sombrero
+      if (so >= 4) return ` \u{1F7E1}\u{1F920}`; // golden sombrero
+      if (so >= 3) return ` \u{1F3A9}\u{1FA84}`; // hat trick
+      return '';
+    };
     const fmtPlayer = (p, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
       const typeAbbrev = p.type === 'Batter' ? 'B' : 'P';
       const mgrShort = shortMgrNames[p.manager] || p.manager;
-      return `${label} *${p.name}* - ${typeAbbrev} (${mgrShort}) — ${fmt(p.score)} pts`;
+      const badge = isBottom && p.type === 'Batter' ? strikeoutBadge(p.so || 0) : '';
+      return `${label} *${p.name}* - ${typeAbbrev} (${mgrShort}) — ${fmt(p.score)} pts${badge}`;
     };
 
     blocks.push({ type: 'divider' });
