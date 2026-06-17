@@ -3280,6 +3280,14 @@ function buildScoreboardBlocks(db, year) {
 
   blocks.push({ type: 'header', text: { type: 'plain_text', text: `⚾ WMMC Scoreboard — ${year}`, emoji: true } });
 
+  // Slack collapses long messages and clips the bottom behind a "View Full Message" link,
+  // so this can't live at the end of the message — put it right under the header where it
+  // always renders, regardless of how long the rest of the post gets.
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: '\u{1F517} View full scoreboard: <http://wmmc.live|wmmc.live>' }],
+  });
+
   // Warn managers when the most recent automated compile failed/was blocked, so they
   // know these numbers may be stale. Cleared automatically by the next successful sync.
   const syncStatus = seasonData.last_sync_status;
@@ -3402,12 +3410,6 @@ function buildScoreboardBlocks(db, year) {
       ],
     });
   }
-
-  blocks.push({ type: 'divider' });
-  blocks.push({
-    type: 'context',
-    elements: [{ type: 'mrkdwn', text: '\u{1F517} View full scoreboard: <http://wmmc.live|wmmc.live>' }],
-  });
 
   return {
     blocks,
