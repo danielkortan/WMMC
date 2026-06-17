@@ -1562,7 +1562,7 @@ function convertIPDecimal(rawIP) {
 
 // Daily delta between two batting cumulative snapshots (floor at 0 to guard resets)
 function battingDelta(curr, prev) {
-  const fields = ['1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb', 'abs', 'so'];
+  const fields = ['1b', '2b', '3b', 'hr', 'r', 'rbi', 'sb', 'bb', 'abs', 'so', 'lob'];
   const delta = {};
   for (const f of fields) delta[f] = Math.max(0, (curr[f] || 0) - (prev[f] || 0));
   return delta;
@@ -2073,7 +2073,7 @@ function rebuildWeeklyFromDaily(sd, round, week) {
   for (const r of dailyBat) {
     const d = r.delta || r.cumulative || {};
     if (!batMap[r.batter]) {
-      batMap[r.batter] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0, so: 0 };
+      batMap[r.batter] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0, so: 0, lob: 0 };
     }
     for (const k of Object.keys(batMap[r.batter])) batMap[r.batter][k] += d[k] || 0;
   }
@@ -2976,18 +2976,23 @@ function computeDailyHighLow(sd, date) {
   const batterScores = {};
   const batterHits = {};
   const batterSO = {};
+  const batterLOB = {};
   const batRoundWeek = {};
   for (const r of dailyBat) {
     const d = r.delta || {};
     batterScores[r.batter] = (batterScores[r.batter] || 0) + calculateBattingScore(d);
     batterHits[r.batter] = (batterHits[r.batter] || 0) + (d['1b'] || 0) + (d['2b'] || 0) + (d['3b'] || 0) + (d.hr || 0);
     batterSO[r.batter] = (batterSO[r.batter] || 0) + (d.so || 0);
+    batterLOB[r.batter] = (batterLOB[r.batter] || 0) + (d.lob || 0);
     if (!batRoundWeek[r.batter]) batRoundWeek[r.batter] = { round: r.round, week: r.week };
   }
   const pitcherScores = {};
+  const pitcherBB = {};
   const pitRoundWeek = {};
   for (const r of dailyPit) {
-    pitcherScores[r.pitcher] = (pitcherScores[r.pitcher] || 0) + calculatePitchingScore(r.delta || {});
+    const d = r.delta || {};
+    pitcherScores[r.pitcher] = (pitcherScores[r.pitcher] || 0) + calculatePitchingScore(d);
+    pitcherBB[r.pitcher] = (pitcherBB[r.pitcher] || 0) + (d.bb || 0);
     if (!pitRoundWeek[r.pitcher]) pitRoundWeek[r.pitcher] = { round: r.round, week: r.week };
   }
 
@@ -3049,6 +3054,7 @@ function computeDailyHighLow(sd, date) {
         manager: batterManager[name],
         hits: batterHits[name] || 0,
         so: batterSO[name] || 0,
+        lob: batterLOB[name] || 0,
       })),
     ...Object.entries(pitcherScores)
       .filter(([name]) => attributedPitchers.has(name))
@@ -3057,6 +3063,7 @@ function computeDailyHighLow(sd, date) {
         score: Math.round(score * 100) / 100,
         type: 'Pitcher',
         manager: pitcherManager[name],
+        bb: pitcherBB[name] || 0,
       })),
   ];
   if (allPlayers.length === 0) return null;
@@ -3388,21 +3395,50 @@ function buildScoreboardBlocks(db, year) {
     // When nobody hits the strict "bad day" bar (see worstPlayers filter in
     // computeDailyHighLow), roast the day's single worst performance and worst manager
     // instead of showing an empty list. Picked deterministically from the date so
-    // reloading the same day's post doesn't reroll the joke.
-    const roastTemplates = [
-      (p, mgrShort, m) =>
-        `Nobody truly bombed today, so we'll pick on *${p.name}*'s ${fmt(p.score)}-pt nothingburger instead. *${mgrShort}* still owns it, and *${m.manager}* posted the league's worst manager day at ${fmt(m.total)} pts to keep them company.`,
-      (p, mgrShort, m) =>
-        `Slim pickings for disasters — *${p.name}* (${mgrShort}) quietly put up ${fmt(p.score)} pts, the closest thing to a stinker. *${m.manager}* still found a way to finish last among managers with ${fmt(m.total)} pts.`,
-      (p, mgrShort, m) =>
-        `No certified trainwrecks today, but *${p.name}*'s ${fmt(p.score)} pts is the best worst we've got — *${mgrShort}*, maybe bench that guy. *${m.manager}* takes the wooden spoon for the day at ${fmt(m.total)} pts.`,
+    // reloading the same day's post doesn't reroll the joke. Roasts the chosen player and
+    // ONLY that player's own manager (never a different manager) — picking whichever
+    // available stat makes the funniest joke: a pitcher walking guys > a batter leaving
+    // men on base > a batter striking out > just a plain low score.
+    const walkRoasts = [
+      (p, mgrShort) =>
+        `*${p.name}* walked ${p.bb} batters on his way to a ${fmt(p.score)}-pt day — the man can't commit to a strike zone any more than he can commit to anything else. *${mgrShort}* keeps handing him the ball anyway.`,
+      (p, mgrShort) =>
+        `${p.bb} free passes and a ${fmt(p.score)}-pt line from *${p.name}* — that's not pitching, that's just walking out on people. *${mgrShort}* rostered him anyway.`,
+      (p, mgrShort) =>
+        `*${p.name}* left ${p.bb} batters standing at first for a ${fmt(p.score)}-pt day — dude bails on commitments more than he throws strikes. *${mgrShort}*, maybe it's time for an intervention.`,
+    ];
+    const lobRoasts = [
+      (p, mgrShort) =>
+        `*${p.name}* left ${p.lob} men on base in a ${fmt(p.score)}-pt nothing of a day — the guy abandons runners like it's a bad camping trip. *${mgrShort}* rostered him anyway.`,
+      (p, mgrShort) =>
+        `${p.lob} runners stranded for only ${fmt(p.score)} pts — *${p.name}* really said "every man for himself" out there. *${mgrShort}*'s guy is loyal to absolutely no one on base.`,
+      (p, mgrShort) =>
+        `*${p.name}* posted ${fmt(p.score)} pts while leaving ${p.lob} men on base — a real love-'em-and-leave-'em day. *${mgrShort}* should look into couples counseling for this roster spot.`,
+    ];
+    const strikeoutRoasts = [
+      (p, mgrShort) =>
+        `*${p.name}* struck out ${p.so} times in a ${fmt(p.score)}-pt day, the offensive equivalent of running in place. *${mgrShort}* still gets credit for owning the league's quietest disaster.`,
+      (p, mgrShort) =>
+        `${p.so} strikeouts and ${fmt(p.score)} pts from *${p.name}* — not a hat trick, just a guy swinging at nothing. *${mgrShort}* watched the whole thing happen.`,
+    ];
+    const flatRoasts = [
+      (p, mgrShort) =>
+        `*${p.name}* turned in the league's flattest line today at ${fmt(p.score)} pts — not bad enough to be funny, just bad enough to notice. *${mgrShort}* will pretend not to see this.`,
+      (p, mgrShort) =>
+        `Nobody bombed today, so *${p.name}*'s ${fmt(p.score)}-pt nothingburger gets the spotlight by default. *${mgrShort}* still owns it.`,
     ];
     const worstPlayerText = (() => {
       if (bottomPlayers.length) return bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n');
-      if (!worstPlayerOverall || !bottomManagers.length) return '_None today_';
+      if (!worstPlayerOverall) return '_None today_';
+      const p = worstPlayerOverall;
+      const mgrShort = shortMgrNames[p.manager] || p.manager;
       const seed = yesterdayET.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-      const mgrShort = shortMgrNames[worstPlayerOverall.manager] || worstPlayerOverall.manager;
-      return roastTemplates[seed % roastTemplates.length](worstPlayerOverall, mgrShort, bottomManagers[0]);
+      let bank;
+      if (p.type === 'Pitcher' && (p.bb || 0) >= 2) bank = walkRoasts;
+      else if (p.type === 'Batter' && (p.lob || 0) >= 2) bank = lobRoasts;
+      else if (p.type === 'Batter' && (p.so || 0) >= 1) bank = strikeoutRoasts;
+      else bank = flatRoasts;
+      return bank[seed % bank.length](p, mgrShort);
     })();
 
     blocks.push({ type: 'divider' });
@@ -3835,6 +3871,7 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
       bb: parseNum(findCol(row, ['bb', 'BB', 'walks']) || 0),
       abs: parseNum(findCol(row, ['ab', 'AB', 'abs', 'atBats']) || 0),
       so: parseNum(findCol(row, ['so', 'SO', 'k', 'K', 'strikeouts']) || 0),
+      lob: parseNum(findCol(row, ['lob', 'LOB', 'left_on_base', 'leftOnBase']) || 0),
     };
 
     // Don't overwrite a manually-locked daily record for today
@@ -4802,6 +4839,7 @@ function parseBoxscore(box, idToWmmcName = new Map(), gameIsFinal = false) {
           bb: bs.baseOnBalls || 0,
           abs: bs.atBats || 0,
           so: bs.strikeOuts || 0,
+          lob: bs.leftOnBase || 0,
         };
       }
 
@@ -4873,7 +4911,7 @@ function aggregatePerGame(gameRecords) {
 
     for (const [name, stats] of Object.entries(gb)) {
       if (!batting[name]) {
-        batting[name] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0, so: 0 };
+        batting[name] = { '1b': 0, '2b': 0, '3b': 0, hr: 0, r: 0, rbi: 0, sb: 0, bb: 0, abs: 0, so: 0, lob: 0 };
       }
       for (const k of Object.keys(batting[name])) batting[name][k] += stats[k] || 0;
     }
@@ -8546,6 +8584,7 @@ app.post('/api/seasons/:year/daily-stats', requireCommissioner, (req, res) => {
       bb: parseNum(delta.bb || 0),
       abs: parseNum(delta.abs || 0),
       so: parseNum(delta.so || 0),
+      lob: parseNum(delta.lob || 0),
     };
     sd.daily_batting = sd.daily_batting.filter(
       (r) => !(r.date === date && r.round === round && r.week === week && r.batter === player)
@@ -9068,6 +9107,7 @@ function serverAutoAdvancePlayers(sd, managers, weekIndex) {
           sb: 0,
           bb: 0,
           so: 0,
+          lob: 0,
           weekly_score: 0,
           total_score: existingBatTotals[batter] || 0,
         });
