@@ -3377,7 +3377,10 @@ function buildScoreboardBlocks(db, year) {
 
     const fmtMgr = (m, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
-      return `${label} *${m.manager}* — ${fmt(m.total)}\n_(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+      // Slack mrkdwn has no text-align support and collapses regular spaces, so fake an
+      // indent with non-breaking spaces to line this row up under the name instead of
+      // flush-left under the rank label above it.
+      return `${label} *${m.manager}* — ${fmt(m.total)}\n\u00A0\u00A0\u00A0_(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
     };
     // Strikeout-milestone badges for hitless batters on the Worst Player Days list:
     // 3 K = hat trick, 4 K = golden sombrero, 5+ K = platinum sombrero.
