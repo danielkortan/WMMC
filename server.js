@@ -3252,7 +3252,11 @@ function buildScoreboardBlocks(db, year) {
   });
 
   // ---- Formatters ----
-  const fmt = (n) => n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  // Whole-point totals (no partial pitcher innings) drop the redundant ".0".
+  const fmt = (n) => {
+    const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    return s.endsWith('.0') ? s.slice(0, -2) : s;
+  };
   const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
   const rankEmoji = ['\u{1F947}', '\u{1F948}', '\u{1F949}']; // 🥇🥈🥉
   const rank = (i) => (i < 3 ? rankEmoji[i] : `${i + 1}.`);
@@ -3268,7 +3272,7 @@ function buildScoreboardBlocks(db, year) {
           const nameStr = d !== null ? `*${m.manager}*` : m.manager;
           const dotStr = d ? `${d} ` : '';
           const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-          return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+          return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)}`;
         })
         .join('\n')
     : '_No scores recorded yet._';
@@ -3284,7 +3288,7 @@ function buildScoreboardBlocks(db, year) {
           const dotStr = d ? `${d} ` : '';
           const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
           const trash = m.manager === poolLastMgr ? ' \u{1F4A9}' : '';
-          return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)} pts`;
+          return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)}`;
         })
         .join('\n');
       return `*${poolName}*\n${lines}`;
@@ -3373,7 +3377,7 @@ function buildScoreboardBlocks(db, year) {
 
     const fmtMgr = (m, i, isBottom) => {
       const label = isBottom ? `${i + 1}.` : rankEmoji[i] || `${i + 1}.`;
-      return `${label} *${m.manager}* — ${fmt(m.total)} pts\n_(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
+      return `${label} *${m.manager}* — ${fmt(m.total)}\n_(B: ${fmtInt(m.batting)} | P: ${fmt(m.pitching)})_`;
     };
     // Strikeout-milestone badges for hitless batters on the Worst Player Days list:
     // 3 K = hat trick, 4 K = golden sombrero, 5+ K = platinum sombrero.
@@ -3389,7 +3393,7 @@ function buildScoreboardBlocks(db, year) {
       const typeAbbrev = p.type === 'Batter' ? 'B' : 'P';
       const mgrShort = shortMgrNames[p.manager] || p.manager;
       const badge = isBottom && p.type === 'Batter' ? strikeoutBadge(p.so || 0) : '';
-      return `${label} *${p.name}* - ${typeAbbrev} (${mgrShort}) — ${fmt(p.score)} pts${badge}`;
+      return `${label} *${p.name}* - ${typeAbbrev} (${mgrShort}) — ${fmt(p.score)}${badge}`;
     };
 
     // When nobody hits the strict "bad day" bar (see worstPlayers filter in
