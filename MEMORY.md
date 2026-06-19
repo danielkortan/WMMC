@@ -1,5 +1,35 @@
 # WMMC — Decisions Log
 
+## Scoreboard PP1/PP2 manager-click panels bled into each other (2026-06-19)
+
+**Symptom.** In the active-season Pool Play Scoreboard (`renderActiveScoreboardTabs`), clicking a
+manager's name in the PP2 section showed PP1's player breakdown (or vice versa) instead of that
+period's own players/stats.
+
+**Root cause (two bugs in `renderPoolSection`/`toggleManagerDetails`, `app.js`).** (1)
+`mgrKey` in `renderPoolSection` was derived from the manager name only (`name.replace(...)`),
+with no section suffix — so the same manager's PP1 row and PP2 row produced the **same**
+`mgr-detail-<mgrKey>` element ID. `document.getElementById` always resolves to the first match in
+the DOM (PP1, since it renders first), so a PP2 click toggled/filled PP1's row. (2) Even with
+unique IDs, `toggleManagerDetails` always built **every** `BREAKDOWN_PERIODS` entry (PP1, PP2, QF,
+SF, Finals) grouped — correct for Pool Play Overall, but it meant a PP1- or PP2-scoped click still
+rendered both periods' players.
+
+**Fix.** `mgrKey` in `renderPoolSection` now suffixes the section (`_pp1`/`_pp2`), giving each
+period's row a distinct ID. `toggleManagerDetails` gained a third `periodFilter` param
+(`'pp1'`/`'pp2'`/`'overall'`/omitted); when set to a single period it filters `BREAKDOWN_PERIODS`
+to just that key before building the panel. Wired through every call site: `renderPoolSection`'s
+onclick passes `section`, `renderOverallTable` passes `'overall'` explicitly (same as the prior
+default — show everything), and `togglePoolManagers`/`toggleAllManagerDetails` forward
+`row.dataset.sbPeriod` (already stamped on each detail row) when re-toggling rows programmatically.
+Pool Play Overall is unaffected — it still shows both periods grouped, as the report requested.
+
+**Verified headless (Playwright) against a live local server** seeded from
+`tests/fixtures/staging-seed.json`: clicking a manager in PP1 showed only "Pool Play 1" with that
+period's batters/pitchers/points; clicking the same manager in PP2 showed only "Pool Play 2" with
+its own (different) totals; Pool Play Overall still showed both periods stacked for one manager.
+Frontend-only (`app.js`); no `SCORING`/`SEASON_SCHEDULE`/server changes.
+
 ## Player-name identity: duplicate-name pool keys + roster-fix purge guard (2026-06-10)
 
 Two production symptoms (PR #305): the swap form offered only "Max Muncy (ATH)" — MLB has TWO
