@@ -3193,7 +3193,7 @@ window.togglePoolManagers = function (poolId) {
     const isHidden = row.style.display === 'none';
     if (anyHidden === isHidden) {
       const mgrKey = row.id.replace('mgr-detail-', '');
-      window.toggleManagerDetails(mgrKey, row.dataset.manager);
+      window.toggleManagerDetails(mgrKey, row.dataset.manager, row.dataset.sbPeriod);
     }
   });
   const btn = document.getElementById('pool-btn-' + poolId);
@@ -3207,15 +3207,17 @@ window.toggleAllManagerDetails = function (period) {
     const isHidden = row.style.display === 'none';
     if (anyHidden === isHidden) {
       const mgrKey = row.id.replace('mgr-detail-', '');
-      window.toggleManagerDetails(mgrKey, row.dataset.manager);
+      window.toggleManagerDetails(mgrKey, row.dataset.manager, row.dataset.sbPeriod);
     }
   });
   const btn = document.getElementById('toggle-all-mgr-btn-' + period);
   if (btn) btn.textContent = anyHidden ? 'Hide' : 'Show';
 };
 
-// Toggle the manager player detail pop-down in the scoreboard
-window.toggleManagerDetails = function (mgrKey, managerName) {
+// Toggle the manager player detail pop-down in the scoreboard. `periodFilter` scopes the
+// breakdown to a single scoring period ('pp1'/'pp2') when clicked from that period's own
+// section; omitted (Pool Play Overall) shows every period grouped, as before.
+window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
   const row = document.getElementById('mgr-detail-' + mgrKey);
   const arrow = document.getElementById('sb-arrow-' + mgrKey);
   if (!row) return;
@@ -3241,21 +3243,26 @@ window.toggleManagerDetails = function (mgrKey, managerName) {
   // Group the schedule into scoring periods (PP1, PP2, playoffs). Each period gets its own
   // collapsible subsection so a future-period roster submission (e.g. a PP2 roster submitted
   // before PP2 starts, dated to PP2's first week) never visually bleeds into the current period.
-  const periodInfo = BREAKDOWN_PERIODS.map((p) => {
-    const weeks = [];
-    let firstStart = null;
-    let lastEnd = null;
-    SEASON_SCHEDULE.forEach((s, idx) => {
-      if (s.round !== p.key) return;
-      weeks.push({ schedWeek: s, idx });
-      const d = sbScheduleDates && sbScheduleDates[idx];
-      if (d) {
-        if (!firstStart || d.start < firstStart) firstStart = d.start;
-        if (!lastEnd || d.end > lastEnd) lastEnd = d.end;
-      }
-    });
-    return { key: p.key, label: p.label, weeks, firstStart, lastEnd };
-  }).filter((p) => p.weeks.length > 0);
+  // periodFilter ('pp1'/'pp2') scopes the breakdown to that single period's own players/stats —
+  // set when the click came from the Pool Play 1 or Pool Play 2 section, not Pool Play Overall.
+  const filterKey = periodFilter && periodFilter !== 'overall' ? periodFilter.toUpperCase() : null;
+  const periodInfo = BREAKDOWN_PERIODS.filter((p) => !filterKey || p.key === filterKey)
+    .map((p) => {
+      const weeks = [];
+      let firstStart = null;
+      let lastEnd = null;
+      SEASON_SCHEDULE.forEach((s, idx) => {
+        if (s.round !== p.key) return;
+        weeks.push({ schedWeek: s, idx });
+        const d = sbScheduleDates && sbScheduleDates[idx];
+        if (d) {
+          if (!firstStart || d.start < firstStart) firstStart = d.start;
+          if (!lastEnd || d.end > lastEnd) lastEnd = d.end;
+        }
+      });
+      return { key: p.key, label: p.label, weeks, firstStart, lastEnd };
+    })
+    .filter((p) => p.weeks.length > 0);
 
   // Pick the period to auto-expand: the one whose date window contains today, else the most
   // recently started, else the first. Drives the "auto show the current period" behavior.
@@ -5008,8 +5015,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <tbody>`;
         poolScores.forEach((m, i) => {
           const cls = hlClass(m.manager, section);
-          const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_');
-          html += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${jsStr(m.manager)}')">
+          // Suffix with the section so PP1 and PP2 rows for the same manager get distinct
+          // element IDs — without it, both periods' detail rows shared one ID and toggling
+          // either row always found/filled the first (PP1) one in the DOM.
+          const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_') + '_' + section;
+          html += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${jsStr(m.manager)}','${section}')">
           <td class="rank">${i + 1}</td>
           <td><strong class="${cls}">${esc(m.manager)}</strong>${m.manager === overallLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''} <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
           <td class="num">${fmt(m.batting)}</td>
@@ -5039,7 +5049,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     scores.forEach((m, i) => {
       const cls = hlClass(m.manager, 'overall');
       const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_') + '_ov';
-      tbl += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${jsStr(m.manager)}')">
+      tbl += `<tr class="sb-manager-row" onclick="toggleManagerDetails('${mgrKey}','${jsStr(m.manager)}','overall')">
         <td class="rank">${i + 1}</td>
         <td><strong class="${cls}">${esc(m.manager)}</strong>${m.manager === overallLastMgr ? ' <span class="last-place-icon" title="Last place">🗑️💦</span>' : ''} <span class="sb-expand-arrow" id="sb-arrow-${mgrKey}">&#9660;</span></td>
         <td>${mgrPool[m.manager] || ''}</td>
@@ -5047,7 +5057,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
         <td class="num">${fmt(m.pitching)}</td>
         <td class="num"><strong>${fmt(m.total)}</strong></td>
       </tr>
-      <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${esc(m.manager)}" style="display:none;">
+      <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${esc(m.manager)}" data-sb-period="overall" style="display:none;">
         <td colspan="6"><div class="mgr-detail-loading">Loading...</div></td>
       </tr>`;
     });
