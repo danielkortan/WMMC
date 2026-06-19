@@ -3079,6 +3079,15 @@ function computeDailyHighLow(sd, date) {
 
   if (managers.length === 0) return null;
 
+  // Top/bottom managers must be disjoint — with fewer than 6 managers playing that day
+  // (e.g. SF/Finals rounds), slicing both ends independently would show the same
+  // manager in both the best and worst lists.
+  const topManagerCount = Math.min(3, managers.length);
+  const topManagersList = managers.slice(0, topManagerCount);
+  const remainingManagers = managers.slice(topManagerCount);
+  const bottomManagerCount = Math.min(3, remainingManagers.length);
+  const bottomManagersList = remainingManagers.slice(-bottomManagerCount).reverse();
+
   // Worst Player Days: batters can never score negative points (every batting weight is
   // positive), so a 0.0 line doesn't mean a bad day on its own — only flag a batter if they
   // also went hitless with 3+ strikeouts. Pitchers can go negative, so any negative day qualifies.
@@ -3096,8 +3105,8 @@ function computeDailyHighLow(sd, date) {
   })[0];
 
   return {
-    topManagers: managers.slice(0, 3),
-    bottomManagers: managers.slice(-3).reverse(),
+    topManagers: topManagersList,
+    bottomManagers: bottomManagersList,
     topPlayers: allPlayers.slice(0, 3),
     bottomPlayers: worstPlayers,
     worstPlayerOverall,
