@@ -242,17 +242,14 @@ async function saveToUpstash(data) {
   }
 }
 
-// Write a dated, auto-expiring snapshot of the DB under wmmc_db_bak_<YYYY-MM-DD>. Unlike the
-// live UPSTASH_KEY (overwritten on every save, no history), these rotate themselves via EX and
-// give ~2 weeks of daily restore points — so a bad write or boot migration is recoverable
-// instead of lost. Called on boot, capturing the as-restored (pre-migration) state.
-async function saveTimestampedBackup(data) {
+// Low-level: write `data` to an explicit Upstash key with a TTL. The daily backup, the pre-restore
+// safety snapshot, and any future named backup all funnel through here so the serialization quirk
+// (Upstash wants a JSON string, hence the double-stringify) and TTL handling live in one place.
+async function saveBackupKey(data, key, ttlSeconds = DB_BACKUP_TTL_SECONDS) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return { ok: false, skipped: true };
-  const dateKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD; later deploys refresh same-day key
-  const key = `${UPSTASH_KEY}_bak_${dateKey}`;
   const body = JSON.stringify(JSON.stringify(data));
   try {
-    const resp = await fetch(`${UPSTASH_URL}/set/${key}?EX=${DB_BACKUP_TTL_SECONDS}`, {
+    const resp = await fetch(`${UPSTASH_URL}/set/${key}?EX=${ttlSeconds}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
       body,
@@ -266,6 +263,52 @@ async function saveTimestampedBackup(data) {
     console.error('[Upstash] Backup save failed:', `(${body.length} bytes)`, e.message);
     return { ok: false, error: e.message };
   }
+}
+
+// Write a dated, auto-expiring snapshot of the DB under wmmc_db_bak_<YYYY-MM-DD>. Unlike the
+// live UPSTASH_KEY (overwritten on every save, no history), these rotate themselves via EX and
+// give ~2 weeks of daily restore points — so a bad write or boot migration is recoverable
+// instead of lost. Called on boot, capturing the as-restored (pre-migration) state.
+async function saveTimestampedBackup(data) {
+  const dateKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD; later deploys refresh same-day key
+  return saveBackupKey(data, `${UPSTASH_KEY}_bak_${dateKey}`);
+}
+
+// Fetch a single dated backup snapshot (wmmc_db_bak_<YYYY-MM-DD>). Returns the parsed DB object, or
+// null when the key is absent/expired/unreadable. Mirrors loadFromUpstash but for the rolling
+// backups; used by the restore tooling (GET /api/admin/db-backups, POST /api/admin/db-restore).
+async function loadTimestampedBackup(dateKey) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const resp = await fetch(`${UPSTASH_URL}/get/${UPSTASH_KEY}_bak_${dateKey}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+    if (!resp.ok) return null;
+    const { result } = await resp.json();
+    return result ? JSON.parse(result) : null;
+  } catch (e) {
+    console.error('[Upstash] Backup load failed:', dateKey, e.message);
+    return null;
+  }
+}
+
+// One-glance integrity summary of a DB snapshot for the restore-point picker: when it was last
+// saved, how many managers it carries, and per active-or-not season the status + schedule_dates
+// length (the field whose silent wipe motivated this tooling) + roster-attribution manager count.
+function summarizeBackup(db) {
+  const seasons = {};
+  for (const [year, sd] of Object.entries((db && db.seasons) || {})) {
+    seasons[year] = {
+      status: (sd && sd.status) || null,
+      schedule_dates: Array.isArray(sd && sd.schedule_dates) ? sd.schedule_dates.length : 0,
+      rostered_managers: sd && sd.rosters && typeof sd.rosters === 'object' ? Object.keys(sd.rosters).length : 0,
+    };
+  }
+  return {
+    last_saved_at: (db && db.last_saved_at) || null,
+    managers: ((db && db.managers) || []).length,
+    seasons,
+  };
 }
 
 // Roster/manager integrity audit (SAVE_HARDENING_PLAN.md, Layer 4). Enforces the core invariant:
@@ -1433,6 +1476,90 @@ app.get('/api/audit-log', requireCommissioner, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, MAX_AUDIT_ENTRIES);
   const log = (db.audit_log || []).slice(0, limit);
   res.json(log);
+});
+
+// ============================================================
+// DB backup / restore (commissioner-only)
+// ============================================================
+//
+// The server already WRITES rolling dated backups (wmmc_db_bak_<YYYY-MM-DD>, ~14-day TTL) on every
+// boot/save. These two endpoints make them usable in-app so recovery from a bad write no longer
+// means opening the Upstash console. Restore is destructive, so it is gated three ways: commissioner
+// auth, an explicit confirm token that must echo the chosen date, and a fresh pre-restore backup of
+// the current live state taken (and awaited) BEFORE anything is overwritten.
+
+// GET /api/admin/db-backups — probe the last ~14 days of dated snapshots and report which exist,
+// each with a one-glance integrity summary (last_saved_at + per-season schedule_dates length).
+app.get('/api/admin/db-backups', requireCommissioner, async (req, res) => {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+    return res.status(503).json({ error: 'backups_unavailable', detail: 'Upstash is not configured on this deploy.' });
+  }
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 30);
+  // Build the candidate date keys (today back N-1 days), then probe them concurrently.
+  const dateKeys = [];
+  for (let i = 0; i < days; i++) {
+    dateKeys.push(new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+  }
+  const snapshots = await Promise.all(dateKeys.map((d) => loadTimestampedBackup(d)));
+  const backups = dateKeys.map((date, i) => {
+    const snap = snapshots[i];
+    return snap ? { date, exists: true, ...summarizeBackup(snap) } : { date, exists: false };
+  });
+  res.json({ backups, live: summarizeBackup(readDB()) });
+});
+
+// POST /api/admin/db-restore?date=YYYY-MM-DD — restore a dated snapshot to live.
+// Body: { confirm: "YYYY-MM-DD" } must match the date query param (a deliberate, non-accidental
+// confirmation). The current live DB is backed up first (awaited) so a restore is itself reversible.
+app.post('/api/admin/db-restore', requireCommissioner, async (req, res) => {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+    return res.status(503).json({ error: 'backups_unavailable', detail: 'Upstash is not configured on this deploy.' });
+  }
+  const date = String(req.query.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'invalid_date', detail: 'date query param must be YYYY-MM-DD.' });
+  }
+  const confirm = req.body && req.body.confirm;
+  if (confirm !== date) {
+    return res
+      .status(400)
+      .json({ error: 'confirmation_required', detail: 'Body { confirm } must echo the date being restored.' });
+  }
+
+  const snapshot = await loadTimestampedBackup(date);
+  if (!snapshot) {
+    return res.status(404).json({ error: 'backup_not_found', detail: `No backup exists for ${date}.` });
+  }
+  // Structural sanity: a restore must look like a real DB, never an empty/garbage blob.
+  if (!snapshot || typeof snapshot !== 'object' || typeof snapshot.seasons !== 'object') {
+    return res.status(422).json({ error: 'backup_corrupt', detail: `Backup for ${date} is missing a seasons object.` });
+  }
+
+  // Snapshot the CURRENT live state under a distinct pre-restore key (kept the full 14 days) BEFORE
+  // overwriting, so an unwanted restore can itself be rolled back. Await it — durability first.
+  const live = readDB();
+  const preKey = `${UPSTASH_KEY}_bak_prerestore_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const preBackup = await saveBackupKey(live, preKey);
+  if (!preBackup.ok && !preBackup.skipped) {
+    return res
+      .status(502)
+      .json({ error: 'pre_restore_backup_failed', detail: 'Aborted: could not back up current state.' });
+  }
+
+  // Commit the restored snapshot to live (disk + Upstash). awaitBackup so the restore can't be lost
+  // if the instance spins down immediately after. Stamp the audit log on the restored DB.
+  addAuditEntry(snapshot, 'db_restore', { date, pre_restore_key: preKey }, req.get('X-User-Email'));
+  await writeDB(snapshot, { awaitBackup: true });
+  console.log(`[Restore] Commissioner restored DB snapshot ${date} (pre-restore backup: ${preKey}).`);
+  try {
+    await postSlack(
+      `:leftwards_arrow_with_hook: *WMMC DB restored* to the ${date} snapshot by ${req.get('X-User-Email')}. ` +
+        `Previous state saved as \`${preKey}\`.`
+    );
+  } catch (e) {
+    console.error('[Restore] Slack alert failed:', e.message);
+  }
+  res.json({ ok: true, restored: date, pre_restore_key: preKey, summary: summarizeBackup(snapshot) });
 });
 
 // ============================================================
