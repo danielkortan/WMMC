@@ -1590,10 +1590,12 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) =>
   });
 
   // 3. Stats: un-attribute player_in's weekly rows for this manager (inverse of approve's attribution).
-  for (const r of sd.weekly_batting || [])
+  for (const r of sd.weekly_batting || []) {
     if (r.batter === swap.player_in && r.manager === swap.manager) r.manager = null;
-  for (const r of sd.weekly_pitching || [])
+  }
+  for (const r of sd.weekly_pitching || []) {
     if (r.pitcher === swap.player_in && r.manager === swap.manager) r.manager = null;
+  }
 
   // 4. Mark the swap undone (kept in the log for audit, not deleted).
   swap.status = 'undone';
@@ -1765,6 +1767,50 @@ app.put('/api/seasons/:year/schedule', requireCommissioner, (req, res) => {
   // schedule_dates is a hashed field — return the new token so a following full-season save from the
   // same client doesn't falsely 409.
   res.json({ ok: true, schedule_dates: sd.schedule_dates, _rev: computeSeasonRev(sd) });
+});
+
+// PUT /api/seasons/:year/pool — atomically write one player pool (batters or pitchers) + its team map
+// from a commissioner CSV upload, instead of riding the whole-season POST. The client still does the
+// CSV merge (mergePlayerPool: same-name/team collisions + renames); this just writes the result under
+// a server read-modify-write. Pool uploads are additive (adds/renames), so a payload that would SHRINK
+// the stored pool signals a stale/bad upload and is refused — the same protection as the schedule
+// endpoint, letting the per-field merge band-aid stay as defense-in-depth. Last slice of #275.
+app.put('/api/seasons/:year/pool', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { type, pool, team_map: teamMap } = req.body || {};
+  if (type !== 'batters' && type !== 'pitchers') {
+    return res.status(400).json({ error: "type must be 'batters' or 'pitchers'" });
+  }
+  if (!Array.isArray(pool) || !pool.every((p) => typeof p === 'string')) {
+    return res.status(400).json({ error: 'pool must be an array of player-name strings' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const poolKey = type === 'batters' ? 'batters_pool' : 'pitchers_pool';
+  const teamKey = type === 'batters' ? 'batters_team' : 'pitchers_team';
+
+  // Refuse a pool that shrinks vs the stored one — uploads only add/rename, never wipe.
+  const storedLen = Array.isArray(sd[poolKey]) ? sd[poolKey].length : 0;
+  if (pool.length < storedLen) {
+    return res.status(409).json({
+      error: 'pool_would_shrink',
+      detail: `Refusing to replace ${storedLen} stored ${type} with ${pool.length}.`,
+    });
+  }
+
+  sd[poolKey] = pool;
+  if (teamMap && typeof teamMap === 'object' && !Array.isArray(teamMap)) sd[teamKey] = teamMap;
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(db, 'pool_uploaded', { year: req.params.year, type, count: pool.length }, req.get('X-User-Email'));
+  writeDB(db);
+  // The pool is a hashed field — return the new token so a following full-season save isn't stale.
+  res.json({ ok: true, type, count: pool.length, _rev: computeSeasonRev(sd) });
 });
 
 // DELETE /api/seasons/:year/submissions/:period/:manager — remove one submission record

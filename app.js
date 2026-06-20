@@ -1051,6 +1051,36 @@ async function saveSchedule(year, fields, opts = {}) {
   }
 }
 
+// Atomically write one player pool (batters or pitchers) + its team map from a CSV upload via the
+// dedicated PUT /api/seasons/:year/pool endpoint instead of a whole-season POST. The caller has
+// already merged the CSV into the local pool (mergePlayerPool); this only swaps the transport and
+// adopts the new concurrency token. Last slice of the granular-endpoints migration (#275).
+async function savePool(year, type, pool, teamMap, opts = {}) {
+  const { silent = false } = opts;
+  try {
+    const resp = await apiFetch('/api/seasons/' + year + '/pool', {
+      method: 'PUT',
+      body: JSON.stringify({ type, pool, team_map: teamMap }),
+    });
+    if (!resp.ok) {
+      if (!silent) alert(`Pool save failed (${resp.status}). Please reload and try again.`);
+      return false;
+    }
+    const body = await resp.json().catch(() => ({}));
+    if (body && body._rev) {
+      const s = getSeasons();
+      if (s[year]) {
+        s[year]._rev = body._rev;
+        setSeasonsLocal(s);
+      }
+    }
+    return true;
+  } catch (e) {
+    if (!silent) console.warn('savePool error:', e.message);
+    return false;
+  }
+}
+
 // Atomically mutate a single swap (deny / edit) via the dedicated swap endpoints instead of a
 // whole-season POST, so a commissioner action can't be lost to a stale-save 409 — the "I approved/
 // denied a swap but it didn't stick and the request came back" bug — and can't clobber unrelated
@@ -12432,7 +12462,8 @@ function setupPlayerPoolUploads() {
       const { pool, teamMap: newTeamMap, added } = mergePlayerPool(sd.batters_pool || [], sd.batters_team || {}, rows);
       sd.batters_pool = pool;
       sd.batters_team = newTeamMap;
-      saveSeason(SELECTED_SEASON, sd);
+      setSeasonsLocal(seasons);
+      savePool(SELECTED_SEASON, 'batters', pool, newTeamMap);
       const pitCount = (sd.pitchers_pool || []).length;
       const totalBat = pool.length;
       let msg =
@@ -12466,7 +12497,8 @@ function setupPlayerPoolUploads() {
       } = mergePlayerPool(sd.pitchers_pool || [], sd.pitchers_team || {}, rows);
       sd.pitchers_pool = pool;
       sd.pitchers_team = newTeamMap;
-      saveSeason(SELECTED_SEASON, sd);
+      setSeasonsLocal(seasons);
+      savePool(SELECTED_SEASON, 'pitchers', pool, newTeamMap);
       const batCount = (sd.batters_pool || []).length;
       const totalPit = pool.length;
       let msg =
