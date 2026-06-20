@@ -1246,12 +1246,29 @@ app.post('/api/seasons/:year/swaps', requireAuth, (req, res) => {
   if (!sd) return res.status(404).json({ error: 'Season not found' });
   if (sd.status !== 'active') return res.status(400).json({ error: 'Season is not active' });
 
+  if (!Array.isArray(sd.swaps)) sd.swaps = [];
+
+  // Idempotency guard: a double-click (or a retry while the first request was still in flight on the
+  // long computeSwapEffectiveDates call) was creating two identical pending requests for the same
+  // manager + player_out + player_in — the "commissioner got the same swap twice" bug. If an
+  // identical pending swap already exists, return it instead of appending a duplicate (no second
+  // write, no second Slack post).
+  const dup = sd.swaps.find(
+    (s) =>
+      s.status === 'pending' &&
+      s.manager === swap.manager &&
+      s.player_out === swap.player_out &&
+      s.player_in === swap.player_in
+  );
+  if (dup) {
+    return res.json({ ok: true, swap: dup, duplicate: true, _rev: computeSeasonRev(sd) });
+  }
+
   // Server stamps id, timestamp, and status so the client cannot forge them.
   swap.id = Date.now().toString();
   swap.timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
   swap.status = 'pending';
 
-  if (!Array.isArray(sd.swaps)) sd.swaps = [];
   sd.swaps.push(swap);
 
   addAuditEntry(
@@ -1269,6 +1286,80 @@ app.post('/api/seasons/:year/swaps', requireAuth, (req, res) => {
   postSlack(
     `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
   ).catch(() => {});
+});
+
+// Find a swap by id within a season, or null. Shared by the deny/edit/approve endpoints.
+function findSwap(sd, swapId) {
+  return (Array.isArray(sd.swaps) ? sd.swaps : []).find((s) => String(s.id) === String(swapId)) || null;
+}
+
+// POST /api/seasons/:year/swaps/:id/deny — atomically deny a pending swap. Deny touches no rosters,
+// dates, or stats — it only flips status — so it carries zero scoring risk and is the safest of the
+// swap-lifecycle endpoints. Replaces the client mutate + whole-season POST, whose stale-save 409
+// could silently lose the denial and resurface the request. Part of #275 (ROSTER_OPS_PLAN.md §3a).
+app.post('/api/seasons/:year/swaps/:id/deny', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const swap = findSwap(sd, req.params.id);
+  if (!swap) return res.status(404).json({ error: 'Swap not found' });
+  if (swap.status !== 'pending') {
+    return res.status(409).json({ error: 'swap_not_pending', detail: `Swap is ${swap.status}, not pending.` });
+  }
+
+  swap.status = 'denied';
+  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'swap_denied',
+    { year: req.params.year, manager: swap.manager, player_out: swap.player_out, player_in: swap.player_in },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
+});
+
+// PUT /api/seasons/:year/swaps/:id — atomically patch a swap's own fields (player_out, player_in,
+// reason, swap_date). Mirrors today's saveSwapEdit / saveSwapLogReason behavior exactly: it edits the
+// swap RECORD only and does not rebuild rosters (roster_dates re-derive from swaps on the next render
+// via backfillRosterDatesFromSwaps, as before). Replaces the whole-season POST so an edit can't be
+// lost to a stale 409 or clobber unrelated data. Part of #275 (ROSTER_OPS_PLAN.md §3b).
+app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const swap = findSwap(sd, req.params.id);
+  if (!swap) return res.status(404).json({ error: 'Swap not found' });
+
+  const { player_out: playerOut, player_in: playerIn, reason, swap_date: swapDate } = req.body || {};
+  if (typeof playerOut === 'string' && playerOut) swap.player_out = playerOut;
+  if (typeof playerIn === 'string' && playerIn) swap.player_in = playerIn;
+  if (typeof reason === 'string') swap.reason = reason;
+  if (typeof swapDate === 'string' && swapDate) swap.swap_date = swapDate;
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'swap_edited',
+    {
+      year: req.params.year,
+      id: swap.id,
+      manager: swap.manager,
+      player_out: swap.player_out,
+      player_in: swap.player_in,
+    },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 });
 
 // ---- Atomic roster-submission endpoints (PP1 + PP2/playoff periods) ----

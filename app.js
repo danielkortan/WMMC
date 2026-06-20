@@ -1051,6 +1051,38 @@ async function saveSchedule(year, fields, opts = {}) {
   }
 }
 
+// Atomically mutate a single swap (deny / edit) via the dedicated swap endpoints instead of a
+// whole-season POST, so a commissioner action can't be lost to a stale-save 409 — the "I approved/
+// denied a swap but it didn't stick and the request came back" bug — and can't clobber unrelated
+// season data. Mirrors the confirmed server swap + new _rev into localStorage. Returns the server
+// payload on success, or null on failure (caller surfaces the error). Part of #275.
+async function persistSwapMutation(year, swapId, method, path, body) {
+  try {
+    const resp = await apiFetch(`/api/seasons/${year}/swaps/${swapId}${path}`, {
+      method,
+      body: JSON.stringify(body || {}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(`Swap update failed (${err.error || resp.status}). Please reload and try again.`);
+      return null;
+    }
+    const data = await resp.json().catch(() => ({}));
+    const seasons = getSeasons();
+    const sd = seasons[year];
+    if (sd && Array.isArray(sd.swaps) && data.swap) {
+      const i = sd.swaps.findIndex((s) => String(s.id) === String(swapId));
+      if (i >= 0) sd.swaps[i] = data.swap;
+      if (data._rev) sd._rev = data._rev;
+      setSeasonsLocal(seasons);
+    }
+    return data;
+  } catch (e) {
+    alert(`Swap update failed — ${e.message}. Please reload and try again.`);
+    return null;
+  }
+}
+
 // ---- Atomic submission persistence ----
 // Roster submissions are written through dedicated endpoints, never the clobber-prone
 // full-season save (saveSeason no longer persists submissions — the server treats them as
@@ -8129,7 +8161,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         </div>
       </div>
       <div style="margin-top:0.75rem;">
-        <button class="btn btn-primary" onclick="submitSwapRequest('${jsStr(managerName)}')">Submit Request</button>
+        <button class="btn btn-primary" onclick="submitSwapRequest('${jsStr(managerName)}', event)">Submit Request</button>
       </div>
       <p id="swap-form-error" class="error-text" style="display:none;margin-top:0.5rem;"></p>
       <p id="swap-form-success" class="success-text" style="display:none;margin-top:0.5rem;"></p>
@@ -8805,99 +8837,122 @@ async function computeSwapEffectiveDates(sd, playerOut, playerIn) {
 }
 
 // Submit a swap request
-window.submitSwapRequest = async function (managerName) {
+window.submitSwapRequest = async function (managerName, ev) {
   const errEl = document.getElementById('swap-form-error');
   const succEl = document.getElementById('swap-form-success');
   errEl.style.display = 'none';
   succEl.style.display = 'none';
 
-  const playerOut = document.getElementById('swap-player-out').value;
-  const playerIn = document.getElementById('swap-player-in').value;
-  const reason = document.getElementById('swap-reason').value;
-  const swapDate = new Date().toISOString().split('T')[0];
-
-  if (!playerOut || !playerIn || !reason) {
-    errEl.textContent = 'All fields are required.';
-    errEl.style.display = 'block';
-    return;
+  // Double-submit guard: computeSwapEffectiveDates below awaits a live-schedule network call, leaving
+  // a window where a second click fired a second identical request (the "commissioner got the swap
+  // twice" bug). Disable the button while this submission is in flight. The server also dedupes
+  // identical pending swaps as a backstop, but blocking the second request here is cleaner.
+  const btnEl = (ev && ev.currentTarget) || (typeof event !== 'undefined' && event && event.currentTarget) || null;
+  if (btnEl) {
+    if (btnEl.dataset.submitting === '1') return;
+    btnEl.dataset.submitting = '1';
+    btnEl.disabled = true;
   }
-
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || sd.status !== 'active') {
-    errEl.textContent = 'No active season.';
-    errEl.style.display = 'block';
-    return;
-  }
-
-  if (!sd.swaps) sd.swaps = [];
-
-  // Check swap limits for this round
-  const limitError = checkSwapLimit(sd, managerName, reason);
-  if (limitError) {
-    errEl.textContent = limitError;
-    errEl.style.display = 'block';
-    return;
-  }
-
-  const { round, weekKey } = getCurrentScheduleRound(sd);
-
-  // Determine effective add/drop dates from the live game schedule.
-  const { effective_date, drop_date, add_date, teams_started } = await computeSwapEffectiveDates(
-    sd,
-    playerOut,
-    playerIn
-  );
-
-  const swap = {
-    email: LOGGED_IN_EMAIL,
-    manager: managerName,
-    player_out: playerOut,
-    player_in: playerIn,
-    reason: reason,
-    swap_date: swapDate,
-    effective_date: effective_date,
-    drop_date: drop_date,
-    add_date: add_date,
-    teams_started: teams_started,
-    round: round,
-    week_key: weekKey,
+  const clearSubmitting = () => {
+    if (btnEl) {
+      btnEl.dataset.submitting = '';
+      btnEl.disabled = false;
+    }
   };
 
-  // Post only the swap object to the dedicated endpoint — avoids the whole-season
-  // payload that previously failed silently when the JSON was large or auth was stale.
   try {
-    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps`, {
-      method: 'POST',
-      body: JSON.stringify(swap),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.error || `Server error (${resp.status})`);
-    }
-    const { swap: savedSwap, _rev } = await resp.json();
+    const playerOut = document.getElementById('swap-player-out').value;
+    const playerIn = document.getElementById('swap-player-in').value;
+    const reason = document.getElementById('swap-reason').value;
+    const swapDate = new Date().toISOString().split('T')[0];
 
-    // Mirror the confirmed server swap into localStorage so the view is consistent.
-    const freshSeasons = getSeasons();
-    const freshSd = freshSeasons[SELECTED_SEASON];
-    if (freshSd) {
-      if (!Array.isArray(freshSd.swaps)) freshSd.swaps = [];
-      freshSd.swaps.push(savedSwap);
-      if (_rev) freshSd._rev = _rev; // adopt the token bumped by this swap so the next save isn't stale
-      setSeasonsLocal(freshSeasons);
+    if (!playerOut || !playerIn || !reason) {
+      errEl.textContent = 'All fields are required.';
+      errEl.style.display = 'block';
+      return;
     }
 
-    succEl.textContent = 'Swap request submitted!';
-    succEl.style.display = 'block';
-  } catch (e) {
-    errEl.textContent = `Swap not submitted — ${e.message}. Please try again or contact the commissioner.`;
-    errEl.style.display = 'block';
-    return;
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (!sd || sd.status !== 'active') {
+      errEl.textContent = 'No active season.';
+      errEl.style.display = 'block';
+      return;
+    }
+
+    if (!sd.swaps) sd.swaps = [];
+
+    // Check swap limits for this round
+    const limitError = checkSwapLimit(sd, managerName, reason);
+    if (limitError) {
+      errEl.textContent = limitError;
+      errEl.style.display = 'block';
+      return;
+    }
+
+    const { round, weekKey } = getCurrentScheduleRound(sd);
+
+    // Determine effective add/drop dates from the live game schedule.
+    const { effective_date, drop_date, add_date, teams_started } = await computeSwapEffectiveDates(
+      sd,
+      playerOut,
+      playerIn
+    );
+
+    const swap = {
+      email: LOGGED_IN_EMAIL,
+      manager: managerName,
+      player_out: playerOut,
+      player_in: playerIn,
+      reason: reason,
+      swap_date: swapDate,
+      effective_date: effective_date,
+      drop_date: drop_date,
+      add_date: add_date,
+      teams_started: teams_started,
+      round: round,
+      week_key: weekKey,
+    };
+
+    // Post only the swap object to the dedicated endpoint — avoids the whole-season
+    // payload that previously failed silently when the JSON was large or auth was stale.
+    try {
+      const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps`, {
+        method: 'POST',
+        body: JSON.stringify(swap),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `Server error (${resp.status})`);
+      }
+      const { swap: savedSwap, _rev } = await resp.json();
+
+      // Mirror the confirmed server swap into localStorage so the view is consistent. Dedupe by id:
+      // if the server returned an already-existing pending swap (duplicate guard), don't add a second
+      // local copy.
+      const freshSeasons = getSeasons();
+      const freshSd = freshSeasons[SELECTED_SEASON];
+      if (freshSd) {
+        if (!Array.isArray(freshSd.swaps)) freshSd.swaps = [];
+        if (!freshSd.swaps.some((s) => String(s.id) === String(savedSwap.id))) freshSd.swaps.push(savedSwap);
+        if (_rev) freshSd._rev = _rev; // adopt the token bumped by this swap so the next save isn't stale
+        setSeasonsLocal(freshSeasons);
+      }
+
+      succEl.textContent = 'Swap request submitted!';
+      succEl.style.display = 'block';
+    } catch (e) {
+      errEl.textContent = `Swap not submitted — ${e.message}. Please try again or contact the commissioner.`;
+      errEl.style.display = 'block';
+      return;
+    }
+
+    // Re-render entire roster view
+    const isComm = isLoggedInCommissioner();
+    renderRosterData(managerName, isComm);
+  } finally {
+    clearSubmitting();
   }
-
-  // Re-render entire roster view
-  const isComm = isLoggedInCommissioner();
-  renderRosterData(managerName, isComm);
 };
 
 // Sync add-date input to one day after drop-date when drop-date changes
@@ -9001,19 +9056,13 @@ window.approveSwap = function (swapId) {
 };
 
 // Commissioner: deny a swap
-window.denySwap = function (swapId) {
+window.denySwap = async function (swapId) {
   if (!confirm('Deny this swap request?')) return;
 
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || !sd.swaps) return;
-
-  const swap = sd.swaps.find((s) => s.id === swapId);
-  if (!swap) return;
-
-  swap.status = 'denied';
-  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  saveSeason(SELECTED_SEASON, sd);
+  // Atomic deny — flips status server-side; can't be lost to a stale-save 409 (the bug where a
+  // denied request reappeared as pending).
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'POST', '/deny', {});
+  if (!result) return;
 
   renderPendingSwapRequests();
   renderSwapLog();
@@ -9091,25 +9140,20 @@ window.editSwapInline = function (swapId) {
 };
 
 // Commissioner: save edited swap
-window.saveSwapEdit = function (swapId) {
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || !sd.swaps) return;
-
-  const swap = sd.swaps.find((s) => s.id === swapId);
-  if (!swap) return;
-
+window.saveSwapEdit = async function (swapId) {
   const newOut = document.getElementById(`edit-out-${swapId}`).value;
   const newIn = document.getElementById(`edit-in-${swapId}`).value;
   const newReason = document.getElementById(`edit-reason-${swapId}`).value;
   const newDate = document.getElementById(`edit-date-${swapId}`).value;
 
-  if (newOut) swap.player_out = newOut;
-  if (newIn) swap.player_in = newIn;
-  if (newReason) swap.reason = newReason;
-  if (newDate) swap.swap_date = newDate;
-
-  saveSeason(SELECTED_SEASON, sd);
+  // Atomic edit of the swap record's own fields (no roster rebuild — matches prior behavior).
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', {
+    player_out: newOut,
+    player_in: newIn,
+    reason: newReason,
+    swap_date: newDate,
+  });
+  if (!result) return;
 
   const mgrs = getManagers();
   const mgr = mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
@@ -9538,14 +9582,9 @@ window.swapLogSetAll = function (containerId, kind, on) {
   renderSwapLog(containerId, state.editable);
 };
 
-window.saveSwapLogReason = function (containerId, swapId, newReason) {
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || !sd.swaps) return;
-  const swap = sd.swaps.find((s) => s.id === swapId);
-  if (!swap) return;
-  swap.reason = newReason;
-  saveSeason(SELECTED_SEASON, sd);
+window.saveSwapLogReason = async function (containerId, swapId, newReason) {
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', { reason: newReason });
+  if (!result) return;
   const state = getSwapLogState(containerId);
   renderSwapLog(containerId, state.editable);
 };
