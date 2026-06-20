@@ -54,7 +54,16 @@ reconciles any overlap, so running both at once is safe but not recommended.
 - `db.json` lives on the Render **persistent disk** at `/var/data/db.json` (`DB_PATH`). The
   **Storage** button reports the live path and whether durable storage is active.
 - Writes are atomic (temp file → fsync → rename), so a crash mid-write can't corrupt the DB.
-- Upstash is **not** a viable backup at this DB size — see README. The disk is the source of truth.
+- The disk is the source of truth. When `UPSTASH_*` is configured, the server also mirrors a **slim**
+  copy to Upstash (live `wmmc_db` key + rolling dated `wmmc_db_bak_<YYYY-MM-DD>` snapshots, ~14-day
+  TTL). Slim = full league/standings state minus the regenerable per-game `daily_*` rows, so it fits
+  Upstash's ~1 MB limit (`slimForBackup` in `server.js`).
+- **Restore** (commissioner only): `GET /api/admin/db-backups` lists available restore points with an
+  integrity summary; `POST /api/admin/db-restore?date=YYYY-MM-DD` (body `{ "confirm": "YYYY-MM-DD" }`)
+  restores one. It backs up current state first under a `wmmc_db_bak_prerestore_*` key, so a restore
+  is itself reversible. Because the snapshot is slim, standings come back immediately but per-game
+  daily detail does not — **re-run an MLB backfill (`POST /api/mlb/backfill`) after a restore** to
+  repopulate `daily_*` rows. The restore response and Slack alert flag which seasons need it.
 
 ## Score-swing guard fired (Slack alert) — troubleshooting
 

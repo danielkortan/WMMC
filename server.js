@@ -218,9 +218,56 @@ async function loadFromUpstash() {
   }
 }
 
+// Upstash's REST /set rejects payloads over its request-size limit (~1 MB on the free tier). A full
+// season's daily_batting/daily_pitching rows (the largest field by far — see the per-year save) push
+// the raw db.json well past that, which is why the backup historically failed silently and UPSTASH_*
+// ships unset. The backup only exists for disaster recovery, and those per-game rows are
+// server-authoritative and re-derivable from the MLB Stats API (and the weekly rollups we keep drive
+// standings). So every Upstash write stores a SLIM clone: full league/standings state minus the
+// regenerable daily rows.
+//
+// IMPORTANT: this is backup-only. writeDB() still persists the FULL db.json to the Render disk (the
+// source of truth the live site reads/writes); slimForBackup never mutates it and never runs on the
+// disk path. A restore from a slim snapshot brings back standings immediately; per-game daily detail
+// is repopulated by an MLB backfill (POST /api/mlb/backfill).
+const UPSTASH_MAX_BYTES = 1024 * 1024; // ~1 MB Upstash /set request limit (free tier)
+
+function slimForBackup(data) {
+  if (!data || typeof data !== 'object') return data;
+  const slim = { ...data };
+  if (slim.seasons && typeof slim.seasons === 'object') {
+    const seasons = {};
+    for (const [year, sd] of Object.entries(slim.seasons)) {
+      if (sd && typeof sd === 'object') {
+        const { daily_batting: _db, daily_pitching: _dp, ...rest } = sd;
+        seasons[year] = rest;
+      } else {
+        seasons[year] = sd;
+      }
+    }
+    slim.seasons = seasons;
+  }
+  return slim;
+}
+
+// Single serialization point for every Upstash write (live mirror + dated backups + pre-restore
+// snapshot). Slims first, then double-stringifies (Upstash /set wants a JSON string as its body), and
+// warns loudly if the slimmed payload STILL exceeds the size limit — so an oversized backup can never
+// fail silently again.
+function serializeForUpstash(data, label) {
+  const body = JSON.stringify(JSON.stringify(slimForBackup(data)));
+  if (body.length > UPSTASH_MAX_BYTES) {
+    console.error(
+      `[Upstash] ${label || 'payload'} is ${body.length} bytes after slimming — exceeds the ~${UPSTASH_MAX_BYTES}-byte ` +
+        `limit and will likely be rejected. The slim payload needs further trimming.`
+    );
+  }
+  return body;
+}
+
 async function saveToUpstash(data) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return { ok: false, skipped: true };
-  const body = JSON.stringify(JSON.stringify(data));
+  const body = serializeForUpstash(data, 'live mirror (wmmc_db)');
   try {
     const resp = await fetch(`${UPSTASH_URL}/set/${UPSTASH_KEY}`, {
       method: 'POST',
@@ -247,7 +294,7 @@ async function saveToUpstash(data) {
 // (Upstash wants a JSON string, hence the double-stringify) and TTL handling live in one place.
 async function saveBackupKey(data, key, ttlSeconds = DB_BACKUP_TTL_SECONDS) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return { ok: false, skipped: true };
-  const body = JSON.stringify(JSON.stringify(data));
+  const body = serializeForUpstash(data, key);
   try {
     const resp = await fetch(`${UPSTASH_URL}/set/${key}?EX=${ttlSeconds}`, {
       method: 'POST',
@@ -1546,20 +1593,42 @@ app.post('/api/admin/db-restore', requireCommissioner, async (req, res) => {
       .json({ error: 'pre_restore_backup_failed', detail: 'Aborted: could not back up current state.' });
   }
 
+  // Backups are slim (daily_batting/daily_pitching are stripped to fit Upstash — see slimForBackup),
+  // so a restore brings back standings immediately but not per-game daily detail. Flag any active
+  // season whose daily rows are empty so the commissioner knows to re-run the MLB backfill.
+  const needsBackfill = Object.entries(snapshot.seasons || {})
+    .filter(
+      ([, sd]) =>
+        sd &&
+        sd.status === 'active' &&
+        !((sd.daily_batting && sd.daily_batting.length) || (sd.daily_pitching && sd.daily_pitching.length))
+    )
+    .map(([year]) => year);
+
   // Commit the restored snapshot to live (disk + Upstash). awaitBackup so the restore can't be lost
   // if the instance spins down immediately after. Stamp the audit log on the restored DB.
   addAuditEntry(snapshot, 'db_restore', { date, pre_restore_key: preKey }, req.get('X-User-Email'));
   await writeDB(snapshot, { awaitBackup: true });
   console.log(`[Restore] Commissioner restored DB snapshot ${date} (pre-restore backup: ${preKey}).`);
+  const backfillNote = needsBackfill.length
+    ? ` Per-game daily detail for ${needsBackfill.join(', ')} was not in the slim backup — run an MLB backfill (POST /api/mlb/backfill) to repopulate it.`
+    : '';
   try {
     await postSlack(
       `:leftwards_arrow_with_hook: *WMMC DB restored* to the ${date} snapshot by ${req.get('X-User-Email')}. ` +
-        `Previous state saved as \`${preKey}\`.`
+        `Previous state saved as \`${preKey}\`.${backfillNote}`
     );
   } catch (e) {
     console.error('[Restore] Slack alert failed:', e.message);
   }
-  res.json({ ok: true, restored: date, pre_restore_key: preKey, summary: summarizeBackup(snapshot) });
+  res.json({
+    ok: true,
+    restored: date,
+    pre_restore_key: preKey,
+    summary: summarizeBackup(snapshot),
+    backfill_needed: needsBackfill,
+    note: backfillNote.trim() || undefined,
+  });
 });
 
 // ============================================================
