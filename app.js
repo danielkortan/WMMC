@@ -1021,6 +1021,36 @@ async function saveSeason(year, data, opts = {}) {
   }
 }
 
+// Persist just the schedule slice (schedule_dates + the ASG date / period deadlines computed with it)
+// via the granular PUT /api/seasons/:year/schedule endpoint instead of a whole-season POST, so a
+// schedule save can't clobber unrelated season fields. Callers update local state themselves (as
+// before); this only swaps the transport and adopts the new concurrency token returned by the server.
+// First slice of the granular-endpoints migration (#275).
+async function saveSchedule(year, fields, opts = {}) {
+  const { silent = false } = opts;
+  try {
+    const resp = await apiFetch('/api/seasons/' + year + '/schedule', { method: 'PUT', body: JSON.stringify(fields) });
+    if (!resp.ok) {
+      if (!silent) alert(`Schedule save failed (${resp.status}). Please try again.`);
+      return false;
+    }
+    // schedule_dates is a hashed field — adopt the returned token so a later full-season save from
+    // this client doesn't falsely 409 as stale.
+    const body = await resp.json().catch(() => ({}));
+    if (body && body._rev) {
+      const s = getSeasons();
+      if (s[year]) {
+        s[year]._rev = body._rev;
+        setSeasonsLocal(s);
+      }
+    }
+    return true;
+  } catch (e) {
+    if (!silent) console.warn('saveSchedule error:', e.message);
+    return false;
+  }
+}
+
 // ---- Atomic submission persistence ----
 // Roster submissions are written through dedicated endpoints, never the clobber-prone
 // full-season save (saveSeason no longer persists submissions — the server treats them as
@@ -10115,7 +10145,8 @@ function setupASGDateInput() {
     const sd = seasons[SELECTED_SEASON];
     sd.asg_date = input.value;
     sd.schedule_dates = dates;
-    saveSeason(SELECTED_SEASON, sd);
+    setSeasonsLocal(seasons);
+    saveSchedule(SELECTED_SEASON, { schedule_dates: dates, asg_date: input.value });
 
     status.innerHTML = '<span style="color:#10b981;">Schedule dates saved!</span>';
     renderScheduleDatesPreview();
@@ -10306,7 +10337,8 @@ async function autoFillSchedule() {
   sd.schedule_dates = schedDates;
   if (!sd.period_deadlines) sd.period_deadlines = {};
   Object.assign(sd.period_deadlines, periodDeadlines);
-  saveSeason(SELECTED_SEASON, sd);
+  setSeasonsLocal(seasons);
+  saveSchedule(SELECTED_SEASON, { schedule_dates: schedDates, asg_date: asgDate, period_deadlines: periodDeadlines });
 
   // Step 5: update UI inputs
   const asgInputEl = document.getElementById('asg-date-input');

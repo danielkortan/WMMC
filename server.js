@@ -1340,6 +1340,61 @@ app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
   res.json({ ok: true, submission, _rev: computeSeasonRev(sd) });
 });
 
+// PUT /api/seasons/:year/schedule — atomically set the per-week schedule_dates (and the optional
+// ASG date / period deadlines computed alongside it in Season Setup) WITHOUT a whole-season
+// overwrite. schedule_dates defines every add/drop scoring window (the core invariant), so this is
+// commissioner-only, validates the shape, and refuses to SHRINK an existing schedule — an incomplete
+// schedule silently turns every `add_date <= weekEnd` check into "always eligible" and corrupts
+// scoring league-wide (the exact wipe the per-field save guard was added to catch). First slice of
+// the granular-endpoints migration (#275): peels the schedule off the clobber-prone full-season POST.
+app.put('/api/seasons/:year/schedule', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { schedule_dates: scheduleDates, asg_date: asgDate, period_deadlines: periodDeadlines } = req.body || {};
+  if (!Array.isArray(scheduleDates) || scheduleDates.length === 0) {
+    return res.status(400).json({ error: 'schedule_dates[] is required' });
+  }
+  const wellFormed = scheduleDates.every(
+    (w) => w && typeof w === 'object' && typeof w.start === 'string' && typeof w.end === 'string'
+  );
+  if (!wellFormed) {
+    return res.status(400).json({ error: 'each schedule_dates entry needs string start and end fields' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  // Refuse a schedule that drops weeks vs the stored one — protects every add/drop scoring window.
+  const storedLen = Array.isArray(sd.schedule_dates) ? sd.schedule_dates.length : 0;
+  if (scheduleDates.length < storedLen) {
+    return res.status(409).json({
+      error: 'schedule_would_shrink',
+      detail: `Refusing to replace ${storedLen} stored weeks with ${scheduleDates.length}.`,
+    });
+  }
+
+  sd.schedule_dates = scheduleDates;
+  if (typeof asgDate === 'string') sd.asg_date = asgDate;
+  if (periodDeadlines && typeof periodDeadlines === 'object') {
+    if (!sd.period_deadlines) sd.period_deadlines = {};
+    Object.assign(sd.period_deadlines, periodDeadlines);
+  }
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'schedule_saved',
+    { year: req.params.year, weeks: scheduleDates.length, asg_date: sd.asg_date || null },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  // schedule_dates is a hashed field — return the new token so a following full-season save from the
+  // same client doesn't falsely 409.
+  res.json({ ok: true, schedule_dates: sd.schedule_dates, _rev: computeSeasonRev(sd) });
+});
+
 // DELETE /api/seasons/:year/submissions/:period/:manager — remove one submission record
 // entirely (commissioner Delete). Distinct from Deny, which leaves an empty draft.
 app.delete('/api/seasons/:year/submissions/:period/:manager', requireAuth, (req, res) => {
