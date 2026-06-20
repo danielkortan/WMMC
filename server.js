@@ -9968,19 +9968,34 @@ function scheduleScoreboardPost() {
 
   function runAndReschedule() {
     const now = new Date();
-    console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
+    const todayET = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
+    // Idempotency guard: claim today's post in db.json (shared across processes/restarts)
+    // BEFORE sending to Slack. Render's zero-downtime deploys can briefly run an old and a
+    // new instance side by side, and each instance independently arms its own 7am setTimeout
+    // — without this guard, both fire and Slack gets two scoreboard posts for the same day
+    // (often computed from different in-memory states, e.g. one mid-deploy with no season
+    // data loaded yet). Re-reading fresh and writing the claim first keeps the race window
+    // as small as possible.
     const db = readDB();
-    const config = db.google_sheets_config || {};
-    const season = config.season || now.getFullYear().toString();
-    const sd = (db.seasons || {})[season];
-
-    if (isWithinSyncWindow(sd)) {
-      postScoreboardSlack(db, season)
-        .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
-        .catch((e) => console.error('[Scoreboard] Post failed:', e.message));
+    if (db.last_scoreboard_post_date === todayET) {
+      console.log(`[Scoreboard] Already posted today (${todayET}) — skipping duplicate run`);
     } else {
-      console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);
+      db.last_scoreboard_post_date = todayET;
+      writeDB(db);
+
+      console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
+      const config = db.google_sheets_config || {};
+      const season = config.season || now.getFullYear().toString();
+      const sd = (db.seasons || {})[season];
+
+      if (isWithinSyncWindow(sd)) {
+        postScoreboardSlack(db, season)
+          .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
+          .catch((e) => console.error('[Scoreboard] Post failed:', e.message));
+      } else {
+        console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);
+      }
     }
 
     const next = getNextEasternHour(7);
