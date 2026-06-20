@@ -1362,6 +1362,151 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
   res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 });
 
+// Set the manager on a player's not-yet-attributed weekly rows. Server-side port of the client's
+// assignUnclaimedStats (which has no server copy) — kept identical so the atomic approve below
+// behaves exactly like the old client approveSwap, only without the stale-save 409 that lost it.
+function assignUnclaimedStatsServer(sd, playerName, managerName, rosterType) {
+  const isBatter = rosterType === 'batters' || rosterType === 'batting';
+  const rows = isBatter ? sd.weekly_batting : sd.weekly_pitching;
+  const key = isBatter ? 'batter' : 'pitcher';
+  if (!Array.isArray(rows)) return;
+  for (const r of rows) {
+    if (r[key] === playerName && !r.manager) r.manager = managerName;
+  }
+}
+
+// POST /api/seasons/:year/swaps/:id/approve — atomically approve a pending swap. This is a faithful
+// server-side port of the old client approveSwap (rosters out→in across the affected weeks +
+// roster_dates drop/add windows + stat attribution), so scoring behavior is unchanged — but because
+// it runs server-side under a read-modify-write, it can't be lost to a stale-save 409 (the
+// "I approved it but it came back as pending" bug). Body: { add_date, drop_date, force? }. Before
+// committing it runs the destructive-save integrity guard and, unless force is set, rejects (409,
+// no write, Slack-alert) any approval that would crater a manager's total or shrink a roster.
+// Part of #275 (ROSTER_OPS_PLAN.md §3c).
+app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const swap = findSwap(sd, req.params.id);
+  if (!swap) return res.status(404).json({ error: 'Swap not found' });
+  if (swap.status !== 'pending') {
+    return res.status(409).json({ error: 'swap_not_pending', detail: `Swap is ${swap.status}, not pending.` });
+  }
+
+  const { add_date: addDate, drop_date: dropDate, force } = req.body || {};
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const tomorrowET = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  })();
+  const effectiveDropDate = (typeof dropDate === 'string' && dropDate) || swap.drop_date || todayET;
+  const effectiveAddDate = (typeof addDate === 'string' && addDate) || swap.add_date || tomorrowET;
+
+  // Pristine copy for the before/after integrity vet (sd is mutated in place below).
+  const originalSd = JSON.parse(JSON.stringify(sd));
+
+  // --- faithful port of the client approveSwap mutation ---
+  if (sd.rosters && sd.rosters[swap.manager]) {
+    const mgrRoster = sd.rosters[swap.manager];
+    let playerType = null;
+    for (const weekRoster of Object.values(mgrRoster)) {
+      if ((weekRoster.batters || []).includes(swap.player_out)) {
+        playerType = 'batters';
+        break;
+      }
+      if ((weekRoster.pitchers || []).includes(swap.player_out)) {
+        playerType = 'pitchers';
+        break;
+      }
+    }
+    if (playerType) {
+      const weekKeys = swap.week_key ? [swap.week_key] : Object.keys(mgrRoster);
+      weekKeys.forEach((wk) => {
+        const weekRoster = mgrRoster[wk];
+        if (!weekRoster) return;
+        const arr = weekRoster[playerType] || [];
+        if (arr.includes(swap.player_out)) {
+          weekRoster[playerType] = arr.filter((p) => p !== swap.player_out);
+          if (!weekRoster[playerType].includes(swap.player_in)) weekRoster[playerType].push(swap.player_in);
+        }
+      });
+      assignUnclaimedStatsServer(sd, swap.player_in, swap.manager, playerType);
+    }
+  }
+
+  swap.status = 'approved';
+  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
+  if (!sd.roster_dates) sd.roster_dates = {};
+  if (!sd.roster_dates[swap.manager]) sd.roster_dates[swap.manager] = {};
+  rdWeekKeys.forEach((wk) => {
+    if (!sd.roster_dates[swap.manager][wk]) sd.roster_dates[swap.manager][wk] = {};
+    const wkDates = sd.roster_dates[swap.manager][wk];
+    if (swap.player_out) {
+      if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
+      wkDates[swap.player_out].drop_date = effectiveDropDate;
+    }
+    if (swap.player_in) {
+      if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
+      wkDates[swap.player_in].add_date = effectiveAddDate;
+    }
+  });
+  // --- end port ---
+
+  // Before/after totals vet + destructive-save guard. A normal swap is net-zero on a week's roster
+  // and shouldn't trip it; a flagged approval (e.g. dropping a high scorer) requires an explicit
+  // force override so a legitimate large correction isn't blocked.
+  const integrity = assessSeasonWriteIntegrity(originalSd, sd);
+  if (integrity.destructive && !force) {
+    // Discard the in-place mutation: sd IS db.seasons[year], so restore the pristine pre-approval
+    // copy before writing, or writeDB would persist the very change we're blocking. Only the audit
+    // entry is meant to survive.
+    db.seasons[req.params.year] = originalSd;
+    addAuditEntry(
+      db,
+      'swap_approve_blocked',
+      { year: req.params.year, id: swap.id, reasons: integrity.reasons },
+      req.get('X-User-Email')
+    );
+    writeDB(db); // persists the restored (good) season + the audit note; the blocked mutation is dropped
+    postSlack(
+      `:warning: *Swap approval blocked (${req.params.year})* — ${swap.manager}: out ${swap.player_out}, in ${swap.player_in}.\n• ` +
+        `${integrity.reasons.join('\n• ')}\nRe-approve with force to apply.`
+    ).catch(() => {});
+    return res.status(409).json({ error: 'destructive_approve_blocked', reasons: integrity.reasons });
+  }
+
+  const before = captureScoreSnapshot(originalSd, todayET).totals;
+  const after = captureScoreSnapshot(sd, todayET).totals;
+  const totalsDelta = {};
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+    if (Math.abs(d) > 0.01) totalsDelta[m] = Math.round(d * 10) / 10;
+  }
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'swap_approved',
+    {
+      year: req.params.year,
+      id: swap.id,
+      manager: swap.manager,
+      player_out: swap.player_out,
+      player_in: swap.player_in,
+      forced: !!force,
+    },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, swap, totals_delta: totalsDelta, _rev: computeSeasonRev(sd) });
+});
+
 // ---- Atomic roster-submission endpoints (PP1 + PP2/playoff periods) ----
 //
 // Roster submissions used to ride the full-season save (POST /api/seasons/:year), whose
