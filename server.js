@@ -1444,12 +1444,30 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
   const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
   if (!sd.roster_dates) sd.roster_dates = {};
   if (!sd.roster_dates[swap.manager]) sd.roster_dates[swap.manager] = {};
+  // A player can't be dropped before they were added. If player_out was added earlier in this same
+  // period (e.g. a rapid swap-then-undo where they were added today but the swap's canned drop date
+  // is yesterday), a drop date before that add forms an impossible window (add after drop) that the
+  // eligibility check reads as "still rostered" — so the drop silently never takes effect. Clamp the
+  // drop up to the player's most recent in-period add. Dates are ISO 'YYYY-MM-DD' (lexicographic).
+  const swapPeriodStart = periodStartForRound(sd, (swap.week_key || '').split('|')[0]);
+  const latestInPeriodAdd = (player) => {
+    let latest = null;
+    for (const wkObj of Object.values(sd.roster_dates[swap.manager] || {})) {
+      const e = wkObj && wkObj[player];
+      if (e && e.add_date && (!swapPeriodStart || e.add_date >= swapPeriodStart) && (!latest || e.add_date > latest)) {
+        latest = e.add_date;
+      }
+    }
+    return latest;
+  };
+  const outAdd = swap.player_out ? latestInPeriodAdd(swap.player_out) : null;
+  const clampedDropDate = outAdd && effectiveDropDate < outAdd ? outAdd : effectiveDropDate;
   rdWeekKeys.forEach((wk) => {
     if (!sd.roster_dates[swap.manager][wk]) sd.roster_dates[swap.manager][wk] = {};
     const wkDates = sd.roster_dates[swap.manager][wk];
     if (swap.player_out) {
       if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
-      wkDates[swap.player_out].drop_date = effectiveDropDate;
+      wkDates[swap.player_out].drop_date = clampedDropDate;
     }
     if (swap.player_in) {
       if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
@@ -1505,6 +1523,124 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
   );
   writeDB(db);
   res.json({ ok: true, swap, totals_delta: totalsDelta, _rev: computeSeasonRev(sd) });
+});
+
+// POST /api/seasons/:year/swaps/:id/undo — cleanly reverse an APPROVED swap (for mistakes / testing).
+// Submitting a reverse swap stacks a SECOND set of add/drop windows and can leave an impossible date
+// window (the bug that brought us here); undo instead erases the records this swap created — it
+// removes player_in entirely (roster array + roster_dates window + stat attribution) and lifts the
+// drop_date it stamped on player_out — restoring the roster to its pre-swap state with no residue.
+// Commissioner-only. A revert can legitimately drop a manager's total (player_in's points go away),
+// so it guards on a ≥40-pt crater and requires { force } to override. Part of #275.
+app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const swap = findSwap(sd, req.params.id);
+  if (!swap) return res.status(404).json({ error: 'Swap not found' });
+  if (swap.status !== 'approved') {
+    return res
+      .status(409)
+      .json({ error: 'swap_not_approved', detail: `Only an approved swap can be undone (this is ${swap.status}).` });
+  }
+  const { force } = req.body || {};
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const originalSd = JSON.parse(JSON.stringify(sd));
+
+  const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
+
+  // 1. Roster arrays: remove player_in, restore player_out (reverse of approve).
+  if (sd.rosters && sd.rosters[swap.manager]) {
+    const mgrRoster = sd.rosters[swap.manager];
+    let playerType = null;
+    for (const wr of Object.values(mgrRoster)) {
+      if ((wr.batters || []).includes(swap.player_in) || (wr.batters || []).includes(swap.player_out)) {
+        playerType = 'batters';
+        break;
+      }
+      if ((wr.pitchers || []).includes(swap.player_in) || (wr.pitchers || []).includes(swap.player_out)) {
+        playerType = 'pitchers';
+        break;
+      }
+    }
+    if (playerType) {
+      rdWeekKeys.forEach((wk) => {
+        const wr = mgrRoster[wk];
+        if (!wr) return;
+        const arr = wr[playerType] || [];
+        wr[playerType] = arr.filter((p) => p !== swap.player_in);
+        if (swap.player_out && !wr[playerType].includes(swap.player_out)) wr[playerType].push(swap.player_out);
+      });
+    }
+  }
+
+  // 2. roster_dates: erase player_in's window entirely; lift player_out's drop_date (re-activate).
+  const mgrDates = (sd.roster_dates && sd.roster_dates[swap.manager]) || {};
+  rdWeekKeys.forEach((wk) => {
+    const wkDates = mgrDates[wk];
+    if (!wkDates) return;
+    if (swap.player_in) delete wkDates[swap.player_in];
+    if (swap.player_out && wkDates[swap.player_out]) {
+      delete wkDates[swap.player_out].drop_date;
+      if (Object.keys(wkDates[swap.player_out]).length === 0) delete wkDates[swap.player_out];
+    }
+  });
+
+  // 3. Stats: un-attribute player_in's weekly rows for this manager (inverse of approve's attribution).
+  for (const r of sd.weekly_batting || [])
+    if (r.batter === swap.player_in && r.manager === swap.manager) r.manager = null;
+  for (const r of sd.weekly_pitching || [])
+    if (r.pitcher === swap.player_in && r.manager === swap.manager) r.manager = null;
+
+  // 4. Mark the swap undone (kept in the log for audit, not deleted).
+  swap.status = 'undone';
+  swap.undone_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  // Guard: a revert legitimately reduces a total, so the full destructive-save guard (which would also
+  // flag the expected approved-swap-count drop) isn't right here — check only for a ≥40-pt crater.
+  const before = captureScoreSnapshot(originalSd, todayET).totals;
+  const after = captureScoreSnapshot(sd, todayET).totals;
+  const craters = [];
+  for (const m of Object.keys(before)) {
+    const b = (before[m] || {}).total || 0;
+    const a = (after[m] || {}).total || 0;
+    if (b - a >= 40) craters.push(`${m} total drops ${Math.round((b - a) * 10) / 10} (${b} → ${a})`);
+  }
+  if (craters.length && !force) {
+    db.seasons[req.params.year] = originalSd; // discard the in-place revert; only the audit note survives
+    addAuditEntry(
+      db,
+      'swap_undo_blocked',
+      { year: req.params.year, id: swap.id, reasons: craters },
+      req.get('X-User-Email')
+    );
+    writeDB(db);
+    postSlack(
+      `:warning: *Swap undo blocked (${req.params.year})* — ${swap.manager}: removing ${swap.player_in}, restoring ${swap.player_out}.\n• ` +
+        `${craters.join('\n• ')}\nRe-run with force to apply.`
+    ).catch(() => {});
+    return res.status(409).json({ error: 'destructive_undo_blocked', reasons: craters });
+  }
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'swap_undone',
+    {
+      year: req.params.year,
+      id: swap.id,
+      manager: swap.manager,
+      player_out: swap.player_out,
+      player_in: swap.player_in,
+      forced: !!force,
+    },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 });
 
 // ---- Atomic roster-submission endpoints (PP1 + PP2/playoff periods) ----
