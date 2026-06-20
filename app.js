@@ -8966,7 +8966,7 @@ window.syncSwapAddDate = function (dropDateId, addDateId) {
 };
 
 // Commissioner: approve a swap
-window.approveSwap = function (swapId) {
+window.approveSwap = async function (swapId) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd || !sd.swaps) return;
@@ -8974,45 +8974,10 @@ window.approveSwap = function (swapId) {
   const swap = sd.swaps.find((s) => s.id === swapId);
   if (!swap) return;
 
-  // Execute the roster swap using per-week model
-  if (sd.rosters && sd.rosters[swap.manager]) {
-    const mgrRoster = sd.rosters[swap.manager];
-    // Determine if player_out is a batter or pitcher by checking all weeks
-    let playerType = null;
-    for (const weekRoster of Object.values(mgrRoster)) {
-      if ((weekRoster.batters || []).includes(swap.player_out)) {
-        playerType = 'batters';
-        break;
-      }
-      if ((weekRoster.pitchers || []).includes(swap.player_out)) {
-        playerType = 'pitchers';
-        break;
-      }
-    }
-
-    if (playerType) {
-      // If swap has a specific week_key, only swap in that week; otherwise swap in all weeks where player_out appears
-      const weekKeys = swap.week_key ? [swap.week_key] : Object.keys(mgrRoster);
-      weekKeys.forEach((wk) => {
-        const weekRoster = mgrRoster[wk];
-        if (!weekRoster) return;
-        const arr = weekRoster[playerType] || [];
-        if (arr.includes(swap.player_out)) {
-          weekRoster[playerType] = arr.filter((p) => p !== swap.player_out);
-          if (!weekRoster[playerType].includes(swap.player_in)) {
-            weekRoster[playerType].push(swap.player_in);
-          }
-        }
-      });
-      // Auto-assign any unattributed stats for the incoming player
-      assignUnclaimedStats(sd, swap.player_in, swap.manager, playerType);
-    }
-  }
-
-  swap.status = 'approved';
-  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-  // Read commissioner-set effective dates from the UI (fall back to today / tomorrow)
+  // Read commissioner-set effective dates from the UI (fall back to today / tomorrow). The SERVER now
+  // performs the roster swap, roster_dates windows, and stat attribution atomically — see
+  // POST /api/seasons/:year/swaps/:id/approve. Doing it server-side means the approval can't be lost
+  // to a stale-save 409 (the bug where an approved swap came back as pending).
   const _fallbackToday = new Date().toISOString().split('T')[0];
   const _fallbackTomorrow = (() => {
     const d = new Date();
@@ -9026,24 +8991,43 @@ window.approveSwap = function (swapId) {
   const effectiveDropDate = (dropDateEl && dropDateEl.value) || swap.drop_date || _fallbackToday;
   const effectiveAddDate = (addDateEl && addDateEl.value) || swap.add_date || _fallbackTomorrow;
 
-  // Write add/drop dates to roster_dates so they appear in the date editor
-  const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
-  if (!sd.roster_dates) sd.roster_dates = {};
-  if (!sd.roster_dates[swap.manager]) sd.roster_dates[swap.manager] = {};
-  rdWeekKeys.forEach((wk) => {
-    if (!sd.roster_dates[swap.manager][wk]) sd.roster_dates[swap.manager][wk] = {};
-    const wkDates = sd.roster_dates[swap.manager][wk];
-    if (swap.player_out) {
-      if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
-      wkDates[swap.player_out].drop_date = effectiveDropDate;
-    }
-    if (swap.player_in) {
-      if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
-      wkDates[swap.player_in].add_date = effectiveAddDate;
-    }
-  });
+  const doApprove = (force) =>
+    apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps/${swapId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ add_date: effectiveAddDate, drop_date: effectiveDropDate, force }),
+    });
 
-  saveSeason(SELECTED_SEASON, sd);
+  try {
+    let resp = await doApprove(false);
+    // The server guards against an approval that would crater a manager's total / shrink a roster.
+    // Offer the commissioner an explicit override for a legitimate large correction.
+    if (resp.status === 409) {
+      const body = await resp.json().catch(() => ({}));
+      if (body.error === 'destructive_approve_blocked') {
+        const reasons = (body.reasons || []).join('\n• ');
+        if (!confirm(`This approval looks destructive:\n\n• ${reasons}\n\nApply anyway?`)) return;
+        resp = await doApprove(true);
+      }
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(`Swap approval failed (${err.error || resp.status}). Please reload and try again.`);
+      return;
+    }
+    // Pull down the authoritative season the server just rebuilt (rosters / roster_dates / weekly).
+    try {
+      const fresh = await fetch('/api/seasons');
+      if (fresh.ok) {
+        const srv = await fresh.json();
+        if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+      }
+    } catch (_) {
+      /* offline — local view may lag until reload */
+    }
+  } catch (e) {
+    alert(`Swap approval failed — ${e.message}. Please reload and try again.`);
+    return;
+  }
 
   renderPendingSwapRequests();
   renderSwapLog();
@@ -12605,32 +12589,8 @@ window.applyPoolCleanup = async function () {
 
 // ---- Weekly Stat Uploads ----
 
-// Assign any unattributed (manager === null) weekly stats for a player to a manager.
-// Called when a player is added to a roster so previously-uploaded stats are credited.
-function assignUnclaimedStats(sd, playerName, managerName, rosterType) {
-  const isBatter = rosterType === 'batters' || rosterType === 'batting';
-  let changed = false;
-
-  if (isBatter && sd.weekly_batting) {
-    sd.weekly_batting.forEach((b) => {
-      if (b.batter === playerName && !b.manager) {
-        b.manager = managerName;
-        changed = true;
-      }
-    });
-  }
-
-  if (!isBatter && sd.weekly_pitching) {
-    sd.weekly_pitching.forEach((p) => {
-      if (p.pitcher === playerName && !p.manager) {
-        p.manager = managerName;
-        changed = true;
-      }
-    });
-  }
-
-  return changed;
-}
+// (assignUnclaimedStats moved server-side as assignUnclaimedStatsServer — the swap approval that
+// used it now runs atomically in POST /api/seasons/:year/swaps/:id/approve. See ROSTER_OPS_PLAN.md.)
 
 // Helper: find which manager owns a player via roster assignments
 // Search all weeks for a player (fallback when no specific week is known)
