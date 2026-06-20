@@ -9057,6 +9057,62 @@ window.denySwap = async function (swapId) {
   if (mgr) renderRosterData(mgr.name, true);
 };
 
+// Commissioner: cleanly undo an approved swap (for a mistake / test). Reverses it server-side —
+// removes the added player and lifts the original player's drop — leaving no residual roster_dates
+// that could form a broken window. See POST /api/seasons/:year/swaps/:id/undo.
+window.undoSwap = async function (swapId) {
+  if (
+    !confirm(
+      'Undo this swap? This removes the player that was added and restores the original player, as if the swap never happened.'
+    )
+  ) {
+    return;
+  }
+  const doUndo = (force) =>
+    apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps/${swapId}/undo`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
+  try {
+    let resp = await doUndo(false);
+    if (resp.status === 409) {
+      const body = await resp.json().catch(() => ({}));
+      if (body.error === 'destructive_undo_blocked') {
+        const reasons = (body.reasons || []).join('\n• ');
+        if (!confirm(`This undo would significantly change totals:\n\n• ${reasons}\n\nApply anyway?`)) return;
+        resp = await doUndo(true);
+      } else if (body.error === 'swap_not_approved') {
+        alert('Only an approved swap can be undone.');
+        return;
+      }
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(`Undo failed (${err.error || resp.status}). Please reload and try again.`);
+      return;
+    }
+    // Pull down the authoritative season the server just rebuilt.
+    try {
+      const fresh = await fetch('/api/seasons');
+      if (fresh.ok) {
+        const srv = await fresh.json();
+        if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+      }
+    } catch (_) {
+      /* offline — local view may lag until reload */
+    }
+  } catch (e) {
+    alert(`Undo failed — ${e.message}. Please reload and try again.`);
+    return;
+  }
+  renderPendingSwapRequests();
+  renderSwapLog();
+  startPendingSwapPoll();
+  const mgrs = getManagers();
+  const mgr = mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
+  if (mgr) renderRosterData(mgr.name, true);
+};
+
 // Commissioner: show inline edit form for a swap
 window.editSwapInline = function (swapId) {
   const seasons = getSeasons();
@@ -9395,6 +9451,7 @@ function fmtSwapTimestamp(ts) {
 function swapStatusBadge(s) {
   if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
   if (s.status === 'denied') return '<span class="swap-badge swap-badge-denied">Denied</span>';
+  if (s.status === 'undone') return '<span class="swap-badge swap-badge-denied">Undone</span>';
   return '<span class="swap-badge swap-badge-pending">Pending</span>';
 }
 
@@ -9421,7 +9478,16 @@ function swapDetailHtml(s, sd) {
   if (s.teams_started && s.teams_started.length) {
     items += row('Teams Already Playing', esc(s.teams_started.join(', ')));
   }
-  return `<div class="swap-detail-panel">${items}</div>`;
+  // Commissioner-only Undo for an approved swap: cleanly reverses it (removes the added player,
+  // restores the original) rather than stacking a reverse swap. See POST /swaps/:id/undo.
+  let actions = '';
+  if (s.status === 'approved' && isLoggedInCommissioner()) {
+    actions = `<div class="swap-detail-actions" style="margin-top:0.6rem;">
+        <button class="btn btn-sm btn-danger" onclick="undoSwap('${jsStr(s.id)}')">Undo swap</button>
+        <span class="text-muted" style="font-size:0.8rem;margin-left:0.5rem;">Removes ${esc(s.player_in || '')}, restores ${esc(s.player_out || '')}.</span>
+      </div>`;
+  }
+  return `<div class="swap-detail-panel">${items}${actions}</div>`;
 }
 
 // Render a chip-based filter row (mirrors the Trends filters).
