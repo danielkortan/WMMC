@@ -3762,7 +3762,13 @@ function computeDailyHighLow(sd, date) {
   // also went hitless with 3+ strikeouts. Pitchers can go negative, so any negative day qualifies.
   const worstPlayers = allPlayers
     .filter((p) => (p.type === 'Pitcher' ? p.score < 0 : p.score === 0 && p.hits === 0 && p.so >= 3))
-    .sort((a, b) => a.score - b.score)
+    .sort((a, b) => {
+      // Lowest score is worst (negative-scoring pitchers sort first). Among the hitless
+      // batters — all tied at 0 — order by strikeout severity so the badges read worst-first:
+      // platinum sombrero (5+ K) > golden sombrero (4 K) > hat trick (3 K).
+      if (a.score !== b.score) return a.score - b.score;
+      return (b.so || 0) - (a.so || 0);
+    })
     .slice(0, 3);
 
   // Fallback for the roast when nobody qualifies for worstPlayers above: the single
