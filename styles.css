@@ -1142,6 +1142,10 @@ input[type='file'] {
   margin-top: 0.75rem;
 }
 
+.sb-poolplay-header.sb-poolplay-collapsed .sb-section-arrow {
+  transform: rotate(-90deg);
+}
+
 /* ============================================================ */
 /* Timeline Schedule (League Info) */
 /* ============================================================ */
@@ -1719,6 +1723,43 @@ footer {
   font-size: 0.9rem;
   font-weight: 700;
   margin: 0;
+}
+
+/* Clickable pool header (name + arrow) — click the name to collapse the pool. */
+.pool-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  background: var(--primary);
+  padding: 0.625rem 1rem;
+  user-select: none;
+}
+
+.pool-card-header:hover {
+  opacity: 0.92;
+}
+
+.pool-card-header h3,
+.pool-card-header h4 {
+  background: none;
+  color: white;
+  margin: 0;
+  padding: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.pool-card-header .sb-section-arrow {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.pool-card.pool-collapsed .pool-card-header .sb-section-arrow {
+  transform: rotate(-90deg);
+}
+
+.pool-card.pool-collapsed .pool-card-body {
+  display: none;
 }
 
 /* ============================================================ */

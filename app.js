@@ -3193,9 +3193,9 @@ function renderScoreboardContent() {
   ];
 
   let html = `<div class="card scoreboard-card sb-poolplay-section">
-    <div class="sb-poolplay-header" onclick="togglePoolPlay()">
+    <div class="sb-poolplay-header${ppCollapsed ? ' sb-poolplay-collapsed' : ''}" onclick="togglePoolPlay()">
       <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
-      <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
+      <span class="sb-section-arrow">▾</span>
     </div>
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">
       <div class="highlight-legend sb-color-legend">
@@ -3231,11 +3231,11 @@ function renderScoreboardContent() {
 
 window.togglePoolPlay = function () {
   const body = document.getElementById('sb-poolplay-body');
-  const btn = document.getElementById('sb-poolplay-toggle-btn');
-  if (!body || !btn) return;
+  if (!body) return;
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? 'block' : 'none';
-  btn.textContent = hidden ? 'Hide' : 'Show';
+  const header = document.querySelector('.sb-poolplay-header');
+  if (header) header.classList.toggle('sb-poolplay-collapsed', !hidden);
 };
 
 window.toggleScoreboardSection = function (sectionId) {
@@ -3247,63 +3247,18 @@ window.toggleScoreboardSection = function (sectionId) {
   body.style.display = isCollapsed ? 'block' : 'none';
 };
 
+// Collapse/expand a single pool card by clicking its header. Toggles a
+// `pool-collapsed` class on the card (CSS hides the body + rotates the arrow);
+// also updates the legacy `−/+` button text if one is still present.
 window.togglePool = function (poolId) {
   const body = document.getElementById('pool-body-' + poolId);
-  const btn = document.getElementById('pool-btn-' + poolId);
-  if (!body || !btn) return;
+  if (!body) return;
   const isHidden = body.style.display === 'none';
   body.style.display = isHidden ? '' : 'none';
-  btn.textContent = isHidden ? '−' : '+';
-};
-
-// Expand/collapse every pool body in a given period at once.
-window.toggleAllPools = function (period) {
-  const buttons = document.querySelectorAll(`.pool-toggle-btn[data-period="${period}"]`);
-  const allBtn = document.getElementById('toggle-all-btn-' + period);
-  // If any pool is currently collapsed, expand them all; otherwise collapse them all.
-  let anyCollapsed = false;
-  buttons.forEach((btn) => {
-    const poolId = btn.dataset.poolId;
-    const body = document.getElementById('pool-body-' + poolId);
-    if (body && body.style.display === 'none') anyCollapsed = true;
-  });
-  const targetDisplay = anyCollapsed ? '' : 'none';
-  const targetLabel = anyCollapsed ? '−' : '+';
-  buttons.forEach((btn) => {
-    const poolId = btn.dataset.poolId;
-    const body = document.getElementById('pool-body-' + poolId);
-    if (body) body.style.display = targetDisplay;
-    btn.textContent = targetLabel;
-  });
-  if (allBtn) allBtn.textContent = targetLabel;
-};
-
-window.togglePoolManagers = function (poolId) {
-  const detailRows = document.querySelectorAll(`.sb-manager-detail-row[data-sb-pool="${poolId}"]`);
-  const anyHidden = [...detailRows].some((row) => row.style.display === 'none');
-  detailRows.forEach((row) => {
-    const isHidden = row.style.display === 'none';
-    if (anyHidden === isHidden) {
-      const mgrKey = row.id.replace('mgr-detail-', '');
-      window.toggleManagerDetails(mgrKey, row.dataset.manager, row.dataset.sbPeriod);
-    }
-  });
+  const card = body.closest('.pool-card');
+  if (card) card.classList.toggle('pool-collapsed', !isHidden);
   const btn = document.getElementById('pool-btn-' + poolId);
-  if (btn) btn.textContent = anyHidden ? 'Hide' : 'Show';
-};
-
-window.toggleAllManagerDetails = function (period) {
-  const detailRows = document.querySelectorAll(`.sb-manager-detail-row[data-sb-period="${period}"]`);
-  const anyHidden = [...detailRows].some((row) => row.style.display === 'none');
-  detailRows.forEach((row) => {
-    const isHidden = row.style.display === 'none';
-    if (anyHidden === isHidden) {
-      const mgrKey = row.id.replace('mgr-detail-', '');
-      window.toggleManagerDetails(mgrKey, row.dataset.manager, row.dataset.sbPeriod);
-    }
-  });
-  const btn = document.getElementById('toggle-all-mgr-btn-' + period);
-  if (btn) btn.textContent = anyHidden ? 'Hide' : 'Show';
+  if (btn) btn.textContent = isHidden ? '−' : '+';
 };
 
 // Toggle the manager player detail pop-down in the scoreboard. `periodFilter` scopes the
@@ -3826,7 +3781,6 @@ function renderPoolPeriodContent(period) {
 
   let html = `<div class="pool-period-header">
     <h3>${periodLabel} Standings</h3>
-    <button class="pool-expand-all-btn" id="toggle-all-btn-${period}" data-period="${period}" onclick="toggleAllPools('${period}')">−</button>
   </div>`;
   html += '<div class="pool-play-grid">';
 
@@ -3835,9 +3789,9 @@ function renderPoolPeriodContent(period) {
     const safePoolId = `${period}_${poolName.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
 
     html += `<div class="pool-card">
-      <div class="pool-card-header">
+      <div class="pool-card-header" onclick="togglePool('${safePoolId}')">
         <h4>${poolName}</h4>
-        <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-period="${period}" data-pool-id="${safePoolId}" onclick="togglePool('${safePoolId}')">−</button>
+        <span class="sb-section-arrow">▾</span>
       </div>
       <div class="pool-card-body" id="pool-body-${safePoolId}">
         <div class="table-wrapper">
@@ -4829,9 +4783,9 @@ function showActiveSeason(seasonData) {
     // If pool play is finalized, minimize pool play section and feature bracket
     if (ppFinalized) {
       const ppBody = document.getElementById('sb-poolplay-body');
-      const ppBtn = document.getElementById('sb-poolplay-toggle-btn');
+      const ppHeader = document.querySelector('.sb-poolplay-header');
       if (ppBody) ppBody.style.display = 'none';
-      if (ppBtn) ppBtn.textContent = 'Show';
+      if (ppHeader) ppHeader.classList.add('sb-poolplay-collapsed');
     }
   }
 }
@@ -5106,7 +5060,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           .replace(/\s+/g, '_')
           .replace(/[^a-zA-Z0-9_]/g, '')}`;
         html += `<div class="pool-card">
-        <h3>${formatPool(poolNum)} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
+        <div class="pool-card-header" onclick="togglePool('${safePoolId}')">
+          <h3>${formatPool(poolNum)}</h3>
+          <span class="sb-section-arrow">▾</span>
+        </div>
+        <div class="pool-card-body" id="pool-body-${safePoolId}">
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -5127,7 +5085,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <td colspan="5"><div class="mgr-detail-loading">Loading...</div></td>
         </tr>`;
         });
-        html += '</tbody></table></div>';
+        html += '</tbody></table></div></div>';
       });
     html += '</div>';
     return html;
@@ -5171,9 +5129,9 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   let html = '';
 
   html += `<div class="card scoreboard-card sb-poolplay-section">
-    <div class="sb-poolplay-header" onclick="togglePoolPlay()">
+    <div class="sb-poolplay-header${ppCollapsed ? ' sb-poolplay-collapsed' : ''}" onclick="togglePoolPlay()">
       <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
-      <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
+      <span class="sb-section-arrow">▾</span>
     </div>
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">`;
 
@@ -5220,7 +5178,6 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     <div class="sb-section${pp1Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp1">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp1')">
         <span class="sb-section-title">Pool Play 1</span>
-        <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp1" onclick="event.stopPropagation();toggleAllManagerDetails('pp1')">Show</button>
         <span class="sb-section-arrow">▾</span>
       </div>
       <div id="sb-pp1" style="display:${pp1Open ? 'block' : 'none'}">
@@ -5234,7 +5191,6 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     <div class="sb-section${pp2Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp2">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp2')">
         <span class="sb-section-title">Pool Play 2</span>
-        <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp2" onclick="event.stopPropagation();toggleAllManagerDetails('pp2')">Show</button>
         <span class="sb-section-arrow">▾</span>
       </div>
       <div id="sb-pp2" style="display:${pp2Open ? 'block' : 'none'}">

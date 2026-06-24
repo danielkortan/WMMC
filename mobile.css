@@ -475,10 +475,6 @@
     margin: 0 !important;
   }
 
-  .sb-poolplay-toggle {
-    display: none !important;
-  }
-
   /* Section heading inside Overall period ("Overall Pool Play Standings") */
   #scoreboard-content .sb-period > h3 {
     font-size: clamp(0.9rem, 3.8vw, 1.1rem);
@@ -508,10 +504,6 @@
     margin: 0;
     padding: 0;
     border: none;
-  }
-
-  .pool-expand-all-btn {
-    display: none !important;
   }
 
   /* Single-column pools */
@@ -551,23 +543,11 @@
     background: none;
   }
 
-  .pool-toggle-btn {
-    display: none !important;
-  }
-
-  .pool-card-header::after {
-    content: '▾';
+  /* Arrow sits dark on the light mobile pool header (overrides the white
+     desktop arrow color); rotation + collapse use the shared .pool-collapsed. */
+  .pool-card-header .sb-section-arrow {
     color: var(--text-muted);
     font-size: 0.85rem;
-    transition: transform 0.2s;
-  }
-
-  .pool-card.mob-pool-collapsed .pool-card-header::after {
-    transform: rotate(-90deg);
-  }
-
-  .pool-card.mob-pool-collapsed .pool-card-body {
-    display: none !important;
   }
 
   /* ── Scoreboard tables → block + card rows ─────────────────────── */
