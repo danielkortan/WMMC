@@ -3456,9 +3456,14 @@ window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
       (childrenByParent[s.player_out] = childrenByParent[s.player_out] || []).push(s.player_in);
       isSwapIn.add(s.player_in);
     });
-    const chainMax = (name) => {
+    // `seen` guards against swap cycles (e.g. a manager swaps out A for B, then later swaps B
+    // back out for A — re-acquiring a dropped player). Without it the recursion never bottoms
+    // out and throws RangeError, which aborts the whole detail render so the row won't expand.
+    const chainMax = (name, seen = new Set()) => {
+      if (seen.has(name)) return scoreByPlayer[name] || 0;
+      seen.add(name);
       let best = scoreByPlayer[name] || 0;
-      (childrenByParent[name] || []).forEach((c) => (best = Math.max(best, chainMax(c))));
+      (childrenByParent[name] || []).forEach((c) => (best = Math.max(best, chainMax(c, seen))));
       return best;
     };
     const ordered = [];
