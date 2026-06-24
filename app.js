@@ -3193,9 +3193,9 @@ function renderScoreboardContent() {
   ];
 
   let html = `<div class="card scoreboard-card sb-poolplay-section">
-    <div class="sb-poolplay-header" onclick="togglePoolPlay()">
+    <div class="sb-poolplay-header${ppCollapsed ? ' sb-poolplay-collapsed' : ''}" onclick="togglePoolPlay()">
       <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
-      <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
+      <span class="sb-section-arrow">▾</span>
     </div>
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">
       <div class="highlight-legend sb-color-legend">
@@ -3231,11 +3231,14 @@ function renderScoreboardContent() {
 
 window.togglePoolPlay = function () {
   const body = document.getElementById('sb-poolplay-body');
-  const btn = document.getElementById('sb-poolplay-toggle-btn');
-  if (!body || !btn) return;
+  if (!body) return;
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? 'block' : 'none';
-  btn.textContent = hidden ? 'Hide' : 'Show';
+  // The collapsed summary is the inverse of the body: shown only when collapsed.
+  const summary = document.getElementById('sb-poolplay-summary');
+  if (summary) summary.style.display = hidden ? 'none' : 'flex';
+  const header = document.querySelector('.sb-poolplay-header');
+  if (header) header.classList.toggle('sb-poolplay-collapsed', !hidden);
 };
 
 window.toggleScoreboardSection = function (sectionId) {
@@ -3247,84 +3250,31 @@ window.toggleScoreboardSection = function (sectionId) {
   body.style.display = isCollapsed ? 'block' : 'none';
 };
 
+// Collapse/expand a single pool card by clicking its header. Toggles a
+// `pool-collapsed` class on the card (CSS hides the body + rotates the arrow);
+// also updates the legacy `−/+` button text if one is still present.
 window.togglePool = function (poolId) {
   const body = document.getElementById('pool-body-' + poolId);
-  const btn = document.getElementById('pool-btn-' + poolId);
-  if (!body || !btn) return;
+  if (!body) return;
   const isHidden = body.style.display === 'none';
   body.style.display = isHidden ? '' : 'none';
-  btn.textContent = isHidden ? '−' : '+';
-};
-
-// Expand/collapse every pool body in a given period at once.
-window.toggleAllPools = function (period) {
-  const buttons = document.querySelectorAll(`.pool-toggle-btn[data-period="${period}"]`);
-  const allBtn = document.getElementById('toggle-all-btn-' + period);
-  // If any pool is currently collapsed, expand them all; otherwise collapse them all.
-  let anyCollapsed = false;
-  buttons.forEach((btn) => {
-    const poolId = btn.dataset.poolId;
-    const body = document.getElementById('pool-body-' + poolId);
-    if (body && body.style.display === 'none') anyCollapsed = true;
-  });
-  const targetDisplay = anyCollapsed ? '' : 'none';
-  const targetLabel = anyCollapsed ? '−' : '+';
-  buttons.forEach((btn) => {
-    const poolId = btn.dataset.poolId;
-    const body = document.getElementById('pool-body-' + poolId);
-    if (body) body.style.display = targetDisplay;
-    btn.textContent = targetLabel;
-  });
-  if (allBtn) allBtn.textContent = targetLabel;
-};
-
-window.togglePoolManagers = function (poolId) {
-  const detailRows = document.querySelectorAll(`.sb-manager-detail-row[data-sb-pool="${poolId}"]`);
-  const anyHidden = [...detailRows].some((row) => row.style.display === 'none');
-  detailRows.forEach((row) => {
-    const isHidden = row.style.display === 'none';
-    if (anyHidden === isHidden) {
-      const mgrKey = row.id.replace('mgr-detail-', '');
-      window.toggleManagerDetails(mgrKey, row.dataset.manager, row.dataset.sbPeriod);
-    }
-  });
+  const card = body.closest('.pool-card');
+  if (card) card.classList.toggle('pool-collapsed', !isHidden);
   const btn = document.getElementById('pool-btn-' + poolId);
-  if (btn) btn.textContent = anyHidden ? 'Hide' : 'Show';
+  if (btn) btn.textContent = isHidden ? '−' : '+';
 };
 
-window.toggleAllManagerDetails = function (period) {
-  const detailRows = document.querySelectorAll(`.sb-manager-detail-row[data-sb-period="${period}"]`);
-  const anyHidden = [...detailRows].some((row) => row.style.display === 'none');
-  detailRows.forEach((row) => {
-    const isHidden = row.style.display === 'none';
-    if (anyHidden === isHidden) {
-      const mgrKey = row.id.replace('mgr-detail-', '');
-      window.toggleManagerDetails(mgrKey, row.dataset.manager, row.dataset.sbPeriod);
-    }
-  });
-  const btn = document.getElementById('toggle-all-mgr-btn-' + period);
-  if (btn) btn.textContent = anyHidden ? 'Hide' : 'Show';
-};
-
-// Toggle the manager player detail pop-down in the scoreboard. `periodFilter` scopes the
-// breakdown to a single scoring period ('pp1'/'pp2') when clicked from that period's own
-// section; omitted (Pool Play Overall) shows every period grouped, as before.
-window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
-  const row = document.getElementById('mgr-detail-' + mgrKey);
-  const arrow = document.getElementById('sb-arrow-' + mgrKey);
-  if (!row) return;
-
-  if (row.style.display !== 'none') {
-    row.style.display = 'none';
-    if (arrow) arrow.innerHTML = '&#9660;';
-    return;
-  }
-
+// Build the grouped player-breakdown panel for one manager: Batters/Pitchers per scoring
+// period, with each player's points rendered as a quick-view button. Shared by the pool-play
+// scoreboard rows (via toggleManagerDetails) and the playoff-bracket teams (via
+// toggleBracketTeam). `filterKey` is a BREAKDOWN_PERIODS key ('PP1'/'PP2'/'QF'/'SF'/'Finals')
+// to scope the panel to a single period, or null to show every period grouped. `idPrefix`
+// namespaces the collapsible-subsection element ids so multiple panels can coexist on a page.
+// Returns the full `.mgr-detail-panel` element HTML (no table wrapper), ready to drop into a
+// container (a `<td>` for the table rows, a `<div>` for the bracket).
+function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
   const sd = getSeasons()[SELECTED_SEASON];
-  if (!sd) {
-    row.style.display = '';
-    return;
-  }
+  if (!sd) return '<div class="mgr-detail-panel sbmd-grouped"></div>';
 
   const detailMgrRosterDates = (sd.roster_dates || {})[managerName] || {};
   const battingRows = sd.weekly_batting || [];
@@ -3335,9 +3285,7 @@ window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
   // Group the schedule into scoring periods (PP1, PP2, playoffs). Each period gets its own
   // collapsible subsection so a future-period roster submission (e.g. a PP2 roster submitted
   // before PP2 starts, dated to PP2's first week) never visually bleeds into the current period.
-  // periodFilter ('pp1'/'pp2') scopes the breakdown to that single period's own players/stats —
-  // set when the click came from the Pool Play 1 or Pool Play 2 section, not Pool Play Overall.
-  const filterKey = periodFilter && periodFilter !== 'overall' ? periodFilter.toUpperCase() : null;
+  // `filterKey` scopes the breakdown to that single period's own players/stats.
   const periodInfo = BREAKDOWN_PERIODS.filter((p) => !filterKey || p.key === filterKey)
     .map((p) => {
       const weeks = [];
@@ -3370,6 +3318,8 @@ window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
     if (started.length) currentPeriodKey = started[started.length - 1].key;
     else if (periodInfo.length) currentPeriodKey = periodInfo[0].key;
   }
+  // When scoped to a single period (pool-section click or a bracket round), always expand it.
+  if (filterKey) currentPeriodKey = filterKey;
 
   // Per-player date tag clipped to a single period's window, so a player's PP2 add (e.g. 6/08)
   // never renders inside their PP1 subsection. Shows only adds/drops that fall in this period.
@@ -3456,9 +3406,14 @@ window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
       (childrenByParent[s.player_out] = childrenByParent[s.player_out] || []).push(s.player_in);
       isSwapIn.add(s.player_in);
     });
-    const chainMax = (name) => {
+    // `seen` guards against swap cycles (e.g. a manager swaps out A for B, then later swaps B
+    // back out for A — re-acquiring a dropped player). Without it the recursion never bottoms
+    // out and throws RangeError, which aborts the whole detail render so the row won't expand.
+    const chainMax = (name, seen = new Set()) => {
+      if (seen.has(name)) return scoreByPlayer[name] || 0;
+      seen.add(name);
       let best = scoreByPlayer[name] || 0;
-      (childrenByParent[name] || []).forEach((c) => (best = Math.max(best, chainMax(c))));
+      (childrenByParent[name] || []).forEach((c) => (best = Math.max(best, chainMax(c, seen))));
       return best;
     };
     const ordered = [];
@@ -3526,7 +3481,7 @@ window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
     anyPeriod = true;
     const periodTotal = Math.round((bat.total + pit.total) * 100) / 100;
     const isCurrent = p.key === currentPeriodKey;
-    const secId = `sbmd-${mgrKey}-${p.key}`;
+    const secId = `sbmd-${idPrefix}-${p.key}`;
     panelHtml += `<div class="sbmd-period${isCurrent ? ' sbmd-current' : ''}">
       <div class="sbmd-period-header" onclick="toggleSbmdPeriod('${secId}')">
         <span class="sbmd-period-label">${esc(p.label)}${isCurrent ? ' <span class="sbmd-current-badge">Current</span>' : ''}</span>
@@ -3550,10 +3505,46 @@ window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
   });
   if (!anyPeriod) panelHtml = '<div class="text-muted" style="padding:0.5rem;">No roster data yet.</div>';
 
+  return `<div class="mgr-detail-panel sbmd-grouped">${panelHtml}</div>`;
+}
+
+// Toggle the manager player detail pop-down in the pool-play scoreboard. `periodFilter` scopes
+// the breakdown to a single scoring period ('pp1'/'pp2') when clicked from that period's own
+// section; omitted (Pool Play Overall) shows every period grouped.
+window.toggleManagerDetails = function (mgrKey, managerName, periodFilter) {
+  const row = document.getElementById('mgr-detail-' + mgrKey);
+  const arrow = document.getElementById('sb-arrow-' + mgrKey);
+  if (!row) return;
+
+  if (row.style.display !== 'none') {
+    row.style.display = 'none';
+    if (arrow) arrow.innerHTML = '&#9660;';
+    return;
+  }
+
+  const filterKey = periodFilter && periodFilter !== 'overall' ? periodFilter.toUpperCase() : null;
   const colspan = row.querySelector('td').getAttribute('colspan') || '6';
-  row.innerHTML = `<td colspan="${colspan}"><div class="mgr-detail-panel sbmd-grouped">${panelHtml}</div></td>`;
+  row.innerHTML = `<td colspan="${colspan}">${buildManagerDetailPanelHtml(mgrKey, managerName, filterKey)}</td>`;
 
   row.style.display = '';
+  if (arrow) arrow.innerHTML = '&#9650;';
+};
+
+// Expand/collapse a single playoff-bracket team to show that round's player breakdown, mirroring
+// the pool-play row expansion. `round` is the exact BREAKDOWN_PERIODS key ('QF'/'SF'/'Finals').
+window.toggleBracketTeam = function (detailId, managerName, round) {
+  const panel = document.getElementById(detailId);
+  if (!panel) return;
+  const arrow = document.getElementById(detailId + '-arrow');
+
+  if (panel.style.display !== 'none') {
+    panel.style.display = 'none';
+    if (arrow) arrow.innerHTML = '&#9660;';
+    return;
+  }
+
+  panel.innerHTML = buildManagerDetailPanelHtml(detailId, managerName, round);
+  panel.style.display = '';
   if (arrow) arrow.innerHTML = '&#9650;';
 };
 
@@ -3821,7 +3812,6 @@ function renderPoolPeriodContent(period) {
 
   let html = `<div class="pool-period-header">
     <h3>${periodLabel} Standings</h3>
-    <button class="pool-expand-all-btn" id="toggle-all-btn-${period}" data-period="${period}" onclick="toggleAllPools('${period}')">−</button>
   </div>`;
   html += '<div class="pool-play-grid">';
 
@@ -3830,9 +3820,9 @@ function renderPoolPeriodContent(period) {
     const safePoolId = `${period}_${poolName.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`;
 
     html += `<div class="pool-card">
-      <div class="pool-card-header">
+      <div class="pool-card-header" onclick="togglePool('${safePoolId}')">
         <h4>${poolName}</h4>
-        <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-period="${period}" data-pool-id="${safePoolId}" onclick="togglePool('${safePoolId}')">−</button>
+        <span class="sb-section-arrow">▾</span>
       </div>
       <div class="pool-card-body" id="pool-body-${safePoolId}">
         <div class="table-wrapper">
@@ -4167,9 +4157,14 @@ function renderWeekly() {
     enrichTeamWeekly(DATA.team_weekly);
   }
 
-  const rounds = [...new Set(DATA.team_weekly.map((t) => t.round))];
-  const weeks = [...new Set(DATA.team_weekly.map((t) => t.week))];
-  const managers = [...new Set(DATA.team_weekly.map((t) => t.manager))].sort();
+  // Capture the rows locally: renderActiveWeekly restores the global DATA to null right after
+  // this function returns, so the `update` closure (run on every filter change) must not read
+  // DATA.team_weekly — it would throw and the filters would silently do nothing.
+  const teamWeekly = DATA.team_weekly;
+
+  const rounds = [...new Set(teamWeekly.map((t) => t.round))];
+  const weeks = [...new Set(teamWeekly.map((t) => t.week))];
+  const managers = [...new Set(teamWeekly.map((t) => t.manager))].sort();
 
   resetSelect('weekly-round-filter', rounds);
   resetSelect('weekly-week-filter', weeks);
@@ -4180,7 +4175,7 @@ function renderWeekly() {
     const weekF = document.getElementById('weekly-week-filter').value;
     const managerF = document.getElementById('weekly-manager-filter').value;
 
-    let filtered = DATA.team_weekly;
+    let filtered = teamWeekly;
     if (roundF !== 'all') filtered = filtered.filter((t) => t.round === roundF);
     if (weekF !== 'all') filtered = filtered.filter((t) => t.week === weekF);
     if (managerF !== 'all') filtered = filtered.filter((t) => t.manager === managerF);
@@ -4249,15 +4244,19 @@ function renderPlayers() {
 
   let currentType = 'batting';
 
-  const rounds = [
-    ...new Set(DATA.batting_weekly.map((b) => b.round).concat(DATA.pitching_weekly.map((p) => p.round))),
-  ].filter(Boolean);
-  const weeks = [
-    ...new Set(DATA.batting_weekly.map((b) => b.week).concat(DATA.pitching_weekly.map((p) => p.week))),
-  ].filter(Boolean);
-  const managers = [
-    ...new Set(DATA.batting_weekly.map((b) => b.manager).concat(DATA.pitching_weekly.map((p) => p.manager))),
-  ]
+  // Capture rows locally: renderActivePlayers restores the global DATA to null right after this
+  // returns, so the updatePlayers closure (run on every filter change) must not read DATA.* —
+  // it would throw and the filters would silently do nothing.
+  const battingWeekly = DATA.batting_weekly;
+  const pitchingWeekly = DATA.pitching_weekly;
+
+  const rounds = [...new Set(battingWeekly.map((b) => b.round).concat(pitchingWeekly.map((p) => p.round)))].filter(
+    Boolean
+  );
+  const weeks = [...new Set(battingWeekly.map((b) => b.week).concat(pitchingWeekly.map((p) => p.week)))].filter(
+    Boolean
+  );
+  const managers = [...new Set(battingWeekly.map((b) => b.manager).concat(pitchingWeekly.map((p) => p.manager)))]
     .filter(Boolean)
     .sort();
 
@@ -4287,7 +4286,7 @@ function renderPlayers() {
     const dates = getScheduleDates();
 
     if (currentType === 'batting') {
-      let filtered = DATA.batting_weekly;
+      let filtered = battingWeekly;
       if (roundF !== 'all') filtered = filtered.filter((b) => b.round === roundF);
       if (weekF !== 'all') filtered = filtered.filter((b) => b.week === weekF);
       if (managerF !== 'all') filtered = filtered.filter((b) => b.manager === managerF);
@@ -4331,7 +4330,7 @@ function renderPlayers() {
         </tbody>
       `;
     } else {
-      let filtered = DATA.pitching_weekly;
+      let filtered = pitchingWeekly;
       if (roundF !== 'all') filtered = filtered.filter((p) => p.round === roundF);
       if (weekF !== 'all') filtered = filtered.filter((p) => p.week === weekF);
       if (managerF !== 'all') filtered = filtered.filter((p) => p.manager === managerF);
@@ -4824,9 +4823,11 @@ function showActiveSeason(seasonData) {
     // If pool play is finalized, minimize pool play section and feature bracket
     if (ppFinalized) {
       const ppBody = document.getElementById('sb-poolplay-body');
-      const ppBtn = document.getElementById('sb-poolplay-toggle-btn');
+      const ppHeader = document.querySelector('.sb-poolplay-header');
+      const ppSummary = document.getElementById('sb-poolplay-summary');
       if (ppBody) ppBody.style.display = 'none';
-      if (ppBtn) ppBtn.textContent = 'Show';
+      if (ppHeader) ppHeader.classList.add('sb-poolplay-collapsed');
+      if (ppSummary) ppSummary.style.display = 'flex';
     }
   }
 }
@@ -4870,6 +4871,24 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     </span>`;
   }
 
+  // Render a bracket team row. A real (non-TBD) manager is clickable: clicking expands that
+  // round's player breakdown beneath it (same panel as the pool-play rows), and each player's
+  // points open the stat quick-view. `seedHtml` is '' for rounds without seeds; `round` is the
+  // BREAKDOWN_PERIODS key for this column ('QF'/'SF'/'Finals').
+  function bracketTeamHtml(name, seedHtml, bd, winnerClass, round) {
+    const isReal = name && name !== 'TBD';
+    const scoreCell = isReal ? bracketScoreHtml(bd) : '<span class="bracket-score">-</span>';
+    if (!isReal) {
+      return `<div class="bracket-team ${winnerClass}">${seedHtml}<span class="bracket-name">${esc(name)}</span>${scoreCell}</div>`;
+    }
+    const detailId = `bracket-detail-${round}-${name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    return `<div class="bracket-team bracket-team-clickable ${winnerClass}" onclick="toggleBracketTeam('${detailId}','${jsStr(name)}','${round}')">
+        ${seedHtml}<span class="bracket-name">${esc(name)}</span>${scoreCell}
+        <span class="sb-expand-arrow bracket-team-arrow" id="${detailId}-arrow">&#9660;</span>
+      </div>
+      <div class="bracket-team-detail" id="${detailId}" style="display:none;"></div>`;
+  }
+
   const finalized = seasonData.finalized_rounds || [];
   const tentativeLabel = !ppFinalized ? ' <span class="badge badge-wildcard">Tentative</span>' : '';
 
@@ -4888,16 +4907,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     qfWinners.push(winner);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
-      <div class="bracket-team ${winner === m.s1.name ? 'bracket-winner' : ''}">
-        <span class="bracket-seed">${m.s1.seed}</span>
-        <span class="bracket-name">${m.s1.name}</span>
-        ${bracketScoreHtml(s1Bd)}
-      </div>
-      <div class="bracket-team ${winner === m.s2.name ? 'bracket-winner' : ''}">
-        <span class="bracket-seed">${m.s2.seed}</span>
-        <span class="bracket-name">${m.s2.name}</span>
-        ${bracketScoreHtml(s2Bd)}
-      </div>
+      ${bracketTeamHtml(m.s1.name, `<span class="bracket-seed">${m.s1.seed}</span>`, s1Bd, winner === m.s1.name ? 'bracket-winner' : '', 'QF')}
+      ${bracketTeamHtml(m.s2.name, `<span class="bracket-seed">${m.s2.seed}</span>`, s2Bd, winner === m.s2.name ? 'bracket-winner' : '', 'QF')}
     </div>`;
   });
   html += '</div>';
@@ -4923,14 +4934,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     sfLosers.push(loser);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
-      <div class="bracket-team ${winner === m.t1 ? 'bracket-winner' : ''}">
-        <span class="bracket-name">${m.t1}</span>
-        ${m.t1 !== 'TBD' ? bracketScoreHtml(s1Bd) : '<span class="bracket-score">-</span>'}
-      </div>
-      <div class="bracket-team ${winner === m.t2 ? 'bracket-winner' : ''}">
-        <span class="bracket-name">${m.t2}</span>
-        ${m.t2 !== 'TBD' ? bracketScoreHtml(s2Bd) : '<span class="bracket-score">-</span>'}
-      </div>
+      ${bracketTeamHtml(m.t1, '', s1Bd, winner === m.t1 ? 'bracket-winner' : '', 'SF')}
+      ${bracketTeamHtml(m.t2, '', s2Bd, winner === m.t2 ? 'bracket-winner' : '', 'SF')}
     </div>`;
   });
   html += '</div>';
@@ -4947,14 +4952,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   html += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
-    <div class="bracket-team ${champion === f1 ? 'bracket-winner bracket-champion' : ''}">
-      <span class="bracket-name">${f1}</span>
-      ${f1 !== 'TBD' ? bracketScoreHtml(f1Bd) : '<span class="bracket-score">-</span>'}
-    </div>
-    <div class="bracket-team ${champion === f2 ? 'bracket-winner bracket-champion' : ''}">
-      <span class="bracket-name">${f2}</span>
-      ${f2 !== 'TBD' ? bracketScoreHtml(f2Bd) : '<span class="bracket-score">-</span>'}
-    </div>
+    ${bracketTeamHtml(f1, '', f1Bd, champion === f1 ? 'bracket-winner bracket-champion' : '', 'Finals')}
+    ${bracketTeamHtml(f2, '', f2Bd, champion === f2 ? 'bracket-winner bracket-champion' : '', 'Finals')}
   </div>`;
 
   // 3rd Place
@@ -4966,14 +4965,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   html += `<div class="bracket-matchup" style="margin-top:1rem;">
     <div class="bracket-matchup-label">3rd Place</div>
-    <div class="bracket-team ${thirdPlace === t1 ? 'bracket-winner' : ''}">
-      <span class="bracket-name">${t1}</span>
-      ${t1 !== 'TBD' ? bracketScoreHtml(t1Bd) : '<span class="bracket-score">-</span>'}
-    </div>
-    <div class="bracket-team ${thirdPlace === t2 ? 'bracket-winner' : ''}">
-      <span class="bracket-name">${t2}</span>
-      ${t2 !== 'TBD' ? bracketScoreHtml(t2Bd) : '<span class="bracket-score">-</span>'}
-    </div>
+    ${bracketTeamHtml(t1, '', t1Bd, thirdPlace === t1 ? 'bracket-winner' : '', 'Finals')}
+    ${bracketTeamHtml(t2, '', t2Bd, thirdPlace === t2 ? 'bracket-winner' : '', 'Finals')}
   </div>`;
 
   html += '</div></div></div>';
@@ -5101,7 +5094,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           .replace(/\s+/g, '_')
           .replace(/[^a-zA-Z0-9_]/g, '')}`;
         html += `<div class="pool-card">
-        <h3>${formatPool(poolNum)} <button class="pool-toggle-btn" id="pool-btn-${safePoolId}" data-pool-id="${safePoolId}" onclick="event.stopPropagation();togglePoolManagers('${safePoolId}')">Show</button></h3>
+        <div class="pool-card-header" onclick="togglePool('${safePoolId}')">
+          <h3>${formatPool(poolNum)}</h3>
+          <span class="sb-section-arrow">▾</span>
+        </div>
+        <div class="pool-card-body" id="pool-body-${safePoolId}">
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -5122,7 +5119,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <td colspan="5"><div class="mgr-detail-loading">Loading...</div></td>
         </tr>`;
         });
-        html += '</tbody></table></div>';
+        html += '</tbody></table></div></div>';
       });
     html += '</div>';
     return html;
@@ -5163,13 +5160,45 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
   const ppCollapsed = hasPlayoffData;
 
+  // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
+  // collapsed-state summary (below) can use them.
+  const ppHasScores = overallScores.length > 0 && overallScores[0].total > 0;
+  const ppTop = ppHasScores ? [...overallScores].sort((a, b) => b.total - a.total)[0] : null;
+  const ppBestBat = ppHasScores ? [...overallScores].sort((a, b) => b.batting - a.batting)[0] : null;
+  const ppBestPit = ppHasScores ? [...overallScores].sort((a, b) => b.pitching - a.pitching)[0] : null;
+
+  // Minimal snapshot shown only when the Pool Play Scoreboard is collapsed (manually or
+  // auto-collapsed once playoffs start). Keeps the key pool-play outcomes — winners, wild
+  // cards, high scorers — visible while the Playoff Bracket stays the focus.
+  let ppSummaryInner = '';
+  if (allPPWinners.size > 0 || wildcardSet.size > 0) {
+    ppSummaryInner += `<div class="pp-summary-qual">
+      <div class="pp-summary-item"><span class="pp-summary-label">Pool Winners</span><span class="pp-summary-val">${esc([...allPPWinners].sort().join(', ')) || 'TBD'}</span></div>
+      <div class="pp-summary-item"><span class="pp-summary-label">Wild Cards</span><span class="pp-summary-val">${esc([...wildcardSet].sort().join(', ')) || 'TBD'}</span></div>
+    </div>`;
+  }
+  if (ppHasScores) {
+    const ppSummaryLeaders = [
+      { label: 'Top Scorer', mgr: ppTop.manager, val: fmt(ppTop.total) },
+      { label: 'Best Batting', mgr: ppBestBat.manager, val: fmt(ppBestBat.batting) },
+      { label: 'Best Pitching', mgr: ppBestPit.manager, val: fmt(ppBestPit.pitching) },
+    ];
+    ppSummaryInner += `<div class="pp-summary-leaders">${ppSummaryLeaders
+      .map(
+        (s) =>
+          `<div class="pp-summary-stat"><span class="pp-summary-label">${s.label}</span><span class="pp-summary-val">${esc(s.mgr)} · ${s.val}</span></div>`
+      )
+      .join('')}</div>`;
+  }
+
   let html = '';
 
   html += `<div class="card scoreboard-card sb-poolplay-section">
-    <div class="sb-poolplay-header" onclick="togglePoolPlay()">
+    <div class="sb-poolplay-header${ppCollapsed ? ' sb-poolplay-collapsed' : ''}" onclick="togglePoolPlay()">
       <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
-      <span class="btn btn-sm btn-secondary sb-poolplay-toggle" id="sb-poolplay-toggle-btn">${ppCollapsed ? 'Show' : 'Hide'}</span>
+      <span class="sb-section-arrow">▾</span>
     </div>
+    ${ppSummaryInner ? `<div class="sb-poolplay-summary" id="sb-poolplay-summary" style="display:${ppCollapsed ? 'flex' : 'none'};">${ppSummaryInner}</div>` : ''}
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">`;
 
   html += `<div class="highlight-legend sb-color-legend">
@@ -5187,11 +5216,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   </div>`;
 
   // Pool Play leader stat cards (pool play scores only)
-  if (overallScores.length > 0 && overallScores[0].total > 0) {
-    const ppSorted = [...overallScores].sort((a, b) => b.total - a.total);
-    const ppTop = ppSorted[0];
-    const ppBestBat = [...overallScores].sort((a, b) => b.batting - a.batting)[0];
-    const ppBestPit = [...overallScores].sort((a, b) => b.pitching - a.pitching)[0];
+  if (ppHasScores) {
     const ppLeaderCards = [
       { label: 'Pool Play Leader', value: fmt(ppTop.total), detail: ppTop.manager },
       { label: 'Best Batting', value: fmt(ppBestBat.batting), detail: ppBestBat.manager },
@@ -5215,7 +5240,6 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     <div class="sb-section${pp1Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp1">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp1')">
         <span class="sb-section-title">Pool Play 1</span>
-        <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp1" onclick="event.stopPropagation();toggleAllManagerDetails('pp1')">Show</button>
         <span class="sb-section-arrow">▾</span>
       </div>
       <div id="sb-pp1" style="display:${pp1Open ? 'block' : 'none'}">
@@ -5229,7 +5253,6 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     <div class="sb-section${pp2Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp2">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp2')">
         <span class="sb-section-title">Pool Play 2</span>
-        <button class="pool-expand-all-btn" id="toggle-all-mgr-btn-pp2" onclick="event.stopPropagation();toggleAllManagerDetails('pp2')">Show</button>
         <span class="sb-section-arrow">▾</span>
       </div>
       <div id="sb-pp2" style="display:${pp2Open ? 'block' : 'none'}">

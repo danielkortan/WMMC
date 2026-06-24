@@ -269,20 +269,6 @@ function buildScoreboardSections() {
   if (title && title.textContent.trim() !== 'Scoreboard') title.textContent = 'Scoreboard';
 }
 
-// Delegated toggle for pool cards within a period (survives re-renders).
-// Section-level collapse is handled by toggleScoreboardSection() via inline onclick.
-function setupPoolPlayToggles() {
-  document.addEventListener('click', (e) => {
-    if (!isMobile()) return;
-    if (!e.target.closest('#scoreboard-content')) return;
-
-    const poolHeader = e.target.closest('.pool-card-header');
-    if (poolHeader) {
-      poolHeader.closest('.pool-card')?.classList.toggle('mob-pool-collapsed');
-    }
-  });
-}
-
 function watchScoreboard() {
   const container = document.getElementById('scoreboard-content');
   if (!container) return;
@@ -307,7 +293,6 @@ function init() {
   if (!isMobile()) return;
   buildMobileNav();
   watchBanner();
-  setupPoolPlayToggles();
   watchScoreboard();
 }
 

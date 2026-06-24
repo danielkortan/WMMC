@@ -1142,6 +1142,52 @@ input[type='file'] {
   margin-top: 0.75rem;
 }
 
+.sb-poolplay-header.sb-poolplay-collapsed .sb-section-arrow {
+  transform: rotate(-90deg);
+}
+
+/* Compact pool-play snapshot shown only while the section is collapsed. */
+.sb-poolplay-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.pp-summary-qual,
+.pp-summary-leaders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.pp-summary-leaders {
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+.pp-summary-item,
+.pp-summary-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.pp-summary-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.pp-summary-val {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
 /* ============================================================ */
 /* Timeline Schedule (League Info) */
 /* ============================================================ */
@@ -1719,6 +1765,43 @@ footer {
   font-size: 0.9rem;
   font-weight: 700;
   margin: 0;
+}
+
+/* Clickable pool header (name + arrow) — click the name to collapse the pool. */
+.pool-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  background: var(--primary);
+  padding: 0.625rem 1rem;
+  user-select: none;
+}
+
+.pool-card-header:hover {
+  opacity: 0.92;
+}
+
+.pool-card-header h3,
+.pool-card-header h4 {
+  background: none;
+  color: white;
+  margin: 0;
+  padding: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.pool-card-header .sb-section-arrow {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.pool-card.pool-collapsed .pool-card-header .sb-section-arrow {
+  transform: rotate(-90deg);
+}
+
+.pool-card.pool-collapsed .pool-card-body {
+  display: none;
 }
 
 /* ============================================================ */
@@ -3761,6 +3844,33 @@ body::before {
 .bracket-team.bracket-champion {
   background: rgba(245, 158, 11, 0.15);
   border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+/* Clickable bracket team → expands that round's player breakdown (like pool-play rows). */
+.bracket-team-clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bracket-team-clickable:hover {
+  background: rgba(0, 45, 98, 0.06);
+}
+
+.bracket-team-arrow {
+  margin-left: 0.25rem;
+}
+
+.bracket-team-detail {
+  padding: 0 0.25rem 0.4rem;
+}
+
+/* The bracket cards are narrow — stack Batters over Pitchers instead of side by side. */
+.bracket-team-detail .mgr-detail-cols {
+  grid-template-columns: 1fr;
+}
+
+.bracket-team-detail .mgr-detail-panel {
+  margin: 0.25rem 0 0;
 }
 
 .bracket-seed {
