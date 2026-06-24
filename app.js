@@ -5094,11 +5094,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           .replace(/\s+/g, '_')
           .replace(/[^a-zA-Z0-9_]/g, '')}`;
         html += `<div class="pool-card">
-        <div class="pool-card-header" onclick="togglePool('${safePoolId}')">
-          <h3>${formatPool(poolNum)}</h3>
-          <span class="sb-section-arrow">▾</span>
-        </div>
-        <div class="pool-card-body" id="pool-body-${safePoolId}">
+        <h3>${formatPool(poolNum)}</h3>
         <table class="data-table compact-table">
           <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead>
           <tbody>`;
@@ -5119,7 +5115,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <td colspan="5"><div class="mgr-detail-loading">Loading...</div></td>
         </tr>`;
         });
-        html += '</tbody></table></div></div>';
+        html += '</tbody></table></div>';
       });
     html += '</div>';
     return html;
