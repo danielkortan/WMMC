@@ -3846,6 +3846,33 @@ body::before {
   border: 1px solid rgba(245, 158, 11, 0.3);
 }
 
+/* Clickable bracket team → expands that round's player breakdown (like pool-play rows). */
+.bracket-team-clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bracket-team-clickable:hover {
+  background: rgba(0, 45, 98, 0.06);
+}
+
+.bracket-team-arrow {
+  margin-left: 0.25rem;
+}
+
+.bracket-team-detail {
+  padding: 0 0.25rem 0.4rem;
+}
+
+/* The bracket cards are narrow — stack Batters over Pitchers instead of side by side. */
+.bracket-team-detail .mgr-detail-cols {
+  grid-template-columns: 1fr;
+}
+
+.bracket-team-detail .mgr-detail-panel {
+  margin: 0.25rem 0 0;
+}
+
 .bracket-seed {
   font-size: 0.7rem;
   font-weight: 700;
