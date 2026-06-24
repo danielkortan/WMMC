@@ -1146,6 +1146,48 @@ input[type='file'] {
   transform: rotate(-90deg);
 }
 
+/* Compact pool-play snapshot shown only while the section is collapsed. */
+.sb-poolplay-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.pp-summary-qual,
+.pp-summary-leaders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.pp-summary-leaders {
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+.pp-summary-item,
+.pp-summary-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.pp-summary-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.pp-summary-val {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
 /* ============================================================ */
 /* Timeline Schedule (League Info) */
 /* ============================================================ */

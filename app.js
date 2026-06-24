@@ -3234,6 +3234,9 @@ window.togglePoolPlay = function () {
   if (!body) return;
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? 'block' : 'none';
+  // The collapsed summary is the inverse of the body: shown only when collapsed.
+  const summary = document.getElementById('sb-poolplay-summary');
+  if (summary) summary.style.display = hidden ? 'none' : 'flex';
   const header = document.querySelector('.sb-poolplay-header');
   if (header) header.classList.toggle('sb-poolplay-collapsed', !hidden);
 };
@@ -4784,8 +4787,10 @@ function showActiveSeason(seasonData) {
     if (ppFinalized) {
       const ppBody = document.getElementById('sb-poolplay-body');
       const ppHeader = document.querySelector('.sb-poolplay-header');
+      const ppSummary = document.getElementById('sb-poolplay-summary');
       if (ppBody) ppBody.style.display = 'none';
       if (ppHeader) ppHeader.classList.add('sb-poolplay-collapsed');
+      if (ppSummary) ppSummary.style.display = 'flex';
     }
   }
 }
@@ -5126,6 +5131,37 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
   const ppCollapsed = hasPlayoffData;
 
+  // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
+  // collapsed-state summary (below) can use them.
+  const ppHasScores = overallScores.length > 0 && overallScores[0].total > 0;
+  const ppTop = ppHasScores ? [...overallScores].sort((a, b) => b.total - a.total)[0] : null;
+  const ppBestBat = ppHasScores ? [...overallScores].sort((a, b) => b.batting - a.batting)[0] : null;
+  const ppBestPit = ppHasScores ? [...overallScores].sort((a, b) => b.pitching - a.pitching)[0] : null;
+
+  // Minimal snapshot shown only when the Pool Play Scoreboard is collapsed (manually or
+  // auto-collapsed once playoffs start). Keeps the key pool-play outcomes — winners, wild
+  // cards, high scorers — visible while the Playoff Bracket stays the focus.
+  let ppSummaryInner = '';
+  if (allPPWinners.size > 0 || wildcardSet.size > 0) {
+    ppSummaryInner += `<div class="pp-summary-qual">
+      <div class="pp-summary-item"><span class="pp-summary-label">Pool Winners</span><span class="pp-summary-val">${esc([...allPPWinners].sort().join(', ')) || 'TBD'}</span></div>
+      <div class="pp-summary-item"><span class="pp-summary-label">Wild Cards</span><span class="pp-summary-val">${esc([...wildcardSet].sort().join(', ')) || 'TBD'}</span></div>
+    </div>`;
+  }
+  if (ppHasScores) {
+    const ppSummaryLeaders = [
+      { label: 'Top Scorer', mgr: ppTop.manager, val: fmt(ppTop.total) },
+      { label: 'Best Batting', mgr: ppBestBat.manager, val: fmt(ppBestBat.batting) },
+      { label: 'Best Pitching', mgr: ppBestPit.manager, val: fmt(ppBestPit.pitching) },
+    ];
+    ppSummaryInner += `<div class="pp-summary-leaders">${ppSummaryLeaders
+      .map(
+        (s) =>
+          `<div class="pp-summary-stat"><span class="pp-summary-label">${s.label}</span><span class="pp-summary-val">${esc(s.mgr)} · ${s.val}</span></div>`
+      )
+      .join('')}</div>`;
+  }
+
   let html = '';
 
   html += `<div class="card scoreboard-card sb-poolplay-section">
@@ -5133,6 +5169,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       <h2 style="margin:0;border:none;padding:0;">Pool Play Scoreboard</h2>
       <span class="sb-section-arrow">▾</span>
     </div>
+    ${ppSummaryInner ? `<div class="sb-poolplay-summary" id="sb-poolplay-summary" style="display:${ppCollapsed ? 'flex' : 'none'};">${ppSummaryInner}</div>` : ''}
     <div class="sb-poolplay-body" id="sb-poolplay-body" style="display:${ppCollapsed ? 'none' : 'block'};">`;
 
   html += `<div class="highlight-legend sb-color-legend">
@@ -5150,11 +5187,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   </div>`;
 
   // Pool Play leader stat cards (pool play scores only)
-  if (overallScores.length > 0 && overallScores[0].total > 0) {
-    const ppSorted = [...overallScores].sort((a, b) => b.total - a.total);
-    const ppTop = ppSorted[0];
-    const ppBestBat = [...overallScores].sort((a, b) => b.batting - a.batting)[0];
-    const ppBestPit = [...overallScores].sort((a, b) => b.pitching - a.pitching)[0];
+  if (ppHasScores) {
     const ppLeaderCards = [
       { label: 'Pool Play Leader', value: fmt(ppTop.total), detail: ppTop.manager },
       { label: 'Best Batting', value: fmt(ppBestBat.batting), detail: ppBestBat.manager },
