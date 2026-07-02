@@ -17,6 +17,7 @@ import {
 } from './scoring.js';
 import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO, normalizeName } from './utils.js';
 import { parseCSVLine, findColumn } from './csv.js';
+import { computeSeasonAccolades } from './accolades.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
 Object.assign(window, {
@@ -36,4 +37,5 @@ Object.assign(window, {
   normalizeName,
   parseCSVLine,
   findColumn,
+  computeSeasonAccolades,
 });

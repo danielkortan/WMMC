@@ -4894,3 +4894,72 @@ body::before {
   color: var(--text-muted);
   margin-left: 0.6rem;
 }
+
+/* ============================================================
+   Season Accolades (Season Stats tab)
+   ============================================================ */
+/* Single column on small screens; on wide screens the three 2-column tables
+   (manager tallies + records) share the top row and the two 4-column player
+   tables get half the row each, so they fit without horizontal scrolling. */
+.accolades-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+@media (min-width: 900px) {
+  .accolades-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .accolade-box {
+    grid-column: span 2;
+  }
+  .accolade-box-wide {
+    grid-column: span 3;
+  }
+}
+.accolade-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  min-width: 0;
+}
+.accolade-box h3 {
+  margin: 0 0 0.2rem;
+  font-size: 1.02rem;
+}
+.accolade-sub {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0 0 0.6rem;
+}
+.accolade-box .data-table {
+  width: 100%;
+  margin: 0;
+}
+.accolade-empty {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+.accolade-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.accolade-records li {
+  padding: 0.4rem 0;
+  font-size: 0.88rem;
+  border-bottom: 1px solid var(--border);
+}
+.accolade-records li:last-child {
+  border-bottom: none;
+}
+.accolade-rec-label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}

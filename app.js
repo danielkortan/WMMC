@@ -1414,8 +1414,11 @@ function enterApp(mgr) {
   setupNav();
   updateOnlineStatus();
 
-  // Restore the tab the user was on before refreshing
-  const savedTab = localStorage.getItem('wmmc_active_tab');
+  // Restore the tab the user was on before refreshing. The standalone Trends
+  // tab merged into Season Stats (the old Weekly Scores tab) — map the legacy
+  // saved value so returning users land on the merged tab, not the default.
+  let savedTab = localStorage.getItem('wmmc_active_tab');
+  if (savedTab === 'trends') savedTab = 'weekly';
   if (savedTab) {
     const targetBtn = document.querySelector(`.nav-btn[data-tab="${savedTab}"]`);
     const targetSection = document.getElementById(savedTab);
@@ -1429,7 +1432,7 @@ function enterApp(mgr) {
 
   init();
   // Trigger tab-specific renders for tabs that need them
-  if (savedTab === 'trends') renderTrends();
+  if (savedTab === 'weekly') renderTrends();
   if (savedTab === 'swap-log') renderSwapLog('swap-log-public', false);
   if (savedTab === 'hall-of-fame') renderHallOfFame();
   if (savedTab === 'live') startLivePolling();
@@ -1928,7 +1931,9 @@ function setupNav() {
       // Always pull fresh data from server before rendering the new tab
       await syncFromServer();
       init();
-      if (btn.dataset.tab === 'trends') renderTrends();
+      // Trends charts live inside the Season Stats tab and only render on
+      // activation — Chart.js canvases size to zero inside a hidden section.
+      if (btn.dataset.tab === 'weekly') renderTrends();
       if (btn.dataset.tab === 'swap-log') renderSwapLog('swap-log-public', false);
       if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
       // Live tab owns its own polling lifecycle — start when entering, stop on leaving.
@@ -1943,6 +1948,7 @@ function setupNav() {
 // ============================================================
 function showHistoricalSeason() {
   renderScoreboard();
+  renderSeasonAccolades();
   renderWeekly();
   renderPlayers();
   renderBracket();
@@ -5324,6 +5330,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
 }
 
 function renderActiveWeekly(seasonData) {
+  renderSeasonAccolades();
   const teamWeekly = buildTeamWeekly(seasonData);
   if (teamWeekly.length === 0) {
     document.getElementById('weekly-table').innerHTML = '<tbody><tr><td>No weekly data yet.</td></tr></tbody>';
@@ -5387,6 +5394,133 @@ const CHART_COLORS = [
   '#a78bfa',
   '#34d399',
 ];
+
+// ============================================================
+// Season Accolades — season-long daily best/worst tallies shown at the top of
+// the Season Stats tab. Pure math lives in js/accolades.js (computeSeasonAccolades,
+// unit-tested); this renders it from the on-demand daily stats cache.
+// ============================================================
+function renderSeasonAccolades() {
+  const container = document.getElementById('season-accolades-content');
+  if (!container) return;
+  const seasons = getSeasons();
+  const seasonData = seasons[SELECTED_SEASON];
+  if (!seasonData) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const heading = `<h2>Season Accolades</h2>
+      <p class="upload-hint">Best of the best, worst of the worst — daily finishes tracked across the whole season, counting only players while they were rostered.</p>`;
+
+  const dailyStats = getDailyStatsCached(SELECTED_SEASON);
+  ensureDailyStats(SELECTED_SEASON, renderSeasonAccolades);
+  if (!dailyStats || (dailyStats.batting.length === 0 && dailyStats.pitching.length === 0)) {
+    container.innerHTML = `<div class="card">${heading}<p>${dailyStats ? 'No daily stat data recorded for this season.' : 'Loading daily stat data…'}</p></div>`;
+    return;
+  }
+
+  const managers = getManagers();
+  const registeredNames = new Set(managers.map((m) => m.name));
+  const rosterLookup = buildRosterLookup(seasonData);
+  const resolveManager = (row, type) => {
+    const name = type === 'batting' ? row.batter : row.pitcher;
+    const mgr = row.manager || rosterLookup[rosterLookupKey(name, row.round, row.week)];
+    return mgr && registeredNames.has(mgr) ? mgr : null;
+  };
+
+  const acc = computeSeasonAccolades({
+    dailyBatting: dailyStats.batting,
+    dailyPitching: dailyStats.pitching,
+    resolveManager,
+  });
+
+  if (acc.days === 0) {
+    container.innerHTML = `<div class="card">${heading}<p>No game days with rostered-player stats yet.</p></div>`;
+    return;
+  }
+
+  const MAX_PLAYER_ROWS = 10;
+  const fmtDay = (d) => {
+    const [, m, day] = String(d).split('-');
+    return `${parseInt(m)}/${parseInt(day)}`;
+  };
+  const emptyNote = '<p class="accolade-empty">Nothing yet — check back after more games.</p>';
+
+  const managerTable = (rows, countHeader) =>
+    rows.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Manager</th><th>${countHeader}</th></tr></thead><tbody>
+          ${rows.map((r) => `<tr><td><strong>${esc(r.manager)}</strong></td><td>${r.count}</td></tr>`).join('')}
+        </tbody></table></div>`
+      : emptyNote;
+
+  const pitcherTable = acc.pitcherNegativeDays.length
+    ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Pitcher</th><th>Manager</th><th>Days &lt; 0</th><th>Worst Day</th></tr></thead><tbody>
+        ${acc.pitcherNegativeDays
+          .slice(0, MAX_PLAYER_ROWS)
+          .map(
+            (r) =>
+              `<tr><td>${displayPlayer(r.player, seasonData)}</td><td>${esc(r.manager)}</td><td>${r.count}</td><td>${fmt(r.worst.score)} (${fmtDay(r.worst.date)})</td></tr>`
+          )
+          .join('')}
+      </tbody></table></div>`
+    : emptyNote;
+
+  // The box is titled "Sombrero Watch", so the tier labels stay short:
+  // 4 K = golden sombrero, 5+ K = platinum sombrero.
+  const sombrero = (k) => (k >= 5 ? ' · platinum!' : k >= 4 ? ' · golden' : '');
+  const batterTable = acc.batterHighKDays.length
+    ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Batter</th><th>Manager</th><th>3+ K Days</th><th>Worst Day</th></tr></thead><tbody>
+        ${acc.batterHighKDays
+          .slice(0, MAX_PLAYER_ROWS)
+          .map(
+            (r) =>
+              `<tr><td>${displayPlayer(r.player, seasonData)}</td><td>${esc(r.manager)}</td><td>${r.count}</td><td>${r.maxK} K (${fmtDay(r.worst.date)})${sombrero(r.maxK)}</td></tr>`
+          )
+          .join('')}
+      </tbody></table></div>`
+    : emptyNote;
+
+  const rec = acc.records;
+  const recordsHtml = `
+      <ul class="accolade-records">
+        ${rec.bestManagerDay ? `<li><span class="accolade-rec-label">Best manager day</span> <strong>${esc(rec.bestManagerDay.manager)}</strong> — ${fmt(rec.bestManagerDay.total)} pts (${fmtDay(rec.bestManagerDay.date)})</li>` : ''}
+        ${rec.worstManagerDay ? `<li><span class="accolade-rec-label">Worst manager day</span> <strong>${esc(rec.worstManagerDay.manager)}</strong> — ${fmt(rec.worstManagerDay.total)} pts (${fmtDay(rec.worstManagerDay.date)})</li>` : ''}
+        ${rec.bestPlayerDay ? `<li><span class="accolade-rec-label">Best player day</span> <strong>${displayPlayer(rec.bestPlayerDay.player, seasonData)}</strong> (${rec.bestPlayerDay.type}, ${esc(rec.bestPlayerDay.manager)}) — ${fmt(rec.bestPlayerDay.score)} pts (${fmtDay(rec.bestPlayerDay.date)})</li>` : ''}
+      </ul>`;
+
+  container.innerHTML = `
+    <div class="card">
+      ${heading}
+      <div class="accolades-grid">
+        <div class="accolade-box">
+          <h3>&#127942; Best of the Best</h3>
+          <p class="accolade-sub">Days finished in the daily top 3 (${acc.days} game day${acc.days === 1 ? '' : 's'} tracked)</p>
+          ${managerTable(acc.managerBest, 'Top-3 Days')}
+        </div>
+        <div class="accolade-box">
+          <h3>&#129398; Worst of the Worst</h3>
+          <p class="accolade-sub">Days finished in the daily bottom 3</p>
+          ${managerTable(acc.managerWorst, 'Bottom-3 Days')}
+        </div>
+        <div class="accolade-box">
+          <h3>&#128197; Single-Day Records</h3>
+          <p class="accolade-sub">Season-best (and worst) single days</p>
+          ${recordsHtml}
+        </div>
+        <div class="accolade-box accolade-box-wide">
+          <h3>&#128201; Rough Outings</h3>
+          <p class="accolade-sub">Pitchers with negative-point days</p>
+          ${pitcherTable}
+        </div>
+        <div class="accolade-box accolade-box-wide">
+          <h3>&#127913; Sombrero Watch</h3>
+          <p class="accolade-sub">Batters with 3+ strikeout days</p>
+          ${batterTable}
+        </div>
+      </div>
+    </div>`;
+}
 
 function renderTrends() {
   const seasons = getSeasons();
@@ -5587,6 +5721,7 @@ function renderTrends() {
   // ---- Build HTML ----
   container.innerHTML = `
     <div class="card">
+      <h2>Trends</h2>
       <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:1.25rem;">
         <div class="player-type-toggle trends-view-toggle" style="margin-bottom:0;">
           <button class="type-btn active" data-view="managers">Manager Trends</button>

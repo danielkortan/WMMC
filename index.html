@@ -14,7 +14,7 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='54' font-size='56'%3E%E2%9A%BE%3C/text%3E%3C/svg%3E"
     />
-    <link rel="stylesheet" href="styles.css?v=15dad87c" />
+    <link rel="stylesheet" href="styles.css?v=f3c0b8ed" />
     <link rel="stylesheet" href="mobile.css?v=873903ad" />
     <!-- Apply the saved theme before first paint so dark-mode users don't see a
          light flash. The authoritative value is the per-account preference loaded
@@ -87,8 +87,7 @@
       <button class="nav-btn" data-tab="live">Live</button>
       <button class="nav-btn" data-tab="my-roster">My Roster</button>
       <button class="nav-btn" data-tab="swap-log">Swap Log</button>
-      <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
-      <button class="nav-btn" data-tab="trends">Trends</button>
+      <button class="nav-btn" data-tab="weekly">Season Stats</button>
       <button class="nav-btn" data-tab="league-info">League Info</button>
       <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
       <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">
@@ -129,8 +128,10 @@
         <div id="live-games"></div>
       </section>
 
-      <!-- Weekly Scores -->
+      <!-- Season Stats: accolades, then trends, then weekly scores -->
       <section id="weekly" class="tab-content">
+        <div id="season-accolades-content"></div>
+        <div id="trends-content"></div>
         <div class="card">
           <h2>Weekly Team Scoring</h2>
           <div class="filters">
@@ -168,11 +169,6 @@
           </div>
           <table id="players-table" class="data-table"></table>
         </div>
-      </section>
-
-      <!-- Trends / Analytics -->
-      <section id="trends" class="tab-content">
-        <div id="trends-content"></div>
       </section>
 
       <!-- League Info (Schedule + Scoring + Constitution) -->
@@ -543,8 +539,8 @@
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <!-- Module entry runs first (defer is implicit for type=module) and attaches
          shared helpers to window. app.js then consumes them as bare globals. -->
-    <script type="module" src="js/index.js?v=c76cc5e9"></script>
+    <script type="module" src="js/index.js?v=e84ecc07"></script>
     <script type="module" src="js/mobile.js?v=bc5fe10e"></script>
-    <script src="app.js?v=ac7f6fea" defer></script>
+    <script src="app.js?v=2bdd8900" defer></script>
   </body>
 </html>
