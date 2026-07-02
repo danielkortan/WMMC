@@ -5482,29 +5482,69 @@ function renderSeasonAccolades() {
     : emptyNote;
 
   const rec = acc.records;
-  const managerDayList = (rows) =>
+
+  // One-line stat summary for a player-day entry (summed delta fields).
+  const accoladeStatLine = (p) => {
+    const s = p.stats || {};
+    if (p.type === 'Pitcher') {
+      const parts = [`${fmtDec(s.ip || 0)} IP`, `${s.h || 0} H`, `${s.er || 0} ER`, `${s.bb || 0} BB`, `${s.k || 0} K`];
+      if (s.w) parts.push('W');
+      if (s.qs) parts.push('QS');
+      if (s.cg) parts.push('CG');
+      if (s.nh) parts.push('NH');
+      return parts.join(', ');
+    }
+    const hits = (s['1b'] || 0) + (s['2b'] || 0) + (s['3b'] || 0) + (s.hr || 0);
+    const parts = [`${hits}-for-${s.abs || 0}`];
+    if (s['2b']) parts.push(`${s['2b']} 2B`);
+    if (s['3b']) parts.push(`${s['3b']} 3B`);
+    if (s.hr) parts.push(`${s.hr} HR`);
+    if (s.r) parts.push(`${s.r} R`);
+    if (s.rbi) parts.push(`${s.rbi} RBI`);
+    if (s.sb) parts.push(`${s.sb} SB`);
+    if (s.bb) parts.push(`${s.bb} BB`);
+    if (s.so) parts.push(`${s.so} K`);
+    return parts.join(', ');
+  };
+
+  const managerDayList = (rows, keyPrefix) =>
     rows.length
       ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Manager</th><th>Pts</th><th>Date</th></tr></thead><tbody>
-          ${rows.map((r) => `<tr><td><strong>${esc(r.manager)}</strong></td><td>${fmt(r.total)}</td><td>${fmtDay(r.date)}</td></tr>`).join('')}
-        </tbody></table></div>`
-      : emptyNote;
-  const playerDayList = (rows, showK) =>
-    rows.length
-      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Player</th><th>Manager</th><th>Pts</th><th>Date</th></tr></thead><tbody>
           ${rows
-            .map(
-              (r) =>
-                `<tr><td>${displayPlayer(r.player, seasonData)}${showK && r.so >= 3 ? ` · ${r.so} K` : ''}</td><td>${esc(r.manager)}</td><td>${fmt(r.score)}</td><td>${fmtDay(r.date)}</td></tr>`
-            )
+            .map((r, i) => {
+              const did = `acc-rec-${keyPrefix}-${i}`;
+              const detail = (r.players || [])
+                .map(
+                  (p) =>
+                    `<tr><td>${displayPlayer(p.player, seasonData)}</td><td>${accoladeStatLine(p)}</td><td>${fmt(p.score)}</td></tr>`
+                )
+                .join('');
+              return `<tr class="accolade-row-click" onclick="toggleAccoladeDetail('${did}')" title="Show the day's player breakdown"><td><strong>${esc(r.manager)}</strong> <span class="accolade-caret">&#9662;</span></td><td>${fmt(r.total)}</td><td>${fmtDay(r.date)}</td></tr>
+              <tr id="${did}" class="accolade-detail-row" style="display:none"><td colspan="3"><table class="data-table compact-table accolade-detail-table"><thead><tr><th>Player</th><th>Line</th><th>Pts</th></tr></thead><tbody>${detail || '<tr><td colspan="3">No player detail for this day.</td></tr>'}</tbody></table></td></tr>`;
+            })
             .join('')}
         </tbody></table></div>`
       : emptyNote;
+
+  const playerDayList = (rows, showK, keyPrefix) =>
+    rows.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Player</th><th>Manager</th><th>Pts</th><th>Date</th></tr></thead><tbody>
+          ${rows
+            .map((r, i) => {
+              const did = `acc-rec-${keyPrefix}-${i}`;
+              return `<tr class="accolade-row-click" onclick="toggleAccoladeDetail('${did}')" title="Show the day's stat line"><td>${displayPlayer(r.player, seasonData)}${showK && r.so >= 3 ? ` · ${r.so} K` : ''} <span class="accolade-caret">&#9662;</span></td><td>${esc(r.manager)}</td><td>${fmt(r.score)}</td><td>${fmtDay(r.date)}</td></tr>
+              <tr id="${did}" class="accolade-detail-row" style="display:none"><td colspan="4">${r.type}: ${accoladeStatLine(r)}</td></tr>`;
+            })
+            .join('')}
+        </tbody></table></div>`
+      : emptyNote;
+
   const recordsHtml = `
       <div class="accolade-records-grid">
-        <div><h4>Best Manager Days</h4>${managerDayList(rec.bestManagerDays)}</div>
-        <div><h4>Worst Manager Days</h4>${managerDayList(rec.worstManagerDays)}</div>
-        <div><h4>Best Player Days</h4>${playerDayList(rec.bestPlayerDays, false)}</div>
-        <div><h4>Worst Player Days</h4>${playerDayList(rec.worstPlayerDays, true)}</div>
+        <div><h4>Best Manager Days</h4>${managerDayList(rec.bestManagerDays, 'bmd')}</div>
+        <div><h4>Worst Manager Days</h4>${managerDayList(rec.worstManagerDays, 'wmd')}</div>
+        <div><h4>Best Player Days</h4>${playerDayList(rec.bestPlayerDays, false, 'bpd')}</div>
+        <div><h4>Worst Player Days</h4>${playerDayList(rec.worstPlayerDays, true, 'wpd')}</div>
       </div>`;
 
   container.innerHTML = `
@@ -5533,12 +5573,18 @@ function renderSeasonAccolades() {
         </div>
         <div class="accolade-box accolade-box-records">
           <h3>&#128197; Single-Day Records</h3>
-          <p class="accolade-sub">The five best (and worst) single days of the season</p>
+          <p class="accolade-sub">The five best (and worst) single days of the season — click a row for the full breakdown</p>
           ${recordsHtml}
         </div>
       </div>
     </div>`;
 }
+
+// Expand/collapse a Single-Day Records detail row (inline onclick handler).
+window.toggleAccoladeDetail = function (id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === 'none' ? 'table-row' : 'none';
+};
 
 function renderTrends() {
   const seasons = getSeasons();

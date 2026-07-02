@@ -41,12 +41,16 @@ const hadGame = (delta) => !!delta && Object.values(delta).some((v) => (parseFlo
 //   pitcherNegativeDays: [{ player, manager, count, worst: { date, score } }],
 //   batterHighKDays:     [{ player, manager, count, maxK, worst: { date, so } }],
 //   records: {                  // single-day record lists, recordsN entries each
-//     bestManagerDays:  [{ manager, date, total }],   // highest daily totals
-//     worstManagerDays: [{ manager, date, total }],   // lowest daily totals
-//     bestPlayerDays:   [{ player, type, manager, date, score, so }],
-//     worstPlayerDays:  [{ player, type, manager, date, score, so }],
+//     bestManagerDays:  [{ manager, date, total, players }],  // highest daily totals
+//     worstManagerDays: [{ manager, date, total, players }],  // lowest daily totals
+//     bestPlayerDays:   [{ player, type, manager, date, score, so, stats }],
+//     worstPlayerDays:  [{ player, type, manager, date, score, so, stats }],
 //   },
 // }
+// `stats` is the player's summed stat line for that date (delta fields across
+// doubleheaders, zero fields omitted); a manager day's `players` is that
+// manager's player-day entries for the date, highest score first — so a UI can
+// expand a record row into the day's full breakdown.
 export function computeSeasonAccolades({
   dailyBatting = [],
   dailyPitching = [],
@@ -60,15 +64,22 @@ export function computeSeasonAccolades({
   //                  pitchers: { name: { score, manager } } }
   const byDate = {};
   const dateBucket = (date) => (byDate[date] = byDate[date] || { batters: {}, pitchers: {} });
+  const addStats = (stats, delta) => {
+    for (const [k, v] of Object.entries(delta)) {
+      const n = parseFloat(v);
+      if (n) stats[k] = round2((stats[k] || 0) + n);
+    }
+  };
 
   for (const row of dailyBatting) {
     if (!row || !row.date || !hadGame(row.delta)) continue;
     const manager = resolveManager(row, 'batting');
     if (!manager) continue;
     const bucket = dateBucket(row.date).batters;
-    const entry = bucket[row.batter] || (bucket[row.batter] = { score: 0, so: 0, manager });
+    const entry = bucket[row.batter] || (bucket[row.batter] = { score: 0, so: 0, manager, stats: {} });
     entry.score += calculateBattingScore(row.delta);
     entry.so += parseFloat(row.delta.so) || 0;
+    addStats(entry.stats, row.delta);
   }
 
   for (const row of dailyPitching) {
@@ -76,8 +87,9 @@ export function computeSeasonAccolades({
     const manager = resolveManager(row, 'pitching');
     if (!manager) continue;
     const bucket = dateBucket(row.date).pitchers;
-    const entry = bucket[row.pitcher] || (bucket[row.pitcher] = { score: 0, manager });
+    const entry = bucket[row.pitcher] || (bucket[row.pitcher] = { score: 0, manager, stats: {} });
     entry.score += calculatePitchingScore(row.delta);
+    addStats(entry.stats, row.delta);
   }
 
   // ---- Walk the dates, tallying accolades ----
@@ -92,6 +104,12 @@ export function computeSeasonAccolades({
   for (const date of dates) {
     const { batters, pitchers } = byDate[date];
     const managerTotals = {};
+    const dayPlayers = {}; // manager -> that date's player-day entries
+
+    const trackPlayerDay = (entry) => {
+      playerDays.push(entry);
+      (dayPlayers[entry.manager] = dayPlayers[entry.manager] || []).push(entry);
+    };
 
     for (const [name, e] of Object.entries(batters)) {
       const score = round2(e.score);
@@ -110,7 +128,7 @@ export function computeSeasonAccolades({
           rec.worst = { date, so: e.so };
         }
       }
-      playerDays.push({ player: name, type: 'Batter', manager: e.manager, date, score, so: e.so });
+      trackPlayerDay({ player: name, type: 'Batter', manager: e.manager, date, score, so: e.so, stats: e.stats });
     }
 
     for (const [name, e] of Object.entries(pitchers)) {
@@ -126,7 +144,7 @@ export function computeSeasonAccolades({
         rec.manager = e.manager;
         if (!rec.worst || score < rec.worst.score) rec.worst = { date, score };
       }
-      playerDays.push({ player: name, type: 'Pitcher', manager: e.manager, date, score, so: 0 });
+      trackPlayerDay({ player: name, type: 'Pitcher', manager: e.manager, date, score, so: 0, stats: e.stats });
     }
 
     const ranked = Object.entries(managerTotals)
@@ -143,7 +161,10 @@ export function computeSeasonAccolades({
     for (const { manager } of top) bestCounts[manager] = (bestCounts[manager] || 0) + 1;
     for (const { manager } of bottom) worstCounts[manager] = (worstCounts[manager] || 0) + 1;
 
-    for (const { manager, total } of ranked) managerDays.push({ manager, date, total });
+    for (const { manager, total } of ranked) {
+      const players = (dayPlayers[manager] || []).slice().sort((a, b) => b.score - a.score);
+      managerDays.push({ manager, date, total, players });
+    }
   }
 
   const toCounts = (counts) =>
