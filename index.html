@@ -128,11 +128,21 @@
         <div id="live-games"></div>
       </section>
 
-      <!-- Season Stats: accolades, then trends, then weekly scores -->
+      <!-- Season Stats: jump nav, accolades, trends, weekly scores -->
       <section id="weekly" class="tab-content">
+        <div class="season-stats-jump-nav">
+          <span class="jump-nav-label">Jump to:</span>
+          <button class="btn btn-sm btn-secondary" onclick="scrollToSection('season-accolades-content')">
+            Season Accolades
+          </button>
+          <button class="btn btn-sm btn-secondary" onclick="scrollToSection('trends-content')">Trends</button>
+          <button class="btn btn-sm btn-secondary" onclick="scrollToSection('weekly-scores-card')">
+            Weekly Team Scoring
+          </button>
+        </div>
         <div id="season-accolades-content"></div>
         <div id="trends-content"></div>
-        <div class="card">
+        <div class="card" id="weekly-scores-card">
           <h2>Weekly Team Scoring</h2>
           <div class="filters">
             <select id="weekly-round-filter">

@@ -4898,21 +4898,48 @@ body::before {
 /* ============================================================
    Season Accolades (Season Stats tab)
    ============================================================ */
-/* Single column on small screens; on wide screens the four tally boxes sit
-   2x2 and the Single-Day Records box takes a full row (its four record lists
-   form their own 2x2 grid inside). */
-.accolades-grid {
+/* Jump-nav row at the top of the Season Stats tab. */
+.season-stats-jump-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.jump-nav-label {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+/* The sticky main nav covers ~3.5rem — keep jump targets clear of it. */
+#season-accolades-content,
+#trends-content,
+#weekly-scores-card {
+  scroll-margin-top: 4rem;
+}
+
+/* Four titled sections, each holding a side-by-side pair of boxes
+   (stacked single-column on small screens). */
+.accolade-section {
+  margin-top: 1.5rem;
+}
+.accolade-section:first-of-type {
+  margin-top: 0.5rem;
+}
+.accolade-section-title {
+  margin: 0 0 0.15rem;
+  font-size: 1.08rem;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.accolade-pair {
   display: grid;
   grid-template-columns: 1fr;
   gap: 1rem;
-  margin-top: 0.75rem;
+  margin-top: 0.5rem;
 }
 @media (min-width: 900px) {
-  .accolades-grid {
+  .accolade-pair {
     grid-template-columns: repeat(2, 1fr);
-  }
-  .accolade-box-records {
-    grid-column: 1 / -1;
   }
 }
 .accolade-box {
@@ -4922,9 +4949,9 @@ body::before {
   padding: 0.85rem 1rem;
   min-width: 0;
 }
-.accolade-box h3 {
-  margin: 0 0 0.2rem;
-  font-size: 1.02rem;
+.accolade-box h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.98rem;
 }
 .accolade-sub {
   color: var(--text-muted);
@@ -4940,25 +4967,11 @@ body::before {
   font-size: 0.85rem;
   margin: 0;
 }
-.accolade-records-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 1rem;
-}
-@media (min-width: 900px) {
-  .accolade-records-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-.accolade-records-grid > div {
-  min-width: 0;
-}
-.accolade-records-grid h4 {
-  margin: 0 0 0.35rem;
-  font-size: 0.92rem;
+.accolade-tie-note {
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 0.82rem;
+  font-style: italic;
+  margin: 0.45rem 0 0;
 }
 .accolade-row-click {
   cursor: pointer;
@@ -4971,6 +4984,10 @@ body::before {
   background: var(--card-bg);
   font-size: 0.85rem;
   padding: 0.5rem 0.75rem;
+  /* Cap the cell's contribution to the outer table's width so the wide stat
+     table inside scrolls in its own .table-wrapper instead of stretching the
+     record list past its box. */
+  max-width: 1px;
 }
 .accolade-detail-table {
   margin: 0;

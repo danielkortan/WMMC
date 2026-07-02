@@ -5440,71 +5440,66 @@ function renderSeasonAccolades() {
     return;
   }
 
-  const MAX_PLAYER_ROWS = 10;
+  const TOP_N = 5;
   const fmtDay = (d) => {
     const [, m, day] = String(d).split('-');
     return `${parseInt(m)}/${parseInt(day)}`;
   };
   const emptyNote = '<p class="accolade-empty">Nothing yet — check back after more games.</p>';
 
-  const managerTable = (rows, countHeader) =>
-    rows.length
-      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Manager</th><th>${countHeader}</th></tr></thead><tbody>
-          ${rows.map((r) => `<tr><td><strong>${esc(r.manager)}</strong></td><td>${r.count}</td></tr>`).join('')}
-        </tbody></table></div>`
-      : emptyNote;
+  // ---- Full scoring stat lines (every category that feeds the score) ----
+  const BAT_COLS = [
+    ['abs', 'AB'],
+    ['1b', '1B'],
+    ['2b', '2B'],
+    ['3b', '3B'],
+    ['hr', 'HR'],
+    ['r', 'R'],
+    ['rbi', 'RBI'],
+    ['sb', 'SB'],
+    ['bb', 'BB'],
+    ['so', 'K'],
+  ];
+  const PIT_COLS = [
+    ['ip', 'IP'],
+    ['h', 'H'],
+    ['er', 'ER'],
+    ['bb', 'BB'],
+    ['k', 'K'],
+    ['w', 'W'],
+    ['qs', 'QS'],
+    ['cg', 'CG'],
+    ['cgso', 'CGSO'],
+    ['nh', 'NH'],
+  ];
+  const statHeaderCells = (cols) => cols.map(([, label]) => `<th>${label}</th>`).join('');
+  const statValueCells = (cols, stats) =>
+    cols.map(([k]) => `<td>${k === 'ip' ? fmtDec(stats[k] || 0) : fmt(stats[k] || 0)}</td>`).join('');
 
-  const pitcherTable = acc.pitcherNegativeDays.length
-    ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Pitcher</th><th>Manager</th><th>Days &lt; 0</th><th>Worst Day</th></tr></thead><tbody>
-        ${acc.pitcherNegativeDays
-          .slice(0, MAX_PLAYER_ROWS)
-          .map(
-            (r) =>
-              `<tr><td>${displayPlayer(r.player, seasonData)}</td><td>${esc(r.manager)}</td><td>${r.count}</td><td>${fmt(r.worst.score)} (${fmtDay(r.worst.date)})</td></tr>`
-          )
-          .join('')}
-      </tbody></table></div>`
-    : emptyNote;
+  // Full stat table for one player-day (used in the player-day expansions).
+  const playerStatTable = (p) => {
+    const cols = p.type === 'Pitcher' ? PIT_COLS : BAT_COLS;
+    return `<div class="table-wrapper"><table class="data-table compact-table accolade-detail-table"><thead><tr><th>${p.type}</th>${statHeaderCells(cols)}<th>Pts</th></tr></thead><tbody>
+        <tr><td>${displayPlayer(p.player, seasonData)}</td>${statValueCells(cols, p.stats || {})}<td><strong>${fmt(p.score)}</strong></td></tr>
+      </tbody></table></div>`;
+  };
 
-  // The box is titled "Sombrero Watch", so the tier labels stay short:
-  // 4 K = golden sombrero, 5+ K = platinum sombrero.
-  const sombrero = (k) => (k >= 5 ? ' · platinum!' : k >= 4 ? ' · golden' : '');
-  const batterTable = acc.batterHighKDays.length
-    ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Batter</th><th>Manager</th><th>3+ K Days</th><th>Worst Day</th></tr></thead><tbody>
-        ${acc.batterHighKDays
-          .slice(0, MAX_PLAYER_ROWS)
-          .map(
-            (r) =>
-              `<tr><td>${displayPlayer(r.player, seasonData)}</td><td>${esc(r.manager)}</td><td>${r.count}</td><td>${r.maxK} K (${fmtDay(r.worst.date)})${sombrero(r.maxK)}</td></tr>`
-          )
-          .join('')}
-      </tbody></table></div>`
-    : emptyNote;
-
-  const rec = acc.records;
-
-  // One-line stat summary for a player-day entry (summed delta fields).
-  const accoladeStatLine = (p) => {
-    const s = p.stats || {};
-    if (p.type === 'Pitcher') {
-      const parts = [`${fmtDec(s.ip || 0)} IP`, `${s.h || 0} H`, `${s.er || 0} ER`, `${s.bb || 0} BB`, `${s.k || 0} K`];
-      if (s.w) parts.push('W');
-      if (s.qs) parts.push('QS');
-      if (s.cg) parts.push('CG');
-      if (s.nh) parts.push('NH');
-      return parts.join(', ');
-    }
-    const hits = (s['1b'] || 0) + (s['2b'] || 0) + (s['3b'] || 0) + (s.hr || 0);
-    const parts = [`${hits}-for-${s.abs || 0}`];
-    if (s['2b']) parts.push(`${s['2b']} 2B`);
-    if (s['3b']) parts.push(`${s['3b']} 3B`);
-    if (s.hr) parts.push(`${s.hr} HR`);
-    if (s.r) parts.push(`${s.r} R`);
-    if (s.rbi) parts.push(`${s.rbi} RBI`);
-    if (s.sb) parts.push(`${s.sb} SB`);
-    if (s.bb) parts.push(`${s.bb} BB`);
-    if (s.so) parts.push(`${s.so} K`);
-    return parts.join(', ');
+  // Full stat breakdown for a manager-day (batters and pitchers each get a
+  // table with their own scoring columns), best score first within each group.
+  const managerDayDetail = (players) => {
+    const group = (type, cols) => {
+      const subset = (players || []).filter((p) => p.type === type);
+      if (!subset.length) return '';
+      return `<div class="table-wrapper"><table class="data-table compact-table accolade-detail-table"><thead><tr><th>${type}s</th>${statHeaderCells(cols)}<th>Pts</th></tr></thead><tbody>
+          ${subset
+            .map(
+              (p) =>
+                `<tr><td>${displayPlayer(p.player, seasonData)}</td>${statValueCells(cols, p.stats || {})}<td><strong>${fmt(p.score)}</strong></td></tr>`
+            )
+            .join('')}
+        </tbody></table></div>`;
+    };
+    return group('Batter', BAT_COLS) + group('Pitcher', PIT_COLS) || '<p>No player detail for this day.</p>';
   };
 
   const managerDayList = (rows, keyPrefix) =>
@@ -5513,14 +5508,8 @@ function renderSeasonAccolades() {
           ${rows
             .map((r, i) => {
               const did = `acc-rec-${keyPrefix}-${i}`;
-              const detail = (r.players || [])
-                .map(
-                  (p) =>
-                    `<tr><td>${displayPlayer(p.player, seasonData)}</td><td>${accoladeStatLine(p)}</td><td>${fmt(p.score)}</td></tr>`
-                )
-                .join('');
               return `<tr class="accolade-row-click" onclick="toggleAccoladeDetail('${did}')" title="Show the day's player breakdown"><td><strong>${esc(r.manager)}</strong> <span class="accolade-caret">&#9662;</span></td><td>${fmt(r.total)}</td><td>${fmtDay(r.date)}</td></tr>
-              <tr id="${did}" class="accolade-detail-row" style="display:none"><td colspan="3"><table class="data-table compact-table accolade-detail-table"><thead><tr><th>Player</th><th>Line</th><th>Pts</th></tr></thead><tbody>${detail || '<tr><td colspan="3">No player detail for this day.</td></tr>'}</tbody></table></td></tr>`;
+              <tr id="${did}" class="accolade-detail-row" style="display:none"><td colspan="3">${managerDayDetail(r.players)}</td></tr>`;
             })
             .join('')}
         </tbody></table></div>`
@@ -5532,53 +5521,130 @@ function renderSeasonAccolades() {
           ${rows
             .map((r, i) => {
               const did = `acc-rec-${keyPrefix}-${i}`;
-              return `<tr class="accolade-row-click" onclick="toggleAccoladeDetail('${did}')" title="Show the day's stat line"><td>${displayPlayer(r.player, seasonData)}${showK && r.so >= 3 ? ` · ${r.so} K` : ''} <span class="accolade-caret">&#9662;</span></td><td>${esc(r.manager)}</td><td>${fmt(r.score)}</td><td>${fmtDay(r.date)}</td></tr>
-              <tr id="${did}" class="accolade-detail-row" style="display:none"><td colspan="4">${r.type}: ${accoladeStatLine(r)}</td></tr>`;
+              return `<tr class="accolade-row-click" onclick="toggleAccoladeDetail('${did}')" title="Show the day's full stat line"><td>${displayPlayer(r.player, seasonData)}${showK && r.so >= 3 ? ` · ${r.so} K` : ''} <span class="accolade-caret">&#9662;</span></td><td>${esc(r.manager)}</td><td>${fmt(r.score)}</td><td>${fmtDay(r.date)}</td></tr>
+              <tr id="${did}" class="accolade-detail-row" style="display:none"><td colspan="4">${playerStatTable(r)}</td></tr>`;
             })
             .join('')}
         </tbody></table></div>`
       : emptyNote;
 
-  const recordsHtml = `
-      <div class="accolade-records-grid">
-        <div><h4>Best Manager Days</h4>${managerDayList(rec.bestManagerDays, 'bmd')}</div>
-        <div><h4>Worst Manager Days</h4>${managerDayList(rec.worstManagerDays, 'wmd')}</div>
-        <div><h4>Best Player Days</h4>${playerDayList(rec.bestPlayerDays, false, 'bpd')}</div>
-        <div><h4>Worst Player Days</h4>${playerDayList(rec.worstPlayerDays, true, 'wpd')}</div>
-      </div>`;
+  const managerTable = (rows, countHeader) =>
+    rows.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Manager</th><th>${countHeader}</th></tr></thead><tbody>
+          ${rows.map((r) => `<tr><td><strong>${esc(r.manager)}</strong></td><td>${r.count}</td></tr>`).join('')}
+        </tbody></table></div>`
+      : emptyNote;
 
+  // Worst-5 player tallies, mirroring the record lists. Anyone past 5th place
+  // who is tied with the 5th-place count collapses into one summary line.
+  const topWithTies = (rows, tieLine) => {
+    const shown = rows.slice(0, TOP_N);
+    let note = '';
+    if (rows.length > TOP_N) {
+      const cutoff = rows[TOP_N - 1].count;
+      const tied = rows.slice(TOP_N).filter((r) => r.count === cutoff);
+      if (tied.length) note = `<p class="accolade-tie-note">${tieLine(tied.length, cutoff)}</p>`;
+    }
+    return { shown, note };
+  };
+
+  const pitcherTally = topWithTies(
+    acc.pitcherNegativeDays,
+    (n, days) => `${n} more pitcher${n === 1 ? '' : 's'} tied with ${days} day${days === 1 ? '' : 's'} &lt; 0`
+  );
+  const pitcherTable = pitcherTally.shown.length
+    ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Pitcher</th><th>Manager</th><th>Days &lt; 0</th><th>Worst Day</th></tr></thead><tbody>
+        ${pitcherTally.shown
+          .map(
+            (r) =>
+              `<tr><td>${displayPlayer(r.player, seasonData)}</td><td>${esc(r.manager)}</td><td>${r.count}</td><td>${fmt(r.worst.score)} (${fmtDay(r.worst.date)})</td></tr>`
+          )
+          .join('')}
+      </tbody></table></div>${pitcherTally.note}`
+    : emptyNote;
+
+  // The box is titled "Sombrero Watch", so the tier labels stay short:
+  // 4 K = golden sombrero, 5+ K = platinum sombrero.
+  const sombrero = (k) => (k >= 5 ? ' · platinum!' : k >= 4 ? ' · golden' : '');
+  const batterTally = topWithTies(
+    acc.batterHighKDays,
+    (n, days) => `${n} more batter${n === 1 ? '' : 's'} tied with ${days} day${days === 1 ? '' : 's'} of 3+ K`
+  );
+  const batterTable = batterTally.shown.length
+    ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Batter</th><th>Manager</th><th>3+ K Days</th><th>Worst Day</th></tr></thead><tbody>
+        ${batterTally.shown
+          .map(
+            (r) =>
+              `<tr><td>${displayPlayer(r.player, seasonData)}</td><td>${esc(r.manager)}</td><td>${r.count}</td><td>${r.maxK} K (${fmtDay(r.worst.date)})${sombrero(r.maxK)}</td></tr>`
+          )
+          .join('')}
+      </tbody></table></div>${batterTally.note}`
+    : emptyNote;
+
+  const rec = acc.records;
   container.innerHTML = `
     <div class="card">
       ${heading}
-      <div class="accolades-grid">
-        <div class="accolade-box">
-          <h3>&#127942; Best of the Best</h3>
-          <p class="accolade-sub">Days finished in the daily top 3 (${acc.days} game day${acc.days === 1 ? '' : 's'} tracked)</p>
-          ${managerTable(acc.managerBest, 'Top-3 Days')}
+
+      <div class="accolade-section">
+        <h3 class="accolade-section-title">Manager Single-Day Records</h3>
+        <p class="accolade-sub">The five best and worst single-day manager totals — click a row for the day's player breakdown</p>
+        <div class="accolade-pair">
+          <div class="accolade-box"><h4>&#128197; Best Manager Days</h4>${managerDayList(rec.bestManagerDays, 'bmd')}</div>
+          <div class="accolade-box"><h4>&#128198; Worst Manager Days</h4>${managerDayList(rec.worstManagerDays, 'wmd')}</div>
         </div>
-        <div class="accolade-box">
-          <h3>&#129398; Worst of the Worst</h3>
-          <p class="accolade-sub">Days finished in the daily bottom 3</p>
-          ${managerTable(acc.managerWorst, 'Bottom-3 Days')}
+      </div>
+
+      <div class="accolade-section">
+        <h3 class="accolade-section-title">Manager Season Records</h3>
+        <p class="accolade-sub">Daily finishes tallied across ${acc.days} game day${acc.days === 1 ? '' : 's'}</p>
+        <div class="accolade-pair">
+          <div class="accolade-box">
+            <h4>&#127942; Best of the Best</h4>
+            <p class="accolade-sub">Days finished in the daily top 3</p>
+            ${managerTable(acc.managerBest, 'Top-3 Days')}
+          </div>
+          <div class="accolade-box">
+            <h4>&#129398; Worst of the Worst</h4>
+            <p class="accolade-sub">Days finished in the daily bottom 3</p>
+            ${managerTable(acc.managerWorst, 'Bottom-3 Days')}
+          </div>
         </div>
-        <div class="accolade-box">
-          <h3>&#128201; Rough Outings</h3>
-          <p class="accolade-sub">Pitchers with negative-point days</p>
-          ${pitcherTable}
+      </div>
+
+      <div class="accolade-section">
+        <h3 class="accolade-section-title">Player Single-Day Records</h3>
+        <p class="accolade-sub">The five best and worst single-day player scores — click a row for the full stat line</p>
+        <div class="accolade-pair">
+          <div class="accolade-box"><h4>&#11088; Best Player Days</h4>${playerDayList(rec.bestPlayerDays, false, 'bpd')}</div>
+          <div class="accolade-box"><h4>&#128128; Worst Player Days</h4>${playerDayList(rec.worstPlayerDays, true, 'wpd')}</div>
         </div>
-        <div class="accolade-box">
-          <h3>&#127913; Sombrero Watch</h3>
-          <p class="accolade-sub">Batters with 3+ strikeout days</p>
-          ${batterTable}
-        </div>
-        <div class="accolade-box accolade-box-records">
-          <h3>&#128197; Single-Day Records</h3>
-          <p class="accolade-sub">The five best (and worst) single days of the season — click a row for the full breakdown</p>
-          ${recordsHtml}
+      </div>
+
+      <div class="accolade-section">
+        <h3 class="accolade-section-title">Player Season Records</h3>
+        <p class="accolade-sub">The five worst repeat offenders of the season</p>
+        <div class="accolade-pair">
+          <div class="accolade-box">
+            <h4>&#128201; Rough Outings</h4>
+            <p class="accolade-sub">Pitchers with negative-point days</p>
+            ${pitcherTable}
+          </div>
+          <div class="accolade-box">
+            <h4>&#127913; Sombrero Watch</h4>
+            <p class="accolade-sub">Batters with 3+ strikeout days</p>
+            ${batterTable}
+          </div>
         </div>
       </div>
     </div>`;
 }
+
+// Smooth-scroll to a Season Stats section (jump-nav row in index.html).
+window.scrollToSection = function (id) {
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
 
 // Expand/collapse a Single-Day Records detail row (inline onclick handler).
 window.toggleAccoladeDetail = function (id) {
