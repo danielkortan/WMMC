@@ -5482,12 +5482,30 @@ function renderSeasonAccolades() {
     : emptyNote;
 
   const rec = acc.records;
+  const managerDayList = (rows) =>
+    rows.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Manager</th><th>Pts</th><th>Date</th></tr></thead><tbody>
+          ${rows.map((r) => `<tr><td><strong>${esc(r.manager)}</strong></td><td>${fmt(r.total)}</td><td>${fmtDay(r.date)}</td></tr>`).join('')}
+        </tbody></table></div>`
+      : emptyNote;
+  const playerDayList = (rows, showK) =>
+    rows.length
+      ? `<div class="table-wrapper"><table class="data-table compact-table"><thead><tr><th>Player</th><th>Manager</th><th>Pts</th><th>Date</th></tr></thead><tbody>
+          ${rows
+            .map(
+              (r) =>
+                `<tr><td>${displayPlayer(r.player, seasonData)}${showK && r.so >= 3 ? ` · ${r.so} K` : ''}</td><td>${esc(r.manager)}</td><td>${fmt(r.score)}</td><td>${fmtDay(r.date)}</td></tr>`
+            )
+            .join('')}
+        </tbody></table></div>`
+      : emptyNote;
   const recordsHtml = `
-      <ul class="accolade-records">
-        ${rec.bestManagerDay ? `<li><span class="accolade-rec-label">Best manager day</span> <strong>${esc(rec.bestManagerDay.manager)}</strong> — ${fmt(rec.bestManagerDay.total)} pts (${fmtDay(rec.bestManagerDay.date)})</li>` : ''}
-        ${rec.worstManagerDay ? `<li><span class="accolade-rec-label">Worst manager day</span> <strong>${esc(rec.worstManagerDay.manager)}</strong> — ${fmt(rec.worstManagerDay.total)} pts (${fmtDay(rec.worstManagerDay.date)})</li>` : ''}
-        ${rec.bestPlayerDay ? `<li><span class="accolade-rec-label">Best player day</span> <strong>${displayPlayer(rec.bestPlayerDay.player, seasonData)}</strong> (${rec.bestPlayerDay.type}, ${esc(rec.bestPlayerDay.manager)}) — ${fmt(rec.bestPlayerDay.score)} pts (${fmtDay(rec.bestPlayerDay.date)})</li>` : ''}
-      </ul>`;
+      <div class="accolade-records-grid">
+        <div><h4>Best Manager Days</h4>${managerDayList(rec.bestManagerDays)}</div>
+        <div><h4>Worst Manager Days</h4>${managerDayList(rec.worstManagerDays)}</div>
+        <div><h4>Best Player Days</h4>${playerDayList(rec.bestPlayerDays, false)}</div>
+        <div><h4>Worst Player Days</h4>${playerDayList(rec.worstPlayerDays, true)}</div>
+      </div>`;
 
   container.innerHTML = `
     <div class="card">
@@ -5504,19 +5522,19 @@ function renderSeasonAccolades() {
           ${managerTable(acc.managerWorst, 'Bottom-3 Days')}
         </div>
         <div class="accolade-box">
-          <h3>&#128197; Single-Day Records</h3>
-          <p class="accolade-sub">Season-best (and worst) single days</p>
-          ${recordsHtml}
-        </div>
-        <div class="accolade-box accolade-box-wide">
           <h3>&#128201; Rough Outings</h3>
           <p class="accolade-sub">Pitchers with negative-point days</p>
           ${pitcherTable}
         </div>
-        <div class="accolade-box accolade-box-wide">
+        <div class="accolade-box">
           <h3>&#127913; Sombrero Watch</h3>
           <p class="accolade-sub">Batters with 3+ strikeout days</p>
           ${batterTable}
+        </div>
+        <div class="accolade-box accolade-box-records">
+          <h3>&#128197; Single-Day Records</h3>
+          <p class="accolade-sub">The five best (and worst) single days of the season</p>
+          ${recordsHtml}
         </div>
       </div>
     </div>`;

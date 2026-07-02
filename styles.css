@@ -4898,9 +4898,9 @@ body::before {
 /* ============================================================
    Season Accolades (Season Stats tab)
    ============================================================ */
-/* Single column on small screens; on wide screens the three 2-column tables
-   (manager tallies + records) share the top row and the two 4-column player
-   tables get half the row each, so they fit without horizontal scrolling. */
+/* Single column on small screens; on wide screens the four tally boxes sit
+   2x2 and the Single-Day Records box takes a full row (its four record lists
+   form their own 2x2 grid inside). */
 .accolades-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -4909,13 +4909,10 @@ body::before {
 }
 @media (min-width: 900px) {
   .accolades-grid {
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(2, 1fr);
   }
-  .accolade-box {
-    grid-column: span 2;
-  }
-  .accolade-box-wide {
-    grid-column: span 3;
+  .accolade-box-records {
+    grid-column: 1 / -1;
   }
 }
 .accolade-box {
@@ -4943,23 +4940,23 @@ body::before {
   font-size: 0.85rem;
   margin: 0;
 }
-.accolade-records {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.accolade-records-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
 }
-.accolade-records li {
-  padding: 0.4rem 0;
-  font-size: 0.88rem;
-  border-bottom: 1px solid var(--border);
+@media (min-width: 900px) {
+  .accolade-records-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
-.accolade-records li:last-child {
-  border-bottom: none;
+.accolade-records-grid > div {
+  min-width: 0;
 }
-.accolade-rec-label {
-  display: block;
+.accolade-records-grid h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.92rem;
   color: var(--text-muted);
-  font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
