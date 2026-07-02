@@ -149,6 +149,9 @@ describe('computeSeasonAccolades', () => {
     assert.equal(rec.count, 2);
     assert.equal(rec.maxK, 4);
     assert.deepEqual(rec.worst, { date: '2026-05-01', so: 4 });
+    // The doubleheader's stat line sums across both games.
+    const whifferDay = acc.records.worstPlayerDays.find((r) => r.player === 'M1 Whiffer' && r.date === '2026-05-01');
+    assert.deepEqual(whifferDay.stats, { so: 4, abs: 7 });
   });
 
   it('tracks single-day record lists for managers and players', () => {
@@ -185,7 +188,17 @@ describe('computeSeasonAccolades', () => {
       date: '2026-05-02',
       score: 48.25,
       so: 0,
+      stats: { ip: 9, k: 12, w: 1 },
     });
+    // A manager-day record carries that day's player breakdown, best first.
+    assert.deepEqual(
+      acc.records.bestManagerDays[0].players.map((p) => [p.player, p.score]),
+      [['M1 Ace', 48.25]]
+    );
+    assert.deepEqual(
+      acc.records.worstManagerDays[0].players.map((p) => [p.player, p.score]),
+      [['M2 Meltdown', -13.65]]
+    );
     assert.deepEqual(
       acc.records.worstPlayerDays.map((r) => [r.player, r.score]),
       [

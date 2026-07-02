@@ -4960,3 +4960,18 @@ body::before {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.accolade-row-click {
+  cursor: pointer;
+}
+.accolade-caret {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.accolade-detail-row > td {
+  background: var(--card-bg);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+}
+.accolade-detail-table {
+  margin: 0;
+}
