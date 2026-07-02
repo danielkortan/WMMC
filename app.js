@@ -5476,30 +5476,48 @@ function renderSeasonAccolades() {
   const statValueCells = (cols, stats) =>
     cols.map(([k]) => `<td>${k === 'ip' ? fmtDec(stats[k] || 0) : fmt(stats[k] || 0)}</td>`).join('');
 
-  // Full stat table for one player-day (used in the player-day expansions).
+  // The detail tables must fit their box without side-scrolling, so columns
+  // that are zero for every shown row are dropped — except the core categories
+  // that should always read as part of the line (a 0-for-4 still shows AB/1B/…).
+  const BAT_CORE = new Set(['abs', '1b', '2b', 'hr', 'r', 'rbi', 'bb', 'so']);
+  const PIT_CORE = new Set(['ip', 'h', 'er', 'bb', 'k']);
+  const visibleCols = (cols, core, statRows) =>
+    cols.filter(([k]) => core.has(k) || statRows.some((s) => (parseFloat(s[k]) || 0) !== 0));
+
+  // Full stat line for one player-day (used in the player-day expansions) —
+  // just the scoring columns; the player's name is already on the row above.
   const playerStatTable = (p) => {
-    const cols = p.type === 'Pitcher' ? PIT_COLS : BAT_COLS;
-    return `<div class="table-wrapper"><table class="data-table compact-table accolade-detail-table"><thead><tr><th>${p.type}</th>${statHeaderCells(cols)}<th>Pts</th></tr></thead><tbody>
-        <tr><td>${displayPlayer(p.player, seasonData)}</td>${statValueCells(cols, p.stats || {})}<td><strong>${fmt(p.score)}</strong></td></tr>
-      </tbody></table></div>`;
+    const isPit = p.type === 'Pitcher';
+    const cols = visibleCols(isPit ? PIT_COLS : BAT_COLS, isPit ? PIT_CORE : BAT_CORE, [p.stats || {}]);
+    return `<table class="data-table compact-table accolade-detail-table"><thead><tr>${statHeaderCells(cols)}<th>Pts</th></tr></thead><tbody>
+        <tr>${statValueCells(cols, p.stats || {})}<td><strong>${fmt(p.score)}</strong></td></tr>
+      </tbody></table>`;
   };
 
   // Full stat breakdown for a manager-day (batters and pitchers each get a
   // table with their own scoring columns), best score first within each group.
   const managerDayDetail = (players) => {
-    const group = (type, cols) => {
+    const group = (type, allCols, core) => {
       const subset = (players || []).filter((p) => p.type === type);
       if (!subset.length) return '';
-      return `<div class="table-wrapper"><table class="data-table compact-table accolade-detail-table"><thead><tr><th>${type}s</th>${statHeaderCells(cols)}<th>Pts</th></tr></thead><tbody>
+      const cols = visibleCols(
+        allCols,
+        core,
+        subset.map((p) => p.stats || {})
+      );
+      return `<table class="data-table compact-table accolade-detail-table accolade-detail-named"><thead><tr><th>${type}s</th>${statHeaderCells(cols)}<th>Pts</th></tr></thead><tbody>
           ${subset
             .map(
               (p) =>
                 `<tr><td>${displayPlayer(p.player, seasonData)}</td>${statValueCells(cols, p.stats || {})}<td><strong>${fmt(p.score)}</strong></td></tr>`
             )
             .join('')}
-        </tbody></table></div>`;
+        </tbody></table>`;
     };
-    return group('Batter', BAT_COLS) + group('Pitcher', PIT_COLS) || '<p>No player detail for this day.</p>';
+    return (
+      group('Batter', BAT_COLS, BAT_CORE) + group('Pitcher', PIT_COLS, PIT_CORE) ||
+      '<p>No player detail for this day.</p>'
+    );
   };
 
   const managerDayList = (rows, keyPrefix) =>
