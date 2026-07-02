@@ -87,8 +87,7 @@
       <button class="nav-btn" data-tab="live">Live</button>
       <button class="nav-btn" data-tab="my-roster">My Roster</button>
       <button class="nav-btn" data-tab="swap-log">Swap Log</button>
-      <button class="nav-btn" data-tab="weekly">Weekly Scores</button>
-      <button class="nav-btn" data-tab="trends">Trends</button>
+      <button class="nav-btn" data-tab="weekly">Season Stats</button>
       <button class="nav-btn" data-tab="league-info">League Info</button>
       <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
       <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">
@@ -129,8 +128,10 @@
         <div id="live-games"></div>
       </section>
 
-      <!-- Weekly Scores -->
+      <!-- Season Stats: accolades, then trends, then weekly scores -->
       <section id="weekly" class="tab-content">
+        <div id="season-accolades-content"></div>
+        <div id="trends-content"></div>
         <div class="card">
           <h2>Weekly Team Scoring</h2>
           <div class="filters">
@@ -168,11 +169,6 @@
           </div>
           <table id="players-table" class="data-table"></table>
         </div>
-      </section>
-
-      <!-- Trends / Analytics -->
-      <section id="trends" class="tab-content">
-        <div id="trends-content"></div>
       </section>
 
       <!-- League Info (Schedule + Scoring + Constitution) -->

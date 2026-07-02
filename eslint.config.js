@@ -22,6 +22,7 @@ const projectGlobals = {
   calculateBattingScore: 'readonly',
   calculatePitchingScore: 'readonly',
   enrichTeamWeekly: 'readonly',
+  computeSeasonAccolades: 'readonly',
   esc: 'readonly',
   jsStr: 'readonly',
   parseNum: 'readonly',

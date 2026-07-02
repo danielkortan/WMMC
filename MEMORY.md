@@ -1,5 +1,36 @@
 # WMMC — Decisions Log
 
+## Season Stats tab: accolades + merged Trends (2026-07-02)
+
+Renamed the Weekly Scores tab to **Season Stats** and made it three stacked blocks: **Season
+Accolades** (new), the **Trends** card (moved from its standalone tab, which was removed), then
+the Weekly Team Scoring table. Decisions and mechanics:
+
+- **`js/accolades.js` — pure `computeSeasonAccolades()`** (unit-tested, exported to `window` via
+  `js/index.js`). Tallies from the daily rows: days each manager finished in the daily top-3 /
+  bottom-3, pitcher negative-point days, batter 3+ strikeout days, plus single-day records
+  (best/worst manager day, best player day). Per-day semantics deliberately **mirror the server's
+  `computeDailyHighLow`** (Slack "Yesterday's Best & Worst"): `hadGame` nonzero-delta check,
+  same-date doubleheader rows aggregate, and the daily top-3/bottom-3 are **disjoint** (bottom
+  drawn from the remainder after the top slice — matters on <6-manager playoff days).
+- **Rostered players only.** Manager attribution is a caller-supplied `resolveManager(row, type)`;
+  app.js resolves `row.manager || buildRosterLookup()` filtered to registered managers — the same
+  path the Trends daily charts use. Display-only; scoring untouched.
+- **Tab plumbing:** the section keeps `id="weekly"` (localStorage `wmmc_active_tab` compat); a
+  legacy saved `'trends'` value is mapped to `'weekly'` on restore. `renderSeasonAccolades()` runs
+  from `renderActiveWeekly`/`showHistoricalSeason` (fresh on every init); **`renderTrends()` still
+  only runs on tab activation** — Chart.js canvases size to zero inside a hidden section, and
+  re-rendering on the 45s poll would stomp chip/mode selections.
+- Daily rows come from the on-demand `ensureDailyStats` cache (both accolades and Trends
+  re-render once when the fetch lands). Historical seasons have no daily rows → accolades card
+  degrades to a "no daily data" note.
+- Defaults chosen without commissioner input (asked, no response): rostered-only player
+  accolades, all season days counted (incl. playoffs), records box included. Easy to revisit.
+- Verified headless (Playwright, local server seeded from the staging fixture + synthetic daily
+  rows): accolade tables/records correct, Trends renders inside Season Stats, legacy `'trends'`
+  restore lands on Season Stats, historical season degrades, mobile stacks single-column, dark
+  mode clean, zero JS errors.
+
 ## Scoreboard PP1/PP2 manager-click panels bled into each other (2026-06-19)
 
 **Symptom.** In the active-season Pool Play Scoreboard (`renderActiveScoreboardTabs`), clicking a
