@@ -37,7 +37,12 @@ describe('computeSeasonAccolades', () => {
     assert.deepEqual(acc.managerWorst, []);
     assert.deepEqual(acc.pitcherNegativeDays, []);
     assert.deepEqual(acc.batterHighKDays, []);
-    assert.deepEqual(acc.records, { bestManagerDay: null, worstManagerDay: null, bestPlayerDay: null });
+    assert.deepEqual(acc.records, {
+      bestManagerDays: [],
+      worstManagerDays: [],
+      bestPlayerDays: [],
+      worstPlayerDays: [],
+    });
   });
 
   it('excludes rows the resolver does not attribute (unrostered players)', () => {
@@ -46,7 +51,7 @@ describe('computeSeasonAccolades', () => {
       resolveManager: () => null,
     });
     assert.equal(acc.days, 0);
-    assert.equal(acc.records.bestPlayerDay, null);
+    assert.deepEqual(acc.records.bestPlayerDays, []);
   });
 
   it('skips rows whose delta shows no game played', () => {
@@ -146,7 +151,7 @@ describe('computeSeasonAccolades', () => {
     assert.deepEqual(rec.worst, { date: '2026-05-01', so: 4 });
   });
 
-  it('tracks single-day records for managers and players', () => {
+  it('tracks single-day record lists for managers and players', () => {
     const acc = computeSeasonAccolades({
       dailyBatting: [bat('2026-05-01', 'M1 Slugger', { hr: 3, r: 3, rbi: 5 })], // 30+6+10 = 46
       dailyPitching: [
@@ -155,16 +160,64 @@ describe('computeSeasonAccolades', () => {
       ],
       resolveManager: prefixResolver,
     });
-    assert.deepEqual(acc.records.bestManagerDay, { manager: 'M1', date: '2026-05-02', total: 48.25 });
-    assert.equal(acc.records.worstManagerDay.manager, 'M2');
-    assert.equal(acc.records.worstManagerDay.date, '2026-05-01');
-    assert.deepEqual(acc.records.bestPlayerDay, {
+    // Best manager days: every (manager, date) total, highest first.
+    assert.deepEqual(
+      acc.records.bestManagerDays.map((r) => [r.manager, r.date, r.total]),
+      [
+        ['M1', '2026-05-02', 48.25],
+        ['M1', '2026-05-01', 46],
+        ['M2', '2026-05-01', -13.65],
+      ]
+    );
+    // Worst manager days: same entries, lowest first.
+    assert.deepEqual(
+      acc.records.worstManagerDays.map((r) => [r.manager, r.total]),
+      [
+        ['M2', -13.65],
+        ['M1', 46],
+        ['M1', 48.25],
+      ]
+    );
+    assert.deepEqual(acc.records.bestPlayerDays[0], {
       player: 'M1 Ace',
       type: 'Pitcher',
       manager: 'M1',
       date: '2026-05-02',
       score: 48.25,
+      so: 0,
     });
+    assert.deepEqual(
+      acc.records.worstPlayerDays.map((r) => [r.player, r.score]),
+      [
+        ['M2 Meltdown', -13.65],
+        ['M1 Slugger', 46],
+        ['M1 Ace', 48.25],
+      ]
+    );
+  });
+
+  it('caps record lists at recordsN and tiebreaks worst player days by strikeouts', () => {
+    const acc = computeSeasonAccolades({
+      dailyBatting: [
+        // Three pointless days (0 pts each) with different K counts, plus a scorer.
+        bat('2026-05-01', 'M1 K4', { so: 4, abs: 4 }),
+        bat('2026-05-01', 'M2 K2', { so: 2, abs: 4 }),
+        bat('2026-05-01', 'M3 K3', { so: 3, abs: 4 }),
+        bat('2026-05-01', 'M4 Hero', { hr: 1 }),
+      ],
+      resolveManager: prefixResolver,
+      recordsN: 2,
+    });
+    assert.equal(acc.records.bestManagerDays.length, 2);
+    assert.equal(acc.records.worstPlayerDays.length, 2);
+    // All 0-pt days tie on score; more strikeouts sorts as the worse day.
+    assert.deepEqual(
+      acc.records.worstPlayerDays.map((r) => [r.player, r.score, r.so]),
+      [
+        ['M1 K4', 0, 4],
+        ['M3 K3', 0, 3],
+      ]
+    );
   });
 
   it('sorts leaderboards by count, with sensible tiebreaks', () => {

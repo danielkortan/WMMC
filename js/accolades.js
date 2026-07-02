@@ -32,6 +32,7 @@ const hadGame = (delta) => !!delta && Object.values(delta).some((v) => (parseFlo
 //     (type is 'batting' | 'pitching'), or null to exclude it.
 //   topN                         — daily best/worst list size (default 3).
 //   minStrikeouts                — batter strikeout threshold (default 3).
+//   recordsN                     — single-day record list size (default 5).
 //
 // Returns {
 //   days,                       // number of dates with at least one game
@@ -39,10 +40,11 @@ const hadGame = (delta) => !!delta && Object.values(delta).some((v) => (parseFlo
 //   managerWorst: [{ manager, count }],   // days finished in the daily bottom-N
 //   pitcherNegativeDays: [{ player, manager, count, worst: { date, score } }],
 //   batterHighKDays:     [{ player, manager, count, maxK, worst: { date, so } }],
-//   records: {
-//     bestManagerDay:  { manager, date, total } | null,
-//     worstManagerDay: { manager, date, total } | null,
-//     bestPlayerDay:   { player, type, manager, date, score } | null,
+//   records: {                  // single-day record lists, recordsN entries each
+//     bestManagerDays:  [{ manager, date, total }],   // highest daily totals
+//     worstManagerDays: [{ manager, date, total }],   // lowest daily totals
+//     bestPlayerDays:   [{ player, type, manager, date, score, so }],
+//     worstPlayerDays:  [{ player, type, manager, date, score, so }],
 //   },
 // }
 export function computeSeasonAccolades({
@@ -51,6 +53,7 @@ export function computeSeasonAccolades({
   resolveManager = () => null,
   topN = 3,
   minStrikeouts = 3,
+  recordsN = 5,
 } = {}) {
   // ---- Aggregate rows into per-date player-days (doubleheaders merge) ----
   // byDate[date] = { batters: { name: { score, so, manager } },
@@ -82,9 +85,8 @@ export function computeSeasonAccolades({
   const worstCounts = {};
   const negativePitchers = {}; // name -> { manager, count, worst: {date, score} }
   const highKBatters = {}; // name -> { manager, count, maxK, worst: {date, so} }
-  let bestManagerDay = null;
-  let worstManagerDay = null;
-  let bestPlayerDay = null;
+  const managerDays = []; // every (manager, date) daily total, for the record lists
+  const playerDays = []; // every (player, date) daily score, for the record lists
 
   const dates = Object.keys(byDate).sort();
   for (const date of dates) {
@@ -108,9 +110,7 @@ export function computeSeasonAccolades({
           rec.worst = { date, so: e.so };
         }
       }
-      if (!bestPlayerDay || score > bestPlayerDay.score) {
-        bestPlayerDay = { player: name, type: 'Batter', manager: e.manager, date, score };
-      }
+      playerDays.push({ player: name, type: 'Batter', manager: e.manager, date, score, so: e.so });
     }
 
     for (const [name, e] of Object.entries(pitchers)) {
@@ -126,9 +126,7 @@ export function computeSeasonAccolades({
         rec.manager = e.manager;
         if (!rec.worst || score < rec.worst.score) rec.worst = { date, score };
       }
-      if (!bestPlayerDay || score > bestPlayerDay.score) {
-        bestPlayerDay = { player: name, type: 'Pitcher', manager: e.manager, date, score };
-      }
+      playerDays.push({ player: name, type: 'Pitcher', manager: e.manager, date, score, so: 0 });
     }
 
     const ranked = Object.entries(managerTotals)
@@ -145,14 +143,7 @@ export function computeSeasonAccolades({
     for (const { manager } of top) bestCounts[manager] = (bestCounts[manager] || 0) + 1;
     for (const { manager } of bottom) worstCounts[manager] = (worstCounts[manager] || 0) + 1;
 
-    const dayBest = ranked[0];
-    const dayWorst = ranked[ranked.length - 1];
-    if (!bestManagerDay || dayBest.total > bestManagerDay.total) {
-      bestManagerDay = { manager: dayBest.manager, date, total: dayBest.total };
-    }
-    if (!worstManagerDay || dayWorst.total < worstManagerDay.total) {
-      worstManagerDay = { manager: dayWorst.manager, date, total: dayWorst.total };
-    }
+    for (const { manager, total } of ranked) managerDays.push({ manager, date, total });
   }
 
   const toCounts = (counts) =>
@@ -168,12 +159,27 @@ export function computeSeasonAccolades({
     .map(([player, r]) => ({ player, manager: r.manager, count: r.count, maxK: r.maxK, worst: r.worst }))
     .sort((a, b) => b.count - a.count || b.maxK - a.maxK || a.player.localeCompare(b.player));
 
+  // Single-day record lists. Best/worst manager and player days rank by the
+  // day's points; worst player days tiebreak on batter strikeouts (mirroring
+  // the server's worstPlayerOverall — among equally pointless days, more Ks is
+  // the worse one; pitchers go negative and sort to the top on score alone).
+  const byTotalDesc = (a, b) => b.total - a.total || a.date.localeCompare(b.date);
+  const byTotalAsc = (a, b) => a.total - b.total || a.date.localeCompare(b.date);
+  const byScoreDesc = (a, b) => b.score - a.score || a.date.localeCompare(b.date);
+  const byScoreAsc = (a, b) => a.score - b.score || (b.so || 0) - (a.so || 0) || a.date.localeCompare(b.date);
+  const records = {
+    bestManagerDays: [...managerDays].sort(byTotalDesc).slice(0, recordsN),
+    worstManagerDays: [...managerDays].sort(byTotalAsc).slice(0, recordsN),
+    bestPlayerDays: [...playerDays].sort(byScoreDesc).slice(0, recordsN),
+    worstPlayerDays: [...playerDays].sort(byScoreAsc).slice(0, recordsN),
+  };
+
   return {
     days: dates.length,
     managerBest: toCounts(bestCounts),
     managerWorst: toCounts(worstCounts),
     pitcherNegativeDays,
     batterHighKDays,
-    records: { bestManagerDay, worstManagerDay, bestPlayerDay },
+    records,
   };
 }

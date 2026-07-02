@@ -8,8 +8,10 @@ the Weekly Team Scoring table. Decisions and mechanics:
 
 - **`js/accolades.js` — pure `computeSeasonAccolades()`** (unit-tested, exported to `window` via
   `js/index.js`). Tallies from the daily rows: days each manager finished in the daily top-3 /
-  bottom-3, pitcher negative-point days, batter 3+ strikeout days, plus single-day records
-  (best/worst manager day, best player day). Per-day semantics deliberately **mirror the server's
+  bottom-3, pitcher negative-point days, batter 3+ strikeout days, plus single-day record lists
+  (`recordsN`=5 each — follow-up PR same day, per commissioner: top-5 best/worst manager days and
+  best/worst player days; worst player days tiebreak on batter strikeouts, mirroring the server's
+  `worstPlayerOverall`). Per-day semantics deliberately **mirror the server's
   `computeDailyHighLow`** (Slack "Yesterday's Best & Worst"): `hadGame` nonzero-delta check,
   same-date doubleheader rows aggregate, and the daily top-3/bottom-3 are **disjoint** (bottom
   drawn from the remainder after the top slice — matters on <6-manager playoff days).
