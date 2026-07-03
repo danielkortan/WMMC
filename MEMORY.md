@@ -858,3 +858,35 @@ git config user.email noreply@anthropic.com && git config user.name Claude
 - Live title row: `flex-wrap: wrap` so long pool-play week names don't overflow — date nav drops to a second line gracefully.
 - Font overrides that compete with `styles.css` need `!important` (e.g., `#live-week-title`, `.live-game-line`).
 - Today's Games game rows: `1.9rem` (2× the 0.95rem base) with `!important`.
+
+## Mobile full-tab redesign (established 2026-07-03, PR #335)
+
+All tabs now have phone-first layouts in `mobile.css` (previously Scoreboard only).
+Decisions made with Daniel (asked via option picker):
+
+- Scope: all tabs; wide tables → card rows with tap-to-expand (not column-pruning
+  or side-scroll); full 16px+ mobile type scale (not a moderate bump); contrast
+  refresh approved (keep navy/red identity).
+- Contrast is done by overriding `--text-light` / `--text-muted` / `--border`
+  inside the ≤768px media query (light + `html.theme-dark` both) — never per-component.
+- Live Running Standings pattern: `tr.live-mgr-row` → flex card; a `tr::after`
+  flex item with `flex-basis:100%` + `order:1` forces the line break between the
+  rank/name/total line (order 0) and the stat chips (`td:nth-child(n+4)`, order 2,
+  labels via `::before`). Chip label text lives only in CSS.
+- The outer table→block transform must be scoped with a child chain
+  (`#live-managers .card > .table-wrapper > .data-table`) so the batter/pitcher
+  tables inside the expand panel stay real tables.
+- Expand-panel rows: set `display:block` on `tr.live-mgr-detail-row` WITHOUT
+  `!important` — app.js collapses panels via inline `display:none` and expands via
+  `display:''`, so plain CSS block applies only when expanded. An anonymous
+  table-row otherwise sizes to the wide inner table and overflows the card.
+- Flex/blocked table cells still inherit `text-align:center` from `.data-table` —
+  set `text-align:left` explicitly on name cells.
+- `.data-table.accolade-detail-table` sizes must be re-pinned compact after any
+  global mobile `.data-table` bump (equal specificity, mobile.css loads last, so
+  the last rule wins) — those tables must fit their box with no side-scroll.
+- Verification pattern: Playwright at 412×915 via the global install
+  (`require('/opt/node22/lib/node_modules/playwright')`, executablePath
+  `/opt/pw-browsers/chromium`); local login = set a `password` on a manager in
+  the gitignored `db.json`; Live tab CSS verified by injecting the exact app.js
+  markup with fake numbers into `#live-managers` / `#live-games`.
