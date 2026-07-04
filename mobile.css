@@ -861,10 +861,34 @@
 
   #scoreboard-content .data-table .mgr-detail-section table tbody td {
     display: table-cell !important;
+    /* styles.css sets 0.75rem directly on these tds (.mgr-detail-panel
+       .data-table tbody td), so the table-level size doesn't inherit —
+       the cells need their own override. */
+    font-size: 1.05rem;
     padding: 0.5rem 0.4rem !important;
     color: var(--text);
     border-bottom: 1px solid var(--border) !important;
     vertical-align: middle;
+  }
+
+  /* Period accordion chrome inside the roster expand (Pool Play 1 / 2 /
+     playoff cards) — scale the desktop's 0.78–0.82rem up to match. */
+  .sbmd-period-header {
+    font-size: 1rem;
+    padding: 0.55rem 0.65rem;
+  }
+
+  .sbmd-period-pts {
+    font-size: 0.95rem;
+  }
+
+  .sbmd-current-badge {
+    font-size: 0.7rem;
+  }
+
+  /* Roster-window tags on swapped players (e.g. "6/8–6/17") */
+  #scoreboard-content .mgr-detail-section .wrs-hist-tag {
+    font-size: 0.8rem;
   }
 
   #scoreboard-content .data-table .mgr-detail-section table tbody td:first-child {
