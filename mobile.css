@@ -29,7 +29,8 @@
   bottom: 0;
   left: 0;
   right: 0;
-  height: 72px;
+  /* rem so the bar grows with the viewport-proportional root font */
+  height: 5rem;
   background: var(--card-bg);
   border-top: 1px solid var(--border);
   border-bottom: none;
@@ -50,7 +51,7 @@
   background: none;
   border: none;
   color: var(--text-muted);
-  font-size: 0.7rem;
+  font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.4px;
   text-transform: uppercase;
@@ -62,7 +63,7 @@
 }
 
 .mobile-nav-btn .mnb-icon {
-  font-size: 1.6rem;
+  font-size: 1.9rem;
   line-height: 1;
   transition: transform 0.15s;
 }
@@ -91,7 +92,7 @@
 .mobile-more-sheet {
   display: none;
   position: fixed;
-  bottom: 72px;
+  bottom: 5rem;
   left: 0;
   right: 0;
   background: var(--card-bg);
@@ -168,9 +169,28 @@
     --border: #383858;
   }
 
+  /* ── Viewport-proportional scale ───────────────────────────────────
+     Phones report very different CSS viewport widths (≈360–600px+
+     depending on model and the OS "screen zoom" setting). A fixed 16px
+     rem looks right on a 390px viewport but tiny on a ~585px one. Since
+     the whole stylesheet is rem-based, scaling the root with the
+     viewport scales the entire mobile UI: 16px at ≤333px wide, growing
+     ~1.2px per 100px of viewport, capped at 20px. Desktop unaffected. */
+  html {
+    font-size: clamp(16px, 12px + 1.2vw, 20px);
+  }
+
+  /* Nothing may widen the page past the viewport (stray wide element =
+     horizontal panning and a zoomed-out first paint on some browsers).
+     Wide tables already scroll inside their own .table-wrapper. */
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
   /* ── Body / chrome ─────────────────────────────────────────────── */
   body {
-    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
   }
 
   /* 16px+ form controls also stop iOS Safari from zooming the page on
@@ -811,7 +831,7 @@
     width: 100% !important;
     table-layout: fixed;
     border-collapse: collapse;
-    font-size: 1rem;
+    font-size: 1.05rem;
   }
 
   #scoreboard-content .data-table .mgr-detail-section table thead {
@@ -891,135 +911,62 @@
     line-height: 1.45;
   }
 
-  /* Outer standings table → block cards. The child chain keeps the
-     batter/pitcher tables inside the expand panel as real tables. */
+  /* Standings stay ONE table (single running scoreboard). To fit a
+     readable size, the Live and Done columns are dropped on mobile —
+     keeping # · Manager · Total · Δ · Daily · Left · Weekly — with
+     tight padding. On the narrowest phones the wrapper still allows a
+     small sideways scroll rather than shrinking the text. */
   #live-managers .card > .table-wrapper {
-    overflow: visible;
-    border: none;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
-  #live-managers .card > .table-wrapper > .data-table,
-  #live-managers .card > .table-wrapper > .data-table > tbody {
-    display: block;
-    width: 100%;
-  }
-
-  #live-managers .card > .table-wrapper > .data-table > thead {
-    display: none;
-  }
-
-  #live-managers .live-mgr-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    column-gap: 0.4rem;
-    row-gap: 0.45rem;
-    padding: 0.7rem 0.25rem;
-    border-bottom: 1px solid var(--border);
-    -webkit-tap-highlight-color: rgba(127, 127, 127, 0.08);
-  }
-
-  /* Full-width break between the name/total line and the chip line */
-  #live-managers .live-mgr-row::after {
-    content: '';
-    order: 1;
-    flex-basis: 100%;
-    height: 0;
+  #live-managers .card > .table-wrapper > .data-table > thead th {
+    font-size: 0.68rem;
+    padding: 0.5rem 0.3rem;
   }
 
   #live-managers .live-mgr-row td {
-    display: block;
-    padding: 0;
-    border: none;
-    white-space: nowrap;
+    font-size: 0.95rem;
+    padding: 0.6rem 0.3rem;
   }
 
-  #live-managers .live-mgr-row td:nth-child(1) {
-    flex: 0 0 1.6rem;
+  /* Hide Live + Done (cols 6–7). The detail row's single colspan cell is
+     its :first-child, so these selectors can never touch it. */
+  #live-managers .card > .table-wrapper > .data-table > thead th:nth-child(6),
+  #live-managers .card > .table-wrapper > .data-table > thead th:nth-child(7),
+  #live-managers .live-mgr-row td:nth-child(6),
+  #live-managers .live-mgr-row td:nth-child(7) {
+    display: none;
+  }
+
+  #live-managers .live-mgr-row td:first-child {
     text-align: center;
-    font-size: 0.95rem;
-    font-weight: 800;
+    width: 1.5rem;
+    font-weight: 700;
     color: var(--text-muted);
   }
 
   #live-managers .live-mgr-row td:nth-child(2) {
-    flex: 1 1 0;
-    min-width: 0;
+    text-align: left;
+    font-weight: 700;
+    font-size: 1rem;
+    max-width: clamp(7rem, 34vw, 13rem);
     overflow: hidden;
     text-overflow: ellipsis;
-    text-align: left;
-    font-size: 1.15rem;
-    font-weight: 700;
+    white-space: nowrap;
   }
 
   #live-managers .live-mgr-row td:nth-child(3) {
-    flex: 0 0 auto;
-    font-size: 1.3rem;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* Stat chips — the remaining six columns, each labeled by ::before */
-  #live-managers .live-mgr-row td:nth-child(n + 4) {
-    order: 2;
-    display: inline-flex;
-    align-items: baseline;
-    gap: 0.3rem;
-    background: rgba(0, 45, 98, 0.05);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.22rem 0.55rem;
-    font-size: 0.92rem;
     font-weight: 700;
-    font-variant-numeric: tabular-nums;
   }
 
-  html.theme-dark #live-managers .live-mgr-row td:nth-child(n + 4) {
-    background: rgba(255, 255, 255, 0.06);
-  }
-
-  #live-managers .live-mgr-row td:nth-child(n + 4)::before {
-    font-size: 0.68rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-  }
-
-  #live-managers .live-mgr-row td:nth-child(4)::before {
-    content: 'Δ';
-  }
-  #live-managers .live-mgr-row td:nth-child(5)::before {
-    content: 'Daily';
-  }
-  #live-managers .live-mgr-row td:nth-child(6)::before {
-    content: 'Live';
-  }
-  #live-managers .live-mgr-row td:nth-child(7)::before {
-    content: 'Done';
-  }
-  #live-managers .live-mgr-row td:nth-child(8)::before {
-    content: 'Left';
-  }
-  #live-managers .live-mgr-row td:nth-child(9)::before {
-    content: 'Wk';
-  }
-
-  /* Expanded "players today" panel — full width; inner stat tables stay
-     real tables and scroll sideways inside their own wrapper. Row + cell
-     become blocks (no !important — the JS inline display:none that
-     collapses the panel must still win) so the wide inner tables scroll
-     inside the card instead of stretching an anonymous table past it. */
-  #live-managers .live-mgr-detail-row {
-    display: block;
-    width: 100%;
-  }
-
+  /* Expanded "players today" panel: cap the colspan cell's contribution
+     to the table's width (same trick as .accolade-detail-row) so the
+     wide batter/pitcher tables scroll inside their own wrapper instead
+     of stretching the standings columns. */
   #live-managers .live-mgr-detail-row > td {
-    display: block;
-    width: 100%;
-    box-sizing: border-box;
+    max-width: 1px;
     padding: 0;
     border: none;
   }
@@ -1036,7 +983,7 @@
 
   #live-managers .live-mgr-detail-section .data-table th,
   #live-managers .live-mgr-detail-section .data-table td {
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     padding: 0.45rem 0.45rem;
   }
 
