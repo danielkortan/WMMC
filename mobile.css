@@ -1144,6 +1144,49 @@
   }
 
   /* =============================================================
+     SWAP LOG — the 7-column table can't fit a phone. Keep only
+     caret / Manager / Out / In; Date, Status and Reason are hidden
+     (they're all shown in the click-to-expand detail panel), and
+     the detail panel collapses to a single column so nothing is
+     clipped off the right edge.
+     ============================================================= */
+  .swap-log-filters {
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .swap-log-filter {
+    max-width: none;
+  }
+
+  .swap-log-table thead th:nth-child(n + 5),
+  .swap-log-table tr.swap-log-row td:nth-child(n + 5) {
+    display: none;
+  }
+
+  /* Player names wrap instead of pushing the table wide (base .data-table
+     tbody td is white-space: nowrap, which forces overflow here) */
+  .swap-log-table tr.swap-log-row td,
+  .swap-log-table tr.swap-log-detail-row > td {
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  .swap-detail-panel {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+    padding: 0.75rem 0.6rem;
+  }
+
+  .swap-detail-item {
+    font-size: 0.95rem;
+  }
+
+  .swap-detail-val {
+    word-break: break-word;
+  }
+
+  /* =============================================================
      EVERYTHING ELSE — wide tables keep a horizontal scroll so they
      never break the page width; charts stay phone-height.
      ============================================================= */

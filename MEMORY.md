@@ -1,5 +1,21 @@
 # WMMC — Decisions Log
 
+## Swap Log filters: chips → dropdowns + mobile layout fix (2026-07-05)
+
+- Replaced the chip-based Manager/Type filters (All/None buttons + one chip per value) in the
+  Swap Log — both the public tab and the commissioner panel share `renderSwapLog` — with two
+  labeled `<select>` dropdowns defaulting to "All managers" / "All types". The chip grid consumed
+  most of a phone screen; single-select covers the real use case. Filter state per container is
+  now one string per kind (`''` = All) instead of Sets; `swapLogSetFilter` replaced
+  `swapLogToggleFilter`/`swapLogSetAll`.
+- Mobile (≤768px): the 7-column swap-log table can't fit a phone — it used to overflow and get
+  clipped by `body { overflow-x: hidden }`, hiding Date/Status/Reason AND the expanded detail
+  panel's values. Now Date/Status/Reason columns are deliberately hidden there (everything is in
+  the click-to-expand detail panel), summary cells wrap (base `.data-table tbody td` is
+  `white-space: nowrap` — must be overridden or the table overflows), and `.swap-detail-panel`
+  collapses to one column. Consequence: the commissioner's inline reason `<select>` (column 7)
+  stays desktop-only — same as before, since that column was already clipped off-screen on phones.
+
 ## Season Stats tab: accolades + merged Trends (2026-07-02)
 
 Renamed the Weekly Scores tab to **Season Stats** and made it three stacked blocks: **Season
