@@ -1476,6 +1476,24 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
   });
   // --- end port ---
 
+  // Apply the new windows to derived state NOW, exactly as the full-season save path does
+  // (roster-array heal + player_dates cutoffs + weekly-score recompute). Without this, the
+  // attribution above credits player_in's already-synced weekly rows in full the moment the
+  // approval lands — even when add_date hasn't arrived yet (an IL swap effective tomorrow) —
+  // and the over-credit persists until the next sync happens to run. It also means the
+  // integrity vet below compares the true resulting totals, not the pre-recompute inflation.
+  if (sd.status === 'active') {
+    try {
+      rebuildRosterArraysFromDates(sd);
+    } catch (e) {
+      console.error('[Roster array heal] Error (continuing):', e.message);
+    }
+  }
+  if ((sd.daily_batting && sd.daily_batting.length) || (sd.daily_pitching && sd.daily_pitching.length)) {
+    const wipedAuto = syncPlayerDatesFromRosterDates(sd);
+    recomputeMidWeekAddScores(sd, wipedAuto);
+  }
+
   // Before/after totals vet + destructive-save guard. A normal swap is net-zero on a week's roster
   // and shouldn't trip it; a flagged approval (e.g. dropping a high scorer) requires an explicit
   // force override so a legitimate large correction isn't blocked.
@@ -1600,6 +1618,21 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) =>
   // 4. Mark the swap undone (kept in the log for audit, not deleted).
   swap.status = 'undone';
   swap.undone_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  // 5. Re-derive cutoffs + recompute, mirroring the approve endpoint / full-season save path:
+  // wipes player_in's now-orphaned auto cutoff and restores any of player_out's weekly points the
+  // lifted drop_date had zeroed, so the crater check below measures the true resulting totals.
+  if (sd.status === 'active') {
+    try {
+      rebuildRosterArraysFromDates(sd);
+    } catch (e) {
+      console.error('[Roster array heal] Error (continuing):', e.message);
+    }
+  }
+  if ((sd.daily_batting && sd.daily_batting.length) || (sd.daily_pitching && sd.daily_pitching.length)) {
+    const wipedAuto = syncPlayerDatesFromRosterDates(sd);
+    recomputeMidWeekAddScores(sd, wipedAuto);
+  }
 
   // Guard: a revert legitimately reduces a total, so the full destructive-save guard (which would also
   // flag the expected approved-swap-count drop) isn't right here — check only for a ≥40-pt crater.
