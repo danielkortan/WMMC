@@ -9760,7 +9760,8 @@ function setupCommTabs() {
 const _swapLogState = {};
 function getSwapLogState(containerId) {
   if (!_swapLogState[containerId]) {
-    _swapLogState[containerId] = { managers: null, types: null, expanded: new Set(), editable: false };
+    // manager/type: '' = "All" (no filtering).
+    _swapLogState[containerId] = { manager: '', type: '', expanded: new Set(), editable: false };
   }
   return _swapLogState[containerId];
 }
@@ -9822,20 +9823,15 @@ function swapDetailHtml(s, sd) {
   return `<div class="swap-detail-panel">${items}${actions}</div>`;
 }
 
-// Render a chip-based filter row (mirrors the Trends filters).
-function swapFilterRowHtml(containerId, label, kind, allValues, selectedSet) {
-  const chips = allValues
-    .map(
-      (v) =>
-        `<button class="chip ${selectedSet.has(v) ? 'chip-active' : ''}" onclick="swapLogToggleFilter('${containerId}','${kind}','${jsStr(v)}')">${esc(v)}</button>`
-    )
+// Render a labeled filter dropdown; the empty value means "All" (no filtering).
+function swapFilterSelectHtml(containerId, label, kind, allValues, selected, allLabel) {
+  const opts = [`<option value="">${esc(allLabel)}</option>`]
+    .concat(allValues.map((v) => `<option value="${esc(v)}"${v === selected ? ' selected' : ''}>${esc(v)}</option>`))
     .join('');
-  return `<div class="trends-control-row">
-    <span class="trends-label">${label}</span>
-    <button class="btn btn-sm btn-secondary" onclick="swapLogSetAll('${containerId}','${kind}',true)">All</button>
-    <button class="btn btn-sm btn-secondary" onclick="swapLogSetAll('${containerId}','${kind}',false)">None</button>
-    <div class="chip-select">${chips}</div>
-  </div>`;
+  return `<label class="swap-log-filter">
+    <span class="swap-log-filter-label">${label}</span>
+    <select onchange="swapLogSetFilter('${containerId}','${kind}', this.value)">${opts}</select>
+  </label>`;
 }
 
 // Render the swap log into `containerId`. When `editable` is true (commissioner),
@@ -9867,17 +9863,18 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
   const allManagers = [...new Set(allSwaps.map((s) => s.manager).filter(Boolean))].sort();
   const allTypes = [...new Set(allSwaps.map((s) => s.reason || SWAP_NO_REASON_LABEL))].sort();
 
-  // Initialise to "all selected" on first render; keep previously-removed selections
-  // valid as new managers/types appear.
-  if (state.managers === null) state.managers = new Set(allManagers);
-  if (state.types === null) state.types = new Set(allTypes);
+  // Drop a saved selection that no longer matches any swap (e.g. after a season switch).
+  if (state.manager && !allManagers.includes(state.manager)) state.manager = '';
+  if (state.type && !allTypes.includes(state.type)) state.type = '';
 
   const typeOf = (s) => s.reason || SWAP_NO_REASON_LABEL;
-  const filtered = allSwaps.filter((s) => (!s.manager || state.managers.has(s.manager)) && state.types.has(typeOf(s)));
+  const filtered = allSwaps.filter(
+    (s) => (!state.manager || s.manager === state.manager) && (!state.type || typeOf(s) === state.type)
+  );
 
-  let html = '<div class="swap-log-filters trends-controls">';
-  html += swapFilterRowHtml(containerId, 'Manager', 'managers', allManagers, state.managers);
-  html += swapFilterRowHtml(containerId, 'Type', 'types', allTypes, state.types);
+  let html = '<div class="swap-log-filters">';
+  html += swapFilterSelectHtml(containerId, 'Manager', 'manager', allManagers, state.manager, 'All managers');
+  html += swapFilterSelectHtml(containerId, 'Type', 'type', allTypes, state.type, 'All types');
   html += '</div>';
 
   if (filtered.length === 0) {
@@ -9938,29 +9935,11 @@ window.toggleSwapDetail = function (containerId, swapId) {
   }
 };
 
-// Toggle a manager/type filter chip, then re-render the affected log.
-window.swapLogToggleFilter = function (containerId, kind, value) {
+// Set a filter dropdown ('' = All), then re-render the affected log.
+window.swapLogSetFilter = function (containerId, kind, value) {
   const state = getSwapLogState(containerId);
-  const set = kind === 'managers' ? state.managers : state.types;
-  if (!set) return;
-  if (set.has(value)) set.delete(value);
-  else set.add(value);
-  renderSwapLog(containerId, state.editable);
-};
-
-// Select all or none for a filter group.
-window.swapLogSetAll = function (containerId, kind, on) {
-  const state = getSwapLogState(containerId);
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  const allSwaps = (sd && sd.swaps) || [];
-  if (kind === 'managers') {
-    const all = [...new Set(allSwaps.map((s) => s.manager).filter(Boolean))];
-    state.managers = on ? new Set(all) : new Set();
-  } else {
-    const all = [...new Set(allSwaps.map((s) => s.reason || SWAP_NO_REASON_LABEL))];
-    state.types = on ? new Set(all) : new Set();
-  }
+  if (kind === 'manager') state.manager = value;
+  else state.type = value;
   renderSwapLog(containerId, state.editable);
 };
 
