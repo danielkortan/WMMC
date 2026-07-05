@@ -1,5 +1,46 @@
 # WMMC — Decisions Log
 
+## Swap approve/undo skipped the date-window recompute — phantom +57 + guard-block loop (2026-07-05)
+
+**Symptom (commissioner).** Approving Chris Bentivegna's IL swap (Julio Rodríguez → Michael
+Harris II, drop 07-05, add 07-06 = tomorrow) looked fine, but Slack streamed repeated
+":no_entry: Blocked a destructive season save — likely a stale browser tab … Chris drops 57
+(2563.2 → 2506.2)" alerts, an undo attempt hit the crater guard ("drops 57 … re-run with
+force"), and even freshly-reloaded clients kept 409-ing their render-time auto-saves. Harris
+not showing on the roster yet was the one NON-bug: his add date was tomorrow, by design.
+
+**Root cause.** The atomic approve endpoint (#275) ported the client mutation (roster arrays +
+`roster_dates` windows + `assignUnclaimedStatsServer`) but NOT the derived-state pass the
+full-season save path runs (`syncPlayerDatesFromRosterDates` + `recomputeMidWeekAddScores` +
+`rebuildRosterArraysFromDates`). So Harris's already-synced Week-4 weekly row (57 pts) counted
+for Chris **immediately, before his 07-06 add date** — no `player_dates` cutoff existed to clip
+it, and he was in the week's eligible set three ways (array entry, `roster_dates` entry,
+approved swap). The server total inflated to 2563.2; every client computing the CORRECT 2506.2
+then read as a ≥40-pt destructive drop and was blocked. **Inversion gotcha: the "stale browser
+tab" saves the guard blocked were carrying the RIGHT totals — the server itself held the bad
+state.** The undo crater check measured the same phantom 57 and demanded force for what should
+have been net-zero.
+
+**Fix (PR #340).** Approve and undo now run the rebuild + resync + recompute pass right after
+their mutations, BEFORE their integrity/crater checks: a swap-in scores only within
+`add_date → drop_date` from the moment of approval (no dependency on a later sync), the guards
+vet the true resulting totals, and the array heal carries the swap-in into later weeks' arrays
+(fixes next week's array missing him until an unrelated save). Vetted per SAVE_HARDENING_PLAN
+§7 on a seeded temp-DB server (real 2026 schedule, incident shape): effective-tomorrow approval
+is score-neutral; a backdated add credits exactly the in-window daily points; undo restores the
+original totals (and still correctly demands force only for a legitimate ≥40-pt revert).
+
+**Operational remedy for an already-inflated season** (the code fix does not retro-heal):
+`wmmc.forceSync()` — re-derives cutoffs, recompiles, forces past the swing guard. Without it,
+every subsequent compile (incl. the 4am daily) reads the correction as a ≥40 drop and gets
+blocked daily — same blocked-compile/stale-7am-post signature as the 2026-06-07 Herrera ghost.
+
+**Diagnosis tells (reusable).** Repeating "Blocked a destructive season save" right after a
+swap approval, with freshly-reloaded clients still 409-ing, means suspect the SERVER total is
+the inflated one — compare the 4am `wmmc.dates()` trail against the live `/api/diag/manager`
+total (they differed by exactly the swap-in's week: 2506.2 vs 2563.2). An undo-blocked
+"drops N" where N equals the swap-in's week total = the swap-in is counting before his add date.
+
 ## Swap Log filters: chips → dropdowns + mobile layout fix (2026-07-05)
 
 - Replaced the chip-based Manager/Type filters (All/None buttons + one chip per value) in the
