@@ -15,6 +15,11 @@
   `white-space: nowrap` — must be overridden or the table overflows), and `.swap-detail-panel`
   collapses to one column. Consequence: the commissioner's inline reason `<select>` (column 7)
   stays desktop-only — same as before, since that column was already clipped off-screen on phones.
+- Follow-up (same day, second PR): `swapDetailHtml` now takes `(s, sd, containerId, editable)` and
+  renders the Reason row as a `.swap-detail-reason` dropdown when editable, so commissioners can
+  edit a swap's reason from the click-to-expand panel — the only reachable editor on mobile. The
+  public tab still passes `editable=false` explicitly, so it stays read-only even for a logged-in
+  commissioner (matching the pre-existing column behavior).
 
 ## Season Stats tab: accolades + merged Trends (2026-07-02)
 

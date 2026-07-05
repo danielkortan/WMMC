@@ -3166,6 +3166,19 @@ footer {
   font-weight: 500;
 }
 
+/* Commissioner-only inline reason editor inside the detail panel */
+.swap-detail-reason {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  padding: 0.25rem 0.4rem;
+  cursor: pointer;
+  max-width: 100%;
+}
+
 /* ============================================================ */
 /* Responsive additions for new components */
 /* ============================================================ */

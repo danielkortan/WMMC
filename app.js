@@ -9788,16 +9788,29 @@ function swapStatusBadge(s) {
   return '<span class="swap-badge swap-badge-pending">Pending</span>';
 }
 
-// Build the expandable detail panel shown when a swap row is clicked.
-function swapDetailHtml(s, sd) {
+// Build the expandable detail panel shown when a swap row is clicked. When `editable`
+// is true (commissioner), the Reason row is an inline dropdown — on mobile the Reason
+// column is hidden, so the panel is the only place a commissioner can edit it.
+function swapDetailHtml(s, sd, containerId, editable) {
   const row = (label, value) =>
     `<div class="swap-detail-item"><span class="swap-detail-key">${label}</span><span class="swap-detail-val">${value}</span></div>`;
+
+  let reasonVal;
+  if (editable) {
+    const reason = s.reason || '';
+    const opts = COMMISSIONER_SWAP_REASONS.map(
+      (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(r)}</option>`
+    ).join('');
+    reasonVal = `<select class="swap-detail-reason" onclick="event.stopPropagation()" onchange="saveSwapLogReason('${containerId}','${s.id}', this.value)">${opts}</select>`;
+  } else {
+    reasonVal = esc(s.reason || '—');
+  }
 
   let items = '';
   items += row('Manager', esc(s.manager || '—'));
   items += row('Player Out', displayPlayer(s.player_out || '—', sd));
   items += row('Player In', displayPlayer(s.player_in || '—', sd));
-  items += row('Reason', esc(s.reason || '—'));
+  items += row('Reason', reasonVal);
   items += row('Status', swapStatusBadge(s));
   items += row('Submitted', fmtSwapTimestamp(s.timestamp));
   if (s.reviewed_at) items += row('Reviewed', fmtSwapTimestamp(s.reviewed_at));
@@ -9910,7 +9923,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
       <td style="font-size:0.82rem;color:var(--text-muted);">${reasonCell}</td>
     </tr>`;
     html += `<tr class="swap-log-detail-row" id="swap-detail-${containerId}-${s.id}" style="display:${isOpen ? '' : 'none'};">
-      <td colspan="7">${swapDetailHtml(s, sd)}</td>
+      <td colspan="7">${swapDetailHtml(s, sd, containerId, editable)}</td>
     </tr>`;
   });
   html += '</tbody></table>';
