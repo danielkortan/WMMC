@@ -1380,6 +1380,17 @@ async function syncFromServer() {
   }
 }
 
+// True while the user is actively engaged with a form control — focused on an
+// input/select/textarea or inside an open custom dropdown / inline swap-edit form / player
+// search. Used to hold off background poll re-renders, which replace the DOM under the user
+// and wipe typed text, dropdown state, and scroll position.
+function isUserMidInteraction() {
+  const el = document.activeElement;
+  if (!el || el === document.body) return false;
+  if (el.matches && el.matches('input, textarea, select, [contenteditable="true"]')) return true;
+  return !!(el.closest && el.closest('.custom-dd, .swap-edit-form, .player-search-container'));
+}
+
 // ============================================================
 // Authentication
 // ============================================================
@@ -1438,11 +1449,15 @@ function enterApp(mgr) {
   if (savedTab === 'live') startLivePolling();
 
   // Poll for changes every 45 seconds so logged-in users always see
-  // the latest data without needing a page refresh.
+  // the latest data without needing a page refresh. Skip the re-render while the user is
+  // mid-interaction with a form control (typing a player search, editing a date/stat field,
+  // choosing from a dropdown) — a background re-render replaces the DOM under them and wipes
+  // that in-progress state. The fresh data is already cached locally, so the next idle poll
+  // tick (or any user action) renders it.
   setInterval(async () => {
     if (!LOGGED_IN_EMAIL) return;
     const changed = await syncFromServer();
-    if (changed) init();
+    if (changed && !isUserMidInteraction()) init();
   }, 45000);
 }
 
@@ -8315,6 +8330,22 @@ function getSeasonSwaps(seasonData) {
   return [];
 }
 
+// Schedule week whose date window contains today (ET). During a gap between weeks (e.g. the
+// All-Star break) or after the season it falls back to the latest started week; before the
+// season starts, the first week.
+function currentScheduleWeekKey() {
+  const dates = getScheduleDates() || [];
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  let idx = 0;
+  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+    const d = dates[i];
+    if (!d || !d.start || todayET < d.start) continue;
+    idx = i;
+    if (d.end && todayET <= d.end) break;
+  }
+  return `${SEASON_SCHEDULE[idx].round}|${SEASON_SCHEDULE[idx].week}`;
+}
+
 function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
   const isActive = !!(seasonData && seasonData.status === 'active');
 
@@ -8567,13 +8598,21 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
       <h3>Commissioner Roster Management</h3>
       <p class="text-muted" style="margin-bottom:0.75rem;">Add/drop players and edit stats for ${esc(managerName)}</p>`;
 
-    // Week selector
+    // Week selector. This HTML is built while the PREVIOUS render's DOM is still live
+    // (the container's innerHTML is replaced afterward), so read the old select to preserve
+    // the week the commissioner was viewing across re-renders (45s auto-poll, post-action
+    // refreshes). First render defaults to the CURRENT week — not Week 1.
+    const prevWeekEl = document.getElementById('comm-roster-week');
+    const prevWeek = prevWeekEl ? prevWeekEl.value : '';
+    const selectedWeek = SEASON_SCHEDULE.some((s) => `${s.round}|${s.week}` === prevWeek)
+      ? prevWeek
+      : currentScheduleWeekKey();
     html += `<div class="form-row" style="margin-bottom:0.75rem;">
       <label class="upload-label">Week</label>
       <select id="comm-roster-week" class="form-select" style="max-width:280px;" onchange="updateCommRosterWeekView('${safeMgr}')">`;
     SEASON_SCHEDULE.forEach((s) => {
       const wk = `${s.round}|${s.week}`;
-      html += `<option value="${wk}">${s.label}</option>`;
+      html += `<option value="${wk}"${wk === selectedWeek ? ' selected' : ''}>${s.label}</option>`;
     });
     html += `</select></div>`;
 
@@ -9297,6 +9336,20 @@ window.syncSwapAddDate = function (dropDateId, addDateId) {
   addEl.value = d.toISOString().split('T')[0];
 };
 
+// Commissioner swap actions re-render the roster view; re-render WHICHEVER roster the
+// manager picker is currently showing instead of snapping back to the commissioner's own
+// team (the "I was adjusting someone else's roster and it reset to mine" annoyance).
+function rerenderCurrentRosterView() {
+  const mgrs = getManagers();
+  const dd = document.getElementById('roster-manager-dropdown');
+  const viewing = dd && dd._dd ? dd._dd.getValue() : '';
+  const name =
+    viewing && mgrs.some((m) => m.name === viewing)
+      ? viewing
+      : (mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase()) || {}).name;
+  if (name) renderRosterData(name, true);
+}
+
 // Commissioner: approve a swap
 window.approveSwap = async function (swapId) {
   const seasons = getSeasons();
@@ -9365,10 +9418,7 @@ window.approveSwap = async function (swapId) {
   renderSwapLog();
   startPendingSwapPoll();
 
-  // Find logged-in manager name and re-render
-  const mgrs = getManagers();
-  const mgr = mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
-  if (mgr) renderRosterData(mgr.name, true);
+  rerenderCurrentRosterView();
 };
 
 // Commissioner: deny a swap
@@ -9384,9 +9434,7 @@ window.denySwap = async function (swapId) {
   renderSwapLog();
   startPendingSwapPoll();
 
-  const mgrs = getManagers();
-  const mgr = mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
-  if (mgr) renderRosterData(mgr.name, true);
+  rerenderCurrentRosterView();
 };
 
 // Commissioner: cleanly undo an approved swap (for a mistake / test). Reverses it server-side —
@@ -9440,9 +9488,7 @@ window.undoSwap = async function (swapId) {
   renderPendingSwapRequests();
   renderSwapLog();
   startPendingSwapPoll();
-  const mgrs = getManagers();
-  const mgr = mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
-  if (mgr) renderRosterData(mgr.name, true);
+  rerenderCurrentRosterView();
 };
 
 // Commissioner: show inline edit form for a swap
@@ -9527,9 +9573,7 @@ window.saveSwapEdit = async function (swapId) {
   });
   if (!result) return;
 
-  const mgrs = getManagers();
-  const mgr = mgrs.find((m) => m.email.toLowerCase() === LOGGED_IN_EMAIL.toLowerCase());
-  if (mgr) renderRosterData(mgr.name, true);
+  rerenderCurrentRosterView();
 };
 
 // Commissioner: cancel editing a swap
