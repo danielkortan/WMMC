@@ -10,6 +10,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
+- **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
 - **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap approvals, audit log
@@ -130,13 +131,14 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Seasons
 
-| Method   | Endpoint                              | Description                                       |
-| -------- | ------------------------------------- | ------------------------------------------------- |
-| `GET`    | `/api/seasons`                        | All seasons keyed by year.                        |
-| `POST`   | `/api/seasons`                        | Replace the entire seasons map.                   |
-| `POST`   | `/api/seasons/:year`                  | Save a single season.                             |
-| `DELETE` | `/api/seasons/:year/week-data`        | Wipe a single week's uploaded stats for a season. |
-| `POST`   | `/api/seasons/:year/recompute-scores` | Recompute weekly scores from scratch.             |
+| Method   | Endpoint                                    | Description                                                           |
+| -------- | ------------------------------------------- | --------------------------------------------------------------------- |
+| `GET`    | `/api/seasons`                              | All seasons keyed by year.                                            |
+| `POST`   | `/api/seasons`                              | Replace the entire seasons map.                                       |
+| `POST`   | `/api/seasons/:year`                        | Save a single season.                                                 |
+| `DELETE` | `/api/seasons/:year/week-data`              | Wipe a single week's uploaded stats for a season.                     |
+| `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                 |
+| `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store playoff odds now (only valid during PP2 Weeks 4–5). |
 
 ### Player Dates & Daily Stats
 
