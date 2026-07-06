@@ -5084,6 +5084,31 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const allPPWinners = seeding.allLeaders;
   const wildcardSet = seeding.wildcardSet;
 
+  // ---- Playoff odds (server-computed Monte-Carlo sim, PP2 Weeks 4–5 only) ----
+  // `sd.playoff_odds` is written by the server (4am sync / 7am post / manual
+  // recompute) — the client only displays it, so the scoreboard and the Slack
+  // post can never disagree. Shown only while the odds window is live and pool
+  // play isn't finalized (once it is, the bracket itself is the answer).
+  const oddsTodayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const odds =
+    !(seasonData.finalized_rounds || []).includes('PP') &&
+    seasonData.playoff_odds &&
+    seasonData.playoff_odds.managers &&
+    oddsWindowForDate(seasonData.schedule_dates || [], oddsTodayISO)
+      ? seasonData.playoff_odds
+      : null;
+
+  function oddsPill(name) {
+    const o = odds && odds.managers[name];
+    if (!o) return '';
+    const label = formatOddsPct(o.pct / 100, o.locked);
+    const cls = o.locked ? 'odds-lock' : o.pct >= 75 ? 'odds-high' : o.pct >= 25 ? 'odds-mid' : 'odds-low';
+    const title = o.locked
+      ? 'Clinched a playoff spot — PP1 pool winner'
+      : `Makes playoffs in ${o.pct}% of simulations (wins PP2 pool ${o.pool_win_pct}%, wild card ${o.wildcard_pct}%)`;
+    return `<span class="odds-pill ${cls}" title="${esc(title)}">${o.locked ? '&#128274; ' : ''}${label}</span>`;
+  }
+
   // Highlight class for a manager name in a given section
   function hlClass(name, section) {
     const wonPP1 = pp1WinnerSet.has(name);
@@ -5151,7 +5176,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       if (m.pool) mgrPool[m.name] = m.pool;
     });
     let tbl = `<table class="data-table compact-table">
-      <thead><tr><th>#</th><th>Manager</th><th>Pool</th><th>B</th><th>P</th><th>Total</th></tr></thead><tbody>`;
+      <thead><tr><th>#</th><th>Manager</th><th>Pool</th><th>B</th><th>P</th><th>Total</th>${odds ? '<th>Playoff&nbsp;%</th>' : ''}</tr></thead><tbody>`;
     scores.forEach((m, i) => {
       const cls = hlClass(m.manager, 'overall');
       const mgrKey = m.manager.replace(/[^a-zA-Z0-9]/g, '_') + '_ov';
@@ -5162,9 +5187,10 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
         <td class="num">${fmt(m.batting)}</td>
         <td class="num">${fmt(m.pitching)}</td>
         <td class="num"><strong>${fmt(m.total)}</strong></td>
+        ${odds ? `<td class="num">${oddsPill(m.manager)}</td>` : ''}
       </tr>
       <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${esc(m.manager)}" data-sb-period="overall" style="display:none;">
-        <td colspan="6"><div class="mgr-detail-loading">Loading...</div></td>
+        <td colspan="${odds ? 7 : 6}"><div class="mgr-detail-loading">Loading...</div></td>
       </tr>`;
     });
     tbl += '</tbody></table>';
@@ -5231,6 +5257,63 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     <h3>Pool Play Overall</h3>
     ${renderOverallTable(overallScores)}
   </div>`;
+
+  // Playoff odds detail panel (only while the PP2 Week 4–5 window is live)
+  if (odds) {
+    const history = Array.isArray(odds.history) ? odds.history : [];
+    const prior = [...history].reverse().find((h) => h.date < odds.date);
+    const rows = Object.entries(odds.managers)
+      .map(([name, o]) => ({ name, ...o }))
+      .sort((a, b) => b.pct - a.pct || a.name.localeCompare(b.name));
+    const trendHtml = (r) => {
+      if (r.locked || !prior || !prior.pcts || prior.pcts[r.name] == null) return '';
+      const delta = Math.round(r.pct - prior.pcts[r.name]);
+      if (delta >= 1) {
+        return ` <span class="odds-trend odds-trend-up" title="vs. ${esc(prior.date)}">&#9650;${delta}</span>`;
+      }
+      if (delta <= -1) {
+        return ` <span class="odds-trend odds-trend-down" title="vs. ${esc(prior.date)}">&#9660;${Math.abs(delta)}</span>`;
+      }
+      return '';
+    };
+    // Server stores gaps as points BEHIND (positive = trailing). Render as a
+    // signed margin instead: "+50" = 50 ahead, "-120" = 120 back.
+    const gapCell = (v) => {
+      if (v == null) return '—';
+      if (v === 0) return '0';
+      return v > 0 ? `-${fmt(v)}` : `+${fmt(-v)}`;
+    };
+    html += `<div class="scoreboard-section">
+      <h3>&#128302; Playoff Odds</h3>
+      <div class="table-wrapper"><table class="data-table compact-table odds-table">
+        <thead><tr>
+          <th>Manager</th><th>Playoff&nbsp;%</th><th>Win PP2 Pool</th><th>Wild Card</th>
+          <th title="Points behind the current PP2 leader of your pool (+ = you lead)">Pool Gap</th>
+          <th title="Combined-total points vs. the current last qualifier (+ = above the cut)">Cut Gap</th>
+          <th title="Projected points from your roster over the remaining games">Proj. Left</th>
+          <th title="MLB games remaining for your rostered players">Games Left</th>
+        </tr></thead><tbody>
+        ${rows
+          .map(
+            (r) => `<tr>
+          <td><strong class="${hlClass(r.name, 'overall')}">${esc(r.name)}</strong></td>
+          <td class="num">${oddsPill(r.name)}${trendHtml(r)}</td>
+          <td class="num">${r.locked ? '—' : formatOddsPct(r.pool_win_pct / 100)}</td>
+          <td class="num">${r.locked ? '—' : formatOddsPct(r.wildcard_pct / 100)}</td>
+          <td class="num">${gapCell(r.points_back_pool)}</td>
+          <td class="num">${gapCell(r.points_back_cut)}</td>
+          <td class="num">${fmt(r.proj_mean)}</td>
+          <td class="num">${r.games_remaining}</td>
+        </tr>`
+          )
+          .join('')}
+        </tbody></table></div>
+      <p class="odds-note">Likelihood of reaching the 8-team playoff, from ${Number(odds.sims).toLocaleString('en-US')} simulations
+      of the remaining schedule (each rostered player's per-game scoring rate &times; their team's remaining MLB games,
+      re-run against the pool-winner and wild-card rules). &#128274; = clinched via PP1 pool win.
+      Updated ${esc(odds.date)} — recomputed each morning.</p>
+    </div>`;
+  }
 
   // Pool Play leader stat cards (pool play scores only)
   if (ppHasScores) {

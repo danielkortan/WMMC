@@ -47,7 +47,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
 - `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
-- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
 - `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
@@ -107,6 +107,8 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 ## Gotchas — things that look wrong but aren't
 
 - `detectScoreSwings` exists in **both** `js/scoring.js` (canonical, unit-tested) and `server.js` (the only runtime caller). Like `SCORING`/`SEASON_SCHEDULE`, the two copies must stay identical — edit both. The server can't import the ESM `js/` copy.
+
+- The playoff-odds engine (`ODDS_WINDOW` through `formatOddsPct`) exists in **both** `js/playoffOdds.js` (canonical, unit-tested) and `server.js` (the runtime caller: 4am compute, 7am Slack post, recompute endpoint). Same rule: edit both. The server-only glue (`collectPlayerGameScores`, `activeRosterForOdds`, `fetchRemainingGamesByTeam`, `computePlayoffOddsForSeason`, `ensureFreshPlayoffOdds`, `buildPlayoffOddsSlackText`) lives only in `server.js`. `sd.playoff_odds` is a server-computed derived cache — clients only display it; the full-season save always keeps the server's copy.
 
 - `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.)
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
