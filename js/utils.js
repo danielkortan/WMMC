@@ -72,6 +72,21 @@ export function normalizeName(name) {
     .trim();
 }
 
+// Parse a server-stamped timestamp into a Date. The server stamps swap and
+// upload-log timestamps in UTC but strips the zone marker ("YYYY-MM-DD HH:MM:SS",
+// via toISOString().replace('T',' ').slice(0,19)), which naive new Date() parsing
+// would misread as local time. Zone-less strings are therefore interpreted as UTC;
+// strings with an explicit zone (Z or ±hh:mm) are honored as-is. Returns null for
+// blank, date-only, or unparseable input so callers can fall back to the raw string.
+export function parseServerTimestamp(ts) {
+  if (!ts) return null;
+  let s = String(ts).trim().replace(' ', 'T');
+  if (!s.includes('T')) return null; // date-only — no time to convert
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(s)) s += 'Z';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // Format a Date object into YYYY-MM-DD using the local timezone.
 export function fmtDateISO(d) {
   const y = d.getFullYear();
