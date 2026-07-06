@@ -8655,7 +8655,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
             ? 'swap-badge-pending'
             : 'swap-badge-denied';
       const badgeLabel = status.charAt(0).toUpperCase() + status.slice(1);
-      const date = s.swap_date || (s.timestamp ? s.timestamp.split(' ')[0] : '');
+      const date = s.swap_date || serverTimestampLocalDate(s.timestamp);
       html += `<tr>`;
       html += `<td>${s.player_in ? displayPlayer(s.player_in, seasonData) : '—'}</td>`;
       html += `<td>${s.player_out ? displayPlayer(s.player_out, seasonData) : '—'}</td>`;
@@ -9813,16 +9813,24 @@ function getSwapLogState(containerId) {
 // Label used in the Type filter for swaps that have no reason recorded.
 const SWAP_NO_REASON_LABEL = '(No reason)';
 
-// Format an ISO-ish timestamp ("YYYY-MM-DD HH:MM:SS" or full ISO) for display.
-function fmtSwapTimestamp(ts) {
+// Format a server-stamped timestamp ("YYYY-MM-DD HH:MM:SS" UTC or full ISO) in the
+// viewer's local timezone. parseServerTimestamp treats zone-less strings as UTC —
+// the server stamps them that way — so the browser handles the zone + DST math.
+function fmtServerTimestamp(ts) {
   if (!ts) return '—';
-  const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T'));
-  if (isNaN(d.getTime())) return esc(ts);
+  const d = parseServerTimestamp(ts);
+  if (!d) return esc(ts);
   return (
     d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
     ' ' +
     d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
   );
+}
+
+// Local-timezone YYYY-MM-DD of a server-stamped timestamp (for date-only columns).
+function serverTimestampLocalDate(ts) {
+  const d = parseServerTimestamp(ts);
+  return d ? fmtDateISO(d) : '';
 }
 
 function swapStatusBadge(s) {
@@ -9856,8 +9864,8 @@ function swapDetailHtml(s, sd, containerId, editable) {
   items += row('Player In', displayPlayer(s.player_in || '—', sd));
   items += row('Reason', reasonVal);
   items += row('Status', swapStatusBadge(s));
-  items += row('Submitted', fmtSwapTimestamp(s.timestamp));
-  if (s.reviewed_at) items += row('Reviewed', fmtSwapTimestamp(s.reviewed_at));
+  items += row('Submitted', fmtServerTimestamp(s.timestamp));
+  if (s.reviewed_at) items += row('Reviewed', fmtServerTimestamp(s.reviewed_at));
   if (s.email) items += row('Submitted By', esc(s.email));
   if (s.round) items += row('Round', esc(s.round));
   if (s.week_key) items += row('Week', esc(s.week_key.replace('|', ' · ')));
@@ -9943,7 +9951,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
   html +=
     '<table class="data-table swap-log-table"><thead><tr><th style="width:1.5rem;"></th><th>Manager</th><th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
   filtered.forEach((s) => {
-    const date = s.timestamp ? s.timestamp.slice(0, 10) : s.swap_date || '';
+    const date = serverTimestampLocalDate(s.timestamp) || s.swap_date || '';
     const outTxt = displayPlayer(s.player_out || '—', sd);
     const inTxt = displayPlayer(s.player_in || '—', sd);
     const reason = s.reason || '';
@@ -10096,7 +10104,7 @@ function renderMLBSyncLog() {
               : '';
           const detail = `${l.batting_imported ?? '?'} batting, ${l.pitching_imported ?? '?'} pitching (${l.games ?? '?'} games)${noteLabel}`;
           logHtml += `<div class="gsheets-log-item">
-            <span class="gsheets-log-time">${esc(l.timestamp || '')}</span>
+            <span class="gsheets-log-time">${fmtServerTimestamp(l.timestamp)}</span>
             <span class="swap-badge" style="${b.style}font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${b.label}</span>
             <span style="font-size:0.82rem;color:var(--text-muted,#666);">${detail}</span>
           </div>`;
@@ -13229,7 +13237,7 @@ function renderWeeklyUploadSections() {
           const typeLabel = l.type === 'batting' ? 'Batting' : 'Pitching';
           const typeBadgeColor = l.type === 'batting' ? 'var(--accent,#6c63ff)' : 'var(--success,#28a745)';
           html += `<div class="upload-log-entry">
-          <span class="upload-log-time">${l.timestamp}</span>
+          <span class="upload-log-time">${fmtServerTimestamp(l.timestamp)}</span>
           <span class="swap-badge" style="background:${typeBadgeColor};color:#fff;font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;">${typeLabel}</span>
           <span class="upload-log-detail">${l.rows} records &mdash; ${l.assigned} assigned, ${l.unassigned} unassigned</span>
         </div>`;
