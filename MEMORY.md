@@ -1,46 +1,19 @@
 # WMMC — Decisions Log
 
-## Playoff odds: Monte-Carlo prediction section, PP2 Weeks 4–5 (2026-07-06)
+## Timezone display: server stamps are zone-less UTC; render browser-local with zone abbrev (2026-07-06)
 
-**What:** "Likelihood to make the playoffs" percentage on the scoreboard + a section in the
-daily 7am Slack post, live only from the start of PP2 Week 4 through the end of pool play
-(user's chosen window). Server-computed, client-displayed.
-
-**Model (user chose Monte Carlo over a deterministic formula):** 10,000 sims of the remaining
-schedule. Each manager's remaining PP2 production ~ Normal(mean, var) built player-by-player:
-per-game scoring rate from the season's daily rows (batting+pitching merged per game_id,
-shrunk toward the league per-game baseline with k=5 pseudo-games) × the player's MLB team's
-remaining non-Final games (statsapi schedule + teams endpoints) within the window. Roster =
-active PP2 players from roster_dates as of today (latest add ≤ today, no later drop, scoped
-by periodStartForRound). Each sim applies the exact qualification rules (per-pool PP1/PP2
-winners > 0, wildcards by combined total fill to 8; winners seed first). PP1 is complete in
-the window, so PP1 pool winners are banked → shown 🔒 100% ("clinched").
-
-**Key decisions:**
-
-- Canonical pure engine in `js/playoffOdds.js` (unit-tested, 20 tests w/ seeded LCG rng);
-  synced copy in `server.js` per the detectScoreSwings convention. Server-only glue:
-  collectPlayerGameScores / activeRosterForOdds / fetchRemainingGamesByTeam /
-  computePlayoffOddsForSeason / ensureFreshPlayoffOdds / buildPlayoffOddsSlackText.
-- `sd.playoff_odds` is a derived cache written ONLY server-side (4am sync after the score
-  guard settles — fresh read-modify-write so a guard-blocked compile computes from last-good
-  scores; 7am scoreboard post as backstop; POST /api/seasons/:year/playoff-odds/recompute
-  for the commissioner). Save handler always keeps the server copy (like score_snapshots).
-  Includes `history` (≤21 daily pct snapshots) for day-over-day ▲/▼ arrows.
-- UI: "Playoff %" pill column on the Pool Play Overall table + a 🔮 Playoff Odds detail
-  panel (pool-win % vs wild-card %, pool gap, cut gap, projected remaining pts, games left).
-  Client gates on oddsWindowForDate + !finalized_rounds.includes('PP') — after PP finalize
-  the bracket is the answer. Bridged to app.js via js/index.js (oddsWindowForDate,
-  formatOddsPct).
-- Slack: section appended to the existing 7am scoreboard post (same window), reading the
-  stored payload so Slack and UI can never disagree.
-- Display caps: >99% / <1% unless mathematically locked (only PP1 pool winners get 100%;
-  scores are unbounded so nobody is ever mathematically eliminated).
-
-**Verified:** full E2E with a stubbed MLB API (fetch preload) + Slack sink + Playwright:
-recompute endpoint, GET /api/seasons payload, Slack section incl. trend arrows, and the
-rendered scoreboard (pills + panel). Synthetic db confirmed locked/pool/wildcard splits and
-Final-game exclusion from games-remaining.
+- Server stamps swap `timestamp`/`reviewed_at` and upload-log times in UTC but strips the zone
+  marker (`toISOString().replace('T',' ').slice(0,19)`), so naive `new Date()` parsing displayed
+  the raw UTC clock (4–5 h ahead for Eastern). Fix (PR #342): `parseServerTimestamp` in
+  `js/utils.js` interprets zone-less stamps as UTC; display converts to the **viewer's local
+  timezone** (DST automatic). Storage format deliberately unchanged — old data displays right.
+- Follow-up: `fmtServerTimestamp` appends the viewer's zone abbreviation (EDT/EST…) via
+  `timeZoneName:'short'`, and public `GET /api/time` reports the server clock (UTC + Eastern)
+  to rule clock skew in or out when a displayed time looks wrong.
+- **"Still an hour off" gotcha:** a Slack post time vs. a swap-log time can legitimately differ
+  when the log row is a RESUBMISSION (approve → undo → resubmit, as in the 2026-07-05 incident)
+  — compare against the matching swap row, and check Slack's rendering device timezone, before
+  suspecting the clock. Prod (wmmc.live) is on Render; clocks are NTP-synced.
 
 ## Swap approve/undo skipped the date-window recompute — phantom +57 + guard-block loop (2026-07-05)
 

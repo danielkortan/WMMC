@@ -611,7 +611,10 @@ function writeDB(data, opts = {}) {
   // rename(2) is atomic on the same filesystem, so a crash/restart mid-write can never leave a
   // truncated or corrupt db.json — the previous good file stays intact until the new one is
   // fully durable. (Plain writeFileSync onto db.json leaves a corruption window.)
-  const json = JSON.stringify(data, null, 2);
+  // Compact (no-indent) JSON: with a season of daily_* rows the pretty-printed form roughly
+  // doubles both this in-memory string and the on-disk file that every readDB() re-parses —
+  // that transient was a contributor to the 2026-07-06 heap OOM crash loop.
+  const json = JSON.stringify(data);
   const tmp = `${DB_FILE}.tmp`;
   const fd = fs.openSync(tmp, 'w');
   try {
@@ -962,6 +965,18 @@ app.post('/api/seasons', requireCommissioner, (req, res) => {
 // loaded with, so an open tab can't keep running stale code after a deploy.
 app.get('/api/build', (req, res) => {
   res.json({ build: ASSET_VERSION });
+});
+
+// GET /api/time — public server-clock check. Every activity timestamp in the app is
+// stamped from this clock; compare `utc` against a trusted clock (a phone) to rule
+// server clock skew in or out when a displayed time looks wrong.
+app.get('/api/time', (req, res) => {
+  const now = new Date();
+  res.json({
+    utc: now.toISOString(),
+    eastern: now.toLocaleString('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' }),
+    epoch_ms: now.getTime(),
+  });
 });
 
 app.post('/api/seasons/:year', requireAuth, (req, res) => {
@@ -10871,7 +10886,7 @@ async function main() {
       if (saved && (!hasSeasons(local) || savedAt(saved) > savedAt(local))) {
         // Upstash is the better copy: the local disk is missing/empty, or the
         // backup is strictly newer. Safe to restore.
-        fs.writeFileSync(DB_FILE, JSON.stringify(saved, null, 2), 'utf8');
+        fs.writeFileSync(DB_FILE, JSON.stringify(saved), 'utf8');
         console.log('[Upstash] db restored from backup (local missing or older)');
       } else if (hasSeasons(local)) {
         // The local disk copy is current (Render's persistent disk survived the
@@ -10903,6 +10918,16 @@ async function main() {
     if (!fs.existsSync(DB_FILE)) {
       writeDB({ seasons: {}, managers: [], audit_log: [] });
       console.log('Created empty db.json');
+    }
+
+    // Memory forensics for the OOM crash loop (exit 134): put db.json size and the V8 heap
+    // ceiling side by side in the boot log, so growth toward the limit is visible per deploy.
+    try {
+      const heapLimitMB = require('v8').getHeapStatistics().heap_size_limit / 1024 / 1024;
+      const dbMB = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size / 1024 / 1024 : 0;
+      console.log(`[Boot] db.json ${dbMB.toFixed(1)} MB on disk; V8 heap limit ${heapLimitMB.toFixed(0)} MB`);
+    } catch (e) {
+      console.error('[Boot] size/heap report failed:', e.message);
     }
 
     // Auto-seed managers from data.json if db.json has none
