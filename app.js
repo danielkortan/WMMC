@@ -9601,15 +9601,7 @@ function renderSubmissionStatusTable() {
     .filter((m) => m.active)
     .map((m) => m.name);
 
-  const fmtDt = (iso) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    return (
-      d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
-      ' ' +
-      d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-    );
-  };
+  const fmtDt = (iso) => (iso ? fmtServerTimestamp(iso) : '');
 
   // Managers to show for a period: Pool Play = all active managers; playoff rounds = only the
   // managers who advanced to that round (null until the prior round is finalized).
@@ -9816,6 +9808,8 @@ const SWAP_NO_REASON_LABEL = '(No reason)';
 // Format a server-stamped timestamp ("YYYY-MM-DD HH:MM:SS" UTC or full ISO) in the
 // viewer's local timezone. parseServerTimestamp treats zone-less strings as UTC —
 // the server stamps them that way — so the browser handles the zone + DST math.
+// timeZoneName:'short' appends the viewer's zone abbreviation (EDT/EST/PDT…) so
+// there's no ambiguity about which timezone a displayed time is in.
 function fmtServerTimestamp(ts) {
   if (!ts) return '—';
   const d = parseServerTimestamp(ts);
@@ -9823,7 +9817,7 @@ function fmtServerTimestamp(ts) {
   return (
     d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
     ' ' +
-    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short' })
   );
 }
 
