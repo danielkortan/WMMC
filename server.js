@@ -964,6 +964,18 @@ app.get('/api/build', (req, res) => {
   res.json({ build: ASSET_VERSION });
 });
 
+// GET /api/time — public server-clock check. Every activity timestamp in the app is
+// stamped from this clock; compare `utc` against a trusted clock (a phone) to rule
+// server clock skew in or out when a displayed time looks wrong.
+app.get('/api/time', (req, res) => {
+  const now = new Date();
+  res.json({
+    utc: now.toISOString(),
+    eastern: now.toLocaleString('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' }),
+    epoch_ms: now.getTime(),
+  });
+});
+
 app.post('/api/seasons/:year', requireAuth, (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });

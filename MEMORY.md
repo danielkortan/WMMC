@@ -1,5 +1,20 @@
 # WMMC — Decisions Log
 
+## Timezone display: server stamps are zone-less UTC; render browser-local with zone abbrev (2026-07-06)
+
+- Server stamps swap `timestamp`/`reviewed_at` and upload-log times in UTC but strips the zone
+  marker (`toISOString().replace('T',' ').slice(0,19)`), so naive `new Date()` parsing displayed
+  the raw UTC clock (4–5 h ahead for Eastern). Fix (PR #342): `parseServerTimestamp` in
+  `js/utils.js` interprets zone-less stamps as UTC; display converts to the **viewer's local
+  timezone** (DST automatic). Storage format deliberately unchanged — old data displays right.
+- Follow-up: `fmtServerTimestamp` appends the viewer's zone abbreviation (EDT/EST…) via
+  `timeZoneName:'short'`, and public `GET /api/time` reports the server clock (UTC + Eastern)
+  to rule clock skew in or out when a displayed time looks wrong.
+- **"Still an hour off" gotcha:** a Slack post time vs. a swap-log time can legitimately differ
+  when the log row is a RESUBMISSION (approve → undo → resubmit, as in the 2026-07-05 incident)
+  — compare against the matching swap row, and check Slack's rendering device timezone, before
+  suspecting the clock. Prod (wmmc.live) is on Render; clocks are NTP-synced.
+
 ## Swap approve/undo skipped the date-window recompute — phantom +57 + guard-block loop (2026-07-05)
 
 **Symptom (commissioner).** Approving Chris Bentivegna's IL swap (Julio Rodríguez → Michael
