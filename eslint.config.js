@@ -31,6 +31,7 @@ const projectGlobals = {
   getInitials: 'readonly',
   fmtDateISO: 'readonly',
   normalizeName: 'readonly',
+  parseServerTimestamp: 'readonly',
   parseCSVLine: 'readonly',
   findColumn: 'readonly',
 };

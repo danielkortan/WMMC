@@ -1,6 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { esc, jsStr, parseNum, fmt, fmtDec, getInitials, fmtDateISO, normalizeName } from '../js/utils.js';
+import {
+  esc,
+  jsStr,
+  parseNum,
+  fmt,
+  fmtDec,
+  getInitials,
+  fmtDateISO,
+  normalizeName,
+  parseServerTimestamp,
+} from '../js/utils.js';
 
 describe('esc', () => {
   it('escapes the five HTML-sensitive characters', () => {
@@ -131,6 +141,37 @@ describe('normalizeName', () => {
 
   it('does not conflate genuinely different first names', () => {
     assert.notEqual(normalizeName('Nicholas Kurtz'), normalizeName('Nick Kurtz'));
+  });
+});
+
+describe('parseServerTimestamp', () => {
+  it('treats zone-less "YYYY-MM-DD HH:MM:SS" server stamps as UTC', () => {
+    const d = parseServerTimestamp('2026-07-05 21:26:00');
+    assert.equal(d.toISOString(), '2026-07-05T21:26:00.000Z');
+  });
+
+  it('treats zone-less T-form ISO strings as UTC', () => {
+    const d = parseServerTimestamp('2026-07-05T21:26:00');
+    assert.equal(d.toISOString(), '2026-07-05T21:26:00.000Z');
+  });
+
+  it('honors an explicit zone marker instead of appending Z', () => {
+    assert.equal(parseServerTimestamp('2026-07-05T21:26:00Z').toISOString(), '2026-07-05T21:26:00.000Z');
+    assert.equal(parseServerTimestamp('2026-07-05T17:26:00-04:00').toISOString(), '2026-07-05T21:26:00.000Z');
+    assert.equal(parseServerTimestamp('2026-07-05T23:26:00+02:00').toISOString(), '2026-07-05T21:26:00.000Z');
+  });
+
+  it('parses full toISOString() output with milliseconds', () => {
+    const d = parseServerTimestamp('2026-07-05T21:26:00.123Z');
+    assert.equal(d.toISOString(), '2026-07-05T21:26:00.123Z');
+  });
+
+  it('returns null for blank, date-only, or unparseable input', () => {
+    assert.equal(parseServerTimestamp(null), null);
+    assert.equal(parseServerTimestamp(undefined), null);
+    assert.equal(parseServerTimestamp(''), null);
+    assert.equal(parseServerTimestamp('2026-07-05'), null);
+    assert.equal(parseServerTimestamp('not a date T'), null);
   });
 });
 
