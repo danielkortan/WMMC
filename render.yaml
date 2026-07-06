@@ -14,6 +14,11 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Raise the V8 heap ceiling: db.json is fully parsed per request and fully re-serialized
+      # per write, and the default limit (~256 MB on a 512 MB instance) caused the 2026-07-06
+      # OOM crash loop (exit 134) once the season's daily rows grew large enough.
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=400
       - key: LOGIN_PASSWORD
         sync: false
       - key: DB_PATH
@@ -53,6 +58,9 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Same heap-ceiling bump as production (see the prod NODE_OPTIONS note).
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=400
       - key: LOGIN_PASSWORD
         sync: false
       - key: GOOGLE_CLIENT_ID
