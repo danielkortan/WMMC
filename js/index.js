@@ -29,6 +29,7 @@ import {
 import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
 import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
+import { orderWithSwapChains } from './rosterOrder.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
 Object.assign(window, {
@@ -52,4 +53,5 @@ Object.assign(window, {
   computeSeasonAccolades,
   oddsWindowForDate,
   formatOddsPct,
+  orderWithSwapChains,
 });

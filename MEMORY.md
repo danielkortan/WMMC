@@ -1055,3 +1055,21 @@ Decisions made with Daniel (asked via option picker):
   `/opt/pw-browsers/chromium`); local login = set a `password` on a manager in
   the gitignored `db.json`; Live tab CSS verified by injecting the exact app.js
   markup with fake numbers into `#live-managers` / `#live-games`.
+
+## 2026-07-10 — Swap-chain grouping applied to every roster listing
+
+- `orderWithSwapChains` (swapped-in player renders directly beneath the player he
+  replaced; each chain floats by its best scorer) was extracted from the scoreboard
+  detail panel in app.js into pure `js/rosterOrder.js` (bridged via js/index.js,
+  unit-tested in tests/rosterOrder.test.js) and is now used by all three roster
+  listings: scoreboard detail panel, My Roster per-week tables (buildPerWeekRoster),
+  and the commissioner roster editor (updateCommRosterWeekView). Signature:
+  `(names, scoreByPlayer, swaps, managerName, managerForEmail?)` — the last arg
+  resolves legacy swap records that carry only an email.
+- Live tab intentionally NOT chain-ordered: it's a single-day view, so a swapped-out
+  player and his replacement almost never co-occur.
+- Bridged window globals used by app.js must also be added to the globals list in
+  eslint.config.js or lint fails with no-undef.
+- Verification gotcha: booting the server against a scratch `db.json` REWRITES
+  `managers_seed.json` from it (password-stripped mirror) — restore it with
+  `git checkout -- managers_seed.json` after any local server run with fake data.
