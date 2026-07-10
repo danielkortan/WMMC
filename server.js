@@ -1157,6 +1157,11 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // whether a slim new client or a snapshot-bearing stale one — can never wipe or roll back
     // the trail the swing guard diffs against. (SAVE_HARDENING_PLAN.md Layer 2.)
     sd.score_snapshots = existingSd.score_snapshots || [];
+
+    // Playoff odds are a server-computed derived cache (4am sync / 7am post /
+    // the recompute endpoint). Same defense as score_snapshots: always keep
+    // the server's copy so a client save can never wipe or roll them back.
+    if (existingSd.playoff_odds) sd.playoff_odds = existingSd.playoff_odds;
   }
 
   // Heal per-week roster arrays from roster_dates whenever a save lands (swap/submission
@@ -3836,6 +3841,620 @@ function computeDailyHighLow(sd, date) {
   };
 }
 
+// ============================================================
+// Playoff odds (Monte-Carlo) — PP2 Week 4–5 only
+// ============================================================
+// Simulates every manager's remaining PP2 production (per-player per-game
+// scoring rates x their team's remaining MLB games) and applies the exact
+// qualification rules — win your pool's PP1 or PP2 period, or take a
+// wildcard on combined total — to each simulated season. Results are stored
+// on the season as `sd.playoff_odds` (a derived cache, like the weekly
+// rollups: rebuilt daily, never authoritative for anything) so the
+// scoreboard UI and the Slack post always read identical numbers.
+//
+// The pure engine below (ODDS_WINDOW through formatOddsPct) is a synced copy
+// of js/playoffOdds.js — the canonical, unit-tested version lives there.
+// Keep both in sync, like SCORING/SEASON_SCHEDULE and detectScoreSwings.
+
+const ODDS_WINDOW = { round: 'PP2', firstWeek: 'Week 4', lastWeek: 'Week 5' };
+const ODDS_DEFAULT_SIMS = 10000;
+
+function oddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCHEDULE) {
+  if (!Array.isArray(scheduleDates) || !todayISO) return null;
+  const idxOf = (round, week) => schedule.findIndex((s) => s.round === round && s.week === week);
+  const firstIdx = idxOf(ODDS_WINDOW.round, ODDS_WINDOW.firstWeek);
+  const lastIdx = idxOf(ODDS_WINDOW.round, ODDS_WINDOW.lastWeek);
+  if (firstIdx === -1 || lastIdx === -1) return null;
+  const first = scheduleDates[firstIdx] || {};
+  const last = scheduleDates[lastIdx] || {};
+  if (!first.start || !last.end) return null;
+  if (todayISO < first.start || todayISO > last.end) return null;
+  return {
+    round: ODDS_WINDOW.round,
+    week: first.end && todayISO <= first.end ? ODDS_WINDOW.firstWeek : ODDS_WINDOW.lastWeek,
+    start: first.start,
+    end: last.end,
+  };
+}
+
+function meanVariance(xs) {
+  const arr = Array.isArray(xs) ? xs.filter((x) => typeof x === 'number' && !Number.isNaN(x)) : [];
+  const n = arr.length;
+  if (n === 0) return { mean: 0, variance: 0, n: 0 };
+  const mean = arr.reduce((s, x) => s + x, 0) / n;
+  if (n === 1) return { mean, variance: 0, n };
+  const variance = arr.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1);
+  return { mean, variance, n };
+}
+
+function playerGameRate(gameScores, baseline = { mean: 0, variance: 0 }, k = 5) {
+  const { mean: sMean, variance: sVar, n } = meanVariance(gameScores);
+  const bMean = baseline.mean || 0;
+  const bVar = baseline.variance || 0;
+  const mean = (sMean * n + bMean * k) / (n + k || 1);
+  const ownVar = n >= 2 ? sVar : bVar;
+  const variance = (ownVar * n + bVar * k) / (n + k || 1);
+  return { mean, variance, games: n };
+}
+
+// ---- Schedule-context adjustments (opponent quality, home/away, park factor) ----
+// Layered on top of the base per-game rate from playerGameRate. Every factor is
+// centered at 1.0 (neutral) and the combined per-game multiplier is clamped so no
+// combination of extremes can dominate the simulation.
+
+// Generic MLB-wide home-field scoring edge (not team-specific) — modest and
+// well-established historically. Applied the same direction to both batting and
+// pitching, unlike park factor, which cuts the other way for pitchers.
+const HOME_ADVANTAGE = 0.03; // home = x1.03, away = x0.97
+
+// Team-abbreviation -> home-park run-scoring multiplier. Approximate MULTI-YEAR
+// averages (not live/current-season). Review and refresh at the start of each
+// season. ATH/OAK (Athletics, mid-relocation) and TB (Rays, temporary home after
+// Tropicana Field storm damage) are left neutral (1.0) rather than guessed —
+// confirm their current-season home park before trusting those two.
+const PARK_FACTORS = {
+  ARI: 1.02,
+  ATL: 1.01,
+  ATH: 1.0,
+  OAK: 1.0,
+  BAL: 0.98,
+  BOS: 1.04,
+  CHC: 1.02,
+  CWS: 1.0,
+  CIN: 1.05,
+  CLE: 0.97,
+  COL: 1.15,
+  DET: 0.97,
+  HOU: 1.0,
+  KC: 0.99,
+  LAA: 0.98,
+  LAD: 0.97,
+  MIA: 0.95,
+  MIL: 1.0,
+  MIN: 0.99,
+  NYM: 0.97,
+  NYY: 1.02,
+  PHI: 1.03,
+  PIT: 0.97,
+  SD: 0.93,
+  SEA: 0.94,
+  SF: 0.9,
+  STL: 0.99,
+  TB: 1.0,
+  TEX: 1.02,
+  TOR: 1.0,
+  WSH: 0.98,
+};
+
+const PARK_FACTOR_CLAMP = [0.85, 1.15];
+const OPPONENT_FACTOR_CLAMP = [0.85, 1.15];
+const GAME_FACTOR_CLAMP = [0.7, 1.5];
+const oddsClamp = (x, [lo, hi]) => Math.min(hi, Math.max(lo, x));
+
+function computeTeamQualityFactors(teamStats) {
+  const eras = Object.values(teamStats || {})
+    .map((t) => t.era)
+    .filter((x) => typeof x === 'number' && x > 0);
+  const rpgs = Object.values(teamStats || {})
+    .map((t) => t.runsPerGame)
+    .filter((x) => typeof x === 'number' && x > 0);
+  const leagueEra = eras.length ? eras.reduce((a, b) => a + b, 0) / eras.length : null;
+  const leagueRpg = rpgs.length ? rpgs.reduce((a, b) => a + b, 0) / rpgs.length : null;
+
+  const out = {};
+  for (const [abbrev, t] of Object.entries(teamStats || {})) {
+    const pitchingRelative =
+      leagueEra && typeof t.era === 'number' && t.era > 0 ? oddsClamp(t.era / leagueEra, OPPONENT_FACTOR_CLAMP) : 1;
+    const hittingRelative =
+      leagueRpg && typeof t.runsPerGame === 'number' && t.runsPerGame > 0
+        ? oddsClamp(t.runsPerGame / leagueRpg, OPPONENT_FACTOR_CLAMP)
+        : 1;
+    out[abbrev] = { pitchingRelative, hittingRelative };
+  }
+  return out;
+}
+
+function gameFactor(playerType, game, teamQuality = {}, parkFactors = PARK_FACTORS) {
+  const opp = game && teamQuality[game.opponent];
+  const opponentFactor = opp ? (playerType === 'batter' ? opp.pitchingRelative : 1 / opp.hittingRelative) : 1;
+  const homeAwayFactor = game && game.isHome ? 1 + HOME_ADVANTAGE : 1 - HOME_ADVANTAGE;
+  const rawPark = oddsClamp((game && parkFactors[game.venueTeam]) ?? 1, PARK_FACTOR_CLAMP);
+  const parkFactorApplied = playerType === 'batter' ? rawPark : 1 / rawPark;
+  return oddsClamp(opponentFactor * homeAwayFactor * parkFactorApplied, GAME_FACTOR_CLAMP);
+}
+
+function projectManager(playerProjections) {
+  let mean = 0;
+  let variance = 0;
+  let games = 0;
+  for (const p of playerProjections || []) {
+    const factors = Array.isArray(p.gameFactors) ? p.gameFactors : [];
+    const sumFactors = factors.reduce((s, f) => s + f, 0);
+    const sumFactorsSq = factors.reduce((s, f) => s + f * f, 0);
+    mean += (p.mean || 0) * sumFactors;
+    variance += (p.variance || 0) * sumFactorsSq;
+    games += factors.length;
+  }
+  return { mean, variance, games };
+}
+
+function currentQualification(entries, bracketSize = 8) {
+  const pools = {};
+  for (const e of entries) (pools[e.pool] = pools[e.pool] || []).push(e);
+
+  const pp1Leaders = new Set();
+  const pp2Leaders = new Set();
+  const pp2LeaderByPool = {};
+  for (const [pool, members] of Object.entries(pools)) {
+    let b1 = 0;
+    let w1 = null;
+    let b2 = 0;
+    let w2 = null;
+    for (const m of members) {
+      if ((m.pp1 || 0) > b1) {
+        b1 = m.pp1;
+        w1 = m.manager;
+      }
+      if ((m.pp2 || 0) > b2) {
+        b2 = m.pp2;
+        w2 = m.manager;
+      }
+    }
+    if (w1) pp1Leaders.add(w1);
+    if (w2) {
+      pp2Leaders.add(w2);
+      pp2LeaderByPool[pool] = { manager: w2, pp2: b2 };
+    }
+  }
+
+  const total = (e) => (e.pp1 || 0) + (e.pp2 || 0);
+  const allLeaders = new Set([...pp1Leaders, ...pp2Leaders]);
+  const winners = entries.filter((e) => allLeaders.has(e.manager)).sort((a, b) => total(b) - total(a));
+  const wildcards = entries
+    .filter((e) => !allLeaders.has(e.manager) && total(e) > 0)
+    .sort((a, b) => total(b) - total(a))
+    .slice(0, Math.max(0, bracketSize - winners.length));
+  const qualifiers = [...winners, ...wildcards].slice(0, bracketSize);
+  const cutTotal = qualifiers.length > 0 ? total(qualifiers[qualifiers.length - 1]) : 0;
+
+  return {
+    pp1Leaders,
+    pp2Leaders,
+    pp2LeaderByPool,
+    qualifierNames: qualifiers.map((e) => e.manager),
+    cutTotal,
+  };
+}
+
+function makeNormalSampler(rng = Math.random) {
+  return function normal() {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = rng();
+    while (v === 0) v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+}
+
+function simulatePlayoffOdds({
+  entries,
+  projections = {},
+  bracketSize = 8,
+  sims = ODDS_DEFAULT_SIMS,
+  rng = Math.random,
+}) {
+  const normal = makeNormalSampler(rng);
+  const names = entries.map((e) => e.manager);
+  const pools = {};
+  entries.forEach((e, i) => {
+    (pools[e.pool] = pools[e.pool] || []).push(i);
+  });
+
+  // PP1 is complete in the odds window — its per-pool winners are fixed.
+  const pp1WinnerIdx = new Set();
+  for (const idxs of Object.values(pools)) {
+    let best = 0;
+    let winner = -1;
+    for (const i of idxs) {
+      if ((entries[i].pp1 || 0) > best) {
+        best = entries[i].pp1;
+        winner = i;
+      }
+    }
+    if (winner >= 0) pp1WinnerIdx.add(winner);
+  }
+
+  const means = names.map((n) => (projections[n] && projections[n].mean) || 0);
+  const sds = names.map((n) => Math.sqrt(Math.max(0, (projections[n] && projections[n].variance) || 0)));
+
+  const counts = names.map(() => ({ make: 0, winPP2Pool: 0, wildcard: 0 }));
+  const pp2Sim = new Array(names.length);
+  const totalSim = new Array(names.length);
+
+  for (let s = 0; s < sims; s++) {
+    for (let i = 0; i < names.length; i++) {
+      const drawn = sds[i] > 0 ? means[i] + sds[i] * normal() : means[i];
+      pp2Sim[i] = (entries[i].pp2 || 0) + drawn;
+      totalSim[i] = (entries[i].pp1 || 0) + pp2Sim[i];
+    }
+
+    // Per-pool PP2 winner on simulated totals.
+    const winnerIdx = new Set(pp1WinnerIdx);
+    for (const idxs of Object.values(pools)) {
+      let best = 0;
+      let winner = -1;
+      for (const i of idxs) {
+        if (pp2Sim[i] > best) {
+          best = pp2Sim[i];
+          winner = i;
+        }
+      }
+      if (winner >= 0) {
+        winnerIdx.add(winner);
+        counts[winner].winPP2Pool++;
+      }
+    }
+
+    // Wildcards: highest combined totals among non-winners, filling to bracketSize.
+    const wcSlots = Math.max(0, bracketSize - winnerIdx.size);
+    const nonWinners = [];
+    for (let i = 0; i < names.length; i++) {
+      if (!winnerIdx.has(i) && totalSim[i] > 0) nonWinners.push(i);
+    }
+    nonWinners.sort((a, b) => totalSim[b] - totalSim[a]);
+    const wildcardIdx = nonWinners.slice(0, wcSlots);
+
+    // Winners seed first — when they exceed the bracket, lowest totals miss.
+    let qualifiedIdx;
+    if (winnerIdx.size > bracketSize) {
+      qualifiedIdx = [...winnerIdx].sort((a, b) => totalSim[b] - totalSim[a]).slice(0, bracketSize);
+    } else {
+      qualifiedIdx = [...winnerIdx, ...wildcardIdx];
+    }
+    for (const i of qualifiedIdx) counts[i].make++;
+    for (const i of wildcardIdx) counts[i].wildcard++;
+  }
+
+  const managers = {};
+  names.forEach((n, i) => {
+    managers[n] = {
+      make: counts[i].make / sims,
+      winPP2Pool: counts[i].winPP2Pool / sims,
+      wildcard: counts[i].wildcard / sims,
+      lockedPP1: pp1WinnerIdx.has(i),
+    };
+  });
+  return { sims, managers };
+}
+
+function formatOddsPct(fraction, locked = false) {
+  if (locked) return '100%';
+  const pct = fraction * 100;
+  if (pct >= 99.5) return '>99%';
+  if (pct > 0 && pct < 0.5) return '<1%';
+  return `${Math.round(pct)}%`;
+}
+
+// ---- Server-only glue (not part of the synced pure engine) ----
+
+// Per-player per-game season scores from the daily rows. Batting and
+// pitching deltas for the same game (two-way players) merge into one score.
+// Rows without a game_id (manual/gsheets imports) fall back to keying by
+// date so they still count as one appearance.
+function collectPlayerGameScores(sd) {
+  const perGame = new Map(); // name -> Map(gameKey -> score)
+  const add = (name, key, score) => {
+    if (!perGame.has(name)) perGame.set(name, new Map());
+    const games = perGame.get(name);
+    games.set(key, (games.get(key) || 0) + score);
+  };
+  for (const r of sd.daily_batting || []) {
+    const stats = r.delta || r.cumulative;
+    if (!r.batter || !stats) continue;
+    add(r.batter, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculateBattingScore(stats));
+  }
+  for (const r of sd.daily_pitching || []) {
+    const stats = r.delta || r.cumulative;
+    if (!r.pitcher || !stats) continue;
+    add(r.pitcher, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculatePitchingScore(stats));
+  }
+  const out = new Map();
+  for (const [name, games] of perGame) out.set(name, [...games.values()]);
+  return out;
+}
+
+// A manager's active PP2 roster as of `todayISO`, derived from the
+// authoritative date windows (roster_dates scoped to the PP2 period start,
+// latest add <= today with no later drop) — the same latest-add/latest-drop
+// logic managerWeekSubtotal uses, evaluated as of today instead of week end.
+function activeRosterForOdds(sd, managerName, todayISO) {
+  const allMgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || null;
+  if (!allMgrDates) return [];
+  const periodStart = periodStartForRound(sd, ODDS_WINDOW.round);
+  const latestAdd = {};
+  const latestDrop = {};
+  for (const players of Object.values(allMgrDates)) {
+    for (const [p, d] of Object.entries(players || {})) {
+      if (
+        d.add_date &&
+        (!periodStart || d.add_date >= periodStart) &&
+        d.add_date <= todayISO &&
+        (!latestAdd[p] || d.add_date > latestAdd[p])
+      ) {
+        latestAdd[p] = d.add_date;
+      }
+      if (
+        d.drop_date &&
+        (!periodStart || d.drop_date >= periodStart) &&
+        d.drop_date <= todayISO &&
+        (!latestDrop[p] || d.drop_date > latestDrop[p])
+      ) {
+        latestDrop[p] = d.drop_date;
+      }
+    }
+  }
+  return Object.keys(latestAdd).filter((p) => !latestDrop[p] || latestAdd[p] > latestDrop[p]);
+}
+
+// MLB team id -> abbreviation, shared by fetchRemainingGamesByTeam and
+// fetchTeamSeasonQuality so a compute only fetches the roster once.
+async function fetchTeamIdAbbrevMap() {
+  const teamsData = await mlbApiFetch('/api/v1/teams?sportId=1');
+  const map = {};
+  for (const t of teamsData.teams || []) map[t.id] = t.abbreviation;
+  return map;
+}
+
+// Remaining (not-yet-Final) MLB games per team abbreviation in a date range,
+// each carrying its opponent, home/away, and venue team (whichever side is
+// home — that's whose park the game is played at) — feeds both the
+// "games remaining" display metric and the schedule-strength adjustment.
+async function fetchRemainingGamesByTeam(startDate, endDate, idToAbbrev) {
+  const data = await mlbApiFetch(
+    `/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&gameType=R,F,D,L,W`
+  );
+  const byTeam = {};
+  const add = (abbrev, game) => {
+    (byTeam[abbrev] = byTeam[abbrev] || []).push(game);
+  };
+  for (const dateEntry of data.dates || []) {
+    for (const game of dateEntry.games || []) {
+      if (game.status?.abstractGameState === 'Final') continue;
+      const homeAbbrev = idToAbbrev[game.teams?.home?.team?.id];
+      const awayAbbrev = idToAbbrev[game.teams?.away?.team?.id];
+      if (!homeAbbrev || !awayAbbrev) continue;
+      add(homeAbbrev, { opponent: awayAbbrev, isHome: true, venueTeam: homeAbbrev });
+      add(awayAbbrev, { opponent: homeAbbrev, isHome: false, venueTeam: homeAbbrev });
+    }
+  }
+  return byTeam; // { [abbrev]: [{opponent, isHome, venueTeam}, ...] }
+}
+
+// Team-level season quality signal (ERA + runs/game) for every team, in two
+// bulk calls rather than one per team. Best-effort: a failed call or a team
+// missing/unparseable stats simply leaves that team out of the map, which
+// computeTeamQualityFactors treats as neutral (1.0) — never blocks the compute.
+async function fetchTeamSeasonQuality(season, idToAbbrev) {
+  const out = {};
+  try {
+    const pitching = await mlbApiFetch(`/api/v1/teams/stats?sportId=1&season=${season}&stats=season&group=pitching`);
+    for (const split of pitching.stats?.[0]?.splits || []) {
+      const abbrev = idToAbbrev[split.team?.id];
+      const era = Number(split.stat?.era);
+      if (!abbrev || !(era > 0)) continue;
+      (out[abbrev] = out[abbrev] || {}).era = era;
+    }
+  } catch (e) {
+    console.error('[PlayoffOdds] Team pitching stats fetch failed (opponent factors neutral):', e.message);
+  }
+  try {
+    const hitting = await mlbApiFetch(`/api/v1/teams/stats?sportId=1&season=${season}&stats=season&group=hitting`);
+    for (const split of hitting.stats?.[0]?.splits || []) {
+      const abbrev = idToAbbrev[split.team?.id];
+      const runs = Number(split.stat?.runs);
+      const gp = Number(split.stat?.gamesPlayed);
+      if (!abbrev || !(runs > 0) || !(gp > 0)) continue;
+      (out[abbrev] = out[abbrev] || {}).runsPerGame = runs / gp;
+    }
+  } catch (e) {
+    console.error('[PlayoffOdds] Team hitting stats fetch failed (opponent factors neutral):', e.message);
+  }
+  return out; // { [abbrev]: { era?, runsPerGame? } }
+}
+
+// Compute the full odds payload for one season, or null when outside the
+// PP2 Week 4–5 window (or pool play is already finalized / pools missing).
+// Managers come from db.managers (the canonical list), scores from
+// computeRoundScores (the same drop-aware path as the scoreboard).
+async function computePlayoffOddsForSeason(db, sd, todayISO, year) {
+  const window = oddsWindowForDate(sd.schedule_dates || [], todayISO);
+  if (!window) return null;
+  if ((sd.finalized_rounds || []).includes('PP')) return null;
+
+  const managers = (db.managers || []).filter((m) => m.active !== false && m.pool);
+  if (managers.length === 0) return null;
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const pp1Totals = {};
+  for (const s of computeRoundScores(batting, pitching, ['PP1'], sd)) pp1Totals[s.manager] = s.total;
+  const pp2Totals = {};
+  for (const s of computeRoundScores(batting, pitching, ['PP2'], sd)) pp2Totals[s.manager] = s.total;
+  const entries = managers.map((m) => ({
+    manager: m.name,
+    pool: m.pool,
+    pp1: pp1Totals[m.name] || 0,
+    pp2: pp2Totals[m.name] || 0,
+  }));
+
+  const gameScores = collectPlayerGameScores(sd);
+  const allScores = [];
+  for (const scores of gameScores.values()) allScores.push(...scores);
+  const baseline = meanVariance(allScores);
+
+  // Schedule-context signals (opponent quality, home/away, park factor). Each
+  // fetch fails safe to neutral — a bad response never blocks the nightly
+  // compute, it just leaves that one signal at 1.0 for the affected teams.
+  let idToAbbrev = {};
+  try {
+    idToAbbrev = await fetchTeamIdAbbrevMap();
+  } catch (e) {
+    console.error('[PlayoffOdds] Team id/abbrev map fetch failed (adjustments neutral):', e.message);
+  }
+  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, window.end, idToAbbrev);
+  const teamStats = await fetchTeamSeasonQuality(year, idToAbbrev);
+  const teamQuality = computeTeamQualityFactors(teamStats);
+  const batPoolSet = new Set(sd.batters_pool || []);
+
+  const teamCounts = Object.values(remainingByTeam).map((g) => g.length);
+  const avgRemaining = teamCounts.length > 0 ? teamCounts.reduce((a, b) => a + b, 0) / teamCounts.length : 0;
+
+  const projections = {};
+  const avgFactorByManager = {};
+  for (const m of managers) {
+    const roster = activeRosterForOdds(sd, m.name, todayISO);
+    const perPlayer = roster.map((player) => {
+      const rate = playerGameRate(gameScores.get(player) || [], baseline);
+      const team = (sd.batters_team || {})[player] || (sd.pitchers_team || {})[player] || null;
+      const playerType = batPoolSet.has(player) ? 'batter' : 'pitcher';
+      const games = team && remainingByTeam[team];
+      const gameFactors = games
+        ? games.map((g) => gameFactor(playerType, g, teamQuality))
+        : Array.from({ length: Math.round(avgRemaining) }, () => 1);
+      return { mean: rate.mean, variance: rate.variance, gameFactors };
+    });
+    projections[m.name] = projectManager(perPlayer);
+    const allFactors = perPlayer.flatMap((p) => p.gameFactors);
+    avgFactorByManager[m.name] = allFactors.length ? allFactors.reduce((a, b) => a + b, 0) / allFactors.length : 1;
+  }
+
+  const sim = simulatePlayoffOdds({ entries, projections });
+  const qual = currentQualification(entries);
+
+  const pct1 = (fraction) => Math.round(fraction * 1000) / 10;
+  const r1 = (x) => Math.round(x * 10) / 10;
+  const managersOut = {};
+  for (const e of entries) {
+    const s = sim.managers[e.manager];
+    const poolLead = qual.pp2LeaderByPool[e.pool];
+    managersOut[e.manager] = {
+      pct: s.lockedPP1 ? 100 : pct1(s.make),
+      pool_win_pct: pct1(s.winPP2Pool),
+      wildcard_pct: pct1(s.wildcard),
+      locked: s.lockedPP1,
+      proj_mean: r1(projections[e.manager].mean),
+      games_remaining: Math.round(projections[e.manager].games),
+      points_back_pool: poolLead ? r1(poolLead.pp2 - e.pp2) : null,
+      points_back_cut: r1(qual.cutTotal - (e.pp1 + e.pp2)),
+      schedule_factor: Math.round((avgFactorByManager[e.manager] || 1) * 1000) / 1000,
+    };
+  }
+
+  return {
+    computed_at: new Date().toISOString(),
+    date: todayISO,
+    sims: sim.sims,
+    round: window.round,
+    week: window.week,
+    window: { start: window.start, end: window.end },
+    managers: managersOut,
+  };
+}
+
+// Roll the previous odds' daily history forward onto a fresh payload so the
+// scoreboard and Slack post can show day-over-day movement. One entry per
+// date (a same-day recompute replaces), capped to the odds window's length.
+const MAX_ODDS_HISTORY = 21;
+function attachPlayoffOddsHistory(sd, odds) {
+  const prev = sd.playoff_odds && Array.isArray(sd.playoff_odds.history) ? sd.playoff_odds.history : [];
+  const history = prev.filter((h) => h.date !== odds.date);
+  const pcts = {};
+  for (const [name, o] of Object.entries(odds.managers)) pcts[name] = o.pct;
+  history.push({ date: odds.date, pcts });
+  history.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  odds.history = history.slice(-MAX_ODDS_HISTORY);
+}
+
+// Compute-and-store on a FRESH db copy (own read-modify-write, so it can run
+// after the 4am sync's write or standalone from the 7am post / the manual
+// endpoint without clobbering anything). No-ops outside the odds window or
+// when today's odds already exist (unless forced). Returns the stored odds
+// or null.
+async function ensureFreshPlayoffOdds(year, opts = {}) {
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return null;
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (!opts.force && sd.playoff_odds && sd.playoff_odds.date === todayISO) return sd.playoff_odds;
+  const odds = await computePlayoffOddsForSeason(db, sd, todayISO, year);
+  if (!odds) return null;
+  attachPlayoffOddsHistory(sd, odds);
+  sd.playoff_odds = odds;
+  writeDB(db);
+  console.log(
+    `[PlayoffOdds] Computed ${year} playoff odds for ${todayISO} (${odds.sims} sims, trigger: ${opts.trigger || 'manual'})`
+  );
+  return odds;
+}
+
+// Slack mrkdwn section for the daily scoreboard post — only during the odds
+// window, reading the stored payload so the post matches the scoreboard UI.
+function buildPlayoffOddsSlackText(sd, todayISO) {
+  const odds = sd.playoff_odds;
+  if (!odds || !odds.managers) return null;
+  if ((sd.finalized_rounds || []).includes('PP')) return null;
+  if (!oddsWindowForDate(sd.schedule_dates || [], todayISO)) return null;
+
+  const history = Array.isArray(odds.history) ? odds.history : [];
+  const prior = [...history].reverse().find((h) => h.date < odds.date);
+
+  const rows = Object.entries(odds.managers)
+    .map(([name, o]) => ({ name, ...o }))
+    .sort((a, b) => b.pct - a.pct || a.name.localeCompare(b.name));
+
+  const lines = rows.map((r) => {
+    const label = formatOddsPct(r.pct / 100, r.locked);
+    let suffix = '';
+    if (r.locked) {
+      suffix = ' \u{1F512}';
+    } else {
+      if (prior && prior.pcts && prior.pcts[r.name] != null) {
+        const delta = Math.round(r.pct - prior.pcts[r.name]);
+        if (delta >= 1) suffix = ` \u{25B2}+${delta}`;
+        else if (delta <= -1) suffix = ` \u{25BC}${delta}`;
+      }
+      suffix += ` _(pool ${formatOddsPct(r.pool_win_pct / 100)} \u{00B7} WC ${formatOddsPct(r.wildcard_pct / 100)})_`;
+    }
+    return `*${r.name}* — ${label}${suffix}`;
+  });
+
+  return (
+    `*\u{1F52E} Playoff Odds* — ${odds.sims.toLocaleString('en-US')} simulated finishes\n` +
+    lines.join('\n') +
+    `\n_\u{1F512} = clinched (PP1 pool winner) \u{00B7} pool/WC = odds of winning the PP2 pool vs. a wild card_`
+  );
+}
+
 function buildScoreboardBlocks(db, year) {
   const seasonData = (db.seasons || {})[year] || {};
   const managers = db.managers || [];
@@ -4092,6 +4711,15 @@ function buildScoreboardBlocks(db, year) {
     });
   } else {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*\u{1F3C6} Overall Standings*\n${overallText}` } });
+  }
+
+  // ---- Playoff odds (PP2 Week 4–5 only) ----
+  // Reads the stored sd.playoff_odds (computed by the 4am sync / 7am post),
+  // so the Slack numbers always match the scoreboard UI's.
+  const oddsText = buildPlayoffOddsSlackText(seasonData, todayISO);
+  if (oddsText) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: oddsText } });
   }
 
   // ---- Daily high/low section ----
@@ -9005,6 +9633,32 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   }
 });
 
+// POST /api/seasons/:year/playoff-odds/recompute — recompute & store playoff
+// odds on demand (the 4am sync and the 7am scoreboard post refresh them
+// automatically). 409 outside the PP2 Week 4–5 window or once pool play is
+// finalized — there is nothing meaningful to compute then.
+app.post('/api/seasons/:year/playoff-odds/recompute', requireCommissioner, async (req, res) => {
+  const { year } = req.params;
+  if (!(readDB().seasons || {})[year]) {
+    return res.status(404).json({ error: `Season ${year} not found` });
+  }
+  try {
+    const odds = await ensureFreshPlayoffOdds(year, { force: true, trigger: 'manual' });
+    if (!odds) {
+      return res.status(409).json({
+        error: 'Playoff odds are only computed during PP2 Weeks 4–5, before pool play is finalized.',
+      });
+    }
+    const db = readDB();
+    addAuditEntry(db, 'playoff_odds_recompute', { year, date: odds.date, sims: odds.sims }, req.get('X-User-Email'));
+    writeDB(db);
+    res.json({ ok: true, odds });
+  } catch (e) {
+    console.error('[PlayoffOdds] Manual recompute failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/slack/command — Slack slash command handler
 // Slack sends application/x-www-form-urlencoded. Body reading is inlined so
 // that express.json() (which runs globally) cannot leave the stream in a state
@@ -10044,7 +10698,15 @@ function scheduleScoreboardPost() {
       const sd = (db.seasons || {})[season];
 
       if (isWithinSyncWindow(sd)) {
-        postScoreboardSlack(db, season)
+        // Backstop for the 4am compute (e.g. server restarted in between): make
+        // sure today's playoff odds exist before posting, then post from a fresh
+        // db read so the new odds are included. Odds failures never block the post.
+        ensureFreshPlayoffOdds(season, { trigger: '7am-scoreboard' })
+          .catch((e) => {
+            console.error('[PlayoffOdds] Pre-post odds compute failed (continuing):', e.message);
+            return null;
+          })
+          .then(() => postScoreboardSlack(readDB(), season))
           .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
           .catch((e) => console.error('[Scoreboard] Post failed:', e.message));
       } else {
@@ -10277,6 +10939,16 @@ function scheduleMLBApiSync() {
               () => {}
             );
           }
+        }
+
+        // Refresh the playoff odds after the stats settle (no-op outside PP2
+        // Week 4–5). Runs on its own fresh read-modify-write AFTER the write
+        // above, so a guard-blocked compile still computes odds from the
+        // last-good persisted scores rather than the rejected in-memory ones.
+        try {
+          await ensureFreshPlayoffOdds(season, { force: true, trigger: 'auto-4am' });
+        } catch (e) {
+          console.error('[PlayoffOdds] 4am odds compute failed (continuing):', e.message);
         }
       }
     } catch (e) {

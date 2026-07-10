@@ -1,5 +1,93 @@
 # WMMC — Decisions Log
 
+## Playoff odds phase 2: opponent quality, home/away, park factors (2026-07-10)
+
+**What:** extended the Monte-Carlo playoff-odds engine (from the 2026-07-06 entry below)
+so each remaining game's projected contribution isn't just "shrunk per-game rate x 1", but
+"shrunk per-game rate x a per-game adjustment factor" reflecting who they're playing, where,
+and whether it's a hitter- or pitcher-friendly park. User explicitly asked for this as a
+follow-up after reviewing phase 1's methodology and confirmed the scope via two rounds of
+AskUserQuestion (scope: opponent quality + home/away + park factors, all three; park-factor
+source: commonly-cited multi-year averages since MLB's Stats API has no park-factor endpoint).
+
+**Key decisions:**
+
+- New pure exports in `js/playoffOdds.js` (synced copy in `server.js`, same convention):
+  `HOME_ADVANTAGE` (flat +-3%, symmetric for both player types), `PARK_FACTORS` (hand-written
+  30-team table of approximate multi-year park run-scoring multipliers — ATH/OAK and TB left
+  neutral 1.0 since their current-season home parks were unstable/unconfirmed at write time,
+  rather than guessed), `computeTeamQualityFactors` (team ERA/runs-per-game -> relative to
+  league average, clamped [0.85,1.15]), `gameFactor` (combines opponent quality + home/away +
+  park into one per-game multiplier, clamped [0.7,1.5] overall; park factor applies directly
+  to batters and inversely to pitchers since a hitter-friendly park hurts pitcher fantasy
+  scoring).
+- `projectManager`'s contract changed: player entries now carry `gameFactors` (one multiplier
+  per remaining game) instead of a scalar `gamesRemaining`. Mean scales by sum(factors);
+  variance scales by sum(factors^2) (Var(sum ci*Xi) = sum(ci^2*Var(Xi)) for independent Xi).
+  All-1.0 factors reproduce the old `mean*gamesRemaining` behavior exactly.
+- Server-only glue: `fetchTeamIdAbbrevMap` (shared id->abbrev lookup), `fetchRemainingGamesByTeam`
+  now returns each remaining game's {opponent, isHome, venueTeam} instead of a bare count,
+  `fetchTeamSeasonQuality` (2 bulk MLB API calls — team-stats endpoint, hitting+pitching groups
+  — not 30 per-team calls). Every new fetch is wrapped to fail safe to neutral (1.0) on error/
+  missing data, never blocking the nightly compute — could not verify the live MLB
+  `/api/v1/teams/stats` response shape from this sandboxed session (network policy blocks
+  statsapi.mlb.com), so this needs a live smoke-test after deploy.
+- Stored payload gained `managers[name].schedule_factor` (average per-game adjustment across
+  a manager's roster, e.g. 1.11 = slate projects 11% above neutral) — surfaced as a new
+  "Sched." column on the scoreboard's Playoff Odds panel with an explanatory tooltip; Slack
+  footnote left unchanged (already terse by design).
+
+**Verified:** unit tests for all new pure functions (computeTeamQualityFactors direction +
+clamping, gameFactor direction for both player types + clamping + null-game fallback,
+projectManager's new factor-scaling formula) — 131/131 total tests pass. E2E smoke test with
+a stubbed MLB API (lopsided team quality: NYY strong/BOS weak) confirmed differentiation
+end-to-end: an all-NYY roster (facing mostly weak BOS pitching, NYY's hitter-friendly park)
+showed schedule_factor +11%, an all-BOS roster (facing mostly strong NYY pitching) showed
+-13% — correct direction, propagated through to the stored payload, the Slack post, and the
+rendered "Sched." column in Chromium.
+
+## Playoff odds: Monte-Carlo prediction section, PP2 Weeks 4–5 (2026-07-06)
+
+**What:** "Likelihood to make the playoffs" percentage on the scoreboard + a section in the
+daily 7am Slack post, live only from the start of PP2 Week 4 through the end of pool play
+(user's chosen window). Server-computed, client-displayed.
+
+**Model (user chose Monte Carlo over a deterministic formula):** 10,000 sims of the remaining
+schedule. Each manager's remaining PP2 production ~ Normal(mean, var) built player-by-player:
+per-game scoring rate from the season's daily rows (batting+pitching merged per game_id,
+shrunk toward the league per-game baseline with k=5 pseudo-games) × the player's MLB team's
+remaining non-Final games (statsapi schedule + teams endpoints) within the window. Roster =
+active PP2 players from roster_dates as of today (latest add ≤ today, no later drop, scoped
+by periodStartForRound). Each sim applies the exact qualification rules (per-pool PP1/PP2
+winners > 0, wildcards by combined total fill to 8; winners seed first). PP1 is complete in
+the window, so PP1 pool winners are banked → shown 🔒 100% ("clinched").
+
+**Key decisions:**
+
+- Canonical pure engine in `js/playoffOdds.js` (unit-tested, 20 tests w/ seeded LCG rng);
+  synced copy in `server.js` per the detectScoreSwings convention. Server-only glue:
+  collectPlayerGameScores / activeRosterForOdds / fetchRemainingGamesByTeam /
+  computePlayoffOddsForSeason / ensureFreshPlayoffOdds / buildPlayoffOddsSlackText.
+- `sd.playoff_odds` is a derived cache written ONLY server-side (4am sync after the score
+  guard settles — fresh read-modify-write so a guard-blocked compile computes from last-good
+  scores; 7am scoreboard post as backstop; POST /api/seasons/:year/playoff-odds/recompute
+  for the commissioner). Save handler always keeps the server copy (like score_snapshots).
+  Includes `history` (≤21 daily pct snapshots) for day-over-day ▲/▼ arrows.
+- UI: "Playoff %" pill column on the Pool Play Overall table + a 🔮 Playoff Odds detail
+  panel (pool-win % vs wild-card %, pool gap, cut gap, projected remaining pts, games left).
+  Client gates on oddsWindowForDate + !finalized_rounds.includes('PP') — after PP finalize
+  the bracket is the answer. Bridged to app.js via js/index.js (oddsWindowForDate,
+  formatOddsPct).
+- Slack: section appended to the existing 7am scoreboard post (same window), reading the
+  stored payload so Slack and UI can never disagree.
+- Display caps: >99% / <1% unless mathematically locked (only PP1 pool winners get 100%;
+  scores are unbounded so nobody is ever mathematically eliminated).
+
+**Verified:** full E2E with a stubbed MLB API (fetch preload) + Slack sink + Playwright:
+recompute endpoint, GET /api/seasons payload, Slack section incl. trend arrows, and the
+rendered scoreboard (pills + panel). Synthetic db confirmed locked/pool/wildcard splits and
+Final-game exclusion from games-remaining.
+
 ## Timezone display: server stamps are zone-less UTC; render browser-local with zone abbrev (2026-07-06)
 
 - Server stamps swap `timestamp`/`reviewed_at` and upload-log times in UTC but strips the zone
@@ -967,3 +1055,21 @@ Decisions made with Daniel (asked via option picker):
   `/opt/pw-browsers/chromium`); local login = set a `password` on a manager in
   the gitignored `db.json`; Live tab CSS verified by injecting the exact app.js
   markup with fake numbers into `#live-managers` / `#live-games`.
+
+## 2026-07-10 — Swap-chain grouping applied to every roster listing
+
+- `orderWithSwapChains` (swapped-in player renders directly beneath the player he
+  replaced; each chain floats by its best scorer) was extracted from the scoreboard
+  detail panel in app.js into pure `js/rosterOrder.js` (bridged via js/index.js,
+  unit-tested in tests/rosterOrder.test.js) and is now used by all three roster
+  listings: scoreboard detail panel, My Roster per-week tables (buildPerWeekRoster),
+  and the commissioner roster editor (updateCommRosterWeekView). Signature:
+  `(names, scoreByPlayer, swaps, managerName, managerForEmail?)` — the last arg
+  resolves legacy swap records that carry only an email.
+- Live tab intentionally NOT chain-ordered: it's a single-day view, so a swapped-out
+  player and his replacement almost never co-occur.
+- Bridged window globals used by app.js must also be added to the globals list in
+  eslint.config.js or lint fails with no-undef.
+- Verification gotcha: booting the server against a scratch `db.json` REWRITES
+  `managers_seed.json` from it (password-stripped mirror) — restore it with
+  `git checkout -- managers_seed.json` after any local server run with fake data.

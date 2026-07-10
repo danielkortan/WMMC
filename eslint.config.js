@@ -34,6 +34,9 @@ const projectGlobals = {
   parseServerTimestamp: 'readonly',
   parseCSVLine: 'readonly',
   findColumn: 'readonly',
+  oddsWindowForDate: 'readonly',
+  formatOddsPct: 'readonly',
+  orderWithSwapChains: 'readonly',
 };
 
 const projectRules = {
