@@ -74,18 +74,137 @@ export function playerGameRate(gameScores, baseline = { mean: 0, variance: 0 }, 
   return { mean, variance, games: n };
 }
 
+// ============================================================
+// Schedule-context adjustments (opponent quality, home/away, park factor)
+// ============================================================
+// Layered on top of the base per-game rate from playerGameRate. Every factor
+// is centered at 1.0 (neutral = no adjustment applied) and the combined
+// per-game multiplier is clamped to a modest range so no combination of
+// extremes (e.g. a weak-pitching opponent + hitter-friendly park + home) can
+// dominate the simulation. This is a nudge in the direction real matchup
+// context suggests, not a claim of precision.
+
+// Generic MLB-wide home-field scoring edge (not team-specific) — modest and
+// well-established historically (the long-run ~53-54% home win rate implies
+// roughly a low-single-digit-percent scoring advantage). Applied the same
+// direction to both batting and pitching (playing in front of your own
+// bullpen/defense/crowd helps a pitcher's fantasy line too), unlike park
+// factor, which cuts the other way for pitchers.
+export const HOME_ADVANTAGE = 0.03; // home = x1.03, away = x0.97
+
+// Team-abbreviation -> home-park run-scoring multiplier. Approximate
+// MULTI-YEAR averages (not live/current-season), drawn from commonly-cited
+// park factor estimates that public sources broadly agree on in direction
+// and rough magnitude. Review and refresh at the start of each season — a
+// stadium change, humidor adjustment, or relocation can move a park's factor
+// meaningfully. ATH/OAK (Athletics, mid-relocation) and TB (Rays, playing at
+// a temporary home after storm damage to Tropicana Field) are left neutral
+// (1.0) rather than guessed — confirm their current-season home park and
+// fill in a real number before trusting those two.
+export const PARK_FACTORS = {
+  ARI: 1.02,
+  ATL: 1.01,
+  ATH: 1.0,
+  OAK: 1.0,
+  BAL: 0.98,
+  BOS: 1.04,
+  CHC: 1.02,
+  CWS: 1.0,
+  CIN: 1.05,
+  CLE: 0.97,
+  COL: 1.15,
+  DET: 0.97,
+  HOU: 1.0,
+  KC: 0.99,
+  LAA: 0.98,
+  LAD: 0.97,
+  MIA: 0.95,
+  MIL: 1.0,
+  MIN: 0.99,
+  NYM: 0.97,
+  NYY: 1.02,
+  PHI: 1.03,
+  PIT: 0.97,
+  SD: 0.93,
+  SEA: 0.94,
+  SF: 0.9,
+  STL: 0.99,
+  TB: 1.0,
+  TEX: 1.02,
+  TOR: 1.0,
+  WSH: 0.98,
+};
+
+const PARK_FACTOR_CLAMP = [0.85, 1.15];
+const OPPONENT_FACTOR_CLAMP = [0.85, 1.15];
+const GAME_FACTOR_CLAMP = [0.7, 1.5];
+const clamp = (x, [lo, hi]) => Math.min(hi, Math.max(lo, x));
+
+// Given raw team season stats, returns each team's quality relative to the
+// league average across all teams with usable data. Any team missing/
+// unparseable stats is simply excluded from the league average AND left out
+// of the returned map (callers treat a missing entry as neutral).
+//   pitchingRelative > 1  -> this team's OWN pitching is WORSE than average
+//                            (higher ERA) -> good for a hitter facing them.
+//   hittingRelative  > 1  -> this team's OWN offense is BETTER than average
+//                            (more runs/game) -> tough for a pitcher facing them.
+// teamStats: { [abbrev]: { era?, runsPerGame? } }
+export function computeTeamQualityFactors(teamStats) {
+  const eras = Object.values(teamStats || {})
+    .map((t) => t.era)
+    .filter((x) => typeof x === 'number' && x > 0);
+  const rpgs = Object.values(teamStats || {})
+    .map((t) => t.runsPerGame)
+    .filter((x) => typeof x === 'number' && x > 0);
+  const leagueEra = eras.length ? eras.reduce((a, b) => a + b, 0) / eras.length : null;
+  const leagueRpg = rpgs.length ? rpgs.reduce((a, b) => a + b, 0) / rpgs.length : null;
+
+  const out = {};
+  for (const [abbrev, t] of Object.entries(teamStats || {})) {
+    const pitchingRelative =
+      leagueEra && typeof t.era === 'number' && t.era > 0 ? clamp(t.era / leagueEra, OPPONENT_FACTOR_CLAMP) : 1;
+    const hittingRelative =
+      leagueRpg && typeof t.runsPerGame === 'number' && t.runsPerGame > 0
+        ? clamp(t.runsPerGame / leagueRpg, OPPONENT_FACTOR_CLAMP)
+        : 1;
+    out[abbrev] = { pitchingRelative, hittingRelative };
+  }
+  return out;
+}
+
+// The multiplier one specific remaining game contributes for one specific
+// rostered player. `playerType` is 'batter' or 'pitcher'. `game` =
+// { opponent, isHome, venueTeam } — venueTeam is whichever team is HOME in
+// that game (that's whose park it's played at, regardless of which side the
+// rostered player's own team is on). A missing opponent/venueTeam (unknown
+// team abbreviation) simply falls back to neutral for that signal.
+export function gameFactor(playerType, game, teamQuality = {}, parkFactors = PARK_FACTORS) {
+  const opp = game && teamQuality[game.opponent];
+  const opponentFactor = opp ? (playerType === 'batter' ? opp.pitchingRelative : 1 / opp.hittingRelative) : 1;
+  const homeAwayFactor = game && game.isHome ? 1 + HOME_ADVANTAGE : 1 - HOME_ADVANTAGE;
+  const rawPark = clamp((game && parkFactors[game.venueTeam]) ?? 1, PARK_FACTOR_CLAMP);
+  const parkFactorApplied = playerType === 'batter' ? rawPark : 1 / rawPark;
+  return clamp(opponentFactor * homeAwayFactor * parkFactorApplied, GAME_FACTOR_CLAMP);
+}
+
 // Aggregate per-player rates into one manager's remaining-production
-// projection. Assumes player game scores are independent, so means and
-// variances both add across (player x remaining game).
+// projection. Each entry: { mean, variance, gameFactors } where gameFactors
+// is one schedule-adjustment multiplier (see gameFactor) per remaining game
+// — its LENGTH is that player's games remaining. All-neutral (1.0) factors
+// reduce this to the pre-phase-2 `mean * gamesRemaining` behavior. Means
+// scale linearly with each game's factor; variances scale with the factor
+// SQUARED, since Var(sum ci*Xi) = sum(ci^2 * Var(Xi)) for independent Xi.
 export function projectManager(playerProjections) {
   let mean = 0;
   let variance = 0;
   let games = 0;
   for (const p of playerProjections || []) {
-    const g = Math.max(0, p.gamesRemaining || 0);
-    mean += (p.mean || 0) * g;
-    variance += (p.variance || 0) * g;
-    games += g;
+    const factors = Array.isArray(p.gameFactors) ? p.gameFactors : [];
+    const sumFactors = factors.reduce((s, f) => s + f, 0);
+    const sumFactorsSq = factors.reduce((s, f) => s + f * f, 0);
+    mean += (p.mean || 0) * sumFactors;
+    variance += (p.variance || 0) * sumFactorsSq;
+    games += factors.length;
   }
   return { mean, variance, games };
 }

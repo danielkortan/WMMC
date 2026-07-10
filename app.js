@@ -5283,6 +5283,14 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       if (v === 0) return '0';
       return v > 0 ? `-${fmt(v)}` : `+${fmt(-v)}`;
     };
+    // schedule_factor is centered at 1.0 (neutral) — display as a signed %
+    // so "tougher/easier than average slate" reads at a glance.
+    const scheduleFactorCell = (f) => {
+      if (f == null) return '—';
+      const pct = Math.round((f - 1) * 100);
+      if (pct === 0) return 'even';
+      return pct > 0 ? `+${pct}%` : `${pct}%`;
+    };
     html += `<div class="scoreboard-section">
       <h3>&#128302; Playoff Odds</h3>
       <div class="table-wrapper"><table class="data-table compact-table odds-table">
@@ -5290,8 +5298,9 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <th>Manager</th><th>Playoff&nbsp;%</th><th>Win PP2 Pool</th><th>Wild Card</th>
           <th title="Points behind the current PP2 leader of your pool (+ = you lead)">Pool Gap</th>
           <th title="Combined-total points vs. the current last qualifier (+ = above the cut)">Cut Gap</th>
-          <th title="Projected points from your roster over the remaining games">Proj. Left</th>
+          <th title="Projected points from your roster over the remaining games, including opponent strength, home/away, and park factors">Proj. Left</th>
           <th title="MLB games remaining for your rostered players">Games Left</th>
+          <th title="Average per-game adjustment across your roster's remaining schedule (opponent quality + home/away + park), relative to a neutral slate">Sched.</th>
         </tr></thead><tbody>
         ${rows
           .map(
@@ -5304,14 +5313,15 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           <td class="num">${gapCell(r.points_back_cut)}</td>
           <td class="num">${fmt(r.proj_mean)}</td>
           <td class="num">${r.games_remaining}</td>
+          <td class="num">${scheduleFactorCell(r.schedule_factor)}</td>
         </tr>`
           )
           .join('')}
         </tbody></table></div>
       <p class="odds-note">Likelihood of reaching the 8-team playoff, from ${Number(odds.sims).toLocaleString('en-US')} simulations
-      of the remaining schedule (each rostered player's per-game scoring rate &times; their team's remaining MLB games,
-      re-run against the pool-winner and wild-card rules). &#128274; = clinched via PP1 pool win.
-      Updated ${esc(odds.date)} — recomputed each morning.</p>
+      of the remaining schedule (each rostered player's per-game scoring rate, adjusted for opponent pitching/hitting
+      quality, home/away, and park factors, &times; their team's remaining MLB games, re-run against the pool-winner
+      and wild-card rules). &#128274; = clinched via PP1 pool win. Updated ${esc(odds.date)} — recomputed each morning.</p>
     </div>`;
   }
 
