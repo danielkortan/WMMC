@@ -10,6 +10,10 @@ import {
   makeNormalSampler,
   simulatePlayoffOdds,
   formatOddsPct,
+  HOME_ADVANTAGE,
+  PARK_FACTORS,
+  computeTeamQualityFactors,
+  gameFactor,
 } from '../js/playoffOdds.js';
 import { SEASON_SCHEDULE } from '../js/scoring.js';
 
@@ -120,19 +124,134 @@ describe('playerGameRate', () => {
 });
 
 describe('projectManager', () => {
-  it('sums mean and variance across players scaled by games remaining', () => {
+  it('reduces to mean * games / variance * games when every factor is neutral (1.0)', () => {
+    const neutral = (n) => Array(n).fill(1);
     const proj = projectManager([
-      { mean: 5, variance: 4, gamesRemaining: 10 },
-      { mean: 3, variance: 2, gamesRemaining: 5 },
-      { mean: 9, variance: 9, gamesRemaining: 0 },
+      { mean: 5, variance: 4, gameFactors: neutral(10) },
+      { mean: 3, variance: 2, gameFactors: neutral(5) },
+      { mean: 9, variance: 9, gameFactors: neutral(0) },
     ]);
     assert.equal(proj.mean, 65);
     assert.equal(proj.variance, 50);
     assert.equal(proj.games, 15);
   });
 
-  it('handles an empty roster', () => {
+  it('scales mean linearly and variance by the square of each game factor', () => {
+    // mean: 1 * (2 + 3) = 5. variance: 1 * (2^2 + 3^2) = 13.
+    const proj = projectManager([{ mean: 1, variance: 1, gameFactors: [2, 3] }]);
+    assert.equal(proj.mean, 5);
+    assert.equal(proj.variance, 13);
+    assert.equal(proj.games, 2);
+  });
+
+  it('handles an empty roster and entries with no gameFactors', () => {
     assert.deepEqual(projectManager([]), { mean: 0, variance: 0, games: 0 });
+    assert.deepEqual(projectManager([{ mean: 5, variance: 4 }]), { mean: 0, variance: 0, games: 0 });
+  });
+});
+
+describe('computeTeamQualityFactors', () => {
+  it('rates a team above/below a league average built only from valid entries', () => {
+    const q = computeTeamQualityFactors({
+      Weak: { era: 6.0, runsPerGame: 3.0 }, // bad pitching, weak offense
+      Avg: { era: 4.0, runsPerGame: 5.0 },
+      Strong: { era: 2.0, runsPerGame: 7.0 }, // great pitching, strong offense
+      Unknown: {}, // no usable stats — excluded from the league average
+    });
+    // League avg era = (6+4+2)/3 = 4, avg rpg = (3+5+7)/3 = 5.
+    assert.equal(q.Weak.pitchingRelative, 1.15); // raw 6/4=1.5, clamped to OPPONENT_FACTOR_CLAMP max
+    assert.equal(q.Strong.pitchingRelative, 0.85); // 2/4=0.5, clamped to min
+    assert.ok(Math.abs(q.Avg.pitchingRelative - 1) < 1e-9);
+    assert.equal(q.Weak.hittingRelative, 0.85); // 3/5=0.6, clamped
+    assert.equal(q.Strong.hittingRelative, 1.15); // 7/5=1.4, clamped
+    assert.equal(q.Unknown.pitchingRelative, 1);
+    assert.equal(q.Unknown.hittingRelative, 1);
+  });
+
+  it('returns neutral factors for everyone when no team has usable stats', () => {
+    const q = computeTeamQualityFactors({ A: {}, B: { era: -1 } });
+    assert.equal(q.A.pitchingRelative, 1);
+    assert.equal(q.B.hittingRelative, 1);
+  });
+
+  it('handles an empty input', () => {
+    assert.deepEqual(computeTeamQualityFactors({}), {});
+    assert.deepEqual(computeTeamQualityFactors(undefined), {});
+  });
+});
+
+describe('gameFactor', () => {
+  const teamQuality = {
+    WeakPitching: { pitchingRelative: 1.15, hittingRelative: 1 },
+    StrongPitching: { pitchingRelative: 0.85, hittingRelative: 1 },
+    StrongHitting: { pitchingRelative: 1, hittingRelative: 1.15 },
+  };
+  const parks = { HITTER_PARK: 1.1, PITCHER_PARK: 0.9 };
+
+  it('boosts a hitter against weak pitching and suppresses them against strong pitching', () => {
+    const vsWeak = gameFactor('batter', { opponent: 'WeakPitching', isHome: true, venueTeam: null }, teamQuality, {});
+    const vsStrong = gameFactor(
+      'batter',
+      { opponent: 'StrongPitching', isHome: true, venueTeam: null },
+      teamQuality,
+      {}
+    );
+    assert.ok(vsWeak > vsStrong, `${vsWeak} should exceed ${vsStrong}`);
+  });
+
+  it('suppresses a pitcher against a strong offense', () => {
+    const neutralOpp = gameFactor('pitcher', { opponent: null, isHome: true, venueTeam: null }, teamQuality, {});
+    const vsStrongHitting = gameFactor(
+      'pitcher',
+      { opponent: 'StrongHitting', isHome: true, venueTeam: null },
+      teamQuality,
+      {}
+    );
+    assert.ok(vsStrongHitting < neutralOpp, `${vsStrongHitting} should be below neutral ${neutralOpp}`);
+  });
+
+  it('applies home/away in the same direction for both player types', () => {
+    const home = gameFactor('batter', { opponent: null, isHome: true, venueTeam: null }, {}, {});
+    const away = gameFactor('batter', { opponent: null, isHome: false, venueTeam: null }, {}, {});
+    assert.ok(Math.abs(home - (1 + HOME_ADVANTAGE)) < 1e-9);
+    assert.ok(Math.abs(away - (1 - HOME_ADVANTAGE)) < 1e-9);
+    assert.ok(home > away);
+  });
+
+  it('applies park factor directly to batters and inversely to pitchers', () => {
+    const batterHitterPark = gameFactor(
+      'batter',
+      { opponent: null, isHome: true, venueTeam: 'HITTER_PARK' },
+      {},
+      parks
+    );
+    const pitcherHitterPark = gameFactor(
+      'pitcher',
+      { opponent: null, isHome: true, venueTeam: 'HITTER_PARK' },
+      {},
+      parks
+    );
+    assert.ok(batterHitterPark > 1 + HOME_ADVANTAGE); // park boost stacks on top of the home boost
+    assert.ok(pitcherHitterPark < 1); // hitter-friendly park drags the pitcher below neutral despite being home
+  });
+
+  it('falls back to neutral for an unknown opponent/venue and clamps combined extremes', () => {
+    const unknown = gameFactor('batter', { opponent: 'NoSuchTeam', isHome: true, venueTeam: 'NoSuchPark' }, {}, {});
+    assert.ok(Math.abs(unknown - (1 + HOME_ADVANTAGE)) < 1e-9);
+
+    // Stack every extreme in the batter's favor — must still clamp to GAME_FACTOR_CLAMP max (1.5).
+    const extreme = gameFactor(
+      'batter',
+      { opponent: 'WeakPitching', isHome: true, venueTeam: 'COL' },
+      teamQuality,
+      PARK_FACTORS
+    );
+    assert.ok(extreme <= 1.5);
+  });
+
+  it('handles a null/undefined game gracefully', () => {
+    assert.equal(gameFactor('batter', null, {}, {}), 1 - HOME_ADVANTAGE);
+    assert.equal(gameFactor('batter', undefined, {}, {}), 1 - HOME_ADVANTAGE);
   });
 });
 

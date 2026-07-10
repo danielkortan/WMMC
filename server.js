@@ -3897,15 +3897,103 @@ function playerGameRate(gameScores, baseline = { mean: 0, variance: 0 }, k = 5) 
   return { mean, variance, games: n };
 }
 
+// ---- Schedule-context adjustments (opponent quality, home/away, park factor) ----
+// Layered on top of the base per-game rate from playerGameRate. Every factor is
+// centered at 1.0 (neutral) and the combined per-game multiplier is clamped so no
+// combination of extremes can dominate the simulation.
+
+// Generic MLB-wide home-field scoring edge (not team-specific) — modest and
+// well-established historically. Applied the same direction to both batting and
+// pitching, unlike park factor, which cuts the other way for pitchers.
+const HOME_ADVANTAGE = 0.03; // home = x1.03, away = x0.97
+
+// Team-abbreviation -> home-park run-scoring multiplier. Approximate MULTI-YEAR
+// averages (not live/current-season). Review and refresh at the start of each
+// season. ATH/OAK (Athletics, mid-relocation) and TB (Rays, temporary home after
+// Tropicana Field storm damage) are left neutral (1.0) rather than guessed —
+// confirm their current-season home park before trusting those two.
+const PARK_FACTORS = {
+  ARI: 1.02,
+  ATL: 1.01,
+  ATH: 1.0,
+  OAK: 1.0,
+  BAL: 0.98,
+  BOS: 1.04,
+  CHC: 1.02,
+  CWS: 1.0,
+  CIN: 1.05,
+  CLE: 0.97,
+  COL: 1.15,
+  DET: 0.97,
+  HOU: 1.0,
+  KC: 0.99,
+  LAA: 0.98,
+  LAD: 0.97,
+  MIA: 0.95,
+  MIL: 1.0,
+  MIN: 0.99,
+  NYM: 0.97,
+  NYY: 1.02,
+  PHI: 1.03,
+  PIT: 0.97,
+  SD: 0.93,
+  SEA: 0.94,
+  SF: 0.9,
+  STL: 0.99,
+  TB: 1.0,
+  TEX: 1.02,
+  TOR: 1.0,
+  WSH: 0.98,
+};
+
+const PARK_FACTOR_CLAMP = [0.85, 1.15];
+const OPPONENT_FACTOR_CLAMP = [0.85, 1.15];
+const GAME_FACTOR_CLAMP = [0.7, 1.5];
+const oddsClamp = (x, [lo, hi]) => Math.min(hi, Math.max(lo, x));
+
+function computeTeamQualityFactors(teamStats) {
+  const eras = Object.values(teamStats || {})
+    .map((t) => t.era)
+    .filter((x) => typeof x === 'number' && x > 0);
+  const rpgs = Object.values(teamStats || {})
+    .map((t) => t.runsPerGame)
+    .filter((x) => typeof x === 'number' && x > 0);
+  const leagueEra = eras.length ? eras.reduce((a, b) => a + b, 0) / eras.length : null;
+  const leagueRpg = rpgs.length ? rpgs.reduce((a, b) => a + b, 0) / rpgs.length : null;
+
+  const out = {};
+  for (const [abbrev, t] of Object.entries(teamStats || {})) {
+    const pitchingRelative =
+      leagueEra && typeof t.era === 'number' && t.era > 0 ? oddsClamp(t.era / leagueEra, OPPONENT_FACTOR_CLAMP) : 1;
+    const hittingRelative =
+      leagueRpg && typeof t.runsPerGame === 'number' && t.runsPerGame > 0
+        ? oddsClamp(t.runsPerGame / leagueRpg, OPPONENT_FACTOR_CLAMP)
+        : 1;
+    out[abbrev] = { pitchingRelative, hittingRelative };
+  }
+  return out;
+}
+
+function gameFactor(playerType, game, teamQuality = {}, parkFactors = PARK_FACTORS) {
+  const opp = game && teamQuality[game.opponent];
+  const opponentFactor = opp ? (playerType === 'batter' ? opp.pitchingRelative : 1 / opp.hittingRelative) : 1;
+  const homeAwayFactor = game && game.isHome ? 1 + HOME_ADVANTAGE : 1 - HOME_ADVANTAGE;
+  const rawPark = oddsClamp((game && parkFactors[game.venueTeam]) ?? 1, PARK_FACTOR_CLAMP);
+  const parkFactorApplied = playerType === 'batter' ? rawPark : 1 / rawPark;
+  return oddsClamp(opponentFactor * homeAwayFactor * parkFactorApplied, GAME_FACTOR_CLAMP);
+}
+
 function projectManager(playerProjections) {
   let mean = 0;
   let variance = 0;
   let games = 0;
   for (const p of playerProjections || []) {
-    const g = Math.max(0, p.gamesRemaining || 0);
-    mean += (p.mean || 0) * g;
-    variance += (p.variance || 0) * g;
-    games += g;
+    const factors = Array.isArray(p.gameFactors) ? p.gameFactors : [];
+    const sumFactors = factors.reduce((s, f) => s + f, 0);
+    const sumFactorsSq = factors.reduce((s, f) => s + f * f, 0);
+    mean += (p.mean || 0) * sumFactors;
+    variance += (p.variance || 0) * sumFactorsSq;
+    games += factors.length;
   }
   return { mean, variance, games };
 }
@@ -4128,33 +4216,77 @@ function activeRosterForOdds(sd, managerName, todayISO) {
   return Object.keys(latestAdd).filter((p) => !latestDrop[p] || latestAdd[p] > latestDrop[p]);
 }
 
-// Remaining (not-yet-Final) MLB games per team abbreviation in a date range.
-async function fetchRemainingGamesByTeam(startDate, endDate) {
+// MLB team id -> abbreviation, shared by fetchRemainingGamesByTeam and
+// fetchTeamSeasonQuality so a compute only fetches the roster once.
+async function fetchTeamIdAbbrevMap() {
   const teamsData = await mlbApiFetch('/api/v1/teams?sportId=1');
-  const idToAbbrev = {};
-  for (const t of teamsData.teams || []) idToAbbrev[t.id] = t.abbreviation;
+  const map = {};
+  for (const t of teamsData.teams || []) map[t.id] = t.abbreviation;
+  return map;
+}
+
+// Remaining (not-yet-Final) MLB games per team abbreviation in a date range,
+// each carrying its opponent, home/away, and venue team (whichever side is
+// home — that's whose park the game is played at) — feeds both the
+// "games remaining" display metric and the schedule-strength adjustment.
+async function fetchRemainingGamesByTeam(startDate, endDate, idToAbbrev) {
   const data = await mlbApiFetch(
     `/api/v1/schedule?sportId=1&startDate=${startDate}&endDate=${endDate}&gameType=R,F,D,L,W`
   );
-  const counts = {};
+  const byTeam = {};
+  const add = (abbrev, game) => {
+    (byTeam[abbrev] = byTeam[abbrev] || []).push(game);
+  };
   for (const dateEntry of data.dates || []) {
     for (const game of dateEntry.games || []) {
       if (game.status?.abstractGameState === 'Final') continue;
-      for (const side of ['home', 'away']) {
-        const id = game.teams?.[side]?.team?.id;
-        const abbrev = idToAbbrev[id];
-        if (abbrev) counts[abbrev] = (counts[abbrev] || 0) + 1;
-      }
+      const homeAbbrev = idToAbbrev[game.teams?.home?.team?.id];
+      const awayAbbrev = idToAbbrev[game.teams?.away?.team?.id];
+      if (!homeAbbrev || !awayAbbrev) continue;
+      add(homeAbbrev, { opponent: awayAbbrev, isHome: true, venueTeam: homeAbbrev });
+      add(awayAbbrev, { opponent: homeAbbrev, isHome: false, venueTeam: homeAbbrev });
     }
   }
-  return counts;
+  return byTeam; // { [abbrev]: [{opponent, isHome, venueTeam}, ...] }
+}
+
+// Team-level season quality signal (ERA + runs/game) for every team, in two
+// bulk calls rather than one per team. Best-effort: a failed call or a team
+// missing/unparseable stats simply leaves that team out of the map, which
+// computeTeamQualityFactors treats as neutral (1.0) — never blocks the compute.
+async function fetchTeamSeasonQuality(season, idToAbbrev) {
+  const out = {};
+  try {
+    const pitching = await mlbApiFetch(`/api/v1/teams/stats?sportId=1&season=${season}&stats=season&group=pitching`);
+    for (const split of pitching.stats?.[0]?.splits || []) {
+      const abbrev = idToAbbrev[split.team?.id];
+      const era = Number(split.stat?.era);
+      if (!abbrev || !(era > 0)) continue;
+      (out[abbrev] = out[abbrev] || {}).era = era;
+    }
+  } catch (e) {
+    console.error('[PlayoffOdds] Team pitching stats fetch failed (opponent factors neutral):', e.message);
+  }
+  try {
+    const hitting = await mlbApiFetch(`/api/v1/teams/stats?sportId=1&season=${season}&stats=season&group=hitting`);
+    for (const split of hitting.stats?.[0]?.splits || []) {
+      const abbrev = idToAbbrev[split.team?.id];
+      const runs = Number(split.stat?.runs);
+      const gp = Number(split.stat?.gamesPlayed);
+      if (!abbrev || !(runs > 0) || !(gp > 0)) continue;
+      (out[abbrev] = out[abbrev] || {}).runsPerGame = runs / gp;
+    }
+  } catch (e) {
+    console.error('[PlayoffOdds] Team hitting stats fetch failed (opponent factors neutral):', e.message);
+  }
+  return out; // { [abbrev]: { era?, runsPerGame? } }
 }
 
 // Compute the full odds payload for one season, or null when outside the
 // PP2 Week 4–5 window (or pool play is already finalized / pools missing).
 // Managers come from db.managers (the canonical list), scores from
 // computeRoundScores (the same drop-aware path as the scoreboard).
-async function computePlayoffOddsForSeason(db, sd, todayISO) {
+async function computePlayoffOddsForSeason(db, sd, todayISO, year) {
   const window = oddsWindowForDate(sd.schedule_dates || [], todayISO);
   if (!window) return null;
   if ((sd.finalized_rounds || []).includes('PP')) return null;
@@ -4180,21 +4312,40 @@ async function computePlayoffOddsForSeason(db, sd, todayISO) {
   for (const scores of gameScores.values()) allScores.push(...scores);
   const baseline = meanVariance(allScores);
 
-  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, window.end);
-  const teamCounts = Object.values(remainingByTeam);
+  // Schedule-context signals (opponent quality, home/away, park factor). Each
+  // fetch fails safe to neutral — a bad response never blocks the nightly
+  // compute, it just leaves that one signal at 1.0 for the affected teams.
+  let idToAbbrev = {};
+  try {
+    idToAbbrev = await fetchTeamIdAbbrevMap();
+  } catch (e) {
+    console.error('[PlayoffOdds] Team id/abbrev map fetch failed (adjustments neutral):', e.message);
+  }
+  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, window.end, idToAbbrev);
+  const teamStats = await fetchTeamSeasonQuality(year, idToAbbrev);
+  const teamQuality = computeTeamQualityFactors(teamStats);
+  const batPoolSet = new Set(sd.batters_pool || []);
+
+  const teamCounts = Object.values(remainingByTeam).map((g) => g.length);
   const avgRemaining = teamCounts.length > 0 ? teamCounts.reduce((a, b) => a + b, 0) / teamCounts.length : 0;
 
   const projections = {};
+  const avgFactorByManager = {};
   for (const m of managers) {
     const roster = activeRosterForOdds(sd, m.name, todayISO);
-    projections[m.name] = projectManager(
-      roster.map((player) => {
-        const rate = playerGameRate(gameScores.get(player) || [], baseline);
-        const team = (sd.batters_team || {})[player] || (sd.pitchers_team || {})[player] || null;
-        const gamesRemaining = team && remainingByTeam[team] != null ? remainingByTeam[team] : avgRemaining;
-        return { mean: rate.mean, variance: rate.variance, gamesRemaining };
-      })
-    );
+    const perPlayer = roster.map((player) => {
+      const rate = playerGameRate(gameScores.get(player) || [], baseline);
+      const team = (sd.batters_team || {})[player] || (sd.pitchers_team || {})[player] || null;
+      const playerType = batPoolSet.has(player) ? 'batter' : 'pitcher';
+      const games = team && remainingByTeam[team];
+      const gameFactors = games
+        ? games.map((g) => gameFactor(playerType, g, teamQuality))
+        : Array.from({ length: Math.round(avgRemaining) }, () => 1);
+      return { mean: rate.mean, variance: rate.variance, gameFactors };
+    });
+    projections[m.name] = projectManager(perPlayer);
+    const allFactors = perPlayer.flatMap((p) => p.gameFactors);
+    avgFactorByManager[m.name] = allFactors.length ? allFactors.reduce((a, b) => a + b, 0) / allFactors.length : 1;
   }
 
   const sim = simulatePlayoffOdds({ entries, projections });
@@ -4215,6 +4366,7 @@ async function computePlayoffOddsForSeason(db, sd, todayISO) {
       games_remaining: Math.round(projections[e.manager].games),
       points_back_pool: poolLead ? r1(poolLead.pp2 - e.pp2) : null,
       points_back_cut: r1(qual.cutTotal - (e.pp1 + e.pp2)),
+      schedule_factor: Math.round((avgFactorByManager[e.manager] || 1) * 1000) / 1000,
     };
   }
 
@@ -4254,7 +4406,7 @@ async function ensureFreshPlayoffOdds(year, opts = {}) {
   if (!sd) return null;
   const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (!opts.force && sd.playoff_odds && sd.playoff_odds.date === todayISO) return sd.playoff_odds;
-  const odds = await computePlayoffOddsForSeason(db, sd, todayISO);
+  const odds = await computePlayoffOddsForSeason(db, sd, todayISO, year);
   if (!odds) return null;
   attachPlayoffOddsHistory(sd, odds);
   sd.playoff_odds = odds;
