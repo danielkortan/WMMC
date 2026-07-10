@@ -1071,5 +1071,5 @@ Decisions made with Daniel (asked via option picker):
 - Bridged window globals used by app.js must also be added to the globals list in
   eslint.config.js or lint fails with no-undef.
 - Verification gotcha: booting the server against a scratch `db.json` REWRITES
-  `managers_seed.json` from it (password-stripped mirror) — `git checkout --
-  managers_seed.json` after any local server run with fake data.
+  `managers_seed.json` from it (password-stripped mirror) — restore it with
+  `git checkout -- managers_seed.json` after any local server run with fake data.
