@@ -3407,54 +3407,10 @@ function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
     return !latestDrop || (latestAdd && latestAdd > latestDrop);
   }
 
-  // Order players so a swapped-in player sits directly beneath the player he replaced (e.g. Logan
-  // Webb → Kyle Harrison), making a drop/add easy to trace. Each chain sorts by its best scorer so
-  // a strong swap-in still floats near the top, carrying its predecessor with it.
-  function orderWithSwapChains(names, scoreByPlayer) {
-    const nameSet = new Set(names);
-    const chainSwaps = (sd.swaps || [])
-      .filter((s) => {
-        if (!s.player_out || !s.player_in) return false; // only true 1-for-1 swaps can pair
-        if (s.status && s.status !== 'approved') return false; // skip pending/denied
-        const swapMgr = s.manager || (findManagerByEmail(s.email) || {}).name;
-        return swapMgr === managerName && nameSet.has(s.player_out) && nameSet.has(s.player_in);
-      })
-      .slice()
-      .sort((a, b) => (a.swap_date || a.timestamp || '').localeCompare(b.swap_date || b.timestamp || ''));
-    const childrenByParent = {};
-    const isSwapIn = new Set();
-    chainSwaps.forEach((s) => {
-      (childrenByParent[s.player_out] = childrenByParent[s.player_out] || []).push(s.player_in);
-      isSwapIn.add(s.player_in);
-    });
-    // `seen` guards against swap cycles (e.g. a manager swaps out A for B, then later swaps B
-    // back out for A — re-acquiring a dropped player). Without it the recursion never bottoms
-    // out and throws RangeError, which aborts the whole detail render so the row won't expand.
-    const chainMax = (name, seen = new Set()) => {
-      if (seen.has(name)) return scoreByPlayer[name] || 0;
-      seen.add(name);
-      let best = scoreByPlayer[name] || 0;
-      (childrenByParent[name] || []).forEach((c) => (best = Math.max(best, chainMax(c, seen))));
-      return best;
-    };
-    const ordered = [];
-    const seen = new Set();
-    const visit = (name) => {
-      if (seen.has(name)) return;
-      seen.add(name);
-      ordered.push(name);
-      (childrenByParent[name] || [])
-        .slice()
-        .sort((a, b) => chainMax(b) - chainMax(a))
-        .forEach(visit);
-    };
-    names
-      .filter((n) => !isSwapIn.has(n))
-      .sort((a, b) => chainMax(b) - chainMax(a))
-      .forEach(visit);
-    names.forEach(visit); // safety net for swap cycles / leftovers
-    return ordered;
-  }
+  // Order players so a swapped-in player sits directly beneath the player he replaced —
+  // js/rosterOrder.js is the implementation (bridged onto window via js/index.js).
+  const orderPlayersWithSwapChains = (names, scoreByPlayer) =>
+    orderWithSwapChains(names, scoreByPlayer, sd.swaps, managerName, (email) => (findManagerByEmail(email) || {}).name);
 
   // Build one period's Batters or Pitchers table. Per-player points use the same carry-forward
   // subtotal (managerWeekSubtotal + detailOut) that feeds the manager's period totals, so the
@@ -3478,7 +3434,7 @@ function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
     const body =
       names.length === 0
         ? '<tr><td colspan="2" class="text-muted" style="font-size:0.82rem;">None</td></tr>'
-        : orderWithSwapChains(names, scoreByPlayer)
+        : orderPlayersWithSwapChains(names, scoreByPlayer)
             .map((name) => {
               const pts = Math.round((scoreByPlayer[name] || 0) * 100) / 100;
               const active = activeAsOf(name, p.lastEnd);
@@ -8042,33 +7998,35 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       html +=
         '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
       html += '</tr></thead><tbody>';
-      [...allBattersThisWeek]
-        .sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0))
-        .forEach((batter) => {
-          const s = batStatMap[batter] || {};
-          const onRoster = weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
-          const wkRank = weekRanks.batRanks[batter];
-          const { batCum, periodRankings: pRankings } = getRoundData(round, week);
-          const cumScore = batCum[batter] || 0;
-          const cumRank = pRankings.batRanks[batter];
-          html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-          html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
-          const ds = getEffBatStats(batter) || s;
-          html += batStatCell(s, 'abs', ds.abs || 0);
-          html += batStatCell(s, '1b', ds['1b'] || 0);
-          html += batStatCell(s, '2b', ds['2b'] || 0);
-          html += batStatCell(s, '3b', ds['3b'] || 0);
-          html += batStatCell(s, 'hr', ds.hr || 0);
-          html += batStatCell(s, 'r', ds.r || 0);
-          html += batStatCell(s, 'rbi', ds.rbi || 0);
-          html += batStatCell(s, 'sb', ds.sb || 0);
-          html += batStatCell(s, 'bb', ds.bb || 0);
-          html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
-          html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
-          html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
-          html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
-          html += '</tr>';
-        });
+      // Same swap-chain ordering as the scoreboard detail panel: a swapped-in batter renders
+      // directly beneath the batter he replaced instead of wherever his score lands.
+      const batScoreByPlayer = {};
+      allBattersThisWeek.forEach((p) => (batScoreByPlayer[p] = (batStatMap[p] || {}).weekly_score || 0));
+      orderWithSwapChains([...allBattersThisWeek], batScoreByPlayer, approvedSwaps, managerName).forEach((batter) => {
+        const s = batStatMap[batter] || {};
+        const onRoster = weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
+        const wkRank = weekRanks.batRanks[batter];
+        const { batCum, periodRankings: pRankings } = getRoundData(round, week);
+        const cumScore = batCum[batter] || 0;
+        const cumRank = pRankings.batRanks[batter];
+        html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
+        const ds = getEffBatStats(batter) || s;
+        html += batStatCell(s, 'abs', ds.abs || 0);
+        html += batStatCell(s, '1b', ds['1b'] || 0);
+        html += batStatCell(s, '2b', ds['2b'] || 0);
+        html += batStatCell(s, '3b', ds['3b'] || 0);
+        html += batStatCell(s, 'hr', ds.hr || 0);
+        html += batStatCell(s, 'r', ds.r || 0);
+        html += batStatCell(s, 'rbi', ds.rbi || 0);
+        html += batStatCell(s, 'sb', ds.sb || 0);
+        html += batStatCell(s, 'bb', ds.bb || 0);
+        html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
+        html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
+        html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
+        html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
+        html += '</tr>';
+      });
       html += `</tbody><tfoot><tr class="wrs-subtotal-row">
         <td colspan="9"></td>
         <td class="wrs-subtotal-label">Batting Total</td>
@@ -8108,35 +8066,36 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       html +=
         '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th>';
       html += '</tr></thead><tbody>';
-      [...allPitchersThisWeek]
-        .sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0))
-        .forEach((pitcher) => {
-          const s = pitStatMap[pitcher] || {};
-          const onRoster = weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
-          const wkRank = weekRanks.pitRanks[pitcher];
-          const { pitCum, periodRankings: pRankingsPit } = getRoundData(round, week);
-          const cumScore = pitCum[pitcher] || 0;
-          const cumRank = pRankingsPit.pitRanks[pitcher];
-          html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-          html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}</td>`;
-          const ps = getEffPitStats(pitcher) || s;
-          html += pitStatCell(s, 'gs', ps.gs || 0);
-          html += pitStatCell(s, 'w', ps.w || 0);
-          html += pitStatCell(s, 'qs', ps.qs != null ? fmtDec(ps.qs) : 0);
-          html += pitStatCell(s, 'cg', ps.cg || 0);
-          html += pitStatCell(s, 'cgso', ps.cgso || 0);
-          html += pitStatCell(s, 'nh', ps.nh || 0);
-          html += pitStatCell(s, 'ip', fmtDec(ps.ip || 0));
-          html += pitStatCell(s, 'h', ps.h || 0);
-          html += pitStatCell(s, 'er', ps.er || 0);
-          html += pitStatCell(s, 'bb', ps.bb || 0);
-          html += pitStatCell(s, 'k', ps.k || 0);
-          html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
-          html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
-          html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
-          html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
-          html += '</tr>';
-        });
+      // Swap-chain ordering, same as the batter table above.
+      const pitScoreByPlayer = {};
+      allPitchersThisWeek.forEach((p) => (pitScoreByPlayer[p] = (pitStatMap[p] || {}).weekly_score || 0));
+      orderWithSwapChains([...allPitchersThisWeek], pitScoreByPlayer, approvedSwaps, managerName).forEach((pitcher) => {
+        const s = pitStatMap[pitcher] || {};
+        const onRoster = weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
+        const wkRank = weekRanks.pitRanks[pitcher];
+        const { pitCum, periodRankings: pRankingsPit } = getRoundData(round, week);
+        const cumScore = pitCum[pitcher] || 0;
+        const cumRank = pRankingsPit.pitRanks[pitcher];
+        html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}</td>`;
+        const ps = getEffPitStats(pitcher) || s;
+        html += pitStatCell(s, 'gs', ps.gs || 0);
+        html += pitStatCell(s, 'w', ps.w || 0);
+        html += pitStatCell(s, 'qs', ps.qs != null ? fmtDec(ps.qs) : 0);
+        html += pitStatCell(s, 'cg', ps.cg || 0);
+        html += pitStatCell(s, 'cgso', ps.cgso || 0);
+        html += pitStatCell(s, 'nh', ps.nh || 0);
+        html += pitStatCell(s, 'ip', fmtDec(ps.ip || 0));
+        html += pitStatCell(s, 'h', ps.h || 0);
+        html += pitStatCell(s, 'er', ps.er || 0);
+        html += pitStatCell(s, 'bb', ps.bb || 0);
+        html += pitStatCell(s, 'k', ps.k || 0);
+        html += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
+        html += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
+        html += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
+        html += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
+        html += '</tr>';
+      });
       html += `</tbody><tfoot><tr class="wrs-subtotal-row">
         <td colspan="11"></td>
         <td class="wrs-subtotal-label">Pitching Total</td>
@@ -12448,52 +12407,54 @@ window.updateCommRosterWeekView = function (managerName) {
     batHtml +=
       '<th>Player</th><th>AB</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>R</th><th>RBI</th><th>SB</th><th>BB</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th><th></th>';
     batHtml += '</tr></thead><tbody>';
-    [...allBattersThisWeek]
-      .sort((a, b) => ((batStatMap[b] || {}).weekly_score || 0) - ((batStatMap[a] || {}).weekly_score || 0))
-      .forEach((batter) => {
-        const s = batStatMap[batter] || {};
-        const onRoster = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
-        const wkRank = weekRanks.batRanks[batter];
-        const cumScore = commBatCum[batter] || 0;
-        const cumRank = cumRankings.batRanks[batter];
-        const safeB = jsStr(batter);
-        const manual = (f) => ((s.manual_fields || []).includes(f) ? ' stat-manual' : '');
-        const pDates = getPlayerDates(batter);
-        const batDroppedTag =
-          pDates.add_date || pDates.drop_date
-            ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
-            : ' <span class="wrs-hist-tag">not rostered</span>';
-        batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
-        batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
-        batHtml += `<td class="num${manual('1b')}">${s['1b'] || 0}</td>`;
-        batHtml += `<td class="num${manual('2b')}">${s['2b'] || 0}</td>`;
-        batHtml += `<td class="num${manual('3b')}">${s['3b'] || 0}</td>`;
-        batHtml += `<td class="num${manual('hr')}">${s.hr || 0}</td>`;
-        batHtml += `<td class="num${manual('r')}">${s.r || 0}</td>`;
-        batHtml += `<td class="num${manual('rbi')}">${s.rbi || 0}</td>`;
-        batHtml += `<td class="num${manual('sb')}">${s.sb || 0}</td>`;
-        batHtml += `<td class="num${manual('bb')}">${s.bb || 0}</td>`;
-        batHtml += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
-        batHtml += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
-        batHtml += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
-        batHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
-        batHtml += `<td style="white-space:nowrap;">`;
-        batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
-        if (onRoster) {
-          batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button> `;
-        }
-        batHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Remove</button>`;
-        batHtml += `</td></tr>`;
-        // Date editor row
-        const dateRowId = `pdate-bat-${batter.replace(/[^a-zA-Z0-9]/g, '_')}`;
-        batHtml += `<tr class="comm-date-row"><td colspan="15">`;
-        batHtml += `<div class="comm-player-dates">`;
-        batHtml += `<label>Add Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-add" value="${pDates.add_date}">`;
-        batHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
-        batHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeB}','${weekKey}','${dateRowId}')">Save</button>`;
-        batHtml += `</div></td></tr>`;
-      });
+    // Same swap-chain ordering as the scoreboard / My Roster tables: keep a swapped-in batter
+    // right beneath the batter he replaced so commissioners can trace a swap at a glance.
+    const commBatScoreByPlayer = {};
+    allBattersThisWeek.forEach((p) => (commBatScoreByPlayer[p] = (batStatMap[p] || {}).weekly_score || 0));
+    orderWithSwapChains([...allBattersThisWeek], commBatScoreByPlayer, approvedSwaps, managerName).forEach((batter) => {
+      const s = batStatMap[batter] || {};
+      const onRoster = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
+      const wkRank = weekRanks.batRanks[batter];
+      const cumScore = commBatCum[batter] || 0;
+      const cumRank = cumRankings.batRanks[batter];
+      const safeB = jsStr(batter);
+      const manual = (f) => ((s.manual_fields || []).includes(f) ? ' stat-manual' : '');
+      const pDates = getPlayerDates(batter);
+      const batDroppedTag =
+        pDates.add_date || pDates.drop_date
+          ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
+          : ' <span class="wrs-hist-tag">not rostered</span>';
+      batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
+      batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
+      batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
+      batHtml += `<td class="num${manual('1b')}">${s['1b'] || 0}</td>`;
+      batHtml += `<td class="num${manual('2b')}">${s['2b'] || 0}</td>`;
+      batHtml += `<td class="num${manual('3b')}">${s['3b'] || 0}</td>`;
+      batHtml += `<td class="num${manual('hr')}">${s.hr || 0}</td>`;
+      batHtml += `<td class="num${manual('r')}">${s.r || 0}</td>`;
+      batHtml += `<td class="num${manual('rbi')}">${s.rbi || 0}</td>`;
+      batHtml += `<td class="num${manual('sb')}">${s.sb || 0}</td>`;
+      batHtml += `<td class="num${manual('bb')}">${s.bb || 0}</td>`;
+      batHtml += `<td class="num"><strong>${fmt(s.weekly_score || 0)}</strong></td>`;
+      batHtml += `<td class="num rank-cell">${wkRank ? wkRank.rank + '/' + wkRank.total : '-'}</td>`;
+      batHtml += `<td class="num"><strong>${fmt(cumScore)}</strong></td>`;
+      batHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
+      batHtml += `<td style="white-space:nowrap;">`;
+      batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
+      if (onRoster) {
+        batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button> `;
+      }
+      batHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Remove</button>`;
+      batHtml += `</td></tr>`;
+      // Date editor row
+      const dateRowId = `pdate-bat-${batter.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      batHtml += `<tr class="comm-date-row"><td colspan="15">`;
+      batHtml += `<div class="comm-player-dates">`;
+      batHtml += `<label>Add Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-add" value="${pDates.add_date}">`;
+      batHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
+      batHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeB}','${weekKey}','${dateRowId}')">Save</button>`;
+      batHtml += `</div></td></tr>`;
+    });
     batHtml += `</tbody><tfoot><tr class="wrs-subtotal-row">
       <td colspan="9"></td>
       <td class="wrs-subtotal-label">Batting Total</td>
@@ -12533,9 +12494,11 @@ window.updateCommRosterWeekView = function (managerName) {
     pitHtml +=
       '<th>Player</th><th>GS</th><th>W</th><th>QS</th><th>CG</th><th>CGSO</th><th>NH</th><th>IP</th><th>H</th><th>ER</th><th>BB</th><th>K</th><th>Wk Pts</th><th>Wk Rank</th><th>Cum Pts</th><th>Cum Rank</th><th></th>';
     pitHtml += '</tr></thead><tbody>';
-    [...allPitchersThisWeek]
-      .sort((a, b) => ((pitStatMap[b] || {}).weekly_score || 0) - ((pitStatMap[a] || {}).weekly_score || 0))
-      .forEach((pitcher) => {
+    // Swap-chain ordering, same as the batter table above.
+    const commPitScoreByPlayer = {};
+    allPitchersThisWeek.forEach((p) => (commPitScoreByPlayer[p] = (pitStatMap[p] || {}).weekly_score || 0));
+    orderWithSwapChains([...allPitchersThisWeek], commPitScoreByPlayer, approvedSwaps, managerName).forEach(
+      (pitcher) => {
         const s = pitStatMap[pitcher] || {};
         const onRoster = roster.pitchers.includes(pitcher) && !commDroppedThisWeek.has(pitcher);
         const wkRank = weekRanks.pitRanks[pitcher];
@@ -12580,7 +12543,8 @@ window.updateCommRosterWeekView = function (managerName) {
         pitHtml += `<label>Drop Date</label><input type="date" class="form-select comm-date-input" id="${dateRowId}-drop" value="${pDates.drop_date}">`;
         pitHtml += `<button class="btn btn-sm btn-primary" onclick="savePlayerDates('${safeMgr}','${safeP}','${weekKey}','${dateRowId}')">Save</button>`;
         pitHtml += `</div></td></tr>`;
-      });
+      }
+    );
     pitHtml += `</tbody><tfoot><tr class="wrs-subtotal-row">
       <td colspan="11"></td>
       <td class="wrs-subtotal-label">Pitching Total</td>
