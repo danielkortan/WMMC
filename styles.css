@@ -1879,6 +1879,12 @@ footer {
   color: #991b1b;
 }
 
+/* Odds-table headers carry a full and an abbreviated label; desktop shows
+   the full one, mobile.css swaps to .th-mob so headers fit narrow columns. */
+.odds-table th .th-mob {
+  display: none;
+}
+
 .odds-trend {
   font-size: 0.75rem;
   font-weight: 700;

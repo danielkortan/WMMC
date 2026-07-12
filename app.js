@@ -5251,12 +5251,15 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       <h3>&#128302; Playoff Odds</h3>
       <div class="table-wrapper"><table class="data-table compact-table odds-table">
         <thead><tr>
-          <th>Manager</th><th>Playoff&nbsp;%</th><th>Win PP2 Pool</th><th>Wild Card</th>
-          <th title="Points behind the current PP2 leader of your pool (+ = you lead)">Pool Gap</th>
-          <th title="Combined-total points vs. the current last qualifier (+ = above the cut)">Cut Gap</th>
-          <th title="Projected points from your roster over the remaining games, including opponent strength, home/away, and park factors">Proj. Left</th>
-          <th title="MLB games remaining for your rostered players">Games Left</th>
-          <th title="Average per-game adjustment across your roster's remaining schedule (opponent quality + home/away + park), relative to a neutral slate">Sched.</th>
+          <th>Manager</th>
+          <th><span class="th-full">Playoff&nbsp;%</span><span class="th-mob">Odds</span></th>
+          <th><span class="th-full">Win PP2 Pool</span><span class="th-mob">Pool&nbsp;W</span></th>
+          <th><span class="th-full">Wild Card</span><span class="th-mob">WC</span></th>
+          <th title="Points behind the current PP2 leader of your pool (+ = you lead)"><span class="th-full">Pool Gap</span><span class="th-mob">P&nbsp;Gap</span></th>
+          <th title="Combined-total points vs. the current last qualifier (+ = above the cut)"><span class="th-full">Cut Gap</span><span class="th-mob">C&nbsp;Gap</span></th>
+          <th title="Projected points from your roster over the remaining games, including opponent strength, home/away, and park factors"><span class="th-full">Proj. Left</span><span class="th-mob">Proj</span></th>
+          <th title="MLB games remaining for your rostered players"><span class="th-full">Games Left</span><span class="th-mob">G</span></th>
+          <th title="Average per-game adjustment across your roster's remaining schedule (opponent quality + home/away + park), relative to a neutral slate"><span class="th-full">Sched.</span><span class="th-mob">Sch</span></th>
         </tr></thead><tbody>
         ${rows
           .map(
