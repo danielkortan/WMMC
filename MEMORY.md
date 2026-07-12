@@ -1073,3 +1073,26 @@ Decisions made with Daniel (asked via option picker):
 - Verification gotcha: booting the server against a scratch `db.json` REWRITES
   `managers_seed.json` from it (password-stripped mirror) — restore it with
   `git checkout -- managers_seed.json` after any local server run with fake data.
+
+## 2026-07-12 — Mobile scoreboard: Total column restored next to Playoff %
+
+- Bug: the mobile card layout for scoreboard rows (`mobile.css` `.mob-sbrow`)
+  shows rank / name / `td:last-child` as the score slot. When the playoff-odds
+  window is live, `renderOverallTable` appends a Playoff % column, so the odds
+  pill became the last cell and silently displaced the Total (hidden by the
+  generic `td { display:none }`). Symptom: Pool Play Overall on phones showed
+  only the % pill, no scores.
+- Fix: positional selectors replaced with tagged cells — app.js marks the
+  Total cell `sb-mob-total` and the odds cell `sb-mob-odds`; mobile.css shows
+  both (`[rank] [name…] [total] [pill]`). The class rules sit AFTER the
+  `td:last-child` score-slot rule so they win the equal-specificity tie (the
+  pill keeps its own 0.8rem size instead of the 1.5rem score font).
+- Lesson: any new column appended conditionally to a scoreboard table breaks
+  the mobile `td:last-child` score slot — tag semantic cells with classes
+  instead of relying on position.
+- Verified with Playwright (scratchpad-installed `playwright-core`,
+  executablePath `/opt/pw-browsers/chromium`, 390×844 mobile viewport) against
+  a fabricated gitignored `db.json` (schedule_dates putting today in the PP2
+  Wk4–5 odds window + `playoff_odds` blob). Probed: odds absent (Total still
+  renders via last-child rule), row expand/collapse, PP1/PP2 pool tables,
+  desktop 7-column table — all unchanged.

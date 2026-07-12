@@ -5142,8 +5142,8 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
         <td>${mgrPool[m.manager] || ''}</td>
         <td class="num">${fmt(m.batting)}</td>
         <td class="num">${fmt(m.pitching)}</td>
-        <td class="num"><strong>${fmt(m.total)}</strong></td>
-        ${odds ? `<td class="num">${oddsPill(m.manager)}</td>` : ''}
+        <td class="num sb-mob-total"><strong>${fmt(m.total)}</strong></td>
+        ${odds ? `<td class="num sb-mob-odds">${oddsPill(m.manager)}</td>` : ''}
       </tr>
       <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${esc(m.manager)}" data-sb-period="overall" style="display:none;">
         <td colspan="${odds ? 7 : 6}"><div class="mgr-detail-loading">Loading...</div></td>
