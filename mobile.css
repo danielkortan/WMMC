@@ -777,6 +777,41 @@
     padding-left: 0.5rem !important;
   }
 
+  /* Pool Play Overall while the Playoff % column is live: the odds pill is
+     then the last cell, which would displace the Total from the td:last-child
+     score slot above. Tagged cells keep both visible: [rank] [name…] [total]
+     [odds]. When the odds column is absent, .sb-mob-total is the last child
+     and these rules match the generic score-slot styling. */
+  #scoreboard-content .mob-sbrow td.sb-mob-total {
+    display: flex !important;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    align-items: center;
+    font-size: clamp(1.05rem, 4.8vw, 1.5rem);
+    font-weight: 800;
+    color: var(--text);
+    white-space: nowrap;
+    letter-spacing: -0.5px;
+    padding-left: 0.5rem !important;
+  }
+
+  #scoreboard-content .mob-sbrow td.sb-mob-total strong {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+
+  #scoreboard-content .mob-sbrow td.sb-mob-odds {
+    display: flex !important;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    align-items: center;
+    white-space: nowrap;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    padding-left: 0.25rem !important;
+  }
+
   /* ── Manager detail (player list) pop-down — full width, readable ── */
   /* Leave the <tr> display to JS — it toggles inline display:none to collapse
      the panel. Forcing display here would pin every panel open (stuck on its
