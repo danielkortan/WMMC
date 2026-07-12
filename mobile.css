@@ -804,7 +804,7 @@
      same size, so the Total column's right edge lines up down the list. */
   #scoreboard-content .mob-sbrow td.sb-mob-odds {
     display: flex !important;
-    flex: 0 0 4.25rem;
+    flex: 0 0 3.9rem;
     justify-content: center;
     align-items: center;
     white-space: nowrap;
@@ -818,8 +818,28 @@
     width: 100%;
     box-sizing: border-box;
     text-align: center;
-    padding-left: 0.2rem;
-    padding-right: 0.2rem;
+    padding-left: 0.15rem;
+    padding-right: 0.15rem;
+  }
+
+  /* With the pill column present the row carries four cells — trim the
+     rank/gap/fonts a touch so full manager names fit untruncated on
+     360–390px phones. Rows without the pill keep the roomier sizes. */
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) {
+    gap: 0.35rem;
+  }
+
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) td:first-child {
+    width: 1.4rem;
+  }
+
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) td:nth-child(2) {
+    font-size: clamp(0.95rem, 4.1vw, 1.25rem);
+  }
+
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) td.sb-mob-total {
+    font-size: clamp(0.95rem, 4.3vw, 1.35rem);
+    padding-left: 0.3rem !important;
   }
 
   /* ── Manager detail (player list) pop-down — full width, readable ── */
