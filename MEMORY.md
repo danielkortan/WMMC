@@ -1096,3 +1096,21 @@ Decisions made with Daniel (asked via option picker):
   Wk4–5 odds window + `playoff_odds` blob). Probed: odds absent (Total still
   renders via last-child rule), row expand/collapse, PP1/PP2 pool tables,
   desktop 7-column table — all unchanged.
+
+## 2026-07-12 — Mobile scoreboard polish: aligned score column + odds-table headers
+
+- Overall list: `.sb-mob-odds` now a fixed 4.25rem flex column with the pill
+  stretched to 100% width and centered — uniform pill boxes mean every row's
+  Total right-aligns to the same edge (was ragged because pill text widths
+  varied: "🔒 100%" vs "0%").
+- 🔮 Playoff Odds table on mobile: re-enabled as a real table with its thead
+  (the generic `#scoreboard-content .data-table thead {display:none}` had
+  left it headerless). Each th carries `<span class="th-full">` +
+  `<span class="th-mob">` — desktop keeps full labels (styles.css hides
+  .th-mob), mobile swaps to abbreviations (Odds / Pool W / WC / P Gap /
+  C Gap / Proj / G / Sch) at 0.58rem so headers stay inside column widths.
+- Fit at 390px needed: td font 0.8rem + 0.1rem side padding, manager cell
+  `strong` as block with max-width 4.6rem + ellipsis (max-width only bites
+  on a block inside an auto-layout table cell), smaller pills/trends inside
+  the table. Overflow measured 0px; `:has(> .odds-table)` wrapper keeps
+  overflow-x:auto as a fallback for narrower screens.

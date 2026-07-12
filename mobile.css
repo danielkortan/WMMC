@@ -800,16 +800,46 @@
     font-weight: inherit;
   }
 
+  /* Fixed-width odds column with uniform pills: every row's pill box is the
+     same size, so the Total column's right edge lines up down the list. */
   #scoreboard-content .mob-sbrow td.sb-mob-odds {
     display: flex !important;
-    flex: 0 0 auto;
-    justify-content: flex-end;
+    flex: 0 0 3.9rem;
+    justify-content: center;
     align-items: center;
     white-space: nowrap;
     font-size: 0.8rem;
     font-weight: 700;
     letter-spacing: 0;
     padding-left: 0.25rem !important;
+  }
+
+  #scoreboard-content .mob-sbrow td.sb-mob-odds .odds-pill {
+    width: 100%;
+    box-sizing: border-box;
+    text-align: center;
+    padding-left: 0.15rem;
+    padding-right: 0.15rem;
+  }
+
+  /* With the pill column present the row carries four cells — trim the
+     rank/gap/fonts a touch so full manager names fit untruncated on
+     360–390px phones. Rows without the pill keep the roomier sizes. */
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) {
+    gap: 0.35rem;
+  }
+
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) td:first-child {
+    width: 1.4rem;
+  }
+
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) td:nth-child(2) {
+    font-size: clamp(0.95rem, 4.1vw, 1.25rem);
+  }
+
+  #scoreboard-content .mob-sbrow:has(td.sb-mob-odds) td.sb-mob-total {
+    font-size: clamp(0.95rem, 4.3vw, 1.35rem);
+    padding-left: 0.3rem !important;
   }
 
   /* ── Manager detail (player list) pop-down — full width, readable ── */
@@ -930,6 +960,84 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* ── 🔮 Playoff Odds detail table — real table with compact headers ── */
+  /* Re-enable the thead that the generic scoreboard-table rule hides so the
+     columns are labeled; the .th-mob abbreviations (swapped in below, full
+     labels live in app.js/styles.css) keep every header inside its column's
+     current width. Equal specificity with the display rules at the top of
+     this section, so these must stay AFTER them in the file. */
+  #scoreboard-content .odds-table {
+    display: table !important;
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  #scoreboard-content .odds-table thead {
+    display: table-header-group !important;
+  }
+
+  #scoreboard-content .odds-table tbody {
+    display: table-row-group !important;
+  }
+
+  #scoreboard-content .odds-table thead th {
+    display: table-cell !important;
+    font-size: 0.58rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.2px;
+    padding: 0.3rem 0.1rem;
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+    white-space: nowrap;
+    background: none;
+  }
+
+  #scoreboard-content .odds-table thead th:first-child {
+    text-align: left;
+  }
+
+  #scoreboard-content .odds-table th .th-full {
+    display: none;
+  }
+
+  #scoreboard-content .odds-table th .th-mob {
+    display: inline;
+  }
+
+  /* Tighten cells so all nine columns fit the phone width. */
+  #scoreboard-content .odds-table td {
+    font-size: 0.8rem;
+    padding: 0.4rem 0.1rem;
+    white-space: nowrap;
+  }
+
+  /* Long manager names truncate instead of pushing the table wide (the
+     block wrapper is what lets max-width bite inside an auto-layout cell). */
+  #scoreboard-content .odds-table td:first-child strong {
+    display: block;
+    max-width: 4.6rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #scoreboard-content .odds-table .odds-pill {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.35rem;
+  }
+
+  #scoreboard-content .odds-table .odds-trend {
+    font-size: 0.65rem;
+  }
+
+  /* If a very narrow screen still can't fit the table, scroll it inside its
+     wrapper instead of clipping at the viewport edge. */
+  #scoreboard-content .table-wrapper:has(> .odds-table) {
+    overflow-x: auto;
   }
 
   /* ── Seeding list (below Overall) ──────────────────────────────── */
