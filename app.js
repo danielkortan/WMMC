@@ -13219,6 +13219,12 @@ function renderWeeklyUploadSections() {
         </button>
         ${ppFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Pool Play finalized. Managers advanced to Quarterfinals.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize pool play and advance managers to playoffs.</span>'}
       </div>`;
+      if (ppFinalized) {
+        html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-secondary" onclick="repostPoolPlayRoasts()">Regenerate &amp; Repost Roasts to Slack</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast and reposts the combined playoff-field + Hall of Shame message to the scoreboard channel.</span>
+        </div>`;
+      }
     } else if (i === 11) {
       // Week 12 (QF Week 2) - End Quarterfinals
       const qfFinalized = finalized.includes('QF');
@@ -13543,7 +13549,7 @@ window.finalizeRound = function (roundKey, weekIndex) {
       for (const m of nonQualifiers) {
         await generateRoastForManager(m, 'PP');
       }
-      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP', qualifiers);
+      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers);
       renderWeeklyUploadSections();
     })();
     return;
@@ -13636,25 +13642,60 @@ async function generateRoastForManager(manager, round) {
   }
 }
 
-// Ask the server to post every stored roast for a round to Slack as one combined message
-// on the scoreboard channel, opening with the playoff field. `qualifiers` (seed-ordered)
-// is a fallback the server uses if the confirmed_seeding save hasn't landed yet.
+// Ask the server to post every elimination roast for a round to Slack as one combined
+// message on the scoreboard channel, opening with the playoff field. `qualifiers`
+// (seed-ordered) and `eliminated` are fallbacks the server uses if the finalize save
+// hasn't landed yet; the server generates any missing roast itself before posting.
+// `regenerate` re-rolls every stored roast for the round (used by the repost button).
 // Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
-// and the roasts still show on the roster pages.
-async function postCombinedRoastsToSlack(round, qualifiers) {
+// and the roasts still show on the roster pages. Returns true when the post went out.
+async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
       method: 'POST',
-      body: JSON.stringify({ round, qualifiers }),
+      body: JSON.stringify({ round, qualifiers, eliminated, regenerate }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
       console.error('Combined roast Slack post failed:', data.error || resp.status);
+      return false;
     }
+    return true;
   } catch (e) {
     console.error('Combined roast Slack post failed for', round, e);
+    return false;
   }
 }
+
+// Commissioner repair action: re-roll every Pool Play roast server-side and repost the
+// combined Slack message (playoff field + Hall of Shame). Covers the failure modes of the
+// original post — a roast lost to a stale save, or the whole batch coming from the static
+// fallback — without having to re-finalize anything.
+window.repostPoolPlayRoasts = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+  if (!confirm('Re-roll every Pool Play roast and repost the combined Slack message?')) return;
+
+  const qualifiers = getQFQualifiers(sd) || [];
+  const nonQualifiers = getManagers()
+    .map((m) => m.name)
+    .filter((m) => !qualifiers.includes(m));
+  const ok = await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers, true);
+
+  // Re-sync so the regenerated roasts show on roster pages immediately.
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (fresh.ok) {
+      const serverSeasons = await fresh.json();
+      if (serverSeasons && Object.keys(serverSeasons).length > 0) setSeasonsLocal(serverSeasons);
+    }
+  } catch (e) {
+    console.error('Season re-sync after roast repost failed:', e);
+  }
+  alert(ok ? 'Roasts regenerated and reposted to Slack.' : 'Slack repost failed — check the browser console.');
+  renderWeeklyUploadSections();
+};
 
 // Show/hide the global submission warning banner below the nav.
 function updateSubmissionWarningBanner() {
