@@ -33,6 +33,10 @@ services:
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+      # Enables AI-generated elimination roasts (Claude). Without it every roast comes from
+      # the static fallback template bank — set the value in the Render dashboard.
+      - key: ANTHROPIC_API_KEY
+        sync: false
       # OAuth 2.0 Web client ID from Google Cloud — enables "Sign in with Google".
       # Not a secret, but set per-service so prod/staging can differ.
       - key: GOOGLE_CLIENT_ID

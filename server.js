@@ -1174,6 +1174,18 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // the recompute endpoint). Same defense as score_snapshots: always keep
     // the server's copy so a client save can never wipe or roll them back.
     if (existingSd.playoff_odds) sd.playoff_odds = existingSd.playoff_odds;
+
+    // Elimination roasts are written server-side by /generate-roast while the client's
+    // full-season save (fired at "End Pool Play") may still be in flight carrying a copy
+    // that predates them — that save landing mid-generation is how a manager's roast
+    // vanished from the first live combined post. Union-merge: keep every server roast
+    // the incoming payload doesn't know about (there is no client path that deletes one).
+    if (existingSd.roasts && typeof existingSd.roasts === 'object') {
+      if (!sd.roasts || typeof sd.roasts !== 'object') sd.roasts = {};
+      for (const [mgr, roast] of Object.entries(existingSd.roasts)) {
+        if (!sd.roasts[mgr]) sd.roasts[mgr] = roast;
+      }
+    }
   }
 
   // Heal per-week roster arrays from roster_dates whenever a save lands (swap/submission
@@ -10221,12 +10233,62 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
   };
 }
 
+// Static roast bank used when the Anthropic API is unavailable (no ANTHROPIC_API_KEY, or the
+// call failed). Deterministically seeded per manager+round so every eliminated manager gets a
+// DIFFERENT roast — the old single hardcoded template made a combined Slack post read like a
+// form letter. Each template works the manager's real numbers and worst performers in.
+function fallbackRoast(manager, round, perf) {
+  // Entries in perf arrive as "Name: X pts" strings — split them back apart.
+  const parseWorst = (s) => {
+    const idx = s ? s.lastIndexOf(':') : -1;
+    return idx > 0
+      ? {
+          name: s.slice(0, idx),
+          pts: s
+            .slice(idx + 1)
+            .replace('pts', '')
+            .trim(),
+        }
+      : null;
+  };
+  const worst = parseWorst(perf.batters_ranked_worst_first[0]) ||
+    parseWorst(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
+  const other =
+    parseWorst(perf.pitchers_ranked_worst_first[0]) || parseWorst(perf.batters_ranked_worst_first[0]) || worst;
+  const roundLabel =
+    round === 'PP'
+      ? 'Pool Play'
+      : round === 'QF'
+        ? 'the Quarterfinals'
+        : round === 'SF'
+          ? 'the Semifinals'
+          : 'the Finals';
+  const bank = [
+    () =>
+      `${manager} rode ${worst.name} (${worst.pts} pts) straight into the offseason. ${perf.total} points of pure "maybe next year." The league thanks you for your donation.`,
+    () =>
+      `Somewhere out there ${worst.name} is enjoying a lovely summer, blissfully unaware they dragged ${manager} to a ${perf.total}-point funeral in ${roundLabel}. Pour one out.`,
+    () =>
+      `${manager} drafted ${worst.name} on purpose, watched them post ${worst.pts} pts, and did nothing about it. ${perf.total} points later, the playoffs politely declined. Bold strategy.`,
+    () =>
+      `Autopsy report for ${manager}: cause of death, ${worst.name} (${worst.pts} pts), with an assist from ${other.name}. Time of death: ${roundLabel}. Total damage: ${perf.total} points.`,
+    () =>
+      `${manager} scored ${perf.total} points, which sounds like a lot until you remember it wasn't. ${worst.name} chipped in a heroic ${worst.pts}. See you at the draft, champ.`,
+    () =>
+      `Good news: ${manager} no longer has to watch ${worst.name} (${worst.pts} pts) every night. Bad news: the rest of us watched ${manager} score ${perf.total} and call it a season.`,
+    () =>
+      `${manager}'s ${roundLabel} campaign: ${perf.total} points, ${worst.name} in witness protection at ${worst.pts} pts, and a roster that quit before the group chat did. Eliminated, emphatically.`,
+    () =>
+      `Legend says ${manager} is still waiting for ${worst.name} to heat up. ${worst.pts} points later, the wait continues — from the couch. ${perf.total} total. Brutal.`,
+  ];
+  let seed = 0;
+  for (const c of `${manager}|${round}`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+  return bank[seed % bank.length]();
+}
+
 // Call the Anthropic Messages API to generate a vulgar, personalized roast.
 async function generateRoastWithClaude(manager, round, perf) {
-  if (!ANTHROPIC_API_KEY) {
-    const worst = perf.batters_ranked_worst_first[0] || perf.pitchers_ranked_worst_first[0] || 'their entire roster';
-    return `${manager} put up a heroic ${perf.total} points in ${round} and somehow managed to make ${worst} look like an all-star by comparison. Absolutely cooked. The league thanks you for your sacrifice.`;
-  }
+  if (!ANTHROPIC_API_KEY) return fallbackRoast(manager, round, perf);
 
   const roundLabel =
     round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
@@ -10257,14 +10319,11 @@ Write the roast now. No preamble, no labels — just the roast.`;
 
   if (!resp.ok) {
     console.error('Anthropic API error:', resp.status, await resp.text());
-    return `${manager} scored ${perf.total} pts in ${roundLabel} and got absolutely cooked. No further commentary is needed.`;
+    return fallbackRoast(manager, round, perf);
   }
 
   const data = await resp.json();
-  return (
-    (data.content && data.content[0] && data.content[0].text) ||
-    `${manager} had a historically embarrassing run in ${roundLabel}.`
-  );
+  return (data.content && data.content[0] && data.content[0].text) || fallbackRoast(manager, round, perf);
 }
 
 // POST /api/seasons/:year/generate-roast — generate and store an elimination roast (commissioner only)
@@ -10298,15 +10357,22 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
 });
 
 // POST /api/seasons/:year/roasts/slack — post one combined Slack message that opens with
-// the playoff field (seed-ordered QF matchups) and then every stored elimination roast for
-// a round (commissioner only). Body: { round, qualifiers? }. Posts to the SCOREBOARD
-// channel — the same webhook/process as the daily score updates — NOT the swap-notification
-// channel. The client calls this after "End Pool Play" finishes generating the roasts.
+// the playoff field (seed-ordered QF matchups) and then an elimination roast for EVERY
+// manager eliminated in a round (commissioner only). Body: { round, qualifiers?,
+// eliminated?, regenerate? }. Posts to the SCOREBOARD channel — the same webhook/process
+// as the daily score updates — NOT the swap-notification channel.
+//
+// Self-healing: the roster of shame is derived from sd.eliminated (plus the client-passed
+// `eliminated` list as a fallback for the window before the finalize save lands, plus any
+// already-stored roasts), and any manager missing a stored roast gets one generated here
+// before the post — the first live post silently dropped a manager because it trusted the
+// stored roasts alone. `regenerate: true` re-rolls every roast for the round (the repost
+// button uses this).
 app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
-  const { round, qualifiers } = req.body || {};
+  const { round, qualifiers, eliminated, regenerate } = req.body || {};
   if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
     return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
   }
@@ -10318,11 +10384,52 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
 
-  const entries = Object.entries(sd.roasts || {})
-    .filter(([, r]) => r && r.round === round && r.text)
-    .sort(([a], [b]) => a.localeCompare(b));
+  const toRoast = new Set();
+  for (const [m, r] of Object.entries(sd.eliminated || {})) if (r === round) toRoast.add(m);
+  if (Array.isArray(eliminated)) for (const m of eliminated) if (typeof m === 'string' && m) toRoast.add(m);
+  for (const [m, r] of Object.entries(sd.roasts || {})) if (r && r.round === round && r.text) toRoast.add(m);
+  if (toRoast.size === 0) {
+    return res.status(404).json({ error: `No eliminated managers or stored roasts for round ${round}` });
+  }
+
+  // Generate what's missing (or everything, on regenerate) BEFORE composing the post.
+  // Texts are generated first against the read-only snapshot, then persisted through a
+  // fresh read-modify-write so the slow Anthropic awaits can't clobber writes that landed
+  // on other requests in the meantime.
+  const managerOrder = [...toRoast].sort((a, b) => a.localeCompare(b));
+  const roastByManager = {};
+  const freshTexts = {};
+  for (const m of managerOrder) {
+    const existing = (sd.roasts || {})[m];
+    if (!regenerate && existing && existing.round === round && existing.text) {
+      roastByManager[m] = existing.text;
+      continue;
+    }
+    try {
+      const perf = buildManagerPerformanceForRoast(sd, m, round);
+      const text = await generateRoastWithClaude(m, round, perf);
+      roastByManager[m] = text;
+      freshTexts[m] = text;
+    } catch (e) {
+      console.error('Roast generation failed for', m, '-', e.message);
+      if (existing && existing.text) roastByManager[m] = existing.text;
+    }
+  }
+  if (Object.keys(freshTexts).length > 0) {
+    const db2 = readDB();
+    const sd2 = (db2.seasons || {})[year];
+    if (sd2) {
+      if (!sd2.roasts) sd2.roasts = {};
+      const now = new Date().toISOString();
+      for (const [m, text] of Object.entries(freshTexts)) sd2.roasts[m] = { round, text, generated_at: now };
+      db2.seasons[year] = sd2;
+      writeDB(db2);
+    }
+  }
+
+  const entries = managerOrder.filter((m) => roastByManager[m]).map((m) => [m, { text: roastByManager[m] }]);
   if (entries.length === 0) {
-    return res.status(404).json({ error: `No roasts stored for round ${round}` });
+    return res.status(500).json({ error: 'Roast generation failed for every eliminated manager' });
   }
 
   // Playoff-field summary (PP only). Seed order comes from the confirmed_seeding snapshot
@@ -10359,8 +10466,16 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
 
   try {
     await postScoreboardChannelSlack(`${summary}${header}\n\n${sections.join('\n\n')}`);
-    addAuditEntry(db, 'roasts_slack_post', { year, round, managers: entries.length }, req.get('X-User-Email'));
-    writeDB(db);
+    // Audit against a fresh read — the roast-persist step above may have written since
+    // this handler's first readDB, and writing that stale copy back would undo it.
+    const auditDb = readDB();
+    addAuditEntry(
+      auditDb,
+      'roasts_slack_post',
+      { year, round, managers: entries.length, regenerated: Object.keys(freshTexts).length },
+      req.get('X-User-Email')
+    );
+    writeDB(auditDb);
     res.json({ ok: true, round, managers: entries.map(([m]) => m) });
   } catch (e) {
     console.error('[Slack] Combined roast post failed:', e.message);
