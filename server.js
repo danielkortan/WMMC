@@ -69,6 +69,18 @@ async function postScoreboardSlack(db, year) {
   });
 }
 
+// Post plain text to the scoreboard channel — the same webhook/process as the daily
+// scoreboard post — for announcements that belong with the score updates rather than
+// the swap-notification channel (e.g. the combined elimination-roast post).
+async function postScoreboardChannelSlack(text) {
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
+  await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+}
+
 // Unique token generated every time the server starts. Appended to asset URLs
 // so that browsers (especially mobile) always fetch fresh JS/CSS after a deploy.
 const ASSET_VERSION = Date.now();
@@ -10282,6 +10294,77 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   } catch (err) {
     console.error('Roast generation error:', err);
     res.status(500).json({ error: 'Failed to generate roast' });
+  }
+});
+
+// POST /api/seasons/:year/roasts/slack — post one combined Slack message that opens with
+// the playoff field (seed-ordered QF matchups) and then every stored elimination roast for
+// a round (commissioner only). Body: { round, qualifiers? }. Posts to the SCOREBOARD
+// channel — the same webhook/process as the daily score updates — NOT the swap-notification
+// channel. The client calls this after "End Pool Play" finishes generating the roasts.
+app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const { round, qualifiers } = req.body || {};
+  if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
+    return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
+  }
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) {
+    return res.status(503).json({ error: 'Slack webhook not configured' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const entries = Object.entries(sd.roasts || {})
+    .filter(([, r]) => r && r.round === round && r.text)
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0) {
+    return res.status(404).json({ error: `No roasts stored for round ${round}` });
+  }
+
+  // Playoff-field summary (PP only). Seed order comes from the confirmed_seeding snapshot
+  // locked at "End Pool Play"; the client-passed qualifiers list is a fallback for the
+  // window where that full-season save hasn't landed server-side yet. QF pairs mirror the
+  // client bracket (getSFParticipants): 1v8, 4v5, 3v6, 2v7.
+  let summary = '';
+  if (round === 'PP') {
+    const snapNames =
+      sd.confirmed_seeding && Array.isArray(sd.confirmed_seeding.qualifierNames)
+        ? sd.confirmed_seeding.qualifierNames
+        : null;
+    const seeds =
+      snapNames || (Array.isArray(qualifiers) && qualifiers.every((q) => typeof q === 'string') ? qualifiers : []);
+    if (seeds.length === 8) {
+      const pair = (a, b) => `• (${a + 1}) ${seeds[a]} vs (${b + 1}) ${seeds[b]}`;
+      summary =
+        ':trophy: *The playoff field is set!* Quarterfinal matchups:\n' +
+        [pair(0, 7), pair(3, 4), pair(2, 5), pair(1, 6)].join('\n') +
+        '\n\n';
+    } else if (seeds.length > 0) {
+      summary = `:trophy: *The playoff field is set!* Qualifiers by seed: ${seeds
+        .map((n, i) => `(${i + 1}) ${n}`)
+        .join(', ')}\n\n`;
+    }
+  }
+
+  const header =
+    round === 'PP'
+      ? `:fire: *Pool Play is over.* ${entries.length} manager${entries.length > 1 ? 's' : ''} missed the playoffs — welcome to the Hall of Shame:`
+      : `:fire: *${round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals'} eliminations* — welcome to the Hall of Shame:`;
+  // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
+  const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
+
+  try {
+    await postScoreboardChannelSlack(`${summary}${header}\n\n${sections.join('\n\n')}`);
+    addAuditEntry(db, 'roasts_slack_post', { year, round, managers: entries.length }, req.get('X-User-Email'));
+    writeDB(db);
+    res.json({ ok: true, round, managers: entries.map(([m]) => m) });
+  } catch (e) {
+    console.error('[Slack] Combined roast post failed:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
