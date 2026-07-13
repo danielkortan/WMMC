@@ -172,11 +172,11 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Slack
 
-| Method | Endpoint                          | Description                                                                                                                                                                                                              |
-| ------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post.                                                                                                                                                                              |
-| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                             |
-| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field + a roast for every manager eliminated in a round as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`. |
+| Method | Endpoint                          | Description                                                                                                                                                                                                                                                     |
+| ------ | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post.                                                                                                                                                                                                                     |
+| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                    |
+| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field, a roast for every manager eliminated in a round, and next-round submission instructions as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`. |
 
 ### Misc
 

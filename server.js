@@ -10356,6 +10356,76 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   }
 });
 
+// Slack section telling the surviving managers what happens next: when the next round
+// runs, when its fresh-roster submission window opens (3 days before Week 1, mirroring the
+// client's getPeriodOpenDate), and when rosters lock (5 minutes before the stored
+// first-pitch time in sd.period_deadlines, mirroring getPeriodDeadline). Every date comes
+// from the season's own schedule_dates; anything missing degrades to a generic line rather
+// than blocking the post. Empty string after Finals — there is no next round.
+function buildNextRoundInstructions(sd, round) {
+  const NEXT = {
+    PP: { round: 'QF', label: 'The Quarterfinals', period: 'qf' },
+    QF: { round: 'SF', label: 'The Semifinals', period: 'sf' },
+    SF: { round: 'Finals', label: 'The Finals / 3rd-place game', period: 'finals' },
+  };
+  const next = NEXT[round];
+  if (!next) return '';
+
+  const startIdx = SEASON_SCHEDULE.findIndex((s) => s.round === next.round && s.week === 'Week 1');
+  let endIdx = -1;
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (s.round === next.round) endIdx = i;
+  });
+  const dates = Array.isArray(sd.schedule_dates) ? sd.schedule_dates : [];
+  const startISO = startIdx >= 0 && dates[startIdx] ? dates[startIdx].start : null;
+  const endISO = endIdx >= 0 && dates[endIdx] ? dates[endIdx].end : null;
+
+  // Schedule dates are bare YYYY-MM-DD strings; pin them to noon UTC and format in UTC so
+  // the printed calendar day never shifts with the server's timezone.
+  const fmtDay = (iso) =>
+    new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'UTC',
+    });
+
+  let openStr = null;
+  if (startISO) {
+    const d = new Date(startISO + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() - 3);
+    openStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  }
+
+  let deadlineStr = null;
+  const firstGame = sd.period_deadlines && sd.period_deadlines[next.period];
+  if (firstGame) {
+    const fg = new Date(firstGame);
+    if (!Number.isNaN(fg.getTime())) {
+      deadlineStr =
+        new Date(fg.getTime() - 5 * 60 * 1000).toLocaleString('en-US', {
+          weekday: 'long',
+          month: 'long',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          timeZone: 'America/New_York',
+        }) + ' ET';
+    }
+  }
+
+  const lines = [':clipboard: *Playoff managers — what happens next:*'];
+  if (startISO && endISO) lines.push(`• ${next.label} run ${fmtDay(startISO)} through ${fmtDay(endISO)}.`);
+  else if (startISO) lines.push(`• ${next.label} start ${fmtDay(startISO)}.`);
+  lines.push(
+    '• Rosters do NOT carry over — every playoff team submits a fresh roster in the app for commissioner approval.'
+  );
+  if (openStr) lines.push(`• The submission window opens ${openStr}.`);
+  if (deadlineStr) lines.push(`• Rosters lock ${deadlineStr} — 5 minutes before first pitch.`);
+  else if (startISO) lines.push(`• Rosters lock 5 minutes before the first pitch on ${fmtDay(startISO)}.`);
+  return lines.join('\n');
+}
+
 // POST /api/seasons/:year/roasts/slack — post one combined Slack message that opens with
 // the playoff field (seed-ordered QF matchups) and then an elimination roast for EVERY
 // manager eliminated in a round (commissioner only). Body: { round, qualifiers?,
@@ -10464,8 +10534,12 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
   const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
 
+  const instructions = buildNextRoundInstructions(sd, round);
+
   try {
-    await postScoreboardChannelSlack(`${summary}${header}\n\n${sections.join('\n\n')}`);
+    await postScoreboardChannelSlack(
+      `${summary}${header}\n\n${sections.join('\n\n')}${instructions ? `\n\n${instructions}` : ''}`
+    );
     // Audit against a fresh read — the roast-persist step above may have written since
     // this handler's first readDB, and writing that stale copy back would undo it.
     const auditDb = readDB();
