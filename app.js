@@ -13536,13 +13536,14 @@ window.finalizeRound = function (roundKey, weekIndex) {
     renderWeeklyUploadSections();
     init();
     // Generate roasts in the background — sequentially, so concurrent generate-roast
-    // read-modify-writes can't clobber each other's stored roast — then post them to
-    // Slack as ONE combined Hall of Shame message and re-render so roasts appear.
+    // read-modify-writes can't clobber each other's stored roast — then post ONE combined
+    // Slack message (playoff field + QF matchups, then the roasts) to the scoreboard
+    // channel and re-render so roasts appear. `qualifiers` is already seed-ordered.
     (async () => {
       for (const m of nonQualifiers) {
         await generateRoastForManager(m, 'PP');
       }
-      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP');
+      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP', qualifiers);
       renderWeeklyUploadSections();
     })();
     return;
@@ -13635,14 +13636,16 @@ async function generateRoastForManager(manager, round) {
   }
 }
 
-// Ask the server to post every stored roast for a round to Slack as one combined message.
+// Ask the server to post every stored roast for a round to Slack as one combined message
+// on the scoreboard channel, opening with the playoff field. `qualifiers` (seed-ordered)
+// is a fallback the server uses if the confirmed_seeding save hasn't landed yet.
 // Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
 // and the roasts still show on the roster pages.
-async function postCombinedRoastsToSlack(round) {
+async function postCombinedRoastsToSlack(round, qualifiers) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
       method: 'POST',
-      body: JSON.stringify({ round }),
+      body: JSON.stringify({ round, qualifiers }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
