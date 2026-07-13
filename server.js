@@ -10285,6 +10285,51 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   }
 });
 
+// POST /api/seasons/:year/roasts/slack — post one combined Slack message containing every
+// stored elimination roast for a round (commissioner only). Body: { round }. The client
+// calls this after "End Pool Play" finishes generating the individual roasts, so the
+// channel gets a single Hall of Shame post covering all eliminated managers.
+app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const { round } = req.body || {};
+  if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
+    return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
+  }
+  if (!SLACK_WEBHOOK_URL) {
+    return res.status(503).json({ error: 'Slack webhook not configured' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const entries = Object.entries(sd.roasts || {})
+    .filter(([, r]) => r && r.round === round && r.text)
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0) {
+    return res.status(404).json({ error: `No roasts stored for round ${round}` });
+  }
+
+  const header =
+    round === 'PP'
+      ? `:fire: *Pool Play is over.* ${entries.length} manager${entries.length > 1 ? 's' : ''} missed the playoffs — welcome to the Hall of Shame:`
+      : `:fire: *${round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals'} eliminations* — welcome to the Hall of Shame:`;
+  // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
+  const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
+
+  try {
+    await postSlack(`${header}\n\n${sections.join('\n\n')}`);
+    addAuditEntry(db, 'roasts_slack_post', { year, round, managers: entries.length }, req.get('X-User-Email'));
+    writeDB(db);
+    res.json({ ok: true, round, managers: entries.map(([m]) => m) });
+  } catch (e) {
+    console.error('[Slack] Combined roast post failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ============================================================
 // Daily Scheduler
 // ============================================================

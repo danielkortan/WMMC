@@ -13533,9 +13533,18 @@ window.finalizeRound = function (roundKey, weekIndex) {
       if (!sd.eliminated[m]) sd.eliminated[m] = 'PP';
     });
     saveSeason(SELECTED_SEASON, sd);
-    nonQualifiers.forEach((m) => generateRoastForManager(m, 'PP'));
     renderWeeklyUploadSections();
     init();
+    // Generate roasts in the background — sequentially, so concurrent generate-roast
+    // read-modify-writes can't clobber each other's stored roast — then post them to
+    // Slack as ONE combined Hall of Shame message and re-render so roasts appear.
+    (async () => {
+      for (const m of nonQualifiers) {
+        await generateRoastForManager(m, 'PP');
+      }
+      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP');
+      renderWeeklyUploadSections();
+    })();
     return;
   }
 
@@ -13623,6 +13632,24 @@ async function generateRoastForManager(manager, round) {
     }
   } catch (e) {
     console.error('Roast generation failed for', manager, e);
+  }
+}
+
+// Ask the server to post every stored roast for a round to Slack as one combined message.
+// Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
+// and the roasts still show on the roster pages.
+async function postCombinedRoastsToSlack(round) {
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
+      method: 'POST',
+      body: JSON.stringify({ round }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      console.error('Combined roast Slack post failed:', data.error || resp.status);
+    }
+  } catch (e) {
+    console.error('Combined roast Slack post failed for', round, e);
   }
 }
 
