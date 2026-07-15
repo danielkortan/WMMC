@@ -1,6 +1,38 @@
 # WMMC — Decisions Log
 
-## Playoff odds phase 2: opponent quality, home/away, park factors (2026-07-10)
+## Daily Slack post: playoff cadence + bracket matchups (2026-07-15)
+
+**What (commissioner request):** stop the pool-play 7am auto post after the Monday following
+PP2's end; nothing during the All-Star break (the "End Pool Play" roast/field post covers the
+transition); each playoff round (QF/SF/Finals) posts daily starting its first TUESDAY (the
+opening Monday's 7am run has no games to report); the first Monday after each round ends gets
+one wrap-up post reporting the round that just finished ("and so on" through Finals).
+
+**Key decisions (all in `server.js`, display/timing only — no scoring/roster writes):**
+
+- `scoreboardAutoPostPlan(sd, todayISO)` gates the 7am run: `{summaryRound}` on the first
+  Monday after a PP2/QF/SF/Finals round-end, `{}` daily in-round (pool play unchanged; playoff
+  rounds only from `tuesdayOnOrAfterISO(round start)`), `null` otherwise. PP1's boundary
+  Monday deliberately stays a normal daily post (falls inside PP2's window). The wrap-up
+  Monday wins over the next round's window (SF Week 1 starts the Monday after QF ends — that
+  Monday's post is the QF wrap-up; SF posts start Tuesday). Empty `schedule_dates` preserves
+  the old always-post behavior. `last_scoreboard_post_date` idempotency guard untouched.
+- During QF/SF/Finals, `buildScoreboardBlocks` drops the pool-play frames (Overall Standings +
+  pool columns + legend) for `buildPlayoffMatchupsSlackText`: head-to-head matchups mirroring
+  app.js `buildActivePlayoffBracket` (`confirmed_seeding.qualifierNames` seeds; QF 1v8/4v5/
+  3v6/2v7; SF1 = QF1w vs QF4w; Finals = SF winners, 3rd place = SF losers with the app's
+  t1-favoring tie). Winners derive from round totals + seed tiebreak directly (identical to
+  the app's finalized bracket) so posts never wait on a finalize save. No confirmed seeding →
+  degrade to a plain ranked round-total list. Wrap-up posts add ✅/❌, an advancing/champion
+  footer, and a "complete! Final results below" line instead of the Current Period line.
+- Manual `POST /api/slack/scoreboard` and the `/wmmc` slash command intentionally keep no
+  gating (post-on-demand) but pick up the playoff matchup layout automatically.
+
+**Verified:** scratch harness (extracted the new pure functions from server.js) asserting the
+whole 2026 calendar day-by-day (PP daily through 7/13 PP2 wrap-up; silent ASB; QF daily
+7/21–8/03 wrap-up; SF/Finals likewise; nothing after the 8/31 Finals wrap-up) and matchup
+rendering incl. tie→seed and 3rd-place-tie→SF1-loser; block-assembly smoke for QF daily /
+QF+PP2 wrap-ups / PP2 daily / no-seeding fallback. 140/140 tests, lint + format clean.
 
 **What:** extended the Monte-Carlo playoff-odds engine (from the 2026-07-06 entry below)
 so each remaining game's projected contribution isn't just "shrunk per-game rate x 1", but
