@@ -5274,6 +5274,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       )
       .join('')}</div>`;
   }
+  // Explicit expand affordance — the header's small arrow is easy to miss, so the
+  // collapsed summary ends with a labeled button. It lives inside the summary div,
+  // which togglePoolPlay hides on expand, so it never shows alongside the tables.
+  if (ppSummaryInner) {
+    ppSummaryInner += `<button type="button" class="sb-poolplay-expand-btn" onclick="togglePoolPlay()">View Full Pool Play Scoreboard &#9662;</button>`;
+  }
 
   let html = '';
 
@@ -13813,14 +13819,29 @@ function updateSubmissionWarningBanner() {
     !!elim &&
     ((period === 'sf' && ['PP', 'QF'].includes(elim)) || (period === 'finals' && ['PP', 'QF', 'SF'].includes(elim)));
 
+  // During a between-periods break (e.g. the All-Star break) the upcoming round's
+  // window may not have opened yet — windows open the Friday before the round — but
+  // the break is exactly when managers think about their next lineup. Warn for the
+  // upcoming period through the whole break, noting when submissions open; drop it
+  // once that period's deadline has passed.
+  const between = getBetweenPeriodsInfo(sd);
+  const upcomingPeriod = between ? between.nextRound.toLowerCase() : null;
+
   const warnings = [];
   for (const period of ['pp1', 'pp2', 'qf', 'sf', 'finals']) {
-    if (!isPeriodWindowConfirmedOpen(sd, period)) continue;
+    let opensAt = null;
+    if (!isPeriodWindowConfirmedOpen(sd, period)) {
+      if (period !== upcomingPeriod) continue;
+      const deadline = getPeriodDeadline(sd, period);
+      if (deadline && Date.now() >= deadline.getTime()) continue;
+      const openDate = getPeriodOpenDate(sd, period);
+      if (openDate && Date.now() < openDate.getTime()) opensAt = openDate;
+    }
     if (!isManagerQualifiedForPeriod(me.name, period, sd)) continue;
     if (isEliminatedFor(period)) continue;
     const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push({ period, label: PERIOD_LABELS[period] || period });
+      warnings.push({ period, label: PERIOD_LABELS[period] || period, opensAt });
     }
   }
 
@@ -13830,11 +13851,19 @@ function updateSubmissionWarningBanner() {
   }
 
   banner.innerHTML = warnings
-    .map(
-      (w) =>
-        `<span class="sub-warn-item">⚠️ Your <strong>${w.label}</strong> lineup is not submitted.` +
-        ` <a href="#" onclick="goToSubmission('${w.period}');return false;">Submit your lineup &rarr;</a></span>`
-    )
+    .map((w) => {
+      // The period lives inside the <strong>: the desktop banner lays the item out
+      // with inline-flex, so a bare trailing "." would become its own flex item
+      // with a stray gap before it.
+      const opensNote = w.opensAt
+        ? ` Submissions open <strong>${w.opensAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}.</strong>`
+        : '';
+      const linkText = w.opensAt ? 'View submission page' : 'Submit your lineup';
+      return (
+        `<span class="sub-warn-item">⚠️ Your <strong>${w.label}</strong> lineup is not submitted.${opensNote}` +
+        ` <a href="#" onclick="goToSubmission('${w.period}');return false;">${linkText} &rarr;</a></span>`
+      );
+    })
     .join('');
   banner.style.display = 'flex';
 }
