@@ -8823,7 +8823,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const poolPitCount = (seasonData.pitchers_pool || []).length;
     const poolReady = poolBatCount > 0 && poolPitCount > 0;
 
-    html += `<div class="card initial-submission-section" style="margin-top:1rem;">
+    html += `<div class="card initial-submission-section" id="period-submission-card-pp1" style="margin-top:1rem;">
       <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">Pool Play 1</span>
         <h3 style="margin:0;">Player Submission</h3>
@@ -9047,7 +9047,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
         })
       : '';
 
-  let html = `<div class="card initial-submission-section" style="margin-top:1rem;">
+  let html = `<div class="card initial-submission-section" id="period-submission-card-${period}" style="margin-top:1rem;">
     <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
       <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">${periodLabel}</span>
       <h3 style="margin:0;">Player Submission</h3>
@@ -13782,7 +13782,11 @@ window.repostPoolPlayRoasts = async function () {
   renderWeeklyUploadSections();
 };
 
-// Show/hide the global submission warning banner below the nav.
+// Show/hide the global submission warning banner below the nav. Sits outside the tab
+// sections, so it's visible on every page. Covers EVERY submission window (PP1, PP2,
+// QF, SF, Finals): while a period's window is confirmed open and the logged-in manager
+// is qualified (and not eliminated), a missing submission warns with a link that jumps
+// to that period's submission card on My Roster.
 function updateSubmissionWarningBanner() {
   const banner = document.getElementById('submission-warning-banner');
   if (!banner || !LOGGED_IN_EMAIL) return;
@@ -13801,21 +13805,22 @@ function updateSubmissionWarningBanner() {
     return;
   }
 
+  // SF/Finals "qualification" is open to everyone (see isManagerQualifiedForPeriod) —
+  // an eliminated manager is filtered here instead, mirroring the submission card's
+  // "Season ended" state so the banner never nags a knocked-out manager.
+  const elim = sd.eliminated && sd.eliminated[me.name];
+  const isEliminatedFor = (period) =>
+    !!elim &&
+    ((period === 'sf' && ['PP', 'QF'].includes(elim)) || (period === 'finals' && ['PP', 'QF', 'SF'].includes(elim)));
+
   const warnings = [];
-
-  // PP2 submission incomplete
-  if (isPeriodWindowConfirmedOpen(sd, 'pp2')) {
-    const sub = getPeriodSub(sd, 'pp2', me.name);
+  for (const period of ['pp1', 'pp2', 'qf', 'sf', 'finals']) {
+    if (!isPeriodWindowConfirmedOpen(sd, period)) continue;
+    if (!isManagerQualifiedForPeriod(me.name, period, sd)) continue;
+    if (isEliminatedFor(period)) continue;
+    const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push('Your <strong>Pool Play 2</strong> lineup is not submitted.');
-    }
-  }
-
-  // QF submission incomplete (only for qualified managers)
-  if (isPeriodWindowConfirmedOpen(sd, 'qf') && isManagerQualifiedForPeriod(me.name, 'qf', sd)) {
-    const sub = getPeriodSub(sd, 'qf', me.name);
-    if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push('Your <strong>Quarterfinals</strong> lineup is not submitted.');
+      warnings.push({ period, label: PERIOD_LABELS[period] || period });
     }
   }
 
@@ -13824,9 +13829,42 @@ function updateSubmissionWarningBanner() {
     return;
   }
 
-  banner.innerHTML = warnings.map((w) => `<span class="sub-warn-item">⚠️ ${w}</span>`).join('');
+  banner.innerHTML = warnings
+    .map(
+      (w) =>
+        `<span class="sub-warn-item">⚠️ Your <strong>${w.label}</strong> lineup is not submitted.` +
+        ` <a href="#" onclick="goToSubmission('${w.period}');return false;">Submit your lineup &rarr;</a></span>`
+    )
+    .join('');
   banner.style.display = 'flex';
 }
+
+// Jump from the warning banner to a period's submission card: activate the My Roster
+// tab (its click handler re-syncs from the server and re-renders asynchronously), then
+// poll for the card, switch to the Swaps roster sub-tab that hosts the submission
+// cards, and scroll to it. Polling is needed because the tab render is async.
+window.goToSubmission = function (period) {
+  const navBtn = document.querySelector('.nav-btn[data-tab="my-roster"]');
+  if (navBtn) navBtn.click();
+  const targetId = `period-submission-card-${period}`;
+  let tries = 0;
+  const timer = setInterval(() => {
+    const el = document.getElementById(targetId);
+    if (el) {
+      clearInterval(timer);
+      // The submission cards live inside the "Swaps" roster sub-tab — activate it
+      // (no-op if already active) so the card is actually visible before scrolling.
+      const swapsTab = document.querySelector('.roster-tab[data-rtab="swaps"]');
+      if (swapsTab && !swapsTab.classList.contains('active')) swapsTab.click();
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Brief highlight so the eye lands on the right card after the jump.
+      el.classList.add('submission-card-flash');
+      setTimeout(() => el.classList.remove('submission-card-flash'), 2400);
+    } else if (++tries > 40) {
+      clearInterval(timer);
+    }
+  }, 150);
+};
 
 window.uploadWeeklyBatting = function (weekIndex) {
   const scheduleWeek = SEASON_SCHEDULE[weekIndex];

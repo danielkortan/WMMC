@@ -1166,3 +1166,14 @@ Decisions made with Daniel (asked via option picker):
 - Mobile banner footer forces `white-space: nowrap` on .banner-period — any long
   period string must opt out (`.banner-period-break` wraps + hides its label span,
   since the data-short status under the title already names the break).
+- Follow-up in same PR: the global #submission-warning-banner (below nav, all pages)
+  now covers EVERY submission window (pp1..finals) via isPeriodWindowConfirmedOpen +
+  isManagerQualifiedForPeriod + an eliminated-manager filter mirroring the card's
+  "Season ended" state, and links to `goToSubmission(period)` — which clicks the
+  My Roster nav tab, polls for `#period-submission-card-<period>` (render is async),
+  activates the "Swaps" roster sub-tab (the cards live in #rtab-swaps, hidden by
+  default), scrolls, and flashes the card. Gotcha: scrolling without switching the
+  sub-tab silently no-ops — the card exists but is display:none.
+- Mobile: .sub-warn-item's desktop inline-flex splits text nodes into flex items and
+  stacks them in columns at 390px — mobile.css forces `display:inline` so the warning
+  reads as a sentence.

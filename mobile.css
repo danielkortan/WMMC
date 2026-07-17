@@ -507,6 +507,13 @@
     display: none;
   }
 
+  /* Global submission warning: flow as one sentence on phones — the desktop
+     inline-flex layout turns each text fragment into its own flex item and
+     stacks them in odd columns at narrow widths. */
+  #submission-warning-banner .sub-warn-item {
+    display: inline;
+  }
+
   /* ── Cards ─────────────────────────────────────────────────────── */
   .card {
     border-radius: 10px;
