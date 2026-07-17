@@ -4904,6 +4904,22 @@ body::before {
   text-decoration: underline;
 }
 
+/* Landing highlight when the banner's "Submit your lineup" link jumps to a
+   period's submission card on My Roster (see goToSubmission). */
+.submission-card-flash {
+  animation: submission-card-flash 2.4s ease-out;
+}
+
+@keyframes submission-card-flash {
+  0%,
+  55% {
+    box-shadow: 0 0 0 3px #ffc107;
+  }
+  100% {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
 /* ============================================================
    In-page submission warning (My Roster page)
    ============================================================ */

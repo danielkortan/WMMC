@@ -648,14 +648,6 @@ function getCurrentScoringPeriod(seasonData) {
     }
   }
 
-  const roundNames = {
-    PP1: 'Pool Play 1',
-    PP2: 'Pool Play 2',
-    QF: 'Quarterfinals',
-    SF: 'Semifinals',
-    Finals: 'Finals',
-  };
-
   return {
     round: latestRound,
     week: latestWeek,
@@ -664,9 +656,51 @@ function getCurrentScoringPeriod(seasonData) {
     weekNum,
     totalRoundWeeks,
     dateRange,
-    roundName: roundNames[latestRound] || latestRound,
+    roundName: ROUND_DISPLAY_NAMES[latestRound] || latestRound,
     roundStartDate,
     roundEndDate,
+  };
+}
+
+const ROUND_DISPLAY_NAMES = {
+  PP1: 'Pool Play 1',
+  PP2: 'Pool Play 2',
+  QF: 'Quarterfinals',
+  SF: 'Semifinals',
+  Finals: 'Finals',
+};
+
+// When today (ET) falls in the gap between two rounds' schedule windows — e.g. the
+// All-Star break week between PP2's last week and the Quarterfinals — return info
+// about the break: the upcoming round, its start date, and its roster submission
+// deadline (first game − 5 min, via getPeriodDeadline). Returns null whenever today
+// is inside a scheduled week, before the season, after it, or in a same-round gap,
+// so the normal "Round — Week N of M" banner keeps rendering in all of those cases.
+function getBetweenPeriodsInfo(sd) {
+  const dates = (sd && sd.schedule_dates) || [];
+  if (!dates.length) return null;
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  let prevIdx = -1;
+  let nextIdx = -1;
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    const d = dates[i];
+    if (!d || !d.start || !d.end) continue;
+    if (todayET >= d.start && todayET <= d.end) return null; // inside a scheduled week
+    if (d.end < todayET) prevIdx = i;
+    if (nextIdx < 0 && d.start > todayET) nextIdx = i;
+  }
+  if (prevIdx < 0 || nextIdx < 0) return null; // preseason or season over
+  const prevRound = SEASON_SCHEDULE[prevIdx].round;
+  const nextRound = SEASON_SCHEDULE[nextIdx].round;
+  if (prevRound === nextRound) return null; // gap within a round — not a period break
+  return {
+    prevRound,
+    nextRound,
+    nextRoundName: ROUND_DISPLAY_NAMES[nextRound] || nextRound,
+    nextStart: dates[nextIdx].start,
+    deadline: getPeriodDeadline(sd, nextRound.toLowerCase()),
+    // The PP2 → QF gap is the league's All-Star break week by schedule design.
+    isAllStarBreak: prevRound === 'PP2' && nextRound === 'QF',
   };
 }
 
@@ -2753,12 +2787,38 @@ function renderChampionBanner() {
   if (!seasonComplete) {
     const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
+    const between = sd ? getBetweenPeriodsInfo(sd) : null;
 
     // Season status + period are wrapped in distinct spans (with a short
     // status form in data-short) so the layout can split them: desktop shows
     // them together in the footer; mobile moves the short status under the
     // title and keeps only the period in the footer (see js/mobile.js).
-    if (period) {
+    if (between) {
+      // Between periods (e.g. the All-Star break before the Quarterfinals):
+      // show the upcoming round's roster deadline and start date instead of a
+      // stale "last data week" period label.
+      const label = between.isAllStarBreak ? 'All-Star Break' : 'Between Rounds';
+      const parts = [];
+      if (between.deadline) {
+        const dueFmt = between.deadline.toLocaleString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        });
+        parts.push(`Rosters due ${dueFmt}`);
+      }
+      parts.push(`${between.nextRoundName} start ${fmtShortDate(between.nextStart)}`);
+      // The label gets its own span: mobile hides it (the short status under the
+      // title already reads e.g. "All-Star Break") and lets the details wrap.
+      footerHtml =
+        `<div class="banner-footer">` +
+        `<span class="banner-status" data-short="${label}">${SELECTED_SEASON} Season In Progress</span>` +
+        `<span class="banner-sep"> &nbsp;|&nbsp; </span>` +
+        `<span class="banner-period banner-period-break"><span class="banner-break-label">${label} — </span>${parts.join(' &middot; ')}</span>` +
+        `</div>`;
+    } else if (period) {
       // Season has data — show round name + week number
       const weekPart = `Week ${period.weekNum} of ${period.totalRoundWeeks}`;
       footerHtml =
@@ -4361,9 +4421,28 @@ function renderPlayers() {
 }
 
 // ---- Bracket ----
+
+// Order the Scoreboard tab's two containers. Default (index.html) order is the
+// scoreboard above the bracket; once playoffs are the focus — pool play finalized
+// on an active season, or a historical season with bracket data — the bracket
+// moves above so the pool-play summary + full scoreboard tables sit below it.
+// Both containers are re-rendered wholesale on every view change, so moving the
+// live elements is safe, and season switches restore either order.
+function orderScoreboardBracket(bracketFirst) {
+  const content = document.getElementById('scoreboard-content');
+  const bracket = document.getElementById('scoreboard-bracket');
+  if (!content || !bracket || !bracket.parentNode) return;
+  if (bracketFirst) {
+    if (bracket.nextElementSibling !== content) bracket.parentNode.insertBefore(bracket, content);
+  } else if (content.nextElementSibling !== bracket) {
+    content.parentNode.insertBefore(content, bracket);
+  }
+}
+
 function renderBracket() {
   const container = document.getElementById('scoreboard-bracket');
   if (!container) return;
+  orderScoreboardBracket(!!(DATA && DATA.bracket));
   if (!DATA || !DATA.bracket) {
     container.innerHTML = '';
     return;
@@ -4796,6 +4875,9 @@ function showActiveSeason(seasonData) {
   const bracketContainer = document.getElementById('scoreboard-bracket');
   if (bracketContainer) {
     bracketContainer.innerHTML = buildActivePlayoffBracket(seasonData, ppFinalized);
+    // Once pool play is finalized the bracket leads the page; the pool-play
+    // summary + full scoreboard move below it (collapsed by default, below).
+    orderScoreboardBracket(ppFinalized);
 
     // If pool play is finalized, minimize pool play section and feature bracket
     if (ppFinalized) {
@@ -5154,10 +5236,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // ---- Build full HTML ----
-  // Check if playoff data exists — if so, pool play starts collapsed
+  // Pool play starts collapsed (summary visible, tables hidden) once playoff data
+  // exists OR pool play is finalized — the latter covers the between-periods break
+  // when the bracket is set but no playoff stats have been recorded yet. The
+  // showActiveSeason post-render fixup enforces the same state after bracket render.
   const rounds = new Set([...batting.map((b) => b.round), ...pitching.map((p) => p.round)]);
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
-  const ppCollapsed = hasPlayoffData;
+  const ppCollapsed = hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
 
   // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
   // collapsed-state summary (below) can use them.
@@ -8738,7 +8823,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const poolPitCount = (seasonData.pitchers_pool || []).length;
     const poolReady = poolBatCount > 0 && poolPitCount > 0;
 
-    html += `<div class="card initial-submission-section" style="margin-top:1rem;">
+    html += `<div class="card initial-submission-section" id="period-submission-card-pp1" style="margin-top:1rem;">
       <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">Pool Play 1</span>
         <h3 style="margin:0;">Player Submission</h3>
@@ -8962,7 +9047,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
         })
       : '';
 
-  let html = `<div class="card initial-submission-section" style="margin-top:1rem;">
+  let html = `<div class="card initial-submission-section" id="period-submission-card-${period}" style="margin-top:1rem;">
     <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
       <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">${periodLabel}</span>
       <h3 style="margin:0;">Player Submission</h3>
@@ -13697,7 +13782,11 @@ window.repostPoolPlayRoasts = async function () {
   renderWeeklyUploadSections();
 };
 
-// Show/hide the global submission warning banner below the nav.
+// Show/hide the global submission warning banner below the nav. Sits outside the tab
+// sections, so it's visible on every page. Covers EVERY submission window (PP1, PP2,
+// QF, SF, Finals): while a period's window is confirmed open and the logged-in manager
+// is qualified (and not eliminated), a missing submission warns with a link that jumps
+// to that period's submission card on My Roster.
 function updateSubmissionWarningBanner() {
   const banner = document.getElementById('submission-warning-banner');
   if (!banner || !LOGGED_IN_EMAIL) return;
@@ -13716,21 +13805,22 @@ function updateSubmissionWarningBanner() {
     return;
   }
 
+  // SF/Finals "qualification" is open to everyone (see isManagerQualifiedForPeriod) —
+  // an eliminated manager is filtered here instead, mirroring the submission card's
+  // "Season ended" state so the banner never nags a knocked-out manager.
+  const elim = sd.eliminated && sd.eliminated[me.name];
+  const isEliminatedFor = (period) =>
+    !!elim &&
+    ((period === 'sf' && ['PP', 'QF'].includes(elim)) || (period === 'finals' && ['PP', 'QF', 'SF'].includes(elim)));
+
   const warnings = [];
-
-  // PP2 submission incomplete
-  if (isPeriodWindowConfirmedOpen(sd, 'pp2')) {
-    const sub = getPeriodSub(sd, 'pp2', me.name);
+  for (const period of ['pp1', 'pp2', 'qf', 'sf', 'finals']) {
+    if (!isPeriodWindowConfirmedOpen(sd, period)) continue;
+    if (!isManagerQualifiedForPeriod(me.name, period, sd)) continue;
+    if (isEliminatedFor(period)) continue;
+    const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push('Your <strong>Pool Play 2</strong> lineup is not submitted.');
-    }
-  }
-
-  // QF submission incomplete (only for qualified managers)
-  if (isPeriodWindowConfirmedOpen(sd, 'qf') && isManagerQualifiedForPeriod(me.name, 'qf', sd)) {
-    const sub = getPeriodSub(sd, 'qf', me.name);
-    if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push('Your <strong>Quarterfinals</strong> lineup is not submitted.');
+      warnings.push({ period, label: PERIOD_LABELS[period] || period });
     }
   }
 
@@ -13739,9 +13829,42 @@ function updateSubmissionWarningBanner() {
     return;
   }
 
-  banner.innerHTML = warnings.map((w) => `<span class="sub-warn-item">⚠️ ${w}</span>`).join('');
+  banner.innerHTML = warnings
+    .map(
+      (w) =>
+        `<span class="sub-warn-item">⚠️ Your <strong>${w.label}</strong> lineup is not submitted.` +
+        ` <a href="#" onclick="goToSubmission('${w.period}');return false;">Submit your lineup &rarr;</a></span>`
+    )
+    .join('');
   banner.style.display = 'flex';
 }
+
+// Jump from the warning banner to a period's submission card: activate the My Roster
+// tab (its click handler re-syncs from the server and re-renders asynchronously), then
+// poll for the card, switch to the Swaps roster sub-tab that hosts the submission
+// cards, and scroll to it. Polling is needed because the tab render is async.
+window.goToSubmission = function (period) {
+  const navBtn = document.querySelector('.nav-btn[data-tab="my-roster"]');
+  if (navBtn) navBtn.click();
+  const targetId = `period-submission-card-${period}`;
+  let tries = 0;
+  const timer = setInterval(() => {
+    const el = document.getElementById(targetId);
+    if (el) {
+      clearInterval(timer);
+      // The submission cards live inside the "Swaps" roster sub-tab — activate it
+      // (no-op if already active) so the card is actually visible before scrolling.
+      const swapsTab = document.querySelector('.roster-tab[data-rtab="swaps"]');
+      if (swapsTab && !swapsTab.classList.contains('active')) swapsTab.click();
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Brief highlight so the eye lands on the right card after the jump.
+      el.classList.add('submission-card-flash');
+      setTimeout(() => el.classList.remove('submission-card-flash'), 2400);
+    } else if (++tries > 40) {
+      clearInterval(timer);
+    }
+  }, 150);
+};
 
 window.uploadWeeklyBatting = function (weekIndex) {
   const scheduleWeek = SEASON_SCHEDULE[weekIndex];

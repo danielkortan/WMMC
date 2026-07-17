@@ -1146,3 +1146,34 @@ Decisions made with Daniel (asked via option picker):
   on a block inside an auto-layout table cell), smaller pills/trends inside
   the table. Overflow measured 0px; `:has(> .odds-table)` wrapper keeps
   overflow-x:auto as a fallback for narrower screens.
+
+## 2026-07-17 — All-Star break banner + bracket-first scoreboard (PR #353)
+
+- `getBetweenPeriodsInfo(sd)` (app.js, next to getCurrentScoringPeriod) detects a
+  calendar day in the gap between two rounds' schedule_dates windows and feeds the
+  champion banner: "All-Star Break — Rosters due <getPeriodDeadline> · <round> start
+  <date>". PP2→QF gap = "All-Star Break"; other inter-round gaps = "Between Rounds";
+  returns null inside any week / preseason / postseason / same-round gaps.
+- Scoreboard-tab ordering is deliberately NOT static in index.html:
+  `orderScoreboardBracket(bracketFirst)` moves #scoreboard-bracket above
+  #scoreboard-content only when playoffs are the focus (active season with PP
+  finalized, or historical season with bracket data). During pool play/preseason the
+  scoreboard leads with the tentative bracket below. Both containers re-render
+  wholesale so moving the live nodes is safe; season switches restore either order.
+- `ppCollapsed` in renderActiveScoreboardTabs now includes finalized PP (not just
+  playoff stats existing) so the collapsed-summary state is in the initial HTML
+  during the between-periods break, not only after showActiveSeason's fixup.
+- Mobile banner footer forces `white-space: nowrap` on .banner-period — any long
+  period string must opt out (`.banner-period-break` wraps + hides its label span,
+  since the data-short status under the title already names the break).
+- Follow-up in same PR: the global #submission-warning-banner (below nav, all pages)
+  now covers EVERY submission window (pp1..finals) via isPeriodWindowConfirmedOpen +
+  isManagerQualifiedForPeriod + an eliminated-manager filter mirroring the card's
+  "Season ended" state, and links to `goToSubmission(period)` — which clicks the
+  My Roster nav tab, polls for `#period-submission-card-<period>` (render is async),
+  activates the "Swaps" roster sub-tab (the cards live in #rtab-swaps, hidden by
+  default), scrolls, and flashes the card. Gotcha: scrolling without switching the
+  sub-tab silently no-ops — the card exists but is display:none.
+- Mobile: .sub-warn-item's desktop inline-flex splits text nodes into flex items and
+  stacks them in columns at 390px — mobile.css forces `display:inline` so the warning
+  reads as a sentence.
