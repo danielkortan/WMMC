@@ -1177,3 +1177,19 @@ Decisions made with Daniel (asked via option picker):
 - Mobile: .sub-warn-item's desktop inline-flex splits text nodes into flex items and
   stacks them in columns at 390px — mobile.css forces `display:inline` so the warning
   reads as a sentence.
+
+## 2026-07-17 — Break-time submission warning + explicit scoreboard expand (PR after #353)
+
+- Commissioner feedback on #353: no warning visible on 7/16 evening (QF window only
+  opens the Friday before the round → midnight 7/17 local), and the collapsed Pool
+  Play Scoreboard's header-arrow affordance was too subtle to discover.
+- updateSubmissionWarningBanner now also warns for the UPCOMING period during a
+  between-periods break (via getBetweenPeriodsInfo) even before its window opens —
+  copy adds "Submissions open <date>." and the link reads "View submission page"
+  until the window is open. Dropped once the period's deadline passes.
+- Collapsed pool-play summary ends with a labeled pill button ("View Full Pool Play
+  Scoreboard ▾", .sb-poolplay-expand-btn) that calls togglePoolPlay(); it lives
+  INSIDE #sb-poolplay-summary so expand/collapse hides/restores it for free.
+- Flex gotcha: .sub-warn-item is inline-flex on desktop — every text node becomes a
+  flex item separated by the gap, so punctuation after a </strong> gets a stray
+  leading space. Keep trailing periods inside the <strong>.

@@ -1154,6 +1154,26 @@ input[type='file'] {
   margin-top: 0.75rem;
 }
 
+/* Labeled expand button at the bottom of the collapsed pool-play summary — the
+   header arrow alone is too subtle an affordance for "there's a full scoreboard
+   in here". Hidden with the summary once expanded (togglePoolPlay). */
+.sb-poolplay-expand-btn {
+  align-self: center;
+  margin-top: 0.25rem;
+  padding: 0.4rem 1.1rem;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sb-poolplay-expand-btn:hover {
+  background: var(--bg);
+}
+
 .pp-summary-qual,
 .pp-summary-leaders {
   display: flex;
