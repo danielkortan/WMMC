@@ -496,6 +496,17 @@
     white-space: nowrap;
   }
 
+  /* Between-periods footer (e.g. All-Star break): the label is dropped — the
+     short status under the title already reads "All-Star Break" — and the
+     roster-deadline / next-round details wrap instead of clipping. */
+  .banner-footer .banner-period-break {
+    white-space: normal;
+  }
+
+  .banner-footer .banner-period-break .banner-break-label {
+    display: none;
+  }
+
   /* ── Cards ─────────────────────────────────────────────────────── */
   .card {
     border-radius: 10px;
