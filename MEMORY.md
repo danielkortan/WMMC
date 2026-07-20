@@ -1236,3 +1236,18 @@ Decisions made with Daniel (asked via option picker):
 - Flex gotcha: .sub-warn-item is inline-flex on desktop — every text node becomes a
   flex item separated by the gap, so punctuation after a </strong> gets a stray
   leading space. Keep trailing periods inside the <strong>.
+
+## 2026-07-20 — Banner stuck on PP2 W5 after break: calendar week now wins both ways (PR #356)
+
+- `getCurrentScoringPeriod` starts from the latest week WITH STAT DATA; its
+  calendar-week sync only capped backwards (`i < latestIdx`). When QF Week 1
+  started but no QF stats had synced, the banner stayed on "Pool Play 2 —
+  Week 5 of 5". Fix: if today (ET) falls inside a scheduled week, that week
+  wins in both directions (`i !== latestIdx`). Also fixes which scoreboard
+  section defaults open (renderScoreboardContent / renderActiveScoreboardTabs
+  share the function).
+- The break banner (`getBetweenPeriodsInfo`) only fires in a genuine gap
+  between rounds' schedule_dates — if the QF window is drawn to include the
+  break days, users see "Quarterfinals — Week 1 of 2" during the break
+  instead. Verified both states with Playwright + fabricated staging-seed
+  db.json (data through PP2 W5 only).
