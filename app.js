@@ -648,16 +648,18 @@ function getCurrentScoringPeriod(seasonData) {
 
   const dates = getScheduleDates();
 
-  // Cap to the current calendar week (ET). If today falls in a week whose
-  // schedule index is earlier than the latest data week, the banner should
-  // reflect where we actually are on the calendar — not data that may have
-  // been partially written for a future week via live-sync or early import.
+  // Sync to the current calendar week (ET). If today falls inside a scheduled
+  // week, that week wins over the latest data week in BOTH directions: cap
+  // back when data was partially written for a future week via live-sync or
+  // early import, and advance forward when a new week has started but its
+  // stats haven't synced yet — e.g. QF Week 1 right after the All-Star break,
+  // when the latest data week is still PP2 Week 5.
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (dates) {
-    for (let i = 0; i < dates.length; i++) {
+    for (let i = 0; i < dates.length && i < SEASON_SCHEDULE.length; i++) {
       const d = dates[i];
       if (d && d.start && d.end && todayET >= d.start && todayET <= d.end) {
-        if (i < latestIdx) {
+        if (i !== latestIdx) {
           latestIdx = i;
           latestRound = SEASON_SCHEDULE[i].round;
           latestWeek = SEASON_SCHEDULE[i].week;
