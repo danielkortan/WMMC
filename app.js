@@ -133,6 +133,29 @@ function computeScheduleDates(asgDateStr) {
 
 // fmtDateISO lives in js/utils.js (loaded via window globals by js/index.js).
 
+// Shift an ISO date string by N days: shiftDateISO('2026-07-12', 1) → '2026-07-13'.
+function shiftDateISO(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return fmtDateISO(d);
+}
+
+// The skipped days between two rounds' schedule windows (e.g. the All-Star
+// break week between PP2 Week 5 and QF Week 1). Returns {start, end, label}
+// when at least one full day separates prevWeek.end from nextWeek.start,
+// else null. The schedule stores no explicit break entry — the break IS the
+// gap (computeScheduleDates skips the ASG week), so displays derive it.
+function interRoundBreak(prevWeek, nextWeek, prevRound, nextRound) {
+  if (!prevWeek || !nextWeek || !prevWeek.end || !nextWeek.start) return null;
+  const start = shiftDateISO(prevWeek.end, 1);
+  if (nextWeek.start <= start) return null;
+  return {
+    start,
+    end: shiftDateISO(nextWeek.start, -1),
+    label: prevRound === 'PP2' && nextRound === 'QF' ? 'All-Star Break' : 'League Break',
+  };
+}
+
 // Short display:  "May 5 – 11" or "Jun 30 – Jul 6"
 function fmtShortDate(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
@@ -648,16 +671,18 @@ function getCurrentScoringPeriod(seasonData) {
 
   const dates = getScheduleDates();
 
-  // Cap to the current calendar week (ET). If today falls in a week whose
-  // schedule index is earlier than the latest data week, the banner should
-  // reflect where we actually are on the calendar — not data that may have
-  // been partially written for a future week via live-sync or early import.
+  // Sync to the current calendar week (ET). If today falls inside a scheduled
+  // week, that week wins over the latest data week in BOTH directions: cap
+  // back when data was partially written for a future week via live-sync or
+  // early import, and advance forward when a new week has started but its
+  // stats haven't synced yet — e.g. QF Week 1 right after the All-Star break,
+  // when the latest data week is still PP2 Week 5.
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (dates) {
-    for (let i = 0; i < dates.length; i++) {
+    for (let i = 0; i < dates.length && i < SEASON_SCHEDULE.length; i++) {
       const d = dates[i];
       if (d && d.start && d.end && todayET >= d.start && todayET <= d.end) {
-        if (i < latestIdx) {
+        if (i !== latestIdx) {
           latestIdx = i;
           latestRound = SEASON_SCHEDULE[i].round;
           latestWeek = SEASON_SCHEDULE[i].week;
@@ -4729,6 +4754,21 @@ function renderLeagueSchedule() {
 
     // Round separator
     if (s.round !== prevRound) {
+      // Call out the skipped week between rounds (the All-Star break) with its
+      // own dates so the timeline doesn't silently jump from PP2 to the QF.
+      if (prevRound && dates) {
+        const brk = interRoundBreak(dates[i - 1], dates[i], prevRound, s.round);
+        if (brk) {
+          html += `<div class="tl-item tl-break">
+            <div class="tl-marker"></div>
+            <div class="tl-content">
+              <span class="tl-week tl-break-label">${brk.label}</span>
+              <span class="tl-dates">${fmtDateRangeShort(brk.start, brk.end)}</span>
+              <span class="tl-status">Games not scored</span>
+            </div>
+          </div>`;
+        }
+      }
       const roundLabels = {
         PP1: 'Pool Play 1',
         PP2: 'Pool Play 2',
@@ -11135,6 +11175,12 @@ function renderScheduleDatesPreview() {
   SEASON_SCHEDULE.forEach((s, i) => {
     const d = dates[i];
     if (!d) return;
+    if (i > 0 && SEASON_SCHEDULE[i - 1].round !== s.round) {
+      const brk = interRoundBreak(dates[i - 1], d, SEASON_SCHEDULE[i - 1].round, s.round);
+      if (brk) {
+        html += `<tr class="schedule-break-row"><td>—</td><td>${brk.label}</td><td>${fmtDateRangeShort(brk.start, brk.end)}</td></tr>`;
+      }
+    }
     html += `<tr><td>${i + 1}</td><td>${s.label}</td><td>${fmtDateRangeShort(d.start, d.end)}</td></tr>`;
   });
   html += '</tbody></table>';
