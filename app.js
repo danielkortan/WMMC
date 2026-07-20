@@ -5044,7 +5044,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   if (qualifiers.length < 8) {
     // Not enough managers to form a bracket
-    return `<div class="card"><h2>Playoff Bracket ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
+    return `<div class="card"><h2>Playoffs ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
       <p class="text-muted">Need at least 8 qualifying managers to display the bracket. Currently ${qualifiers.length}.</p></div>`;
   }
 
@@ -5095,8 +5095,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const tentativeLabel = !ppFinalized ? ' <span class="badge badge-wildcard">Tentative</span>' : '';
 
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
-    <h2>Playoff Bracket${tentativeLabel}</h2>
-    <p class="bracket-tap-hint">Tap a manager to see their player scoring for that round; scores show batting/pitching splits once the round has points.</p>
+    <h2>Playoffs${tentativeLabel}</h2>
     <div class="active-bracket">`;
 
   // QF column

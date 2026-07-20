@@ -1086,10 +1086,6 @@
     font-size: 0.78rem;
   }
 
-  #scoreboard-bracket .bracket-tap-hint {
-    font-size: 0.9rem;
-  }
-
   #scoreboard-bracket .bracket-team {
     font-size: clamp(1rem, 4.2vw, 1.3rem);
     padding: 0.55rem 0.5rem;
@@ -1319,10 +1315,12 @@
     letter-spacing: -0.5px;
   }
 
+  /* One row, always: drop the seed indent and shrink a touch so the whole
+     stat line fits a 390px phone; the base nowrap+ellipsis trims the tail
+     on anything narrower. Density (rows per screen) is the priority here. */
   .live-matchup-sub {
-    font-size: 0.85rem;
-    padding-left: calc(1.4rem + 0.5rem);
-    white-space: normal;
+    font-size: 0.78rem;
+    padding-left: 0.1rem;
   }
 
   .live-matchup-note {

@@ -29,9 +29,13 @@ had none of them.
   bracket — team rows rendered at 0.82rem and expanded panels at desktop 0.75rem. Added a
   bracket section mirroring the `.mob-sbrow` contract (≥16px names/scores, flex name that
   ellipsizes last, fixed score column) and the readable expanded-panel sizes (the
-  `#scoreboard-content .mgr-detail-*` rules are ID-scoped and can't apply). Also a
-  `.bracket-tap-hint` line under the bracket title (same affordance fix as the labeled
-  "View Full Pool Play Scoreboard" button — the tiny arrow was the only expand cue).
+  `#scoreboard-content .mgr-detail-*` rules are ID-scoped and can't apply).
+- Follow-up (same day, commissioner reviewed screenshots — density over explanation): the
+  `.bracket-tap-hint` line added above was REMOVED (don't re-add explanatory text under the
+  bracket title), the active bracket card title is "Playoffs" (was "Playoff Bracket"), and the
+  Live matchup subline is forced to ONE row (nowrap + ellipsis; on phones the seed indent is
+  dropped and the font shrinks to 0.78rem so the full line fits a 390px screen) — the goal is
+  the maximum number of matchup rows visible without scrolling.
 
 **Verified:** Playwright at 1280×900 and 390×844 against a seeded QF-week db (PP finalized,
 confirmed seeding, QF Week 1 scores) with stubbed `/api/mlb/live` + `/api/mlb/daily`: 34/34

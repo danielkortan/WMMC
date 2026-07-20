@@ -4043,15 +4043,6 @@ body::before {
   white-space: nowrap;
 }
 
-/* Affordance hint under the bracket title — the clickable team rows only carry a
-   small arrow, so spell the interaction out (same visibility fix as the labeled
-   pool-play expand button). */
-.bracket-tap-hint {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  margin: -0.25rem 0 0.25rem;
-}
-
 /* ---- Live tab: playoff matchup (bracket) view ----
    During QF/SF/Finals the Live tab's Running Standings table becomes these
    head-to-head matchup cards, visually matching the Playoff Bracket card. */
@@ -4108,11 +4099,16 @@ body::before {
   white-space: nowrap;
 }
 
+/* Always a single row — vertical density (max matchups per screen) beats keeping
+   the tail chip visible on the narrowest phones, where the ellipsis trims it. */
 .live-matchup-sub {
   font-size: 0.72rem;
   color: var(--text-muted);
   padding-left: calc(18px + 0.4rem); /* clear the seed column so sublines align with names */
   margin-top: 0.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .live-matchup-detail .mgr-detail-panel {
