@@ -1,5 +1,47 @@
 # WMMC — Decisions Log
 
+## Swap automation: auto-apply on submit + playoff limits + MLB IL verification (2026-07-20)
+
+**What (commissioner request):** managers' swap submissions no longer wait for commissioner
+approval — they apply immediately with the existing effective-date logic. Rules enforced at
+submission: pool play = one Free Swap per PP round + unlimited IL/Drop/Trade (unchanged);
+playoffs (QF/SF/Finals) = ONE swap total per round across Free/Drop/Trade + unlimited IL (NEW —
+was one per type per round). IL swaps are verified against the player's official MLB IL status.
+Ineligible swaps get a warning and are blocked. Swap log + commissioner undo unchanged.
+
+**Key decisions:**
+
+- **Server is the enforcer.** `POST /api/seasons/:year/swaps` now: verifies the authed user IS
+  the named manager (or commissioner, 403 otherwise), computes round/week_key itself
+  (`currentScheduleRound`), runs `checkSwapLimit` (400 + warning on failure), verifies IL via
+  `fetchPlayerILStatus`, recomputes effective dates server-side (`computeSwapEffectiveDatesServer`
+  - shared `fetchStartedTeamsToday`), then applies via `applySwapToSeason` — the mutation
+    extracted verbatim from the approve endpoint, so approve and auto-apply can never drift.
+    Auto-applied swaps are `status:'approved'` + `auto_approved:true`.
+- **Integrity-guard fallback, not rejection:** if `assessSeasonWriteIntegrity` flags the apply as
+  destructive, the season is restored and the swap is queued as `pending` for commissioner review
+  (`pending_review:true` in the response, Slack alert) — the pre-automation flow is the safety
+  valve, and the approve/deny UI still exists for it.
+- **IL check fails OPEN.** Uses `sd.mlb_ids` → `/api/v1/people/{id}?hydrate=rosterEntries`,
+  IL = status code D7/D10/D15/D60 or description matching /injured list/i. No id / no entry /
+  API error → `il_status:'unverified'` and the swap proceeds (an MLB outage must never block a
+  legit IL swap). Verified status is stored on the swap as `il_status`.
+- **`checkSwapLimit` is a NEW dual-copy function**: canonical in `js/swaps.js` (unit-tested,
+  window-bridged for the form's pre-check) + identical mirror in `server.js`. Documented in
+  CLAUDE.md gotchas. Denied/undone swaps refund the slot (undo → re-eligible, intentionally).
+  Commissioner Swap reason bypasses limits (commissioner only).
+- **Round detection fix (client+server):** between weeks (All-Star break / round gaps) the swap
+  now charges the UPCOMING round, not Finals (old client code fell through to Finals in gaps).
+- **Swap form UX:** "Make a Swap", explains auto-apply; outcome message is baked into the form
+  render via `_swapFormNotice` because renderRosterData (and its daily-stats re-render) rebuilds
+  the form DOM and wiped any directly-written message (pre-existing bug, invisible before because
+  approvals happened out-of-band). After an applied swap the client re-pulls `/api/seasons`.
+- **Verified** end-to-end on a scratch db (API + Playwright): auto-apply, roster windows
+  (drop yesterday/add today with no games started), per-manager totals unchanged (95/95/95),
+  PP free-swap block, playoff combined-slot block (Free+Trade blocked after Drop; IL allowed),
+  403 for other-manager submission, same-day duplicate guard, undo restores roster + refunds
+  slot, IL fail-open when statsapi unreachable. 155/155 tests, lint+format clean.
+
 ## Live tab playoff bracket view + bracket mobile readability (2026-07-20)
 
 **What (commissioner request, day 1 of QF):** (1) the Live tab during QF/SF/Finals should read

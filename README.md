@@ -6,14 +6,14 @@ A full-stack fantasy baseball league management application with multi-season su
 
 - **Multi-Season Management** — Create, manage, and archive multiple seasons
 - **Configurable Scoring** — Per-stat batting and pitching point rubrics (currently hardcoded; see [Scoring Rubric](#scoring-rubric))
-- **Roster Management** — Per-week rosters with a manager-initiated swap workflow that the commissioner approves
+- **Roster Management** — Per-week rosters with a manager-initiated swap workflow that auto-applies on submission: the server enforces per-round swap limits (pool play: one Free Swap per PP round, unlimited IL/Drop/Trade; playoffs: one Free/Drop/Trade swap per round, unlimited IL), verifies IL swaps against the player's official MLB injured-list status, and computes effective dates from the live schedule (a player whose game has started swaps effective tomorrow). Swaps the integrity guard flags fall back to commissioner review; the commissioner can undo any applied swap
 - **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
 - **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
-- **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap approvals, audit log
+- **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap log with undo (plus approvals for guard-flagged swaps), audit log
 - **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post
 
 ## Tech Stack
