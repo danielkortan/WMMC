@@ -510,6 +510,44 @@ function getFinalsParticipants(sd) {
   ].map(([a, b]) => win(a, b));
 }
 
+// Head-to-head matchup pairs for a playoff round, in bracket display order — the same
+// structure the Playoff Bracket card renders (QF1 1v8, QF4 4v5, QF3 3v6, QF2 2v7; SF from
+// QF winners; Championship + 3rd Place from SF winners/losers). Returns
+// [{ label, teams: [{ name, seed }, { name, seed }] }] or null when the round's
+// participants aren't determined yet (no 8-manager seeding, or the prior round isn't
+// finalized) — callers fall back to a plain standings view.
+function playoffRoundMatchups(sd, round) {
+  if (!sd) return null;
+  const qualifiers = getQFQualifiers(sd);
+  if (!qualifiers || qualifiers.length < 8) return null;
+  const seedOf = {};
+  qualifiers.slice(0, 8).forEach((n, i) => (seedOf[n] = i + 1));
+  const mk = (label, a, b) => ({
+    label,
+    teams: [
+      { name: a, seed: seedOf[a] || null },
+      { name: b, seed: seedOf[b] || null },
+    ],
+  });
+  if (round === 'QF') {
+    const q = qualifiers;
+    return [mk('QF1', q[0], q[7]), mk('QF4', q[3], q[4]), mk('QF3', q[2], q[5]), mk('QF2', q[1], q[6])];
+  }
+  if (round === 'SF') {
+    const sf = getSFParticipants(sd);
+    if (!sf || sf.length < 4) return null;
+    return [mk('SF1', sf[0], sf[1]), mk('SF2', sf[2], sf[3])];
+  }
+  if (round === 'Finals') {
+    const sf = getSFParticipants(sd);
+    const fin = getFinalsParticipants(sd);
+    if (!sf || !fin || fin.length < 2) return null;
+    const losers = [sf[0] === fin[0] ? sf[1] : sf[0], sf[2] === fin[1] ? sf[3] : sf[2]];
+    return [mk('Championship', fin[0], fin[1]), mk('3rd Place', losers[0], losers[1])];
+  }
+  return null;
+}
+
 // Returns true if a manager is qualified for a given period (all managers qualify for pp1/pp2)
 function isManagerQualifiedForPeriod(managerName, period, sd) {
   if (period === 'pp1' || period === 'pp2') return true;
@@ -2035,6 +2073,58 @@ const _liveKey = (s) =>
     .replace(/[^a-z0-9]/gi, '_')
     .toLowerCase();
 
+// During QF/SF/Finals the Live tab shows the round's head-to-head matchups (mirroring the
+// Playoff Bracket card) instead of a ranked standings table. Shared by the live (today) and
+// historical-date views: `matchups` comes from playoffRoundMatchups, `byName` maps manager →
+// that view's endpoint row, `renderPanel(name)` builds the expandable player panel, and
+// `subline(row)` the muted per-team stat line. Expansion state rides the same
+// _liveExpandedManagers set / toggleLiveManagerDetails ids as the table view, so panels
+// survive the 2-minute poll re-render.
+function renderLiveMatchupCards(matchups, byName, renderPanel, subline) {
+  const teamHtml = (t, leader) => {
+    const r = byName[t.name];
+    const key = _liveKey(t.name);
+    const expanded = _liveExpandedManagers.has(t.name);
+    const arrow = expanded ? '&#9650;' : '&#9660;';
+    const nameCls = r && r.is_active_today ? 'live-mgr-active' : '';
+    const total = r ? (r.round_total ?? 0).toFixed(2) : '&mdash;';
+    const sub = subline(r);
+    return `
+      <div class="live-matchup-team ${leader ? 'live-matchup-leader' : ''}" onclick="toggleLiveManagerDetails('${key}','${jsStr(t.name)}')">
+        <div class="live-matchup-main">
+          <span class="bracket-seed">${t.seed || ''}</span>
+          <span class="live-matchup-name ${nameCls}">${escapeHtml(t.name)}</span>
+          <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span>
+          <span class="live-matchup-total">${total}</span>
+        </div>
+        ${sub ? `<div class="live-matchup-sub">${sub}</div>` : ''}
+      </div>
+      <div class="live-matchup-detail" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">${renderPanel(t.name)}</div>`;
+  };
+  return matchups
+    .map((mu) => {
+      const [t1, t2] = mu.teams;
+      // Highlight whoever currently leads the matchup (missing data counts as 0; ties — or
+      // nothing scored yet — highlight nobody). Purely visual: official winners are decided
+      // at round finalization on the Scoreboard bracket, seed tiebreak included.
+      const e1 = byName[t1.name] ? (byName[t1.name].round_total ?? 0) : 0;
+      const e2 = byName[t2.name] ? (byName[t2.name].round_total ?? 0) : 0;
+      const leader = e1 !== e2 ? (e1 > e2 ? t1.name : t2.name) : null;
+      return `<div class="live-matchup">
+        <div class="live-matchup-label">${escapeHtml(mu.label)}</div>
+        ${teamHtml(t1, leader === t1.name)}
+        ${teamHtml(t2, leader === t2.name)}
+      </div>`;
+    })
+    .join('');
+}
+
+// Signed fixed-2 number for the live matchup sublines ("+8.40" / "-3.10").
+function fmtSignedLive(v) {
+  const n = v ?? 0;
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}`;
+}
+
 function startLivePolling() {
   stopLivePolling();
   _liveViewDate = null;
@@ -2217,6 +2307,33 @@ function renderDailyContent(d) {
         </div>
       </div>`;
   };
+
+  const byName = {};
+  for (const m of d.managers || []) byName[m.name] = m;
+
+  // Playoff rounds render as head-to-head bracket matchups (same pairs as the Playoff
+  // Bracket card) instead of a ranked standings table; pool play — and any playoff state
+  // where the participants can't be determined yet — keeps the table.
+  const dailyMatchups = ['QF', 'SF', 'Finals'].includes(aw.round)
+    ? playoffRoundMatchups(getSeasons()[SELECTED_SEASON], aw.round)
+    : null;
+  if (dailyMatchups) {
+    const participantNames = new Set(dailyMatchups.flatMap((mu) => mu.teams.map((t) => t.name)));
+    for (const n of [..._liveExpandedManagers]) {
+      if (!participantNames.has(n)) _liveExpandedManagers.delete(n);
+    }
+    const subline = (r) =>
+      r
+        ? `${fmtSignedLive(r.today_score)} daily &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+        : 'No data for this date';
+    managersEl.innerHTML = `
+      <div class="card">
+        <h3>Playoff Matchups <span class="muted">(${escapeHtml(d.date)})</span></h3>
+        ${renderLiveMatchupCards(dailyMatchups, byName, renderDailyPanel, subline)}
+        <div class="live-matchup-note">Totals are certified ${escapeHtml(aw.round)} scoreboard points through end of ${escapeHtml(d.date)}. Tap a manager for that day&rsquo;s player stats.</div>
+      </div>`;
+    return;
+  }
 
   const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
   for (const n of [..._liveExpandedManagers]) {
@@ -2455,21 +2572,46 @@ function renderLiveContent(d) {
       </div>`;
     };
 
-    // Drop any expanded managers that no longer appear in the response so the
-    // Set doesn't grow unbounded across season changes.
-    const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
-    for (const n of [..._liveExpandedManagers]) {
-      if (!currentMgrNames.has(n)) _liveExpandedManagers.delete(n);
-    }
+    const byName = {};
+    for (const m of d.managers || []) byName[m.name] = m;
 
-    const rows = (d.managers || [])
-      .map((m, i) => {
-        const nameCls = m.is_active_today ? 'live-mgr-active' : '';
-        const key = _liveKey(m.name);
-        const expanded = _liveExpandedManagers.has(m.name);
-        const arrow = expanded ? '&#9650;' : '&#9660;';
-        const safeMgr = jsStr(m.name);
-        return `
+    // Playoff rounds render as head-to-head bracket matchups (same pairs as the Playoff
+    // Bracket card) instead of a ranked standings table; pool play — and any playoff state
+    // where the participants can't be determined yet — keeps the table.
+    const liveMatchups = ['QF', 'SF', 'Finals'].includes(aw.round)
+      ? playoffRoundMatchups(getSeasons()[SELECTED_SEASON], aw.round)
+      : null;
+    if (liveMatchups) {
+      const participantNames = new Set(liveMatchups.flatMap((mu) => mu.teams.map((t) => t.name)));
+      for (const n of [..._liveExpandedManagers]) {
+        if (!participantNames.has(n)) _liveExpandedManagers.delete(n);
+      }
+      const subline = (r) =>
+        r
+          ? `${fmtSignedLive(r.today_score)} today &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+          : 'No roster data yet';
+      managersEl.innerHTML = `
+        <div class="card">
+          <h3>Playoff Matchups</h3>
+          ${renderLiveMatchupCards(liveMatchups, byName, renderTodayPanel, subline)}
+          <div class="live-matchup-note">Totals are the certified ${escapeHtml(aw.round)} scoreboard plus today&rsquo;s points. Tap a manager for today&rsquo;s player stats.</div>
+        </div>`;
+    } else {
+      // Drop any expanded managers that no longer appear in the response so the
+      // Set doesn't grow unbounded across season changes.
+      const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
+      for (const n of [..._liveExpandedManagers]) {
+        if (!currentMgrNames.has(n)) _liveExpandedManagers.delete(n);
+      }
+
+      const rows = (d.managers || [])
+        .map((m, i) => {
+          const nameCls = m.is_active_today ? 'live-mgr-active' : '';
+          const key = _liveKey(m.name);
+          const expanded = _liveExpandedManagers.has(m.name);
+          const arrow = expanded ? '&#9650;' : '&#9660;';
+          const safeMgr = jsStr(m.name);
+          return `
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
           <td class="${nameCls}">${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
@@ -2484,10 +2626,10 @@ function renderLiveContent(d) {
         <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">
           <td colspan="9">${renderTodayPanel(m.name)}</td>
         </tr>`;
-      })
-      .join('');
-    const roundLabel = d.active_week?.round || '';
-    managersEl.innerHTML = `
+        })
+        .join('');
+      const roundLabel = d.active_week?.round || '';
+      managersEl.innerHTML = `
       <div class="card">
         <h3>Running Standings</h3>
         <div class="table-wrapper">
@@ -2506,6 +2648,7 @@ function renderLiveContent(d) {
           </table>
         </div>
       </div>`;
+    }
   }
 
   // Today's games
@@ -4901,7 +5044,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   if (qualifiers.length < 8) {
     // Not enough managers to form a bracket
-    return `<div class="card"><h2>Playoff Bracket ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
+    return `<div class="card"><h2>Playoffs ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
       <p class="text-muted">Need at least 8 qualifying managers to display the bracket. Currently ${qualifiers.length}.</p></div>`;
   }
 
@@ -4952,7 +5095,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const tentativeLabel = !ppFinalized ? ' <span class="badge badge-wildcard">Tentative</span>' : '';
 
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
-    <h2>Playoff Bracket${tentativeLabel}</h2>
+    <h2>Playoffs${tentativeLabel}</h2>
     <div class="active-bracket">`;
 
   // QF column

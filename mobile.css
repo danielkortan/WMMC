@@ -1072,6 +1072,111 @@
   }
 
   /* =============================================================
+     PLAYOFF BRACKET — same phone readability treatment as the
+     pool-play scoreboard rows: bigger names/scores, comfortable
+     tap targets, and the expanded player panel at the readable
+     sizes the #scoreboard-content roster expand uses (the bracket
+     lives in #scoreboard-bracket, so those rules don't reach it).
+     ============================================================= */
+  #scoreboard-bracket .bracket-round-label {
+    font-size: 1.05rem;
+  }
+
+  #scoreboard-bracket .bracket-matchup-label {
+    font-size: 0.78rem;
+  }
+
+  #scoreboard-bracket .bracket-team {
+    font-size: clamp(1rem, 4.2vw, 1.3rem);
+    padding: 0.55rem 0.5rem;
+    gap: 0.5rem;
+  }
+
+  #scoreboard-bracket .bracket-seed {
+    font-size: 0.85rem;
+    min-width: 1.4rem;
+  }
+
+  /* Full manager names stay visible: the name flexes and ellipsizes only as a
+     last resort; the score never shrinks (same contract as .mob-sbrow). */
+  #scoreboard-bracket .bracket-name {
+    font-weight: 700;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #scoreboard-bracket .bracket-team-arrow {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  #scoreboard-bracket .bracket-score {
+    font-size: clamp(1rem, 4.4vw, 1.35rem);
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+
+  #scoreboard-bracket .bracket-score-group {
+    flex-shrink: 0;
+  }
+
+  #scoreboard-bracket .bracket-score-detail {
+    font-size: 0.78rem;
+  }
+
+  /* Expanded player panel (buildManagerDetailPanelHtml) — readable sizes,
+     matching the scoreboard roster expand. */
+  #scoreboard-bracket .mgr-detail-panel {
+    padding: 0.4rem 0.4rem 0.5rem;
+    background: var(--bg);
+  }
+
+  #scoreboard-bracket .mgr-detail-header {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-light);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 0.5rem 0.25rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.25rem;
+  }
+
+  #scoreboard-bracket .mgr-detail-section table {
+    width: 100%;
+    table-layout: fixed;
+    font-size: 1.05rem;
+  }
+
+  #scoreboard-bracket .mgr-detail-section table thead th {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding: 0.35rem;
+    background: none;
+  }
+
+  #scoreboard-bracket .mgr-detail-section table tbody td {
+    font-size: 1.05rem;
+    padding: 0.5rem 0.4rem;
+  }
+
+  #scoreboard-bracket .mgr-detail-section table tbody td:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #scoreboard-bracket .mgr-detail-section .wrs-hist-tag {
+    font-size: 0.8rem;
+  }
+
+  /* =============================================================
      LIVE TAB — Running Standings rows become cards, games get
      bigger type. The 9-column desktop table can't fit a phone at a
      readable size, so each manager becomes: rank | name | total on
@@ -1170,6 +1275,61 @@
   #live-managers .live-mgr-detail-section .data-table td {
     font-size: 0.9rem;
     padding: 0.45rem 0.45rem;
+  }
+
+  /* Playoff matchup cards (QF/SF/Finals replace the standings table): the
+     same readability contract as the scoreboard's .mob-sbrow cards — big
+     name that flexes and only ellipsizes as a last resort, big score that
+     never shrinks, and a labeled stat subline instead of hidden columns. */
+  .live-matchup-label {
+    font-size: 0.8rem;
+  }
+
+  .live-matchup-team {
+    padding: 0.5rem 0.4rem;
+  }
+
+  .live-matchup-main {
+    gap: 0.5rem;
+  }
+
+  .live-matchup-name {
+    font-size: clamp(1.05rem, 4.5vw, 1.4rem);
+    font-weight: 700;
+  }
+
+  .live-matchup-main .bracket-seed {
+    font-size: 0.85rem;
+    min-width: 1.4rem;
+  }
+
+  .live-matchup-main .sb-expand-arrow {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+  }
+
+  .live-matchup-total {
+    font-size: clamp(1.05rem, 4.8vw, 1.5rem);
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+
+  /* One row, always: drop the seed indent and shrink a touch so the whole
+     stat line fits a 390px phone; the base nowrap+ellipsis trims the tail
+     on anything narrower. Density (rows per screen) is the priority here. */
+  .live-matchup-sub {
+    font-size: 0.78rem;
+    padding-left: 0.1rem;
+  }
+
+  .live-matchup-note {
+    font-size: 0.85rem;
+  }
+
+  #live-managers .live-matchup-detail .table-wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   /* Today's games list */

@@ -1,5 +1,48 @@
 # WMMC — Decisions Log
 
+## Live tab playoff bracket view + bracket mobile readability (2026-07-20)
+
+**What (commissioner request, day 1 of QF):** (1) the Live tab during QF/SF/Finals should read
+as a playoff bracket, not a "Running Standings" rank table; (2) the recent pool-play scoreboard
+display/visibility improvements (mobile type scale, full names, readable expanded player
+panels, labeled expand affordance) must carry over to the playoff scoreboard/bracket, which
+had none of them.
+
+**Key decisions (display-only — no writes to managers/rosters/swaps/scoring):**
+
+- New `playoffRoundMatchups(sd, round)` (app.js) returns the round's head-to-head pairs in
+  bracket display order by reusing the canonical helpers (`getQFQualifiers` /
+  `getSFParticipants` / `getFinalsParticipants`), so the Live view can never disagree with the
+  Playoff Bracket card. Finals returns Championship + 3rd Place. Returns `null` when
+  participants aren't determined (no 8-manager seeding, prior round unfinalized) — both Live
+  renderers then **fall back to the existing standings table**, and pool play is untouched.
+- Both the live (today) and historical-date Live views share `renderLiveMatchupCards`: seed +
+  name + total per team, a muted subline replacing the dropped table columns (live: today Δ ·
+  live/done/left counts · weekly; historical: daily Δ · weekly), and the same
+  `live-detail-<key>` ids / `_liveExpandedManagers` set so the expandable per-player panels and
+  `toggleLiveManagerDetails` work unchanged across the 2-minute poll re-render. Leader tint is
+  purely visual (missing manager rows count 0; ties highlight nobody) — official winners stay
+  finalize-time on the Scoreboard bracket with the seed tiebreak. Participants missing from the
+  endpoint response (no approved roster yet) render an em-dash total + "No roster data yet".
+- Bracket mobile parity: `mobile.css` previously had **zero** `#scoreboard-bracket` rules, so
+  the pool-play readability work (and the roster-expand fix from #337) never reached the
+  bracket — team rows rendered at 0.82rem and expanded panels at desktop 0.75rem. Added a
+  bracket section mirroring the `.mob-sbrow` contract (≥16px names/scores, flex name that
+  ellipsizes last, fixed score column) and the readable expanded-panel sizes (the
+  `#scoreboard-content .mgr-detail-*` rules are ID-scoped and can't apply).
+- Follow-up (same day, commissioner reviewed screenshots — density over explanation): the
+  `.bracket-tap-hint` line added above was REMOVED (don't re-add explanatory text under the
+  bracket title), the active bracket card title is "Playoffs" (was "Playoff Bracket"), and the
+  Live matchup subline is forced to ONE row (nowrap + ellipsis; on phones the seed indent is
+  dropped and the font shrinks to 0.78rem so the full line fits a 390px screen) — the goal is
+  the maximum number of matchup rows visible without scrolling.
+
+**Verified:** Playwright at 1280×900 and 390×844 against a seeded QF-week db (PP finalized,
+confirmed seeding, QF Week 1 scores) with stubbed `/api/mlb/live` + `/api/mlb/daily`: 34/34
+checks — bracket totals/splits + expanded QF player panels (≥16px on mobile), matchup cards in
+QF1/QF4/QF3/QF2 order, leader/tie/no-data highlighting, expand-across-poll ids, historical
+matchup view, no horizontal overflow, no JS errors. 140/140 tests, lint + format clean.
+
 ## Daily Slack post: playoff cadence + bracket matchups (2026-07-15)
 
 **What (commissioner request):** stop the pool-play 7am auto post after the Monday following
