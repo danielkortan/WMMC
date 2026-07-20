@@ -1268,68 +1268,303 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
   }
 });
 
-// POST /api/seasons/:year/swaps — atomically append a single pending swap.
-// Uses a tiny payload (just the swap object) instead of the full season JSON, so it
-// cannot fail due to payload size and gives the client a clear success/error signal.
-// The full-season save (POST /api/seasons/:year) still acts as a safety net, but
-// swap submission no longer depends on it succeeding.
-app.post('/api/seasons/:year/swaps', requireAuth, (req, res) => {
-  if (!isValidYear(req.params.year)) {
-    return res.status(400).json({ error: 'Invalid year parameter' });
-  }
-  const swap = req.body;
-  if (!swap || typeof swap !== 'object' || Array.isArray(swap)) {
-    return res.status(400).json({ error: 'Request body must be a swap object' });
-  }
-  if (!swap.player_out || !swap.player_in || !swap.manager) {
-    return res.status(400).json({ error: 'Swap must include manager, player_out, and player_in' });
-  }
-  const db = readDB();
-  if (!db.seasons) db.seasons = {};
-  const sd = (db.seasons || {})[req.params.year];
-  if (!sd) return res.status(404).json({ error: 'Season not found' });
-  if (sd.status !== 'active') return res.status(400).json({ error: 'Season is not active' });
+// --- Swap eligibility rules (mirror of js/swaps.js — keep the two copies identical; the server
+// can't import the ESM js/ module, same as detectScoreSwings). Pool play: one Free Swap per PP
+// round, unlimited IL/Drop/Trade. Playoffs: one swap total per round across Free/Drop/Trade,
+// unlimited IL. Only pending and approved swaps consume a slot — denied and undone swaps refund
+// it; commissioner adds/drops carry no `round` field and are excluded. ---
+const FREE_SWAP_REASON = 'Free Swap (one per round)';
+const PLAYOFF_LIMITED_REASONS = [FREE_SWAP_REASON, 'Drop Swap', 'Trade Swap'];
 
-  if (!Array.isArray(sd.swaps)) sd.swaps = [];
-
-  // Idempotency guard: a double-click (or a retry while the first request was still in flight on the
-  // long computeSwapEffectiveDates call) was creating two identical pending requests for the same
-  // manager + player_out + player_in — the "commissioner got the same swap twice" bug. If an
-  // identical pending swap already exists, return it instead of appending a duplicate (no second
-  // write, no second Slack post).
-  const dup = sd.swaps.find(
-    (s) =>
-      s.status === 'pending' &&
-      s.manager === swap.manager &&
-      s.player_out === swap.player_out &&
-      s.player_in === swap.player_in
+function checkSwapLimit(swaps, managerName, reason, round) {
+  // Only count approved or pending swaps (not denied/undone) for this manager in this round
+  const managerSwaps = (swaps || []).filter(
+    (s) => s.manager === managerName && (s.status === 'approved' || s.status === 'pending') && s.round === round
   );
-  if (dup) {
-    return res.json({ ok: true, swap: dup, duplicate: true, _rev: computeSeasonRev(sd) });
+
+  // Pool Play: unlimited Drop/IL/Trade, but only 1 Free Swap per PP-round
+  if (round === 'PP1' || round === 'PP2') {
+    if (reason === FREE_SWAP_REASON) {
+      const used = managerSwaps.filter((s) => s.reason === FREE_SWAP_REASON).length;
+      if (used >= 1) {
+        return `You have already used your Free Swap for ${round === 'PP1' ? 'Pool Play 1' : 'Pool Play 2'}. You may still use Drop, IL, or Trade swaps.`;
+      }
+    }
+    return null; // Drop/IL/Trade unlimited during pool play
   }
 
-  // Server stamps id, timestamp, and status so the client cannot forge them.
-  swap.id = Date.now().toString();
-  swap.timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  swap.status = 'pending';
+  // Playoffs (QF, SF, Finals): IL swaps unlimited; Free/Drop/Trade share ONE slot per round
+  if (round === 'QF' || round === 'SF' || round === 'Finals') {
+    if (reason === 'IL Swap') return null;
+    const usedSwap = managerSwaps.find((s) => PLAYOFF_LIMITED_REASONS.includes(s.reason));
+    if (usedSwap) {
+      const roundLabel = round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'the Finals';
+      return `You have already used your one Free/Drop/Trade swap for ${roundLabel} (${usedSwap.reason} on ${usedSwap.swap_date || 'an earlier date'}). Only IL swaps remain available this round.`;
+    }
+    return null;
+  }
 
-  sd.swaps.push(swap);
+  return null;
+}
 
-  addAuditEntry(
-    db,
-    'swap_submitted',
-    { year: req.params.year, manager: swap.manager, player_out: swap.player_out, player_in: swap.player_in },
-    req.get('X-User-Email')
-  );
-  writeDB(db);
-  // Return the new concurrency token: this write changed `swaps` (a hashed field), so a client that
-  // follows up with a full-season save (e.g. the commissioner approving the swap) must adopt it or
-  // it would falsely 409 as stale.
-  res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
+// Server port of the client's getCurrentScheduleRound: which schedule round contains today's ET
+// date. Between weeks (e.g. the All-Star break or a round gap) it returns the UPCOMING round —
+// that's the roster a swap made in the gap affects, so that's the round it's charged against.
+// The server computes this itself at submission so the round can't be forged or go stale in an
+// old client tab.
+function currentScheduleRound(sd) {
+  const dates = sd.schedule_dates;
+  if (!dates || dates.length === 0) return { round: 'PP1', weekKey: null };
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    const d = dates[i];
+    if (d && today <= d.end) {
+      return { round: SEASON_SCHEDULE[i].round, weekKey: `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}` };
+    }
+  }
+  // After the last week: use the final round.
+  const last = SEASON_SCHEDULE[SEASON_SCHEDULE.length - 1];
+  return { round: last.round, weekKey: `${last.round}|${last.week}` };
+}
 
-  postSlack(
-    `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
-  ).catch(() => {});
+// Server-side twin of the client's computeSwapEffectiveDates: a player whose team's game has
+// already started today can't enter or leave a roster today, so the swap takes effect tomorrow
+// (drop today, add tomorrow); otherwise it's effective today (drop yesterday, add today). The
+// server recomputes this at submission rather than trusting the client's values. Falls back to
+// "not started" when the MLB API is unreachable so swaps stay usable.
+async function computeSwapEffectiveDatesServer(sd, playerOut, playerIn) {
+  const teamOf = (name) =>
+    (sd.batters_team && sd.batters_team[name]) || (sd.pitchers_team && sd.pitchers_team[name]) || null;
+  const teams = [teamOf(playerOut), teamOf(playerIn)].filter(Boolean).map((t) => t.toUpperCase());
+
+  const now = new Date();
+  const isoET = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const todayStr = isoET(now);
+  const yesterdayStr = isoET(new Date(now.getTime() - 86400000));
+  const tomorrowStr = isoET(new Date(now.getTime() + 86400000));
+
+  let started = [];
+  if (teams.length) {
+    try {
+      const startedSet = await fetchStartedTeamsToday();
+      started = teams.filter((t) => startedSet.has(t));
+    } catch (e) {
+      console.error('teams-started check failed during swap submission (treating as not started):', e.message);
+    }
+  }
+
+  if (started.length) {
+    return { effective_date: tomorrowStr, drop_date: todayStr, add_date: tomorrowStr, teams_started: started };
+  }
+  return { effective_date: todayStr, drop_date: yesterdayStr, add_date: todayStr, teams_started: [] };
+}
+
+// IL status codes on MLB roster entries: 7-day (concussion), 10-day, 15-day, and 60-day lists.
+const MLB_IL_STATUS_CODES = new Set(['D7', 'D10', 'D15', 'D60']);
+
+// Look up a player's official MLB roster status to verify an IL swap, via the stable MLB person
+// id in sd.mlb_ids (the source of truth for player identity) and the player's current roster
+// entry. Returns { checked: false, reason } when it can't verify (no id / no entry / API error)
+// or { checked: true, onIL, status } when it can. Callers FAIL OPEN on checked:false — an MLB
+// outage or an unmapped player must never block a legitimate IL swap.
+async function fetchPlayerILStatus(sd, playerName) {
+  const mlbId = (sd.mlb_ids || {})[playerName];
+  if (typeof mlbId !== 'number') return { checked: false, reason: 'no_mlb_id' };
+  try {
+    const data = await mlbApiFetch(`/api/v1/people/${mlbId}?hydrate=rosterEntries`);
+    const person = (data.people || [])[0];
+    const entries = (person && person.rosterEntries) || [];
+    // Current stint: prefer an explicitly active entry, else the newest open-ended one.
+    const current =
+      entries.find((e) => e.isActive === true) ||
+      entries
+        .filter((e) => !e.endDate)
+        .sort((a, b) => String(b.startDate || '').localeCompare(String(a.startDate || '')))[0] ||
+      null;
+    const status = current && current.status;
+    if (!status || (!status.code && !status.description)) return { checked: false, reason: 'no_roster_entry' };
+    const onIL = MLB_IL_STATUS_CODES.has(status.code) || /injured list/i.test(status.description || '');
+    return { checked: true, onIL, status: status.description || status.code };
+  } catch (e) {
+    console.error(`IL status lookup failed for ${playerName} (id ${mlbId}):`, e.message);
+    return { checked: false, reason: 'api_error' };
+  }
+}
+
+// POST /api/seasons/:year/swaps — submit a swap. Since the swap-automation change this
+// AUTO-APPLIES: the server validates eligibility (per-round swap limits + official MLB IL status
+// for IL swaps), computes the effective dates from the live schedule, and applies the swap
+// immediately with the exact mutation the commissioner approve endpoint uses — no approval step.
+// Safety valves preserved:
+//   - the destructive-save integrity guard still runs; a flagged swap is NOT applied and instead
+//     falls back to a pending request for commissioner review (the pre-automation flow);
+//   - every applied swap lands in the swap log as approved, and the commissioner undo endpoint
+//     reverses it exactly as before.
+// Uses a tiny payload (just the swap object) instead of the full season JSON, so it cannot fail
+// due to payload size and gives the client a clear success/error signal.
+app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
+  try {
+    if (!isValidYear(req.params.year)) {
+      return res.status(400).json({ error: 'Invalid year parameter' });
+    }
+    const swap = req.body;
+    if (!swap || typeof swap !== 'object' || Array.isArray(swap)) {
+      return res.status(400).json({ error: 'Request body must be a swap object' });
+    }
+    if (!swap.player_out || !swap.player_in || !swap.manager) {
+      return res.status(400).json({ error: 'Swap must include manager, player_out, and player_in' });
+    }
+    // Swaps auto-apply now, so identity matters: a manager can only submit swaps for their own
+    // team (the commissioner can submit for anyone).
+    if (!req.manager.commissioner && req.manager.name !== swap.manager) {
+      return res.status(403).json({ error: 'You can only submit swaps for your own team.' });
+    }
+    const db = readDB();
+    if (!db.seasons) db.seasons = {};
+    const sd = (db.seasons || {})[req.params.year];
+    if (!sd) return res.status(404).json({ error: 'Season not found' });
+    if (sd.status !== 'active') return res.status(400).json({ error: 'Season is not active' });
+
+    if (!Array.isArray(sd.swaps)) sd.swaps = [];
+
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+    // Idempotency guard: a double-click (or a retry while the first request was still in flight)
+    // was creating two identical requests for the same manager + player_out + player_in — the
+    // "commissioner got the same swap twice" bug. If an identical swap already exists (pending,
+    // or applied today), return it instead of appending a duplicate (no second write, no second
+    // Slack post, no double-applied roster windows).
+    const dup = sd.swaps.find(
+      (s) =>
+        s.manager === swap.manager &&
+        s.player_out === swap.player_out &&
+        s.player_in === swap.player_in &&
+        (s.status === 'pending' || (s.status === 'approved' && s.swap_date === todayET))
+    );
+    if (dup) {
+      return res.json({ ok: true, swap: dup, duplicate: true, _rev: computeSeasonRev(sd) });
+    }
+
+    // The server, not the client, decides which round the swap belongs to and is charged against.
+    const { round, weekKey } = currentScheduleRound(sd);
+    swap.round = round;
+    if (weekKey) swap.week_key = weekKey;
+
+    // Eligibility: enforce the per-round swap limits server-side ("no longer eligible" swaps are
+    // blocked with a warning, not queued). Commissioner Swaps bypass the limits — they are
+    // corrections, not a manager's allotment.
+    const isCommissionerSwap = swap.reason === 'Commissioner Swap' && req.manager.commissioner;
+    if (!isCommissionerSwap) {
+      const limitError = checkSwapLimit(sd.swaps, swap.manager, swap.reason, round);
+      if (limitError) return res.status(400).json({ error: limitError, code: 'swap_limit' });
+    }
+
+    // IL swaps must be real: the player being dropped has to be on the official MLB injured list.
+    // Verified against the MLB Stats API; unverifiable lookups fail open (il_status 'unverified').
+    if (swap.reason === 'IL Swap') {
+      const il = await fetchPlayerILStatus(sd, swap.player_out);
+      if (il.checked && !il.onIL) {
+        return res.status(400).json({
+          error:
+            `${swap.player_out} is not on the official MLB injured list` +
+            `${il.status ? ` (current status: ${il.status})` : ''}. ` +
+            `An IL swap requires the player you're dropping to be on the IL — use your Free, Drop, or Trade swap instead.`,
+          code: 'not_on_il',
+        });
+      }
+      swap.il_status = il.checked ? il.status : 'unverified';
+    }
+
+    // Server-computed effective dates (game-started rule), overriding the client's values.
+    const eff = await computeSwapEffectiveDatesServer(sd, swap.player_out, swap.player_in);
+    swap.swap_date = todayET;
+    swap.effective_date = eff.effective_date;
+    swap.drop_date = eff.drop_date;
+    swap.add_date = eff.add_date;
+    swap.teams_started = eff.teams_started;
+
+    // Server stamps id, timestamp, and status so the client cannot forge them.
+    swap.id = Date.now().toString();
+    swap.timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    swap.status = 'approved';
+    swap.auto_approved = true;
+    swap.reviewed_at = swap.timestamp;
+
+    // Pristine copy for the before/after integrity vet (sd is mutated in place below).
+    const originalSd = JSON.parse(JSON.stringify(sd));
+
+    sd.swaps.push(swap);
+    applySwapToSeason(sd, swap, swap.add_date, swap.drop_date);
+
+    // Destructive-save guard: if applying this swap would crater a manager's total or shrink a
+    // roster, do NOT auto-apply. Fall back to the pre-automation flow — queue it as a pending
+    // request for the commissioner — instead of rejecting outright, so an unusual-but-legitimate
+    // swap isn't lost.
+    const integrity = assessSeasonWriteIntegrity(originalSd, sd);
+    if (integrity.destructive) {
+      db.seasons[req.params.year] = originalSd; // discard the applied mutation entirely
+      const pendingSwap = { ...swap, status: 'pending' };
+      delete pendingSwap.auto_approved;
+      delete pendingSwap.reviewed_at;
+      if (!Array.isArray(originalSd.swaps)) originalSd.swaps = [];
+      originalSd.swaps.push(pendingSwap);
+      addAuditEntry(
+        db,
+        'swap_auto_apply_blocked',
+        { year: req.params.year, id: pendingSwap.id, manager: swap.manager, reasons: integrity.reasons },
+        req.get('X-User-Email')
+      );
+      writeDB(db);
+      res.json({
+        ok: true,
+        swap: pendingSwap,
+        pending_review: true,
+        reasons: integrity.reasons,
+        _rev: computeSeasonRev(originalSd),
+      });
+      postSlack(
+        `:warning: *Swap auto-apply blocked (${req.params.year})* — ${swap.manager}: out ${swap.player_out}, in ${swap.player_in}.\n• ` +
+          `${integrity.reasons.join('\n• ')}\nQueued as pending for commissioner review.`
+      ).catch(() => {});
+      return;
+    }
+
+    const before = captureScoreSnapshot(originalSd, todayET).totals;
+    const after = captureScoreSnapshot(sd, todayET).totals;
+    const totalsDelta = {};
+    for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+      if (Math.abs(d) > 0.01) totalsDelta[m] = Math.round(d * 10) / 10;
+    }
+
+    db.seasons[req.params.year] = sd;
+    addAuditEntry(
+      db,
+      'swap_auto_approved',
+      {
+        year: req.params.year,
+        id: swap.id,
+        manager: swap.manager,
+        player_out: swap.player_out,
+        player_in: swap.player_in,
+        round,
+        reason: swap.reason,
+      },
+      req.get('X-User-Email')
+    );
+    writeDB(db);
+    // Return the new concurrency token: this write changed `swaps` (a hashed field), so a client
+    // that follows up with a full-season save must adopt it or it would falsely 409 as stale.
+    res.json({ ok: true, swap, totals_delta: totalsDelta, _rev: computeSeasonRev(sd) });
+
+    postSlack(
+      `*Swap Applied* (${round})\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}` +
+        `${swap.il_status && swap.il_status !== 'unverified' ? ` (MLB status: ${swap.il_status})` : ''}\n*Effective:* ${swap.effective_date}`
+    ).catch(() => {});
+  } catch (e) {
+    console.error('Swap submission failed:', e);
+    res.status(500).json({ error: 'Swap submission failed: ' + e.message });
+  }
 });
 
 // Find a swap by id within a season, or null. Shared by the deny/edit/approve endpoints.
@@ -1419,40 +1654,16 @@ function assignUnclaimedStatsServer(sd, playerName, managerName, rosterType) {
   }
 }
 
-// POST /api/seasons/:year/swaps/:id/approve — atomically approve a pending swap. This is a faithful
-// server-side port of the old client approveSwap (rosters out→in across the affected weeks +
-// roster_dates drop/add windows + stat attribution), so scoring behavior is unchanged — but because
-// it runs server-side under a read-modify-write, it can't be lost to a stale-save 409 (the
-// "I approved it but it came back as pending" bug). Body: { add_date, drop_date, force? }. Before
-// committing it runs the destructive-save integrity guard and, unless force is set, rejects (409,
-// no write, Slack-alert) any approval that would crater a manager's total or shrink a roster.
-// Part of #275 (ROSTER_OPS_PLAN.md §3c).
-app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res) => {
-  if (!isValidYear(req.params.year)) {
-    return res.status(400).json({ error: 'Invalid year parameter' });
-  }
-  const db = readDB();
-  const sd = (db.seasons || {})[req.params.year];
-  if (!sd) return res.status(404).json({ error: 'Season not found' });
-  const swap = findSwap(sd, req.params.id);
-  if (!swap) return res.status(404).json({ error: 'Swap not found' });
-  if (swap.status !== 'pending') {
-    return res.status(409).json({ error: 'swap_not_pending', detail: `Swap is ${swap.status}, not pending.` });
-  }
-
-  const { add_date: addDate, drop_date: dropDate, force } = req.body || {};
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const tomorrowET = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  })();
-  const effectiveDropDate = (typeof dropDate === 'string' && dropDate) || swap.drop_date || todayET;
-  const effectiveAddDate = (typeof addDate === 'string' && addDate) || swap.add_date || tomorrowET;
-
-  // Pristine copy for the before/after integrity vet (sd is mutated in place below).
-  const originalSd = JSON.parse(JSON.stringify(sd));
-
+// Apply an approved swap to a season in place: roster arrays out→in across the affected weeks,
+// stat attribution for player_in, roster_dates drop/add windows (with the impossible-window drop
+// clamp), then the same derived-state refresh the full-season save path runs (roster-array heal +
+// player_dates cutoffs + weekly-score recompute). Without that refresh, the attribution credits
+// player_in's already-synced weekly rows in full the moment the swap lands — even when add_date
+// hasn't arrived yet (an IL swap effective tomorrow) — and the over-credit persists until the next
+// sync happens to run; it also lets the caller's integrity vet compare the true resulting totals.
+// Shared by the commissioner approve endpoint and the manager auto-apply submission path so the
+// two can never drift. The caller stamps status/reviewed_at, runs the integrity vet, and persists.
+function applySwapToSeason(sd, swap, effectiveAddDate, effectiveDropDate) {
   // --- faithful port of the client approveSwap mutation ---
   if (sd.rosters && sd.rosters[swap.manager]) {
     const mgrRoster = sd.rosters[swap.manager];
@@ -1481,9 +1692,6 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
       assignUnclaimedStatsServer(sd, swap.player_in, swap.manager, playerType);
     }
   }
-
-  swap.status = 'approved';
-  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
   const rdWeekKeys = swap.week_key ? [swap.week_key] : Object.keys((sd.rosters && sd.rosters[swap.manager]) || {});
   if (!sd.roster_dates) sd.roster_dates = {};
@@ -1520,12 +1728,6 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
   });
   // --- end port ---
 
-  // Apply the new windows to derived state NOW, exactly as the full-season save path does
-  // (roster-array heal + player_dates cutoffs + weekly-score recompute). Without this, the
-  // attribution above credits player_in's already-synced weekly rows in full the moment the
-  // approval lands — even when add_date hasn't arrived yet (an IL swap effective tomorrow) —
-  // and the over-credit persists until the next sync happens to run. It also means the
-  // integrity vet below compares the true resulting totals, not the pre-recompute inflation.
   if (sd.status === 'active') {
     try {
       rebuildRosterArraysFromDates(sd);
@@ -1537,6 +1739,46 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
     const wipedAuto = syncPlayerDatesFromRosterDates(sd);
     recomputeMidWeekAddScores(sd, wipedAuto);
   }
+}
+
+// POST /api/seasons/:year/swaps/:id/approve — atomically approve a pending swap. This is a faithful
+// server-side port of the old client approveSwap (rosters out→in across the affected weeks +
+// roster_dates drop/add windows + stat attribution), so scoring behavior is unchanged — but because
+// it runs server-side under a read-modify-write, it can't be lost to a stale-save 409 (the
+// "I approved it but it came back as pending" bug). Body: { add_date, drop_date, force? }. Before
+// committing it runs the destructive-save integrity guard and, unless force is set, rejects (409,
+// no write, Slack-alert) any approval that would crater a manager's total or shrink a roster.
+// Part of #275 (ROSTER_OPS_PLAN.md §3c). Since the swap-automation change manager submissions
+// auto-apply, so this endpoint mostly handles the integrity-guard fallback queue.
+app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const swap = findSwap(sd, req.params.id);
+  if (!swap) return res.status(404).json({ error: 'Swap not found' });
+  if (swap.status !== 'pending') {
+    return res.status(409).json({ error: 'swap_not_pending', detail: `Swap is ${swap.status}, not pending.` });
+  }
+
+  const { add_date: addDate, drop_date: dropDate, force } = req.body || {};
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const tomorrowET = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  })();
+  const effectiveDropDate = (typeof dropDate === 'string' && dropDate) || swap.drop_date || todayET;
+  const effectiveAddDate = (typeof addDate === 'string' && addDate) || swap.add_date || tomorrowET;
+
+  // Pristine copy for the before/after integrity vet (sd is mutated in place below).
+  const originalSd = JSON.parse(JSON.stringify(sd));
+
+  swap.status = 'approved';
+  swap.reviewed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  applySwapToSeason(sd, swap, effectiveAddDate, effectiveDropDate);
 
   // Before/after totals vet + destructive-save guard. A normal swap is net-zero on a week's roster
   // and shouldn't trip it; a flagged approval (e.g. dropping a high scorer) requires an explicit
@@ -9028,6 +9270,35 @@ app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
   }
 });
 
+// Which teams have a game today (ET) that has already started (Live/Final, or first-pitch time
+// already passed)? Returns a Set of team abbreviations. Shared by GET /api/mlb/teams-started and
+// the swap auto-apply path (computeSwapEffectiveDatesServer). Throws on MLB API failure — each
+// caller picks its own fallback.
+async function fetchStartedTeamsToday() {
+  // MLB games are dated in Eastern time; use ET so a late-evening UTC rollover
+  // doesn't shift "today" to tomorrow.
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const scheduleData = await mlbApiFetch(
+    `/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&gameType=R,F,D,L,W&hydrate=team`
+  );
+
+  const now = Date.now();
+  const startedSet = new Set();
+  for (const dateEntry of scheduleData.dates || []) {
+    for (const g of dateEntry.games || []) {
+      const state = g.status?.abstractGameState || 'Preview';
+      const firstPitch = g.gameDate ? new Date(g.gameDate).getTime() : null;
+      const hasStarted = state === 'Live' || state === 'Final' || (firstPitch && firstPitch <= now);
+      if (!hasStarted) continue;
+      const away = g.teams?.away?.team?.abbreviation;
+      const home = g.teams?.home?.team?.abbreviation;
+      if (away) startedSet.add(away.toUpperCase());
+      if (home) startedSet.add(home.toUpperCase());
+    }
+  }
+  return startedSet;
+}
+
 // GET /api/mlb/teams-started?teams=NYY,LAD
 // Lightweight check used at swap-submission time: given a comma-separated list of
 // team abbreviations, returns which of those teams have a game today that has
@@ -9045,29 +9316,10 @@ app.get('/api/mlb/teams-started', async (req, res) => {
         .filter(Boolean)
     : [];
 
-  // MLB games are dated in Eastern time; use ET so a late-evening UTC rollover
-  // doesn't shift "today" to tomorrow.
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
   try {
-    const scheduleData = await mlbApiFetch(
-      `/api/v1/schedule?sportId=1&startDate=${today}&endDate=${today}&gameType=R,F,D,L,W&hydrate=team`
-    );
-
-    const now = Date.now();
-    const startedSet = new Set();
-    for (const dateEntry of scheduleData.dates || []) {
-      for (const g of dateEntry.games || []) {
-        const state = g.status?.abstractGameState || 'Preview';
-        const firstPitch = g.gameDate ? new Date(g.gameDate).getTime() : null;
-        const hasStarted = state === 'Live' || state === 'Final' || (firstPitch && firstPitch <= now);
-        if (!hasStarted) continue;
-        const away = g.teams?.away?.team?.abbreviation;
-        const home = g.teams?.home?.team?.abbreviation;
-        if (away) startedSet.add(away.toUpperCase());
-        if (home) startedSet.add(home.toUpperCase());
-      }
-    }
+    const startedSet = await fetchStartedTeamsToday();
 
     // When teams are requested, only report on those; otherwise return all started teams.
     const started = requested.length ? requested.filter((t) => startedSet.has(t)) : Array.from(startedSet);

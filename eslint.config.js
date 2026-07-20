@@ -37,6 +37,7 @@ const projectGlobals = {
   oddsWindowForDate: 'readonly',
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
+  checkSwapLimit: 'readonly',
 };
 
 const projectRules = {

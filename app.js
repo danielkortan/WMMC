@@ -8651,6 +8651,12 @@ window.togglePeriodSection = function (periodKey) {
 
 // ---- Player Swaps Section ----
 const SWAP_REASONS = ['Free Swap (one per round)', 'IL Swap', 'Drop Swap', 'Trade Swap'];
+
+// Outcome of the most recent swap submission ({ type: 'success'|'error', text }). The swap form is
+// re-rendered after an auto-applied swap (and again when daily stats land), which rebuilds the
+// #swap-form-success/-error elements — so the confirmation is baked into the form render from this
+// variable instead of written to a DOM node a re-render would wipe. Cleared on the next submission.
+let _swapFormNotice = null;
 const COMMISSIONER_SWAP_REASONS = [...SWAP_REASONS, 'Commissioner Swap'];
 
 function getSeasonSwaps(seasonData) {
@@ -8817,7 +8823,8 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !isCurrentlyTaken(p)).sort();
 
     html += `<div class="swap-form-card">
-      <h3>Request a Swap</h3>
+      <h3>Make a Swap</h3>
+      <p class="text-muted" style="margin-bottom:0.75rem;">Swaps take effect immediately when submitted. If either player's team has already started playing today, the swap becomes effective tomorrow. Swap limits and IL status are checked automatically.</p>
       <div class="swap-form-grid">
         <div class="swap-form-field" style="grid-column:1 / -1;">
           <label>Player Type</label>
@@ -8853,10 +8860,10 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         </div>
       </div>
       <div style="margin-top:0.75rem;">
-        <button class="btn btn-primary" onclick="submitSwapRequest('${jsStr(managerName)}', event)">Submit Request</button>
+        <button class="btn btn-primary" onclick="submitSwapRequest('${jsStr(managerName)}', event)">Submit Swap</button>
       </div>
-      <p id="swap-form-error" class="error-text" style="display:none;margin-top:0.5rem;"></p>
-      <p id="swap-form-success" class="success-text" style="display:none;margin-top:0.5rem;"></p>
+      <p id="swap-form-error" class="error-text" style="display:${_swapFormNotice && _swapFormNotice.type === 'error' ? 'block' : 'none'};margin-top:0.5rem;">${_swapFormNotice && _swapFormNotice.type === 'error' ? esc(_swapFormNotice.text) : ''}</p>
+      <p id="swap-form-success" class="success-text" style="display:${_swapFormNotice && _swapFormNotice.type === 'success' ? 'block' : 'none'};margin-top:0.5rem;">${_swapFormNotice && _swapFormNotice.type === 'success' ? esc(_swapFormNotice.text) : ''}</p>
     </div>`;
 
     // Store roster data as data attributes for the type toggle to use
@@ -9436,58 +9443,24 @@ window.swapTypeToggle = function (type) {
   }
 };
 
-// Determine which schedule round the current date falls in (or the most recent active round)
+// Determine which schedule round the current date falls in. Between weeks (e.g. the All-Star
+// break or a round gap) this returns the UPCOMING round — that's the roster a swap made in the
+// gap affects, so that's the round it's charged against. The server recomputes this
+// authoritatively at swap submission (currentScheduleRound in server.js — keep in step).
+// The swap-limit rules themselves (checkSwapLimit) live in js/swaps.js.
 function getCurrentScheduleRound(sd) {
   const dates = sd.schedule_dates;
   if (!dates || dates.length === 0) return { round: 'PP1', weekKey: null };
   const today = fmtDateISO(new Date());
-  // Find matching week
-  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
     const d = dates[i];
-    if (!d) continue;
-    if (today >= d.start && today <= d.end) {
+    if (d && today <= d.end) {
       return { round: SEASON_SCHEDULE[i].round, weekKey: `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}` };
     }
   }
-  // Before first week: use PP1
-  if (dates[0] && today < dates[0].start) return { round: 'PP1', weekKey: `PP1|Week 1` };
-  // After last week: use Finals
+  // After the last week: use the final round.
   const last = SEASON_SCHEDULE[SEASON_SCHEDULE.length - 1];
   return { round: last.round, weekKey: `${last.round}|${last.week}` };
-}
-
-// Check swap limits for a manager submitting a swap request.
-// Returns null if OK, or an error string if the limit is exceeded.
-function checkSwapLimit(sd, managerName, reason) {
-  const { round } = getCurrentScheduleRound(sd);
-
-  // Only count approved or pending swaps (not denied) for this manager in this round
-  const managerSwaps = (sd.swaps || []).filter(
-    (s) => s.manager === managerName && (s.status === 'approved' || s.status === 'pending') && s.round === round
-  );
-
-  // Pool Play: unlimited Drop/IL/Trade, but only 1 Free Swap per PP-round
-  if (round === 'PP1' || round === 'PP2') {
-    if (reason === 'Free Swap (one per round)') {
-      const used = managerSwaps.filter((s) => s.reason === 'Free Swap (one per round)').length;
-      if (used >= 1) {
-        return `You have already used your Free Swap for ${round === 'PP1' ? 'Pool Play 1' : 'Pool Play 2'}. You may still use Drop, IL, or Trade swaps.`;
-      }
-    }
-    return null; // Drop/IL/Trade unlimited during pool play
-  }
-
-  // Playoffs (QF, SF, Finals): each type limited to 1 per round
-  if (round === 'QF' || round === 'SF' || round === 'Finals') {
-    const used = managerSwaps.filter((s) => s.reason === reason).length;
-    if (used >= 1) {
-      const roundLabel = round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals';
-      return `You have already used a "${reason}" swap during the ${roundLabel}. Each swap type may only be used once per playoff round.`;
-    }
-    return null;
-  }
-
-  return null;
 }
 
 // Look up a player's MLB team abbreviation from the season's team maps.
@@ -9542,6 +9515,7 @@ window.submitSwapRequest = async function (managerName, ev) {
   const succEl = document.getElementById('swap-form-success');
   errEl.style.display = 'none';
   succEl.style.display = 'none';
+  _swapFormNotice = null;
 
   // Double-submit guard: computeSwapEffectiveDates below awaits a live-schedule network call, leaving
   // a window where a second click fired a second identical request (the "commissioner got the swap
@@ -9582,15 +9556,16 @@ window.submitSwapRequest = async function (managerName, ev) {
 
     if (!sd.swaps) sd.swaps = [];
 
-    // Check swap limits for this round
-    const limitError = checkSwapLimit(sd, managerName, reason);
+    const { round, weekKey } = getCurrentScheduleRound(sd);
+
+    // Pre-check the swap limits for this round (js/swaps.js) for fast feedback; the server
+    // re-validates authoritatively at submission and blocks ineligible swaps the same way.
+    const limitError = checkSwapLimit(sd.swaps, managerName, reason, round);
     if (limitError) {
       errEl.textContent = limitError;
       errEl.style.display = 'block';
       return;
     }
-
-    const { round, weekKey } = getCurrentScheduleRound(sd);
 
     // Determine effective add/drop dates from the live game schedule.
     const { effective_date, drop_date, add_date, teams_started } = await computeSwapEffectiveDates(
@@ -9625,10 +9600,10 @@ window.submitSwapRequest = async function (managerName, ev) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.error || `Server error (${resp.status})`);
       }
-      const { swap: savedSwap, _rev } = await resp.json();
+      const { swap: savedSwap, _rev, pending_review: pendingReview } = await resp.json();
 
       // Mirror the confirmed server swap into localStorage so the view is consistent. Dedupe by id:
-      // if the server returned an already-existing pending swap (duplicate guard), don't add a second
+      // if the server returned an already-existing swap (duplicate guard), don't add a second
       // local copy.
       const freshSeasons = getSeasons();
       const freshSd = freshSeasons[SELECTED_SEASON];
@@ -9639,17 +9614,38 @@ window.submitSwapRequest = async function (managerName, ev) {
         setSeasonsLocal(freshSeasons);
       }
 
-      succEl.textContent = 'Swap request submitted!';
-      succEl.style.display = 'block';
+      // An auto-applied swap rebuilt rosters/roster_dates/weekly scores server-side — pull down the
+      // authoritative season so the roster view reflects the swap immediately (same pattern as the
+      // commissioner approve flow).
+      if (!pendingReview) {
+        try {
+          const fresh = await fetch('/api/seasons');
+          if (fresh.ok) {
+            const srv = await fresh.json();
+            if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+          }
+        } catch (_) {
+          /* offline — local view may lag until reload */
+        }
+      }
+
+      // Bake the confirmation into the form render (via _swapFormNotice) BEFORE re-rendering:
+      // the re-render replaces the whole form DOM (and renders again when daily stats land), so
+      // a message written directly to the old elements would be wiped instantly.
+      _swapFormNotice = {
+        type: 'success',
+        text: pendingReview
+          ? 'Swap submitted — it was flagged for commissioner review and will take effect once approved.'
+          : `Swap applied! ${playerOut} out, ${playerIn} in — effective ${
+              (savedSwap && (savedSwap.effective_date || savedSwap.add_date)) || 'today'
+            }.`,
+      };
+      renderRosterData(managerName, isLoggedInCommissioner());
     } catch (e) {
-      errEl.textContent = `Swap not submitted — ${e.message}. Please try again or contact the commissioner.`;
+      errEl.textContent = `Swap not applied — ${e.message}`;
       errEl.style.display = 'block';
       return;
     }
-
-    // Re-render entire roster view
-    const isComm = isLoggedInCommissioner();
-    renderRosterData(managerName, isComm);
   } finally {
     clearSubmitting();
   }
