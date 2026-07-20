@@ -1321,6 +1321,34 @@ input[type='file'] {
   color: var(--accent);
 }
 
+/* Inter-round break callout (e.g. the All-Star break between PP2 and the QF) */
+.tl-break {
+  margin: 0.5rem 0;
+}
+
+.tl-break .tl-marker {
+  background: var(--bg);
+  border-style: dashed;
+}
+
+.tl-break .tl-break-label {
+  min-width: 0;
+  color: var(--text-muted);
+  font-style: italic;
+  white-space: nowrap;
+}
+
+.tl-break .tl-status {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-style: italic;
+}
+
+.schedule-break-row td {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* ============================================================ */
 /* League Info Section Headers */
 /* ============================================================ */

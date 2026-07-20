@@ -1251,3 +1251,11 @@ Decisions made with Daniel (asked via option picker):
   break days, users see "Quarterfinals — Week 1 of 2" during the break
   instead. Verified both states with Playwright + fabricated staging-seed
   db.json (data through PP2 W5 only).
+- Follow-up on same PR: the All-Star break needs NO explicit schedule entry —
+  computeScheduleDates skips the ASG week by design, the break IS the gap.
+  Banner (getBetweenPeriodsInfo) and daily sync (performMLBDailySync returns
+  null when detectScheduleWeekForDate finds no containing week → break-week
+  games never imported) both already key off the gap. New: interRoundBreak()
+  helper + a "All-Star Break / Jul 13–19 / Games not scored" callout row in
+  the League Info timeline (.tl-break) and commissioner schedule preview
+  (.schedule-break-row), derived from the gap, PP2→QF labeled All-Star Break.
