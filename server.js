@@ -59,13 +59,25 @@ async function postSlack(text, blocks) {
   });
 }
 
-async function postScoreboardSlack(db, year) {
+async function postScoreboardSlack(db, year, opts) {
   if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
-  const { blocks, text } = buildScoreboardBlocks(db, year);
+  const { blocks, text } = buildScoreboardBlocks(db, year, opts);
   await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, blocks }),
+  });
+}
+
+// Post plain text to the scoreboard channel — the same webhook/process as the daily
+// scoreboard post — for announcements that belong with the score updates rather than
+// the swap-notification channel (e.g. the combined elimination-roast post).
+async function postScoreboardChannelSlack(text) {
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
+  await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
   });
 }
 
@@ -1162,6 +1174,18 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // the recompute endpoint). Same defense as score_snapshots: always keep
     // the server's copy so a client save can never wipe or roll them back.
     if (existingSd.playoff_odds) sd.playoff_odds = existingSd.playoff_odds;
+
+    // Elimination roasts are written server-side by /generate-roast while the client's
+    // full-season save (fired at "End Pool Play") may still be in flight carrying a copy
+    // that predates them — that save landing mid-generation is how a manager's roast
+    // vanished from the first live combined post. Union-merge: keep every server roast
+    // the incoming payload doesn't know about (there is no client path that deletes one).
+    if (existingSd.roasts && typeof existingSd.roasts === 'object') {
+      if (!sd.roasts || typeof sd.roasts !== 'object') sd.roasts = {};
+      for (const [mgr, roast] of Object.entries(existingSd.roasts)) {
+        if (!sd.roasts[mgr]) sd.roasts[mgr] = roast;
+      }
+    }
   }
 
   // Heal per-week roster arrays from roster_dates whenever a save lands (swap/submission
@@ -4455,7 +4479,115 @@ function buildPlayoffOddsSlackText(sd, todayISO) {
   );
 }
 
-function buildScoreboardBlocks(db, year) {
+// Head-to-head matchup section for the daily post during playoff rounds (QF/SF/Finals) and
+// the Monday wrap-up posts. Pairings and tie rules mirror app.js buildActivePlayoffBracket /
+// roundMatchupWinner: QF pairs come from the confirmed_seeding snapshot locked at "End Pool
+// Play" (1v8, 4v5, 3v6, 2v7 in bracket order); SF1 = QF1 winner vs QF4 winner, SF2 = QF3
+// winner vs QF2 winner; the Finals championship is the SF winners and 3rd place the SF
+// losers (3rd-place ties keep the app's t1-favoring `>=`). Matchup winners are derived from
+// round totals + seed tiebreak directly — identical to the app's finalized bracket, without
+// waiting on a finalize save. `final: true` (the Monday wrap-up) marks winners/losers and
+// adds the advancement/champion footer. Returns null when no confirmed seeding is stored
+// (pool play not ended in the app yet) — the caller degrades to a plain ranked list.
+function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
+  const seeds =
+    sd.confirmed_seeding && Array.isArray(sd.confirmed_seeding.qualifierNames)
+      ? sd.confirmed_seeding.qualifierNames
+      : null;
+  if (!seeds || seeds.length < 8) return null;
+
+  const seedRank = {};
+  seeds.forEach((n, i) => (seedRank[n] = i + 1));
+
+  const fmt = (n) => {
+    const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    return s.endsWith('.0') ? s.slice(0, -2) : s;
+  };
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const totalsByRound = {};
+  const score = (r, manager) => {
+    if (!totalsByRound[r]) {
+      totalsByRound[r] = {};
+      for (const row of computeRoundScores(batting, pitching, [r], sd)) totalsByRound[r][row.manager] = row;
+    }
+    return totalsByRound[r][manager] || { batting: 0, pitching: 0, total: 0 };
+  };
+  // Higher round total wins; a tie goes to the better seed (mirrors roundMatchupWinner).
+  const winner = (r, a, b) => {
+    const ta = score(r, a).total;
+    const tb = score(r, b).total;
+    if (ta !== tb) return ta > tb ? a : b;
+    return (seedRank[a] ?? Infinity) <= (seedRank[b] ?? Infinity) ? a : b;
+  };
+
+  const matchupText = (label, r, a, b, leader) => {
+    const line = (name) => {
+      const s = score(r, name);
+      const seedTag = seedRank[name] ? `(${seedRank[name]}) ` : '';
+      const core = `${seedTag}${name} — ${fmt(s.total)}`;
+      const mark = final ? (name === leader ? ' \u{2705}' : ' \u{274C}') : '';
+      return `\u{25B8} ${name === leader ? `*${core}*` : core} _(B: ${fmt(s.batting)} | P: ${fmt(s.pitching)})_${mark}`;
+    };
+    return `*${label}*\n${line(a)}\n${line(b)}`;
+  };
+
+  const qfPairs = [
+    { label: 'QF1', a: seeds[0], b: seeds[7] },
+    { label: 'QF4', a: seeds[3], b: seeds[4] },
+    { label: 'QF3', a: seeds[2], b: seeds[5] },
+    { label: 'QF2', a: seeds[1], b: seeds[6] },
+  ];
+
+  let heading;
+  let pairs;
+  let footer = '';
+  if (round === 'QF') {
+    heading = final ? '\u{1F3C1} *Quarterfinal Results*' : '\u{1F94A} *Quarterfinal Matchups*';
+    pairs = qfPairs.map((p) => ({ ...p, r: 'QF', leader: winner('QF', p.a, p.b) }));
+    if (final) {
+      footer = `Advancing to the Semifinals: ${pairs.map((p) => `*${p.leader}*`).join(', ')}`;
+    }
+  } else if (round === 'SF') {
+    const qfW = qfPairs.map((p) => winner('QF', p.a, p.b));
+    heading = final ? '\u{1F3C1} *Semifinal Results*' : '\u{1F94A} *Semifinal Matchups*';
+    pairs = [
+      { label: 'SF1', a: qfW[0], b: qfW[1] },
+      { label: 'SF2', a: qfW[2], b: qfW[3] },
+    ].map((p) => ({ ...p, r: 'SF', leader: winner('SF', p.a, p.b) }));
+    if (final) {
+      footer = `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}`;
+    }
+  } else if (round === 'Finals') {
+    const qfW = qfPairs.map((p) => winner('QF', p.a, p.b));
+    const sfPairs = [
+      { a: qfW[0], b: qfW[1] },
+      { a: qfW[2], b: qfW[3] },
+    ];
+    const sfW = sfPairs.map((p) => winner('SF', p.a, p.b));
+    const sfL = sfPairs.map((p, i) => (sfW[i] === p.a ? p.b : p.a));
+    const thirdLeader = score('Finals', sfL[0]).total >= score('Finals', sfL[1]).total ? sfL[0] : sfL[1];
+    heading = final ? '\u{1F3C1} *Finals Results*' : '\u{1F94A} *Championship & 3rd Place*';
+    pairs = [
+      { label: 'Championship', a: sfW[0], b: sfW[1], r: 'Finals', leader: winner('Finals', sfW[0], sfW[1]) },
+      { label: '3rd Place', a: sfL[0], b: sfL[1], r: 'Finals', leader: thirdLeader },
+    ];
+    if (final) {
+      footer = `\u{1F3C6} *${pairs[0].leader} wins the Whit Merrifield Memorial Cup!* \u{1F949} ${thirdLeader} takes 3rd place.`;
+    }
+  } else {
+    return null;
+  }
+
+  return (
+    `${heading}\n\n` +
+    pairs.map((p) => matchupText(p.label, p.r, p.a, p.b, p.leader)).join('\n\n') +
+    (footer ? `\n\n${footer}` : '')
+  );
+}
+
+function buildScoreboardBlocks(db, year, opts = {}) {
   const seasonData = (db.seasons || {})[year] || {};
   const managers = db.managers || [];
 
@@ -4496,7 +4628,15 @@ function buildScoreboardBlocks(db, year) {
     }
   }
 
+  // Monday wrap-up posts report the round that just ENDED, even when the next round's
+  // window already contains today (e.g. SF Week 1 starts the Monday after QF ends).
+  const summaryRound = ['PP2', 'QF', 'SF', 'Finals'].includes(opts.summaryRound) ? opts.summaryRound : null;
+  if (summaryRound) currentRound = summaryRound;
+
   const currentRoundLabel = ROUND_LABELS[currentRound] || currentRound || 'Season';
+  // Bracket rounds drop the pool-play frames (overall standings + pool columns) in favor
+  // of head-to-head matchups — nobody needs pool play score updates once the bracket runs.
+  const isPlayoffRound = ['QF', 'SF', 'Finals'].includes(currentRound);
 
   // Find the specific week within the current round that contains today
   const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -4532,76 +4672,6 @@ function buildScoreboardBlocks(db, year) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
-  // ---- PP1 / PP2 pool winners (mirrors app hlClass logic) ----
-  const poolGroups = {};
-  Object.entries(managerPoolMap).forEach(([mgr, poolNum]) => {
-    if (!poolGroups[poolNum]) poolGroups[poolNum] = [];
-    poolGroups[poolNum].push(mgr);
-  });
-
-  const pp1Scores = computeRoundScores(batting, pitching, ['PP1'], seasonData);
-  const pp2Scores = computeRoundScores(batting, pitching, ['PP2'], seasonData);
-
-  const pp1WinnerSet = new Set();
-  const pp2WinnerSet = new Set();
-  Object.values(poolGroups).forEach((members) => {
-    const best1 = pp1Scores.filter((s) => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
-    if (best1 && best1.total > 0) pp1WinnerSet.add(best1.manager);
-    const best2 = pp2Scores.filter((s) => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
-    if (best2 && best2.total > 0) pp2WinnerSet.add(best2.manager);
-  });
-
-  const allPPWinners = new Set([...pp1WinnerSet, ...pp2WinnerSet]);
-  const numWildcards = Math.max(0, 8 - allPPWinners.size);
-  const wildcardSet = new Set();
-  const ppOverall = computeRoundScores(batting, pitching, ['PP1', 'PP2'], seasonData).sort((a, b) => b.total - a.total);
-  let wcCount = 0;
-  for (const m of ppOverall) {
-    if (wcCount >= numWildcards) break;
-    if (!allPPWinners.has(m.manager) && m.total > 0) {
-      wildcardSet.add(m.manager);
-      wcCount++;
-    }
-  }
-
-  // Color dot per manager: 🟢 PP1 leader, 🔵 PP2 leader, 🔷 both, 🟡 wildcard
-  function dot(name, section) {
-    const wonPP1 = pp1WinnerSet.has(name);
-    const wonPP2 = pp2WinnerSet.has(name);
-    if (section === 'overall') {
-      if (wonPP1 && wonPP2) return '🔷';
-      if (wonPP1) return '🟢';
-      if (wonPP2) return '🔵';
-      if (wildcardSet.has(name)) return '🟡';
-      return null;
-    }
-    if (section === 'PP1') return wonPP1 ? '🟢' : null;
-    if (section === 'PP2') return wonPP2 ? '🔵' : null;
-    return null;
-  }
-
-  // ---- Overall standings (all rounds) ----
-  // Route through computeRoundScores so we get the same roster-validated
-  // attribution as the in-app Pool Play Scoreboard.
-  const overall = computeRoundScores(batting, pitching, null, seasonData).sort((a, b) => b.total - a.total);
-
-  const overallLastMgr = overall.length > 0 ? overall[overall.length - 1].manager : null;
-
-  // ---- Current-round pool standings ----
-  const poolStandings = currentRound
-    ? computeRoundScores(batting, pitching, [currentRound], seasonData)
-        .map((m) => ({ ...m, pool: managerPoolMap[m.manager] }))
-        .sort((a, b) => b.total - a.total)
-    : [];
-
-  // Group by pool — already sorted desc so last entry = pool's last place
-  const pools = {};
-  poolStandings.forEach((m) => {
-    const key = m.pool ? formatPool(m.pool) : 'Unassigned';
-    if (!pools[key]) pools[key] = [];
-    pools[key].push(m);
-  });
-
   // ---- Formatters ----
   // Whole-point totals (no partial pitcher innings) drop the redundant ".0".
   const fmt = (n) => {
@@ -4615,36 +4685,140 @@ function buildScoreboardBlocks(db, year) {
   const heart = (n) => (Math.floor(n) === 69 ? ' ❤️' : ''); // ❤️ easter egg at 69
   const dumpster = '\u{1F5D1}️\u{1F4A6}'; // 🗑️💦 last place
 
-  // ---- Build overall standings text ----
-  const overallText = overall.length
-    ? overall
-        .map((m, i) => {
-          const d = dot(m.manager, 'overall');
-          const nameStr = d !== null ? `*${m.manager}*` : m.manager;
-          const dotStr = d ? `${d} ` : '';
-          const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
-          return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)}`;
-        })
-        .join('\n')
-    : '_No scores recorded yet._';
+  // ---- Standings text: bracket matchups for playoff rounds, overall + pool columns
+  // for pool play. Pool-play scaffolding (winner sets, wildcards, legend) is only
+  // computed when it is actually shown.
+  let playoffText = null;
+  let overallText = '';
+  let poolText = '';
+  let legendText = null;
+  if (isPlayoffRound) {
+    playoffText = buildPlayoffMatchupsSlackText(seasonData, currentRound, { final: !!summaryRound });
+    if (!playoffText) {
+      // No confirmed_seeding snapshot yet (pool play not ended in the app) — degrade to a
+      // plain ranked list of this round's totals rather than resurrecting pool-play frames.
+      const rows = computeRoundScores(batting, pitching, [currentRound], seasonData).sort((a, b) => b.total - a.total);
+      playoffText =
+        `*\u{1F3C6} ${currentRoundLabel} Standings*\n` +
+        (rows.length
+          ? rows.map((m, i) => `${rank(i)} ${m.manager} — ${fmt(m.total)}${heart(m.total)}`).join('\n')
+          : '_No scores recorded yet._');
+    }
+  } else {
+    // ---- PP1 / PP2 pool winners (mirrors app hlClass logic) ----
+    const poolGroups = {};
+    Object.entries(managerPoolMap).forEach(([mgr, poolNum]) => {
+      if (!poolGroups[poolNum]) poolGroups[poolNum] = [];
+      poolGroups[poolNum].push(mgr);
+    });
 
-  // ---- Build pool text (combined into one string for the right column) ----
-  const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
-  const poolText = sortedPoolEntries
-    .map(([poolName, members]) => {
-      const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
-      const lines = members
-        .map((m, i) => {
-          const d = dot(m.manager, currentRound);
-          const dotStr = d ? `${d} ` : '';
-          const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
-          const trash = m.manager === poolLastMgr ? ' \u{1F4A9}' : '';
-          return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)}`;
-        })
-        .join('\n');
-      return `*${poolName}*\n${lines}`;
-    })
-    .join('\n\n');
+    const pp1Scores = computeRoundScores(batting, pitching, ['PP1'], seasonData);
+    const pp2Scores = computeRoundScores(batting, pitching, ['PP2'], seasonData);
+
+    const pp1WinnerSet = new Set();
+    const pp2WinnerSet = new Set();
+    Object.values(poolGroups).forEach((members) => {
+      const best1 = pp1Scores.filter((s) => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
+      if (best1 && best1.total > 0) pp1WinnerSet.add(best1.manager);
+      const best2 = pp2Scores.filter((s) => members.includes(s.manager)).sort((a, b) => b.total - a.total)[0];
+      if (best2 && best2.total > 0) pp2WinnerSet.add(best2.manager);
+    });
+
+    const allPPWinners = new Set([...pp1WinnerSet, ...pp2WinnerSet]);
+    const numWildcards = Math.max(0, 8 - allPPWinners.size);
+    const wildcardSet = new Set();
+    const ppOverall = computeRoundScores(batting, pitching, ['PP1', 'PP2'], seasonData).sort(
+      (a, b) => b.total - a.total
+    );
+    let wcCount = 0;
+    for (const m of ppOverall) {
+      if (wcCount >= numWildcards) break;
+      if (!allPPWinners.has(m.manager) && m.total > 0) {
+        wildcardSet.add(m.manager);
+        wcCount++;
+      }
+    }
+
+    // Color dot per manager: 🟢 PP1 leader, 🔵 PP2 leader, 🔷 both, 🟡 wildcard
+    function dot(name, section) {
+      const wonPP1 = pp1WinnerSet.has(name);
+      const wonPP2 = pp2WinnerSet.has(name);
+      if (section === 'overall') {
+        if (wonPP1 && wonPP2) return '🔷';
+        if (wonPP1) return '🟢';
+        if (wonPP2) return '🔵';
+        if (wildcardSet.has(name)) return '🟡';
+        return null;
+      }
+      if (section === 'PP1') return wonPP1 ? '🟢' : null;
+      if (section === 'PP2') return wonPP2 ? '🔵' : null;
+      return null;
+    }
+
+    // ---- Overall standings (all rounds) ----
+    // Route through computeRoundScores so we get the same roster-validated
+    // attribution as the in-app Pool Play Scoreboard.
+    const overall = computeRoundScores(batting, pitching, null, seasonData).sort((a, b) => b.total - a.total);
+
+    const overallLastMgr = overall.length > 0 ? overall[overall.length - 1].manager : null;
+
+    // ---- Current-round pool standings ----
+    const poolStandings = currentRound
+      ? computeRoundScores(batting, pitching, [currentRound], seasonData)
+          .map((m) => ({ ...m, pool: managerPoolMap[m.manager] }))
+          .sort((a, b) => b.total - a.total)
+      : [];
+
+    // Group by pool — already sorted desc so last entry = pool's last place
+    const pools = {};
+    poolStandings.forEach((m) => {
+      const key = m.pool ? formatPool(m.pool) : 'Unassigned';
+      if (!pools[key]) pools[key] = [];
+      pools[key].push(m);
+    });
+
+    // ---- Build overall standings text ----
+    overallText = overall.length
+      ? overall
+          .map((m, i) => {
+            const d = dot(m.manager, 'overall');
+            const nameStr = d !== null ? `*${m.manager}*` : m.manager;
+            const dotStr = d ? `${d} ` : '';
+            const trash = m.manager === overallLastMgr ? ` ${dumpster}` : '';
+            return `${rank(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)}`;
+          })
+          .join('\n')
+      : '_No scores recorded yet._';
+
+    // ---- Build pool text (combined into one string for the right column) ----
+    const sortedPoolEntries = Object.entries(pools).sort((a, b) => a[0].localeCompare(b[0]));
+    poolText = sortedPoolEntries
+      .map(([poolName, members]) => {
+        const poolLastMgr = members.length > 0 ? members[members.length - 1].manager : null;
+        const lines = members
+          .map((m, i) => {
+            const d = dot(m.manager, currentRound);
+            const dotStr = d ? `${d} ` : '';
+            const nameStr = i === 0 ? `*${m.manager}*` : m.manager;
+            const trash = m.manager === poolLastMgr ? ' \u{1F4A9}' : '';
+            return `${rankPool(i)} ${dotStr}${nameStr}${trash} — ${fmt(m.total)}${heart(m.total)}`;
+          })
+          .join('\n');
+        return `*${poolName}*\n${lines}`;
+      })
+      .join('\n\n');
+
+    // Color legend shown during pool play rounds when leaders are determined
+    if (['PP1', 'PP2'].includes(currentRound) && (pp1WinnerSet.size > 0 || pp2WinnerSet.size > 0)) {
+      const parts = [];
+      if (pp1WinnerSet.size > 0) parts.push('\u{1F7E2} PP1 Pool Leader');
+      if (pp2WinnerSet.size > 0) parts.push('\u{1F535} PP2 Pool Leader');
+      if (pp1WinnerSet.size > 0 && pp2WinnerSet.size > 0) parts.push('\u{1F537} Both');
+      if (wildcardSet.size > 0) parts.push('\u{1F7E1} Wild Card');
+      parts.push(`${dumpster} Last Place`);
+      legendText = parts.join('  ·  ');
+    }
+  }
 
   // ---- Assemble blocks ----
   const blocks = [];
@@ -4675,33 +4849,39 @@ function buildScoreboardBlocks(db, year) {
     });
   }
 
-  const periodLabel = currentWeek ? `${currentRoundLabel} - ${currentWeek}` : currentRoundLabel;
-  const roundEndLabel = roundEndDate
-    ? new Date(roundEndDate + 'T12:00:00Z').toLocaleDateString('en-US', {
-        month: 'long',
-        day: 'numeric',
-        timeZone: 'UTC',
-      })
-    : null;
-  const periodText = roundEndLabel
-    ? `\u{1F4C5} Current Period: *${periodLabel}*\nCurrent Round ends: ${roundEndLabel}`
-    : `\u{1F4C5} Current Period: *${periodLabel}*`;
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: periodText } });
-
-  // Color legend shown during pool play rounds when leaders are determined
-  if (['PP1', 'PP2'].includes(currentRound) && (pp1WinnerSet.size > 0 || pp2WinnerSet.size > 0)) {
-    const parts = [];
-    if (pp1WinnerSet.size > 0) parts.push('\u{1F7E2} PP1 Pool Leader');
-    if (pp2WinnerSet.size > 0) parts.push('\u{1F535} PP2 Pool Leader');
-    if (pp1WinnerSet.size > 0 && pp2WinnerSet.size > 0) parts.push('\u{1F537} Both');
-    if (wildcardSet.size > 0) parts.push('\u{1F7E1} Wild Card');
-    parts.push(`${dumpster} Last Place`);
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: parts.join('  ·  ') }] });
+  if (summaryRound) {
+    // Wrap-up post on the Monday after the round's last games — the round is over,
+    // so lead with "final results", not a current-period countdown.
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `\u{1F3C1} *${currentRoundLabel} — complete! Final results below.*` },
+    });
+  } else {
+    const periodLabel = currentWeek ? `${currentRoundLabel} - ${currentWeek}` : currentRoundLabel;
+    const roundEndLabel = roundEndDate
+      ? new Date(roundEndDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+          month: 'long',
+          day: 'numeric',
+          timeZone: 'UTC',
+        })
+      : null;
+    const periodText = roundEndLabel
+      ? `\u{1F4C5} Current Period: *${periodLabel}*\nCurrent Round ends: ${roundEndLabel}`
+      : `\u{1F4C5} Current Period: *${periodLabel}*`;
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: periodText } });
   }
 
-  // ---- Standings: overall (left) + pool (right) in a 2-column layout ----
+  // Color legend shown during pool play rounds when leaders are determined
+  if (legendText) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: legendText }] });
+  }
+
+  // ---- Standings: playoff rounds get head-to-head matchups; pool play keeps the
+  // overall (left) + pool (right) 2-column layout ----
   blocks.push({ type: 'divider' });
-  if (currentRound && poolText) {
+  if (isPlayoffRound) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: playoffText } });
+  } else if (currentRound && poolText) {
     blocks.push({
       type: 'section',
       fields: [
@@ -4843,7 +5023,7 @@ function buildScoreboardBlocks(db, year) {
 
   return {
     blocks,
-    text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel} | wmmc.live`,
+    text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel}${summaryRound ? ' Final' : ''} | wmmc.live`,
   };
 }
 
@@ -10209,12 +10389,62 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
   };
 }
 
+// Static roast bank used when the Anthropic API is unavailable (no ANTHROPIC_API_KEY, or the
+// call failed). Deterministically seeded per manager+round so every eliminated manager gets a
+// DIFFERENT roast — the old single hardcoded template made a combined Slack post read like a
+// form letter. Each template works the manager's real numbers and worst performers in.
+function fallbackRoast(manager, round, perf) {
+  // Entries in perf arrive as "Name: X pts" strings — split them back apart.
+  const parseWorst = (s) => {
+    const idx = s ? s.lastIndexOf(':') : -1;
+    return idx > 0
+      ? {
+          name: s.slice(0, idx),
+          pts: s
+            .slice(idx + 1)
+            .replace('pts', '')
+            .trim(),
+        }
+      : null;
+  };
+  const worst = parseWorst(perf.batters_ranked_worst_first[0]) ||
+    parseWorst(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
+  const other =
+    parseWorst(perf.pitchers_ranked_worst_first[0]) || parseWorst(perf.batters_ranked_worst_first[0]) || worst;
+  const roundLabel =
+    round === 'PP'
+      ? 'Pool Play'
+      : round === 'QF'
+        ? 'the Quarterfinals'
+        : round === 'SF'
+          ? 'the Semifinals'
+          : 'the Finals';
+  const bank = [
+    () =>
+      `${manager} rode ${worst.name} (${worst.pts} pts) straight into the offseason. ${perf.total} points of pure "maybe next year." The league thanks you for your donation.`,
+    () =>
+      `Somewhere out there ${worst.name} is enjoying a lovely summer, blissfully unaware they dragged ${manager} to a ${perf.total}-point funeral in ${roundLabel}. Pour one out.`,
+    () =>
+      `${manager} drafted ${worst.name} on purpose, watched them post ${worst.pts} pts, and did nothing about it. ${perf.total} points later, the playoffs politely declined. Bold strategy.`,
+    () =>
+      `Autopsy report for ${manager}: cause of death, ${worst.name} (${worst.pts} pts), with an assist from ${other.name}. Time of death: ${roundLabel}. Total damage: ${perf.total} points.`,
+    () =>
+      `${manager} scored ${perf.total} points, which sounds like a lot until you remember it wasn't. ${worst.name} chipped in a heroic ${worst.pts}. See you at the draft, champ.`,
+    () =>
+      `Good news: ${manager} no longer has to watch ${worst.name} (${worst.pts} pts) every night. Bad news: the rest of us watched ${manager} score ${perf.total} and call it a season.`,
+    () =>
+      `${manager}'s ${roundLabel} campaign: ${perf.total} points, ${worst.name} in witness protection at ${worst.pts} pts, and a roster that quit before the group chat did. Eliminated, emphatically.`,
+    () =>
+      `Legend says ${manager} is still waiting for ${worst.name} to heat up. ${worst.pts} points later, the wait continues — from the couch. ${perf.total} total. Brutal.`,
+  ];
+  let seed = 0;
+  for (const c of `${manager}|${round}`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+  return bank[seed % bank.length]();
+}
+
 // Call the Anthropic Messages API to generate a vulgar, personalized roast.
 async function generateRoastWithClaude(manager, round, perf) {
-  if (!ANTHROPIC_API_KEY) {
-    const worst = perf.batters_ranked_worst_first[0] || perf.pitchers_ranked_worst_first[0] || 'their entire roster';
-    return `${manager} put up a heroic ${perf.total} points in ${round} and somehow managed to make ${worst} look like an all-star by comparison. Absolutely cooked. The league thanks you for your sacrifice.`;
-  }
+  if (!ANTHROPIC_API_KEY) return fallbackRoast(manager, round, perf);
 
   const roundLabel =
     round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
@@ -10245,14 +10475,11 @@ Write the roast now. No preamble, no labels — just the roast.`;
 
   if (!resp.ok) {
     console.error('Anthropic API error:', resp.status, await resp.text());
-    return `${manager} scored ${perf.total} pts in ${roundLabel} and got absolutely cooked. No further commentary is needed.`;
+    return fallbackRoast(manager, round, perf);
   }
 
   const data = await resp.json();
-  return (
-    (data.content && data.content[0] && data.content[0].text) ||
-    `${manager} had a historically embarrassing run in ${roundLabel}.`
-  );
+  return (data.content && data.content[0] && data.content[0].text) || fallbackRoast(manager, round, perf);
 }
 
 // POST /api/seasons/:year/generate-roast — generate and store an elimination roast (commissioner only)
@@ -10282,6 +10509,207 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   } catch (err) {
     console.error('Roast generation error:', err);
     res.status(500).json({ error: 'Failed to generate roast' });
+  }
+});
+
+// Slack section telling the surviving managers what happens next: when the next round
+// runs, when its fresh-roster submission window opens (3 days before Week 1, mirroring the
+// client's getPeriodOpenDate), and when rosters lock (5 minutes before the stored
+// first-pitch time in sd.period_deadlines, mirroring getPeriodDeadline). Every date comes
+// from the season's own schedule_dates; anything missing degrades to a generic line rather
+// than blocking the post. Empty string after Finals — there is no next round.
+function buildNextRoundInstructions(sd, round) {
+  const NEXT = {
+    PP: { round: 'QF', label: 'The Quarterfinals', period: 'qf' },
+    QF: { round: 'SF', label: 'The Semifinals', period: 'sf' },
+    SF: { round: 'Finals', label: 'The Finals / 3rd-place game', period: 'finals' },
+  };
+  const next = NEXT[round];
+  if (!next) return '';
+
+  const startIdx = SEASON_SCHEDULE.findIndex((s) => s.round === next.round && s.week === 'Week 1');
+  let endIdx = -1;
+  SEASON_SCHEDULE.forEach((s, i) => {
+    if (s.round === next.round) endIdx = i;
+  });
+  const dates = Array.isArray(sd.schedule_dates) ? sd.schedule_dates : [];
+  const startISO = startIdx >= 0 && dates[startIdx] ? dates[startIdx].start : null;
+  const endISO = endIdx >= 0 && dates[endIdx] ? dates[endIdx].end : null;
+
+  // Schedule dates are bare YYYY-MM-DD strings; pin them to noon UTC and format in UTC so
+  // the printed calendar day never shifts with the server's timezone.
+  const fmtDay = (iso) =>
+    new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'UTC',
+    });
+
+  let openStr = null;
+  if (startISO) {
+    const d = new Date(startISO + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() - 3);
+    openStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  }
+
+  let deadlineStr = null;
+  const firstGame = sd.period_deadlines && sd.period_deadlines[next.period];
+  if (firstGame) {
+    const fg = new Date(firstGame);
+    if (!Number.isNaN(fg.getTime())) {
+      deadlineStr =
+        new Date(fg.getTime() - 5 * 60 * 1000).toLocaleString('en-US', {
+          weekday: 'long',
+          month: 'long',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          timeZone: 'America/New_York',
+        }) + ' ET';
+    }
+  }
+
+  const lines = [':clipboard: *Playoff managers — what happens next:*'];
+  if (startISO && endISO) lines.push(`• ${next.label} run ${fmtDay(startISO)} through ${fmtDay(endISO)}.`);
+  else if (startISO) lines.push(`• ${next.label} start ${fmtDay(startISO)}.`);
+  lines.push(
+    '• Rosters do NOT carry over — every playoff team submits a fresh roster in the app for commissioner approval.'
+  );
+  if (openStr) lines.push(`• The submission window opens ${openStr}.`);
+  if (deadlineStr) lines.push(`• Rosters lock ${deadlineStr} — 5 minutes before first pitch.`);
+  else if (startISO) lines.push(`• Rosters lock 5 minutes before the first pitch on ${fmtDay(startISO)}.`);
+  return lines.join('\n');
+}
+
+// POST /api/seasons/:year/roasts/slack — post one combined Slack message that opens with
+// the playoff field (seed-ordered QF matchups) and then an elimination roast for EVERY
+// manager eliminated in a round (commissioner only). Body: { round, qualifiers?,
+// eliminated?, regenerate? }. Posts to the SCOREBOARD channel — the same webhook/process
+// as the daily score updates — NOT the swap-notification channel.
+//
+// Self-healing: the roster of shame is derived from sd.eliminated (plus the client-passed
+// `eliminated` list as a fallback for the window before the finalize save lands, plus any
+// already-stored roasts), and any manager missing a stored roast gets one generated here
+// before the post — the first live post silently dropped a manager because it trusted the
+// stored roasts alone. `regenerate: true` re-rolls every roast for the round (the repost
+// button uses this).
+app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const { round, qualifiers, eliminated, regenerate } = req.body || {};
+  if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
+    return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
+  }
+  if (!SLACK_SCOREBOARD_WEBHOOK_URL) {
+    return res.status(503).json({ error: 'Slack webhook not configured' });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const toRoast = new Set();
+  for (const [m, r] of Object.entries(sd.eliminated || {})) if (r === round) toRoast.add(m);
+  if (Array.isArray(eliminated)) for (const m of eliminated) if (typeof m === 'string' && m) toRoast.add(m);
+  for (const [m, r] of Object.entries(sd.roasts || {})) if (r && r.round === round && r.text) toRoast.add(m);
+  if (toRoast.size === 0) {
+    return res.status(404).json({ error: `No eliminated managers or stored roasts for round ${round}` });
+  }
+
+  // Generate what's missing (or everything, on regenerate) BEFORE composing the post.
+  // Texts are generated first against the read-only snapshot, then persisted through a
+  // fresh read-modify-write so the slow Anthropic awaits can't clobber writes that landed
+  // on other requests in the meantime.
+  const managerOrder = [...toRoast].sort((a, b) => a.localeCompare(b));
+  const roastByManager = {};
+  const freshTexts = {};
+  for (const m of managerOrder) {
+    const existing = (sd.roasts || {})[m];
+    if (!regenerate && existing && existing.round === round && existing.text) {
+      roastByManager[m] = existing.text;
+      continue;
+    }
+    try {
+      const perf = buildManagerPerformanceForRoast(sd, m, round);
+      const text = await generateRoastWithClaude(m, round, perf);
+      roastByManager[m] = text;
+      freshTexts[m] = text;
+    } catch (e) {
+      console.error('Roast generation failed for', m, '-', e.message);
+      if (existing && existing.text) roastByManager[m] = existing.text;
+    }
+  }
+  if (Object.keys(freshTexts).length > 0) {
+    const db2 = readDB();
+    const sd2 = (db2.seasons || {})[year];
+    if (sd2) {
+      if (!sd2.roasts) sd2.roasts = {};
+      const now = new Date().toISOString();
+      for (const [m, text] of Object.entries(freshTexts)) sd2.roasts[m] = { round, text, generated_at: now };
+      db2.seasons[year] = sd2;
+      writeDB(db2);
+    }
+  }
+
+  const entries = managerOrder.filter((m) => roastByManager[m]).map((m) => [m, { text: roastByManager[m] }]);
+  if (entries.length === 0) {
+    return res.status(500).json({ error: 'Roast generation failed for every eliminated manager' });
+  }
+
+  // Playoff-field summary (PP only). Seed order comes from the confirmed_seeding snapshot
+  // locked at "End Pool Play"; the client-passed qualifiers list is a fallback for the
+  // window where that full-season save hasn't landed server-side yet. QF pairs mirror the
+  // client bracket (getSFParticipants): 1v8, 4v5, 3v6, 2v7.
+  let summary = '';
+  if (round === 'PP') {
+    const snapNames =
+      sd.confirmed_seeding && Array.isArray(sd.confirmed_seeding.qualifierNames)
+        ? sd.confirmed_seeding.qualifierNames
+        : null;
+    const seeds =
+      snapNames || (Array.isArray(qualifiers) && qualifiers.every((q) => typeof q === 'string') ? qualifiers : []);
+    if (seeds.length === 8) {
+      const pair = (a, b) => `• (${a + 1}) ${seeds[a]} vs (${b + 1}) ${seeds[b]}`;
+      summary =
+        ':trophy: *The playoff field is set!* Quarterfinal matchups:\n' +
+        [pair(0, 7), pair(3, 4), pair(2, 5), pair(1, 6)].join('\n') +
+        '\n\n';
+    } else if (seeds.length > 0) {
+      summary = `:trophy: *The playoff field is set!* Qualifiers by seed: ${seeds
+        .map((n, i) => `(${i + 1}) ${n}`)
+        .join(', ')}\n\n`;
+    }
+  }
+
+  const header =
+    round === 'PP'
+      ? `:fire: *Pool Play is over.* ${entries.length} manager${entries.length > 1 ? 's' : ''} missed the playoffs — welcome to the Hall of Shame:`
+      : `:fire: *${round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals'} eliminations* — welcome to the Hall of Shame:`;
+  // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
+  const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
+
+  const instructions = buildNextRoundInstructions(sd, round);
+
+  try {
+    await postScoreboardChannelSlack(
+      `${summary}${header}\n\n${sections.join('\n\n')}${instructions ? `\n\n${instructions}` : ''}`
+    );
+    // Audit against a fresh read — the roast-persist step above may have written since
+    // this handler's first readDB, and writing that stale copy back would undo it.
+    const auditDb = readDB();
+    addAuditEntry(
+      auditDb,
+      'roasts_slack_post',
+      { year, round, managers: entries.length, regenerated: Object.keys(freshTexts).length },
+      req.get('X-User-Email')
+    );
+    writeDB(auditDb);
+    res.json({ ok: true, round, managers: entries.map(([m]) => m) });
+  } catch (e) {
+    console.error('[Slack] Combined roast post failed:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -10664,6 +11092,68 @@ function scheduleGSheetsSync() {
 // Daily Scoreboard Post (7:00 AM)
 // ============================================================
 
+// The first Monday strictly AFTER a bare YYYY-MM-DD date (rounds end on Sundays, so this
+// is normally end + 1 day). Pinned to noon UTC so the weekday never shifts with the
+// server's timezone.
+function mondayAfterISO(iso) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + ((8 - d.getUTCDay()) % 7 || 7));
+  return d.toISOString().split('T')[0];
+}
+
+// The first Tuesday ON OR AFTER a bare YYYY-MM-DD date (playoff rounds start on Mondays,
+// so this is normally start + 1 day).
+function tuesdayOnOrAfterISO(iso) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + ((9 - d.getUTCDay()) % 7));
+  return d.toISOString().split('T')[0];
+}
+
+// Collapse schedule_dates into one {round, start, end} window per round.
+function roundDateWindows(scheduleDates) {
+  const windows = [];
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+    const { start, end } = scheduleDates[i] || {};
+    if (!start || !end) continue;
+    const round = SEASON_SCHEDULE[i].round;
+    let w = windows.find((x) => x.round === round);
+    if (!w) windows.push((w = { round, start, end }));
+    if (start < w.start) w.start = start;
+    if (end > w.end) w.end = end;
+  }
+  return windows;
+}
+
+// Decide whether the 7am auto-post should run today and what it should show:
+//   { summaryRound } — wrap-up post on the first Monday after a round ends (the last
+//     pool-play post after PP2, then one per playoff round), reporting the round that
+//     just finished even when the next round's window already contains that Monday.
+//   {}              — normal daily post.
+//   null            — skip today entirely.
+// Pool play posts every day (unchanged). Playoff rounds (QF/SF/Finals) post daily only
+// from the first Tuesday on/after the round's start — the round's opening Monday belongs
+// to the prior round's wrap-up, and its 7am run would have no games to report yet. Gap
+// days (the All-Star break between PP2 and the QF, any post-season stragglers) post
+// nothing. PP1's boundary Monday stays a normal daily post: it falls inside PP2's window,
+// and pool play keeps posting straight through.
+function scoreboardAutoPostPlan(sd, todayISO) {
+  const windows = roundDateWindows((sd && sd.schedule_dates) || []);
+  if (windows.length === 0) return {}; // no dates configured — preserve the old always-post behavior
+
+  let lastEnded = null;
+  for (const w of windows) {
+    if (w.end < todayISO && (!lastEnded || w.end > lastEnded.end)) lastEnded = w;
+  }
+  if (lastEnded && lastEnded.round !== 'PP1' && todayISO === mondayAfterISO(lastEnded.end)) {
+    return { summaryRound: lastEnded.round };
+  }
+
+  const current = windows.find((w) => w.start <= todayISO && todayISO <= w.end);
+  if (!current) return null; // between rounds or after the season
+  if (current.round === 'PP1' || current.round === 'PP2') return {};
+  return todayISO >= tuesdayOnOrAfterISO(current.start) ? {} : null;
+}
+
 let scoreboardTimer = null;
 
 function scheduleScoreboardPost() {
@@ -10696,8 +11186,13 @@ function scheduleScoreboardPost() {
       const config = db.google_sheets_config || {};
       const season = config.season || now.getFullYear().toString();
       const sd = (db.seasons || {})[season];
+      const plan = scoreboardAutoPostPlan(sd, todayET);
 
-      if (isWithinSyncWindow(sd)) {
+      if (!plan) {
+        console.log(
+          `[Scoreboard] Skipping — no post scheduled for ${todayET} (between rounds, or playoff round not started)`
+        );
+      } else if (isWithinSyncWindow(sd)) {
         // Backstop for the 4am compute (e.g. server restarted in between): make
         // sure today's playoff odds exist before posting, then post from a fresh
         // db read so the new odds are included. Odds failures never block the post.
@@ -10706,8 +11201,14 @@ function scheduleScoreboardPost() {
             console.error('[PlayoffOdds] Pre-post odds compute failed (continuing):', e.message);
             return null;
           })
-          .then(() => postScoreboardSlack(readDB(), season))
-          .then(() => console.log('[Scoreboard] Daily scoreboard posted successfully'))
+          .then(() => postScoreboardSlack(readDB(), season, plan))
+          .then(() =>
+            console.log(
+              plan.summaryRound
+                ? `[Scoreboard] ${plan.summaryRound} wrap-up scoreboard posted successfully`
+                : '[Scoreboard] Daily scoreboard posted successfully'
+            )
+          )
           .catch((e) => console.error('[Scoreboard] Post failed:', e.message));
       } else {
         console.log(`[Scoreboard] Skipping — outside season date window for ${season}`);

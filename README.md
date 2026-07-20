@@ -51,6 +51,7 @@ All configuration is via environment variables (no `.env` loader is bundled — 
 | `SLACK_WEBHOOK_URL`            | _(unset)_                         | General notifications channel (swaps, sync errors).                                      |
 | `SLACK_SCOREBOARD_WEBHOOK_URL` | falls back to `SLACK_WEBHOOK_URL` | Channel for the daily scoreboard post.                                                   |
 | `SLACK_SIGNING_SECRET`         | _(unset)_                         | Required if you wire up the `/api/slack/command` slash command.                          |
+| `ANTHROPIC_API_KEY`            | _(unset)_                         | Optional. Enables AI-generated elimination roasts; unset falls back to a template bank.  |
 | `GOOGLE_CLIENT_ID`             | _(unset)_                         | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).           |
 
 ### Running
@@ -171,10 +172,11 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Slack
 
-| Method | Endpoint                | Description                                                  |
-| ------ | ----------------------- | ------------------------------------------------------------ |
-| `POST` | `/api/slack/scoreboard` | Manually trigger the scoreboard Slack post.                  |
-| `POST` | `/api/slack/command`    | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`). |
+| Method | Endpoint                          | Description                                                                                                                                                                                                                                                     |
+| ------ | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post.                                                                                                                                                                                                                     |
+| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                    |
+| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field, a roast for every manager eliminated in a round, and next-round submission instructions as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`. |
 
 ### Misc
 

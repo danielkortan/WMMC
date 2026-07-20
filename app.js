@@ -510,6 +510,44 @@ function getFinalsParticipants(sd) {
   ].map(([a, b]) => win(a, b));
 }
 
+// Head-to-head matchup pairs for a playoff round, in bracket display order — the same
+// structure the Playoff Bracket card renders (QF1 1v8, QF4 4v5, QF3 3v6, QF2 2v7; SF from
+// QF winners; Championship + 3rd Place from SF winners/losers). Returns
+// [{ label, teams: [{ name, seed }, { name, seed }] }] or null when the round's
+// participants aren't determined yet (no 8-manager seeding, or the prior round isn't
+// finalized) — callers fall back to a plain standings view.
+function playoffRoundMatchups(sd, round) {
+  if (!sd) return null;
+  const qualifiers = getQFQualifiers(sd);
+  if (!qualifiers || qualifiers.length < 8) return null;
+  const seedOf = {};
+  qualifiers.slice(0, 8).forEach((n, i) => (seedOf[n] = i + 1));
+  const mk = (label, a, b) => ({
+    label,
+    teams: [
+      { name: a, seed: seedOf[a] || null },
+      { name: b, seed: seedOf[b] || null },
+    ],
+  });
+  if (round === 'QF') {
+    const q = qualifiers;
+    return [mk('QF1', q[0], q[7]), mk('QF4', q[3], q[4]), mk('QF3', q[2], q[5]), mk('QF2', q[1], q[6])];
+  }
+  if (round === 'SF') {
+    const sf = getSFParticipants(sd);
+    if (!sf || sf.length < 4) return null;
+    return [mk('SF1', sf[0], sf[1]), mk('SF2', sf[2], sf[3])];
+  }
+  if (round === 'Finals') {
+    const sf = getSFParticipants(sd);
+    const fin = getFinalsParticipants(sd);
+    if (!sf || !fin || fin.length < 2) return null;
+    const losers = [sf[0] === fin[0] ? sf[1] : sf[0], sf[2] === fin[1] ? sf[3] : sf[2]];
+    return [mk('Championship', fin[0], fin[1]), mk('3rd Place', losers[0], losers[1])];
+  }
+  return null;
+}
+
 // Returns true if a manager is qualified for a given period (all managers qualify for pp1/pp2)
 function isManagerQualifiedForPeriod(managerName, period, sd) {
   if (period === 'pp1' || period === 'pp2') return true;
@@ -648,14 +686,6 @@ function getCurrentScoringPeriod(seasonData) {
     }
   }
 
-  const roundNames = {
-    PP1: 'Pool Play 1',
-    PP2: 'Pool Play 2',
-    QF: 'Quarterfinals',
-    SF: 'Semifinals',
-    Finals: 'Finals',
-  };
-
   return {
     round: latestRound,
     week: latestWeek,
@@ -664,9 +694,51 @@ function getCurrentScoringPeriod(seasonData) {
     weekNum,
     totalRoundWeeks,
     dateRange,
-    roundName: roundNames[latestRound] || latestRound,
+    roundName: ROUND_DISPLAY_NAMES[latestRound] || latestRound,
     roundStartDate,
     roundEndDate,
+  };
+}
+
+const ROUND_DISPLAY_NAMES = {
+  PP1: 'Pool Play 1',
+  PP2: 'Pool Play 2',
+  QF: 'Quarterfinals',
+  SF: 'Semifinals',
+  Finals: 'Finals',
+};
+
+// When today (ET) falls in the gap between two rounds' schedule windows — e.g. the
+// All-Star break week between PP2's last week and the Quarterfinals — return info
+// about the break: the upcoming round, its start date, and its roster submission
+// deadline (first game − 5 min, via getPeriodDeadline). Returns null whenever today
+// is inside a scheduled week, before the season, after it, or in a same-round gap,
+// so the normal "Round — Week N of M" banner keeps rendering in all of those cases.
+function getBetweenPeriodsInfo(sd) {
+  const dates = (sd && sd.schedule_dates) || [];
+  if (!dates.length) return null;
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  let prevIdx = -1;
+  let nextIdx = -1;
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    const d = dates[i];
+    if (!d || !d.start || !d.end) continue;
+    if (todayET >= d.start && todayET <= d.end) return null; // inside a scheduled week
+    if (d.end < todayET) prevIdx = i;
+    if (nextIdx < 0 && d.start > todayET) nextIdx = i;
+  }
+  if (prevIdx < 0 || nextIdx < 0) return null; // preseason or season over
+  const prevRound = SEASON_SCHEDULE[prevIdx].round;
+  const nextRound = SEASON_SCHEDULE[nextIdx].round;
+  if (prevRound === nextRound) return null; // gap within a round — not a period break
+  return {
+    prevRound,
+    nextRound,
+    nextRoundName: ROUND_DISPLAY_NAMES[nextRound] || nextRound,
+    nextStart: dates[nextIdx].start,
+    deadline: getPeriodDeadline(sd, nextRound.toLowerCase()),
+    // The PP2 → QF gap is the league's All-Star break week by schedule design.
+    isAllStarBreak: prevRound === 'PP2' && nextRound === 'QF',
   };
 }
 
@@ -2001,6 +2073,58 @@ const _liveKey = (s) =>
     .replace(/[^a-z0-9]/gi, '_')
     .toLowerCase();
 
+// During QF/SF/Finals the Live tab shows the round's head-to-head matchups (mirroring the
+// Playoff Bracket card) instead of a ranked standings table. Shared by the live (today) and
+// historical-date views: `matchups` comes from playoffRoundMatchups, `byName` maps manager →
+// that view's endpoint row, `renderPanel(name)` builds the expandable player panel, and
+// `subline(row)` the muted per-team stat line. Expansion state rides the same
+// _liveExpandedManagers set / toggleLiveManagerDetails ids as the table view, so panels
+// survive the 2-minute poll re-render.
+function renderLiveMatchupCards(matchups, byName, renderPanel, subline) {
+  const teamHtml = (t, leader) => {
+    const r = byName[t.name];
+    const key = _liveKey(t.name);
+    const expanded = _liveExpandedManagers.has(t.name);
+    const arrow = expanded ? '&#9650;' : '&#9660;';
+    const nameCls = r && r.is_active_today ? 'live-mgr-active' : '';
+    const total = r ? (r.round_total ?? 0).toFixed(2) : '&mdash;';
+    const sub = subline(r);
+    return `
+      <div class="live-matchup-team ${leader ? 'live-matchup-leader' : ''}" onclick="toggleLiveManagerDetails('${key}','${jsStr(t.name)}')">
+        <div class="live-matchup-main">
+          <span class="bracket-seed">${t.seed || ''}</span>
+          <span class="live-matchup-name ${nameCls}">${escapeHtml(t.name)}</span>
+          <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span>
+          <span class="live-matchup-total">${total}</span>
+        </div>
+        ${sub ? `<div class="live-matchup-sub">${sub}</div>` : ''}
+      </div>
+      <div class="live-matchup-detail" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">${renderPanel(t.name)}</div>`;
+  };
+  return matchups
+    .map((mu) => {
+      const [t1, t2] = mu.teams;
+      // Highlight whoever currently leads the matchup (missing data counts as 0; ties — or
+      // nothing scored yet — highlight nobody). Purely visual: official winners are decided
+      // at round finalization on the Scoreboard bracket, seed tiebreak included.
+      const e1 = byName[t1.name] ? (byName[t1.name].round_total ?? 0) : 0;
+      const e2 = byName[t2.name] ? (byName[t2.name].round_total ?? 0) : 0;
+      const leader = e1 !== e2 ? (e1 > e2 ? t1.name : t2.name) : null;
+      return `<div class="live-matchup">
+        <div class="live-matchup-label">${escapeHtml(mu.label)}</div>
+        ${teamHtml(t1, leader === t1.name)}
+        ${teamHtml(t2, leader === t2.name)}
+      </div>`;
+    })
+    .join('');
+}
+
+// Signed fixed-2 number for the live matchup sublines ("+8.40" / "-3.10").
+function fmtSignedLive(v) {
+  const n = v ?? 0;
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}`;
+}
+
 function startLivePolling() {
   stopLivePolling();
   _liveViewDate = null;
@@ -2183,6 +2307,33 @@ function renderDailyContent(d) {
         </div>
       </div>`;
   };
+
+  const byName = {};
+  for (const m of d.managers || []) byName[m.name] = m;
+
+  // Playoff rounds render as head-to-head bracket matchups (same pairs as the Playoff
+  // Bracket card) instead of a ranked standings table; pool play — and any playoff state
+  // where the participants can't be determined yet — keeps the table.
+  const dailyMatchups = ['QF', 'SF', 'Finals'].includes(aw.round)
+    ? playoffRoundMatchups(getSeasons()[SELECTED_SEASON], aw.round)
+    : null;
+  if (dailyMatchups) {
+    const participantNames = new Set(dailyMatchups.flatMap((mu) => mu.teams.map((t) => t.name)));
+    for (const n of [..._liveExpandedManagers]) {
+      if (!participantNames.has(n)) _liveExpandedManagers.delete(n);
+    }
+    const subline = (r) =>
+      r
+        ? `${fmtSignedLive(r.today_score)} daily &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+        : 'No data for this date';
+    managersEl.innerHTML = `
+      <div class="card">
+        <h3>Playoff Matchups <span class="muted">(${escapeHtml(d.date)})</span></h3>
+        ${renderLiveMatchupCards(dailyMatchups, byName, renderDailyPanel, subline)}
+        <div class="live-matchup-note">Totals are certified ${escapeHtml(aw.round)} scoreboard points through end of ${escapeHtml(d.date)}. Tap a manager for that day&rsquo;s player stats.</div>
+      </div>`;
+    return;
+  }
 
   const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
   for (const n of [..._liveExpandedManagers]) {
@@ -2421,21 +2572,46 @@ function renderLiveContent(d) {
       </div>`;
     };
 
-    // Drop any expanded managers that no longer appear in the response so the
-    // Set doesn't grow unbounded across season changes.
-    const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
-    for (const n of [..._liveExpandedManagers]) {
-      if (!currentMgrNames.has(n)) _liveExpandedManagers.delete(n);
-    }
+    const byName = {};
+    for (const m of d.managers || []) byName[m.name] = m;
 
-    const rows = (d.managers || [])
-      .map((m, i) => {
-        const nameCls = m.is_active_today ? 'live-mgr-active' : '';
-        const key = _liveKey(m.name);
-        const expanded = _liveExpandedManagers.has(m.name);
-        const arrow = expanded ? '&#9650;' : '&#9660;';
-        const safeMgr = jsStr(m.name);
-        return `
+    // Playoff rounds render as head-to-head bracket matchups (same pairs as the Playoff
+    // Bracket card) instead of a ranked standings table; pool play — and any playoff state
+    // where the participants can't be determined yet — keeps the table.
+    const liveMatchups = ['QF', 'SF', 'Finals'].includes(aw.round)
+      ? playoffRoundMatchups(getSeasons()[SELECTED_SEASON], aw.round)
+      : null;
+    if (liveMatchups) {
+      const participantNames = new Set(liveMatchups.flatMap((mu) => mu.teams.map((t) => t.name)));
+      for (const n of [..._liveExpandedManagers]) {
+        if (!participantNames.has(n)) _liveExpandedManagers.delete(n);
+      }
+      const subline = (r) =>
+        r
+          ? `${fmtSignedLive(r.today_score)} today &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+          : 'No roster data yet';
+      managersEl.innerHTML = `
+        <div class="card">
+          <h3>Playoff Matchups</h3>
+          ${renderLiveMatchupCards(liveMatchups, byName, renderTodayPanel, subline)}
+          <div class="live-matchup-note">Totals are the certified ${escapeHtml(aw.round)} scoreboard plus today&rsquo;s points. Tap a manager for today&rsquo;s player stats.</div>
+        </div>`;
+    } else {
+      // Drop any expanded managers that no longer appear in the response so the
+      // Set doesn't grow unbounded across season changes.
+      const currentMgrNames = new Set((d.managers || []).map((m) => m.name));
+      for (const n of [..._liveExpandedManagers]) {
+        if (!currentMgrNames.has(n)) _liveExpandedManagers.delete(n);
+      }
+
+      const rows = (d.managers || [])
+        .map((m, i) => {
+          const nameCls = m.is_active_today ? 'live-mgr-active' : '';
+          const key = _liveKey(m.name);
+          const expanded = _liveExpandedManagers.has(m.name);
+          const arrow = expanded ? '&#9650;' : '&#9660;';
+          const safeMgr = jsStr(m.name);
+          return `
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
           <td class="${nameCls}">${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
@@ -2450,10 +2626,10 @@ function renderLiveContent(d) {
         <tr class="live-mgr-detail-row" id="live-detail-${key}" style="display:${expanded ? '' : 'none'};">
           <td colspan="9">${renderTodayPanel(m.name)}</td>
         </tr>`;
-      })
-      .join('');
-    const roundLabel = d.active_week?.round || '';
-    managersEl.innerHTML = `
+        })
+        .join('');
+      const roundLabel = d.active_week?.round || '';
+      managersEl.innerHTML = `
       <div class="card">
         <h3>Running Standings</h3>
         <div class="table-wrapper">
@@ -2472,6 +2648,7 @@ function renderLiveContent(d) {
           </table>
         </div>
       </div>`;
+    }
   }
 
   // Today's games
@@ -2753,12 +2930,38 @@ function renderChampionBanner() {
   if (!seasonComplete) {
     const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
+    const between = sd ? getBetweenPeriodsInfo(sd) : null;
 
     // Season status + period are wrapped in distinct spans (with a short
     // status form in data-short) so the layout can split them: desktop shows
     // them together in the footer; mobile moves the short status under the
     // title and keeps only the period in the footer (see js/mobile.js).
-    if (period) {
+    if (between) {
+      // Between periods (e.g. the All-Star break before the Quarterfinals):
+      // show the upcoming round's roster deadline and start date instead of a
+      // stale "last data week" period label.
+      const label = between.isAllStarBreak ? 'All-Star Break' : 'Between Rounds';
+      const parts = [];
+      if (between.deadline) {
+        const dueFmt = between.deadline.toLocaleString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        });
+        parts.push(`Rosters due ${dueFmt}`);
+      }
+      parts.push(`${between.nextRoundName} start ${fmtShortDate(between.nextStart)}`);
+      // The label gets its own span: mobile hides it (the short status under the
+      // title already reads e.g. "All-Star Break") and lets the details wrap.
+      footerHtml =
+        `<div class="banner-footer">` +
+        `<span class="banner-status" data-short="${label}">${SELECTED_SEASON} Season In Progress</span>` +
+        `<span class="banner-sep"> &nbsp;|&nbsp; </span>` +
+        `<span class="banner-period banner-period-break"><span class="banner-break-label">${label} — </span>${parts.join(' &middot; ')}</span>` +
+        `</div>`;
+    } else if (period) {
       // Season has data — show round name + week number
       const weekPart = `Week ${period.weekNum} of ${period.totalRoundWeeks}`;
       footerHtml =
@@ -4361,9 +4564,28 @@ function renderPlayers() {
 }
 
 // ---- Bracket ----
+
+// Order the Scoreboard tab's two containers. Default (index.html) order is the
+// scoreboard above the bracket; once playoffs are the focus — pool play finalized
+// on an active season, or a historical season with bracket data — the bracket
+// moves above so the pool-play summary + full scoreboard tables sit below it.
+// Both containers are re-rendered wholesale on every view change, so moving the
+// live elements is safe, and season switches restore either order.
+function orderScoreboardBracket(bracketFirst) {
+  const content = document.getElementById('scoreboard-content');
+  const bracket = document.getElementById('scoreboard-bracket');
+  if (!content || !bracket || !bracket.parentNode) return;
+  if (bracketFirst) {
+    if (bracket.nextElementSibling !== content) bracket.parentNode.insertBefore(bracket, content);
+  } else if (content.nextElementSibling !== bracket) {
+    content.parentNode.insertBefore(content, bracket);
+  }
+}
+
 function renderBracket() {
   const container = document.getElementById('scoreboard-bracket');
   if (!container) return;
+  orderScoreboardBracket(!!(DATA && DATA.bracket));
   if (!DATA || !DATA.bracket) {
     container.innerHTML = '';
     return;
@@ -4796,6 +5018,9 @@ function showActiveSeason(seasonData) {
   const bracketContainer = document.getElementById('scoreboard-bracket');
   if (bracketContainer) {
     bracketContainer.innerHTML = buildActivePlayoffBracket(seasonData, ppFinalized);
+    // Once pool play is finalized the bracket leads the page; the pool-play
+    // summary + full scoreboard move below it (collapsed by default, below).
+    orderScoreboardBracket(ppFinalized);
 
     // If pool play is finalized, minimize pool play section and feature bracket
     if (ppFinalized) {
@@ -4819,7 +5044,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   if (qualifiers.length < 8) {
     // Not enough managers to form a bracket
-    return `<div class="card"><h2>Playoff Bracket ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
+    return `<div class="card"><h2>Playoffs ${!ppFinalized ? '<span class="badge badge-wildcard">Tentative</span>' : ''}</h2>
       <p class="text-muted">Need at least 8 qualifying managers to display the bracket. Currently ${qualifiers.length}.</p></div>`;
   }
 
@@ -4870,7 +5095,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const tentativeLabel = !ppFinalized ? ' <span class="badge badge-wildcard">Tentative</span>' : '';
 
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
-    <h2>Playoff Bracket${tentativeLabel}</h2>
+    <h2>Playoffs${tentativeLabel}</h2>
     <div class="active-bracket">`;
 
   // QF column
@@ -5142,8 +5367,8 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
         <td>${mgrPool[m.manager] || ''}</td>
         <td class="num">${fmt(m.batting)}</td>
         <td class="num">${fmt(m.pitching)}</td>
-        <td class="num"><strong>${fmt(m.total)}</strong></td>
-        ${odds ? `<td class="num">${oddsPill(m.manager)}</td>` : ''}
+        <td class="num sb-mob-total"><strong>${fmt(m.total)}</strong></td>
+        ${odds ? `<td class="num sb-mob-odds">${oddsPill(m.manager)}</td>` : ''}
       </tr>
       <tr class="sb-manager-detail-row" id="mgr-detail-${mgrKey}" data-manager="${esc(m.manager)}" data-sb-period="overall" style="display:none;">
         <td colspan="${odds ? 7 : 6}"><div class="mgr-detail-loading">Loading...</div></td>
@@ -5154,10 +5379,13 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // ---- Build full HTML ----
-  // Check if playoff data exists — if so, pool play starts collapsed
+  // Pool play starts collapsed (summary visible, tables hidden) once playoff data
+  // exists OR pool play is finalized — the latter covers the between-periods break
+  // when the bracket is set but no playoff stats have been recorded yet. The
+  // showActiveSeason post-render fixup enforces the same state after bracket render.
   const rounds = new Set([...batting.map((b) => b.round), ...pitching.map((p) => p.round)]);
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
-  const ppCollapsed = hasPlayoffData;
+  const ppCollapsed = hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
 
   // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
   // collapsed-state summary (below) can use them.
@@ -5188,6 +5416,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
           `<div class="pp-summary-stat"><span class="pp-summary-label">${s.label}</span><span class="pp-summary-val">${esc(s.mgr)} · ${s.val}</span></div>`
       )
       .join('')}</div>`;
+  }
+  // Explicit expand affordance — the header's small arrow is easy to miss, so the
+  // collapsed summary ends with a labeled button. It lives inside the summary div,
+  // which togglePoolPlay hides on expand, so it never shows alongside the tables.
+  if (ppSummaryInner) {
+    ppSummaryInner += `<button type="button" class="sb-poolplay-expand-btn" onclick="togglePoolPlay()">View Full Pool Play Scoreboard &#9662;</button>`;
   }
 
   let html = '';
@@ -5251,12 +5485,15 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       <h3>&#128302; Playoff Odds</h3>
       <div class="table-wrapper"><table class="data-table compact-table odds-table">
         <thead><tr>
-          <th>Manager</th><th>Playoff&nbsp;%</th><th>Win PP2 Pool</th><th>Wild Card</th>
-          <th title="Points behind the current PP2 leader of your pool (+ = you lead)">Pool Gap</th>
-          <th title="Combined-total points vs. the current last qualifier (+ = above the cut)">Cut Gap</th>
-          <th title="Projected points from your roster over the remaining games, including opponent strength, home/away, and park factors">Proj. Left</th>
-          <th title="MLB games remaining for your rostered players">Games Left</th>
-          <th title="Average per-game adjustment across your roster's remaining schedule (opponent quality + home/away + park), relative to a neutral slate">Sched.</th>
+          <th>Manager</th>
+          <th><span class="th-full">Playoff&nbsp;%</span><span class="th-mob">Odds</span></th>
+          <th><span class="th-full">Win PP2 Pool</span><span class="th-mob">Pool&nbsp;W</span></th>
+          <th><span class="th-full">Wild Card</span><span class="th-mob">WC</span></th>
+          <th title="Points behind the current PP2 leader of your pool (+ = you lead)"><span class="th-full">Pool Gap</span><span class="th-mob">P&nbsp;Gap</span></th>
+          <th title="Combined-total points vs. the current last qualifier (+ = above the cut)"><span class="th-full">Cut Gap</span><span class="th-mob">C&nbsp;Gap</span></th>
+          <th title="Projected points from your roster over the remaining games, including opponent strength, home/away, and park factors"><span class="th-full">Proj. Left</span><span class="th-mob">Proj</span></th>
+          <th title="MLB games remaining for your rostered players"><span class="th-full">Games Left</span><span class="th-mob">G</span></th>
+          <th title="Average per-game adjustment across your roster's remaining schedule (opponent quality + home/away + park), relative to a neutral slate"><span class="th-full">Sched.</span><span class="th-mob">Sch</span></th>
         </tr></thead><tbody>
         ${rows
           .map(
@@ -8735,7 +8972,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const poolPitCount = (seasonData.pitchers_pool || []).length;
     const poolReady = poolBatCount > 0 && poolPitCount > 0;
 
-    html += `<div class="card initial-submission-section" style="margin-top:1rem;">
+    html += `<div class="card initial-submission-section" id="period-submission-card-pp1" style="margin-top:1rem;">
       <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">Pool Play 1</span>
         <h3 style="margin:0;">Player Submission</h3>
@@ -8959,7 +9196,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
         })
       : '';
 
-  let html = `<div class="card initial-submission-section" style="margin-top:1rem;">
+  let html = `<div class="card initial-submission-section" id="period-submission-card-${period}" style="margin-top:1rem;">
     <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
       <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">${periodLabel}</span>
       <h3 style="margin:0;">Player Submission</h3>
@@ -13216,6 +13453,12 @@ function renderWeeklyUploadSections() {
         </button>
         ${ppFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Pool Play finalized. Managers advanced to Quarterfinals.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize pool play and advance managers to playoffs.</span>'}
       </div>`;
+      if (ppFinalized) {
+        html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-secondary" onclick="repostPoolPlayRoasts()">Regenerate &amp; Repost Roasts to Slack</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast and reposts the combined playoff-field + Hall of Shame message to the scoreboard channel.</span>
+        </div>`;
+      }
     } else if (i === 11) {
       // Week 12 (QF Week 2) - End Quarterfinals
       const qfFinalized = finalized.includes('QF');
@@ -13530,9 +13773,19 @@ window.finalizeRound = function (roundKey, weekIndex) {
       if (!sd.eliminated[m]) sd.eliminated[m] = 'PP';
     });
     saveSeason(SELECTED_SEASON, sd);
-    nonQualifiers.forEach((m) => generateRoastForManager(m, 'PP'));
     renderWeeklyUploadSections();
     init();
+    // Generate roasts in the background — sequentially, so concurrent generate-roast
+    // read-modify-writes can't clobber each other's stored roast — then post ONE combined
+    // Slack message (playoff field + QF matchups, then the roasts) to the scoreboard
+    // channel and re-render so roasts appear. `qualifiers` is already seed-ordered.
+    (async () => {
+      for (const m of nonQualifiers) {
+        await generateRoastForManager(m, 'PP');
+      }
+      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers);
+      renderWeeklyUploadSections();
+    })();
     return;
   }
 
@@ -13623,7 +13876,66 @@ async function generateRoastForManager(manager, round) {
   }
 }
 
-// Show/hide the global submission warning banner below the nav.
+// Ask the server to post every elimination roast for a round to Slack as one combined
+// message on the scoreboard channel, opening with the playoff field. `qualifiers`
+// (seed-ordered) and `eliminated` are fallbacks the server uses if the finalize save
+// hasn't landed yet; the server generates any missing roast itself before posting.
+// `regenerate` re-rolls every stored roast for the round (used by the repost button).
+// Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
+// and the roasts still show on the roster pages. Returns true when the post went out.
+async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate) {
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
+      method: 'POST',
+      body: JSON.stringify({ round, qualifiers, eliminated, regenerate }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      console.error('Combined roast Slack post failed:', data.error || resp.status);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('Combined roast Slack post failed for', round, e);
+    return false;
+  }
+}
+
+// Commissioner repair action: re-roll every Pool Play roast server-side and repost the
+// combined Slack message (playoff field + Hall of Shame). Covers the failure modes of the
+// original post — a roast lost to a stale save, or the whole batch coming from the static
+// fallback — without having to re-finalize anything.
+window.repostPoolPlayRoasts = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+  if (!confirm('Re-roll every Pool Play roast and repost the combined Slack message?')) return;
+
+  const qualifiers = getQFQualifiers(sd) || [];
+  const nonQualifiers = getManagers()
+    .map((m) => m.name)
+    .filter((m) => !qualifiers.includes(m));
+  const ok = await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers, true);
+
+  // Re-sync so the regenerated roasts show on roster pages immediately.
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (fresh.ok) {
+      const serverSeasons = await fresh.json();
+      if (serverSeasons && Object.keys(serverSeasons).length > 0) setSeasonsLocal(serverSeasons);
+    }
+  } catch (e) {
+    console.error('Season re-sync after roast repost failed:', e);
+  }
+  alert(ok ? 'Roasts regenerated and reposted to Slack.' : 'Slack repost failed — check the browser console.');
+  renderWeeklyUploadSections();
+};
+
+// Show/hide the global submission warning banner below the nav. Sits outside the tab
+// sections, so it's visible on every page. Covers EVERY submission window (PP1, PP2,
+// QF, SF, Finals): while a period's window is confirmed open and the logged-in manager
+// is qualified (and not eliminated), a missing submission warns with a link that jumps
+// to that period's submission card on My Roster.
 function updateSubmissionWarningBanner() {
   const banner = document.getElementById('submission-warning-banner');
   if (!banner || !LOGGED_IN_EMAIL) return;
@@ -13642,21 +13954,37 @@ function updateSubmissionWarningBanner() {
     return;
   }
 
+  // SF/Finals "qualification" is open to everyone (see isManagerQualifiedForPeriod) —
+  // an eliminated manager is filtered here instead, mirroring the submission card's
+  // "Season ended" state so the banner never nags a knocked-out manager.
+  const elim = sd.eliminated && sd.eliminated[me.name];
+  const isEliminatedFor = (period) =>
+    !!elim &&
+    ((period === 'sf' && ['PP', 'QF'].includes(elim)) || (period === 'finals' && ['PP', 'QF', 'SF'].includes(elim)));
+
+  // During a between-periods break (e.g. the All-Star break) the upcoming round's
+  // window may not have opened yet — windows open the Friday before the round — but
+  // the break is exactly when managers think about their next lineup. Warn for the
+  // upcoming period through the whole break, noting when submissions open; drop it
+  // once that period's deadline has passed.
+  const between = getBetweenPeriodsInfo(sd);
+  const upcomingPeriod = between ? between.nextRound.toLowerCase() : null;
+
   const warnings = [];
-
-  // PP2 submission incomplete
-  if (isPeriodWindowConfirmedOpen(sd, 'pp2')) {
-    const sub = getPeriodSub(sd, 'pp2', me.name);
-    if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push('Your <strong>Pool Play 2</strong> lineup is not submitted.');
+  for (const period of ['pp1', 'pp2', 'qf', 'sf', 'finals']) {
+    let opensAt = null;
+    if (!isPeriodWindowConfirmedOpen(sd, period)) {
+      if (period !== upcomingPeriod) continue;
+      const deadline = getPeriodDeadline(sd, period);
+      if (deadline && Date.now() >= deadline.getTime()) continue;
+      const openDate = getPeriodOpenDate(sd, period);
+      if (openDate && Date.now() < openDate.getTime()) opensAt = openDate;
     }
-  }
-
-  // QF submission incomplete (only for qualified managers)
-  if (isPeriodWindowConfirmedOpen(sd, 'qf') && isManagerQualifiedForPeriod(me.name, 'qf', sd)) {
-    const sub = getPeriodSub(sd, 'qf', me.name);
+    if (!isManagerQualifiedForPeriod(me.name, period, sd)) continue;
+    if (isEliminatedFor(period)) continue;
+    const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push('Your <strong>Quarterfinals</strong> lineup is not submitted.');
+      warnings.push({ period, label: PERIOD_LABELS[period] || period, opensAt });
     }
   }
 
@@ -13665,9 +13993,50 @@ function updateSubmissionWarningBanner() {
     return;
   }
 
-  banner.innerHTML = warnings.map((w) => `<span class="sub-warn-item">⚠️ ${w}</span>`).join('');
+  banner.innerHTML = warnings
+    .map((w) => {
+      // The period lives inside the <strong>: the desktop banner lays the item out
+      // with inline-flex, so a bare trailing "." would become its own flex item
+      // with a stray gap before it.
+      const opensNote = w.opensAt
+        ? ` Submissions open <strong>${w.opensAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}.</strong>`
+        : '';
+      const linkText = w.opensAt ? 'View submission page' : 'Submit your lineup';
+      return (
+        `<span class="sub-warn-item">⚠️ Your <strong>${w.label}</strong> lineup is not submitted.${opensNote}` +
+        ` <a href="#" onclick="goToSubmission('${w.period}');return false;">${linkText} &rarr;</a></span>`
+      );
+    })
+    .join('');
   banner.style.display = 'flex';
 }
+
+// Jump from the warning banner to a period's submission card: activate the My Roster
+// tab (its click handler re-syncs from the server and re-renders asynchronously), then
+// poll for the card, switch to the Swaps roster sub-tab that hosts the submission
+// cards, and scroll to it. Polling is needed because the tab render is async.
+window.goToSubmission = function (period) {
+  const navBtn = document.querySelector('.nav-btn[data-tab="my-roster"]');
+  if (navBtn) navBtn.click();
+  const targetId = `period-submission-card-${period}`;
+  let tries = 0;
+  const timer = setInterval(() => {
+    const el = document.getElementById(targetId);
+    if (el) {
+      clearInterval(timer);
+      // The submission cards live inside the "Swaps" roster sub-tab — activate it
+      // (no-op if already active) so the card is actually visible before scrolling.
+      const swapsTab = document.querySelector('.roster-tab[data-rtab="swaps"]');
+      if (swapsTab && !swapsTab.classList.contains('active')) swapsTab.click();
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // Brief highlight so the eye lands on the right card after the jump.
+      el.classList.add('submission-card-flash');
+      setTimeout(() => el.classList.remove('submission-card-flash'), 2400);
+    } else if (++tries > 40) {
+      clearInterval(timer);
+    }
+  }, 150);
+};
 
 window.uploadWeeklyBatting = function (weekIndex) {
   const scheduleWeek = SEASON_SCHEDULE[weekIndex];

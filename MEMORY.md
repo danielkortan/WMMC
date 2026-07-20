@@ -1,6 +1,81 @@
 # WMMC — Decisions Log
 
-## Playoff odds phase 2: opponent quality, home/away, park factors (2026-07-10)
+## Live tab playoff bracket view + bracket mobile readability (2026-07-20)
+
+**What (commissioner request, day 1 of QF):** (1) the Live tab during QF/SF/Finals should read
+as a playoff bracket, not a "Running Standings" rank table; (2) the recent pool-play scoreboard
+display/visibility improvements (mobile type scale, full names, readable expanded player
+panels, labeled expand affordance) must carry over to the playoff scoreboard/bracket, which
+had none of them.
+
+**Key decisions (display-only — no writes to managers/rosters/swaps/scoring):**
+
+- New `playoffRoundMatchups(sd, round)` (app.js) returns the round's head-to-head pairs in
+  bracket display order by reusing the canonical helpers (`getQFQualifiers` /
+  `getSFParticipants` / `getFinalsParticipants`), so the Live view can never disagree with the
+  Playoff Bracket card. Finals returns Championship + 3rd Place. Returns `null` when
+  participants aren't determined (no 8-manager seeding, prior round unfinalized) — both Live
+  renderers then **fall back to the existing standings table**, and pool play is untouched.
+- Both the live (today) and historical-date Live views share `renderLiveMatchupCards`: seed +
+  name + total per team, a muted subline replacing the dropped table columns (live: today Δ ·
+  live/done/left counts · weekly; historical: daily Δ · weekly), and the same
+  `live-detail-<key>` ids / `_liveExpandedManagers` set so the expandable per-player panels and
+  `toggleLiveManagerDetails` work unchanged across the 2-minute poll re-render. Leader tint is
+  purely visual (missing manager rows count 0; ties highlight nobody) — official winners stay
+  finalize-time on the Scoreboard bracket with the seed tiebreak. Participants missing from the
+  endpoint response (no approved roster yet) render an em-dash total + "No roster data yet".
+- Bracket mobile parity: `mobile.css` previously had **zero** `#scoreboard-bracket` rules, so
+  the pool-play readability work (and the roster-expand fix from #337) never reached the
+  bracket — team rows rendered at 0.82rem and expanded panels at desktop 0.75rem. Added a
+  bracket section mirroring the `.mob-sbrow` contract (≥16px names/scores, flex name that
+  ellipsizes last, fixed score column) and the readable expanded-panel sizes (the
+  `#scoreboard-content .mgr-detail-*` rules are ID-scoped and can't apply).
+- Follow-up (same day, commissioner reviewed screenshots — density over explanation): the
+  `.bracket-tap-hint` line added above was REMOVED (don't re-add explanatory text under the
+  bracket title), the active bracket card title is "Playoffs" (was "Playoff Bracket"), and the
+  Live matchup subline is forced to ONE row (nowrap + ellipsis; on phones the seed indent is
+  dropped and the font shrinks to 0.78rem so the full line fits a 390px screen) — the goal is
+  the maximum number of matchup rows visible without scrolling.
+
+**Verified:** Playwright at 1280×900 and 390×844 against a seeded QF-week db (PP finalized,
+confirmed seeding, QF Week 1 scores) with stubbed `/api/mlb/live` + `/api/mlb/daily`: 34/34
+checks — bracket totals/splits + expanded QF player panels (≥16px on mobile), matchup cards in
+QF1/QF4/QF3/QF2 order, leader/tie/no-data highlighting, expand-across-poll ids, historical
+matchup view, no horizontal overflow, no JS errors. 140/140 tests, lint + format clean.
+
+## Daily Slack post: playoff cadence + bracket matchups (2026-07-15)
+
+**What (commissioner request):** stop the pool-play 7am auto post after the Monday following
+PP2's end; nothing during the All-Star break (the "End Pool Play" roast/field post covers the
+transition); each playoff round (QF/SF/Finals) posts daily starting its first TUESDAY (the
+opening Monday's 7am run has no games to report); the first Monday after each round ends gets
+one wrap-up post reporting the round that just finished ("and so on" through Finals).
+
+**Key decisions (all in `server.js`, display/timing only — no scoring/roster writes):**
+
+- `scoreboardAutoPostPlan(sd, todayISO)` gates the 7am run: `{summaryRound}` on the first
+  Monday after a PP2/QF/SF/Finals round-end, `{}` daily in-round (pool play unchanged; playoff
+  rounds only from `tuesdayOnOrAfterISO(round start)`), `null` otherwise. PP1's boundary
+  Monday deliberately stays a normal daily post (falls inside PP2's window). The wrap-up
+  Monday wins over the next round's window (SF Week 1 starts the Monday after QF ends — that
+  Monday's post is the QF wrap-up; SF posts start Tuesday). Empty `schedule_dates` preserves
+  the old always-post behavior. `last_scoreboard_post_date` idempotency guard untouched.
+- During QF/SF/Finals, `buildScoreboardBlocks` drops the pool-play frames (Overall Standings +
+  pool columns + legend) for `buildPlayoffMatchupsSlackText`: head-to-head matchups mirroring
+  app.js `buildActivePlayoffBracket` (`confirmed_seeding.qualifierNames` seeds; QF 1v8/4v5/
+  3v6/2v7; SF1 = QF1w vs QF4w; Finals = SF winners, 3rd place = SF losers with the app's
+  t1-favoring tie). Winners derive from round totals + seed tiebreak directly (identical to
+  the app's finalized bracket) so posts never wait on a finalize save. No confirmed seeding →
+  degrade to a plain ranked round-total list. Wrap-up posts add ✅/❌, an advancing/champion
+  footer, and a "complete! Final results below" line instead of the Current Period line.
+- Manual `POST /api/slack/scoreboard` and the `/wmmc` slash command intentionally keep no
+  gating (post-on-demand) but pick up the playoff matchup layout automatically.
+
+**Verified:** scratch harness (extracted the new pure functions from server.js) asserting the
+whole 2026 calendar day-by-day (PP daily through 7/13 PP2 wrap-up; silent ASB; QF daily
+7/21–8/03 wrap-up; SF/Finals likewise; nothing after the 8/31 Finals wrap-up) and matchup
+rendering incl. tie→seed and 3rd-place-tie→SF1-loser; block-assembly smoke for QF daily /
+QF+PP2 wrap-ups / PP2 daily / no-seeding fallback. 140/140 tests, lint + format clean.
 
 **What:** extended the Monte-Carlo playoff-odds engine (from the 2026-07-06 entry below)
 so each remaining game's projected contribution isn't just "shrunk per-game rate x 1", but
@@ -1073,3 +1148,91 @@ Decisions made with Daniel (asked via option picker):
 - Verification gotcha: booting the server against a scratch `db.json` REWRITES
   `managers_seed.json` from it (password-stripped mirror) — restore it with
   `git checkout -- managers_seed.json` after any local server run with fake data.
+
+## 2026-07-12 — Mobile scoreboard: Total column restored next to Playoff %
+
+- Bug: the mobile card layout for scoreboard rows (`mobile.css` `.mob-sbrow`)
+  shows rank / name / `td:last-child` as the score slot. When the playoff-odds
+  window is live, `renderOverallTable` appends a Playoff % column, so the odds
+  pill became the last cell and silently displaced the Total (hidden by the
+  generic `td { display:none }`). Symptom: Pool Play Overall on phones showed
+  only the % pill, no scores.
+- Fix: positional selectors replaced with tagged cells — app.js marks the
+  Total cell `sb-mob-total` and the odds cell `sb-mob-odds`; mobile.css shows
+  both (`[rank] [name…] [total] [pill]`). The class rules sit AFTER the
+  `td:last-child` score-slot rule so they win the equal-specificity tie (the
+  pill keeps its own 0.8rem size instead of the 1.5rem score font).
+- Lesson: any new column appended conditionally to a scoreboard table breaks
+  the mobile `td:last-child` score slot — tag semantic cells with classes
+  instead of relying on position.
+- Verified with Playwright (scratchpad-installed `playwright-core`,
+  executablePath `/opt/pw-browsers/chromium`, 390×844 mobile viewport) against
+  a fabricated gitignored `db.json` (schedule_dates putting today in the PP2
+  Wk4–5 odds window + `playoff_odds` blob). Probed: odds absent (Total still
+  renders via last-child rule), row expand/collapse, PP1/PP2 pool tables,
+  desktop 7-column table — all unchanged.
+
+## 2026-07-12 — Mobile scoreboard polish: aligned score column + odds-table headers
+
+- Overall list: `.sb-mob-odds` now a fixed 4.25rem flex column with the pill
+  stretched to 100% width and centered — uniform pill boxes mean every row's
+  Total right-aligns to the same edge (was ragged because pill text widths
+  varied: "🔒 100%" vs "0%").
+- 🔮 Playoff Odds table on mobile: re-enabled as a real table with its thead
+  (the generic `#scoreboard-content .data-table thead {display:none}` had
+  left it headerless). Each th carries `<span class="th-full">` +
+  `<span class="th-mob">` — desktop keeps full labels (styles.css hides
+  .th-mob), mobile swaps to abbreviations (Odds / Pool W / WC / P Gap /
+  C Gap / Proj / G / Sch) at 0.58rem so headers stay inside column widths.
+- Fit at 390px needed: td font 0.8rem + 0.1rem side padding, manager cell
+  `strong` as block with max-width 4.6rem + ellipsis (max-width only bites
+  on a block inside an auto-layout table cell), smaller pills/trends inside
+  the table. Overflow measured 0px; `:has(> .odds-table)` wrapper keeps
+  overflow-x:auto as a fallback for narrower screens.
+
+## 2026-07-17 — All-Star break banner + bracket-first scoreboard (PR #353)
+
+- `getBetweenPeriodsInfo(sd)` (app.js, next to getCurrentScoringPeriod) detects a
+  calendar day in the gap between two rounds' schedule_dates windows and feeds the
+  champion banner: "All-Star Break — Rosters due <getPeriodDeadline> · <round> start
+  <date>". PP2→QF gap = "All-Star Break"; other inter-round gaps = "Between Rounds";
+  returns null inside any week / preseason / postseason / same-round gaps.
+- Scoreboard-tab ordering is deliberately NOT static in index.html:
+  `orderScoreboardBracket(bracketFirst)` moves #scoreboard-bracket above
+  #scoreboard-content only when playoffs are the focus (active season with PP
+  finalized, or historical season with bracket data). During pool play/preseason the
+  scoreboard leads with the tentative bracket below. Both containers re-render
+  wholesale so moving the live nodes is safe; season switches restore either order.
+- `ppCollapsed` in renderActiveScoreboardTabs now includes finalized PP (not just
+  playoff stats existing) so the collapsed-summary state is in the initial HTML
+  during the between-periods break, not only after showActiveSeason's fixup.
+- Mobile banner footer forces `white-space: nowrap` on .banner-period — any long
+  period string must opt out (`.banner-period-break` wraps + hides its label span,
+  since the data-short status under the title already names the break).
+- Follow-up in same PR: the global #submission-warning-banner (below nav, all pages)
+  now covers EVERY submission window (pp1..finals) via isPeriodWindowConfirmedOpen +
+  isManagerQualifiedForPeriod + an eliminated-manager filter mirroring the card's
+  "Season ended" state, and links to `goToSubmission(period)` — which clicks the
+  My Roster nav tab, polls for `#period-submission-card-<period>` (render is async),
+  activates the "Swaps" roster sub-tab (the cards live in #rtab-swaps, hidden by
+  default), scrolls, and flashes the card. Gotcha: scrolling without switching the
+  sub-tab silently no-ops — the card exists but is display:none.
+- Mobile: .sub-warn-item's desktop inline-flex splits text nodes into flex items and
+  stacks them in columns at 390px — mobile.css forces `display:inline` so the warning
+  reads as a sentence.
+
+## 2026-07-17 — Break-time submission warning + explicit scoreboard expand (PR after #353)
+
+- Commissioner feedback on #353: no warning visible on 7/16 evening (QF window only
+  opens the Friday before the round → midnight 7/17 local), and the collapsed Pool
+  Play Scoreboard's header-arrow affordance was too subtle to discover.
+- updateSubmissionWarningBanner now also warns for the UPCOMING period during a
+  between-periods break (via getBetweenPeriodsInfo) even before its window opens —
+  copy adds "Submissions open <date>." and the link reads "View submission page"
+  until the window is open. Dropped once the period's deadline passes.
+- Collapsed pool-play summary ends with a labeled pill button ("View Full Pool Play
+  Scoreboard ▾", .sb-poolplay-expand-btn) that calls togglePoolPlay(); it lives
+  INSIDE #sb-poolplay-summary so expand/collapse hides/restores it for free.
+- Flex gotcha: .sub-warn-item is inline-flex on desktop — every text node becomes a
+  flex item separated by the gap, so punctuation after a </strong> gets a stray
+  leading space. Keep trailing periods inside the <strong>.
