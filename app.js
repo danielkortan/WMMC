@@ -1527,6 +1527,10 @@ function enterApp(mgr) {
   // saved value so returning users land on the merged tab, not the default.
   let savedTab = localStorage.getItem('wmmc_active_tab');
   if (savedTab === 'trends') savedTab = 'weekly';
+  // A #hash deep link naming a tab (e.g. wmmc.live/#swap-log from a Slack swap notification)
+  // wins over the saved tab, so a link can land directly on that tab after login.
+  const hashTab = (window.location.hash || '').replace(/^#/, '');
+  if (hashTab && document.querySelector(`.nav-btn[data-tab="${hashTab}"]`)) savedTab = hashTab;
   if (savedTab) {
     const targetBtn = document.querySelector(`.nav-btn[data-tab="${savedTab}"]`);
     const targetSection = document.getElementById(savedTab);

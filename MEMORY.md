@@ -11,6 +11,14 @@ Ineligible swaps get a warning and are blocked. Swap log + commissioner undo unc
 
 **Key decisions:**
 
+- **Rich Slack swap posts + deep link (same-day follow-up):** all swap notifications
+  (`buildSwapSlackText` in server.js) mirror the Swap Log detail rows — out/in with team
+  abbreviations, drop/add dates, reason + verified IL status, round · week, effective date,
+  submission time in ET — and end with a link to `http://wmmc.live/#swap-log` (`WMMC_SITE_URL`).
+  app.js gained minimal hash deep-linking: after login, a `#<tab>` hash matching a `.nav-btn`
+  `data-tab` wins over the localStorage-saved tab (only `#swap-log` is emitted today). Verified
+  live: captured the webhook payload with a local listener, and Playwright confirmed
+  `/#swap-log` + saved-tab=dashboard lands on the Swap Log.
 - **Server is the enforcer.** `POST /api/seasons/:year/swaps` now: verifies the authed user IS
   the named manager (or commissioner, 403 otherwise), computes round/week_key itself
   (`currentScheduleRound`), runs `checkSwapLimit` (400 + warning on failure), verifies IL via

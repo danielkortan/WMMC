@@ -1262,9 +1262,7 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
 
   // Fire-and-forget Slack notifications for each new pending swap
   for (const swap of newPending) {
-    postSlack(
-      `*New Swap Request*\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}`
-    ).catch(() => {});
+    postSlack(buildSwapSlackText(sd, swap, '*New Swap Request*')).catch(() => {});
   }
 });
 
@@ -1357,6 +1355,47 @@ async function computeSwapEffectiveDatesServer(sd, playerOut, playerIn) {
     return { effective_date: tomorrowStr, drop_date: todayStr, add_date: tomorrowStr, teams_started: started };
   }
   return { effective_date: todayStr, drop_date: yesterdayStr, add_date: todayStr, teams_started: [] };
+}
+
+// Public site URL used in Slack deep links (also hardcoded in the daily scoreboard post).
+const WMMC_SITE_URL = 'http://wmmc.live';
+
+// Slack text for a swap notification, mirroring the Swap Log's detail rows so the commissioner
+// can read the whole transaction from the post: out/in with team abbreviations and their
+// drop/add dates, reason + verified MLB IL status, round/week, effective date, submission time
+// (ET), and a deep link to the Swap Log tab (#swap-log) for quick review/edit/undo.
+function buildSwapSlackText(sd, swap, headline) {
+  const teamOf = (name) =>
+    (sd.batters_team && sd.batters_team[name]) || (sd.pitchers_team && sd.pitchers_team[name]) || null;
+  const withTeam = (name) => {
+    const t = teamOf(name);
+    return t && !String(name).endsWith(`(${t})`) ? `${name} (${t})` : name;
+  };
+  const roundWeek = swap.week_key ? swap.week_key.replace('|', ' · ') : swap.round || '';
+  // swap.timestamp is UTC ('YYYY-MM-DD HH:MM:SS' from toISOString) — render it in ET.
+  const submittedET = swap.timestamp
+    ? new Date(swap.timestamp.replace(' ', 'T') + 'Z').toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      }) + ' ET'
+    : '—';
+  const ilNote =
+    swap.il_status && swap.il_status !== 'unverified'
+      ? ` (MLB status: ${swap.il_status})`
+      : swap.il_status === 'unverified'
+        ? ' (IL status unverified)'
+        : '';
+  return [
+    `${headline} — *${swap.manager || '?'}*${roundWeek ? ` (${roundWeek})` : ''}`,
+    `*Out:* ${swap.player_out ? withTeam(swap.player_out) : '—'}${swap.drop_date ? ` — dropped ${swap.drop_date}` : ''}`,
+    `*In:* ${swap.player_in ? withTeam(swap.player_in) : '—'}${swap.add_date ? ` — added ${swap.add_date}` : ''}`,
+    `*Reason:* ${swap.reason || '—'}${ilNote}`,
+    `*Effective:* ${swap.effective_date || swap.add_date || '—'} · *Submitted:* ${submittedET}`,
+    `🔗 <${WMMC_SITE_URL}/#swap-log|Open the Swap Log to review, edit, or undo>`,
+  ].join('\n');
 }
 
 // IL status codes on MLB roster entries: 7-day (concussion), 10-day, 15-day, and 60-day lists.
@@ -1523,8 +1562,11 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
         _rev: computeSeasonRev(originalSd),
       });
       postSlack(
-        `:warning: *Swap auto-apply blocked (${req.params.year})* — ${swap.manager}: out ${swap.player_out}, in ${swap.player_in}.\n• ` +
-          `${integrity.reasons.join('\n• ')}\nQueued as pending for commissioner review.`
+        buildSwapSlackText(
+          originalSd,
+          pendingSwap,
+          `:warning: *Swap flagged (${req.params.year}) — pending your approval*`
+        ) + `\n*Integrity guard:* ${integrity.reasons.join('; ')}`
       ).catch(() => {});
       return;
     }
@@ -1557,10 +1599,7 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
     // that follows up with a full-season save must adopt it or it would falsely 409 as stale.
     res.json({ ok: true, swap, totals_delta: totalsDelta, _rev: computeSeasonRev(sd) });
 
-    postSlack(
-      `*Swap Applied* (${round})\n*Manager:* ${swap.manager || '?'}\n*Out:* ${swap.player_out || '?'}\n*In:* ${swap.player_in || '?'}\n*Reason:* ${swap.reason || '—'}` +
-        `${swap.il_status && swap.il_status !== 'unverified' ? ` (MLB status: ${swap.il_status})` : ''}\n*Effective:* ${swap.effective_date}`
-    ).catch(() => {});
+    postSlack(buildSwapSlackText(sd, swap, '*Swap Applied*')).catch(() => {});
   } catch (e) {
     console.error('Swap submission failed:', e);
     res.status(500).json({ error: 'Swap submission failed: ' + e.message });
