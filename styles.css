@@ -4043,6 +4043,88 @@ body::before {
   white-space: nowrap;
 }
 
+/* Affordance hint under the bracket title — the clickable team rows only carry a
+   small arrow, so spell the interaction out (same visibility fix as the labeled
+   pool-play expand button). */
+.bracket-tap-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: -0.25rem 0 0.25rem;
+}
+
+/* ---- Live tab: playoff matchup (bracket) view ----
+   During QF/SF/Finals the Live tab's Running Standings table becomes these
+   head-to-head matchup cards, visually matching the Playoff Bracket card. */
+.live-matchup {
+  background: var(--bg-body);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.live-matchup-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 0.25rem;
+}
+
+.live-matchup-team {
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.live-matchup-team:hover {
+  background: rgba(0, 45, 98, 0.06);
+}
+
+.live-matchup-team.live-matchup-leader {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.live-matchup-main {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.live-matchup-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.live-matchup-total {
+  font-weight: 700;
+  color: var(--navy);
+  white-space: nowrap;
+}
+
+.live-matchup-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding-left: calc(18px + 0.4rem); /* clear the seed column so sublines align with names */
+  margin-top: 0.1rem;
+}
+
+.live-matchup-detail .mgr-detail-panel {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.live-matchup-note {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
 .pp-leader-cards {
   margin: 1rem 0;
 }
