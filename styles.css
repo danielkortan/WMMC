@@ -3287,6 +3287,19 @@ footer {
   max-width: 100%;
 }
 
+/* Commissioner-only inline drop/add date editors inside the detail panel */
+.swap-detail-date-input {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  padding: 0.2rem 0.4rem;
+  cursor: pointer;
+  max-width: 100%;
+}
+
 /* ============================================================ */
 /* Responsive additions for new components */
 /* ============================================================ */

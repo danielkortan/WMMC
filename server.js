@@ -1325,6 +1325,27 @@ function currentScheduleRound(sd) {
   return { round: last.round, weekKey: `${last.round}|${last.week}` };
 }
 
+// Add days to an ISO YYYY-MM-DD date string (noon-UTC arithmetic — immune to DST edges).
+function isoDateAddDays(iso, days) {
+  return new Date(Date.parse(iso + 'T12:00:00Z') + days * 86400000).toISOString().slice(0, 10);
+}
+
+// Last calendar day of a round (max schedule_dates end among the round's weeks), or null when
+// the schedule doesn't cover it. Caps how far ahead a manager may schedule a swap: within the
+// current round the existing date-window machinery is proven (commissioner approvals have always
+// picked arbitrary in-round dates); across a period boundary rosters start fresh from a new
+// submission, so a pre-scheduled swap there would violate the period-scoping invariant.
+function scheduleRoundEndDate(sd, round) {
+  const dates = sd.schedule_dates || [];
+  let end = null;
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    if (SEASON_SCHEDULE[i].round === round && dates[i] && dates[i].end) {
+      if (!end || dates[i].end > end) end = dates[i].end;
+    }
+  }
+  return end;
+}
+
 // Server-side twin of the client's computeSwapEffectiveDates: a player whose team's game has
 // already started today can't enter or leave a roster today, so the swap takes effect tomorrow
 // (drop today, add tomorrow); otherwise it's effective today (drop yesterday, add today). The
@@ -1514,13 +1535,47 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
       swap.il_status = il.checked ? il.status : 'unverified';
     }
 
-    // Server-computed effective dates (game-started rule), overriding the client's values.
-    const eff = await computeSwapEffectiveDatesServer(sd, swap.player_out, swap.player_in);
+    // Server-computed effective dates (game-started rule), overriding the client's values —
+    // unless the submitter scheduled the swap for a specific effective date. Managers may only
+    // schedule FORWARD (strictly after today — no backdating — and no later than the current
+    // round's end); the commissioner may pick any date (corrections). A scheduled date drives
+    // the same add/drop window shape as the auto path: drop the day before, add on the date.
+    const requestedEff = swap.requested_effective_date;
+    delete swap.requested_effective_date;
+    if (requestedEff !== undefined && requestedEff !== null && requestedEff !== '') {
+      if (typeof requestedEff !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(requestedEff)) {
+        return res.status(400).json({ error: 'Invalid effective date (expected YYYY-MM-DD).' });
+      }
+      if (!req.manager.commissioner) {
+        if (requestedEff <= todayET) {
+          return res.status(400).json({
+            error:
+              'The effective date must be a future date — swaps cannot be backdated. ' +
+              'Leave it blank to apply the swap automatically.',
+            code: 'effective_date_not_future',
+          });
+        }
+        const roundEnd = scheduleRoundEndDate(sd, round);
+        if (roundEnd && requestedEff > roundEnd) {
+          return res.status(400).json({
+            error: `The effective date can be no later than the end of the current round (${roundEnd}).`,
+            code: 'effective_date_past_round',
+          });
+        }
+      }
+      swap.requested_effective_date = requestedEff;
+      swap.effective_date = requestedEff;
+      swap.add_date = requestedEff;
+      swap.drop_date = isoDateAddDays(requestedEff, -1);
+      swap.teams_started = [];
+    } else {
+      const eff = await computeSwapEffectiveDatesServer(sd, swap.player_out, swap.player_in);
+      swap.effective_date = eff.effective_date;
+      swap.drop_date = eff.drop_date;
+      swap.add_date = eff.add_date;
+      swap.teams_started = eff.teams_started;
+    }
     swap.swap_date = todayET;
-    swap.effective_date = eff.effective_date;
-    swap.drop_date = eff.drop_date;
-    swap.add_date = eff.add_date;
-    swap.teams_started = eff.teams_started;
 
     // Server stamps id, timestamp, and status so the client cannot forge them.
     swap.id = Date.now().toString();
@@ -1643,10 +1698,14 @@ app.post('/api/seasons/:year/swaps/:id/deny', requireCommissioner, (req, res) =>
 });
 
 // PUT /api/seasons/:year/swaps/:id — atomically patch a swap's own fields (player_out, player_in,
-// reason, swap_date). Mirrors today's saveSwapEdit / saveSwapLogReason behavior exactly: it edits the
-// swap RECORD only and does not rebuild rosters (roster_dates re-derive from swaps on the next render
-// via backfillRosterDatesFromSwaps, as before). Replaces the whole-season POST so an edit can't be
-// lost to a stale 409 or clobber unrelated data. Part of #275 (ROSTER_OPS_PLAN.md §3b).
+// reason, swap_date, effective_date, add_date, drop_date). Record-only edits (reason, players,
+// swap_date) behave exactly as before: they edit the swap RECORD only and do not rebuild rosters.
+// Changing add_date/drop_date on an APPROVED swap additionally re-applies the swap's roster
+// windows with the new dates via applySwapToSeason (the same mutation approve/auto-apply use, so
+// scoring is recomputed from the new windows immediately) and is vetted by the destructive-save
+// integrity guard — a flagged edit is rejected (409, no write) unless { force: true }. Replaces
+// the whole-season POST so an edit can't be lost to a stale 409 or clobber unrelated data.
+// Part of #275 (ROSTER_OPS_PLAN.md §3b); date editing added with the scheduled-swaps change.
 app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
@@ -1657,11 +1716,75 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
   const swap = findSwap(sd, req.params.id);
   if (!swap) return res.status(404).json({ error: 'Swap not found' });
 
-  const { player_out: playerOut, player_in: playerIn, reason, swap_date: swapDate } = req.body || {};
+  const {
+    player_out: playerOut,
+    player_in: playerIn,
+    reason,
+    swap_date: swapDate,
+    effective_date: effectiveDate,
+    add_date: addDate,
+    drop_date: dropDate,
+    force,
+  } = req.body || {};
+  const isISODate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  for (const [label, v] of [
+    ['effective_date', effectiveDate],
+    ['add_date', addDate],
+    ['drop_date', dropDate],
+  ]) {
+    if (v !== undefined && v !== '' && !isISODate(v)) {
+      return res.status(400).json({ error: `Invalid ${label} (expected YYYY-MM-DD).` });
+    }
+  }
+
+  // Only an approved swap has live roster windows to move; pending swaps get their dates read at
+  // approval time, so a record-only update suffices there.
+  const scoringDatesChanged =
+    (isISODate(addDate) && addDate !== swap.add_date) || (isISODate(dropDate) && dropDate !== swap.drop_date);
+  const reapply = swap.status === 'approved' && scoringDatesChanged;
+  // Pristine copy for the before/after integrity vet (sd is mutated in place below).
+  const originalSd = reapply ? JSON.parse(JSON.stringify(sd)) : null;
+
   if (typeof playerOut === 'string' && playerOut) swap.player_out = playerOut;
   if (typeof playerIn === 'string' && playerIn) swap.player_in = playerIn;
   if (typeof reason === 'string') swap.reason = reason;
   if (typeof swapDate === 'string' && swapDate) swap.swap_date = swapDate;
+  if (isISODate(addDate)) {
+    swap.add_date = addDate;
+    // effective_date is informational and equals the add date by construction — keep it in step
+    // unless the caller sets it explicitly.
+    if (effectiveDate === undefined) swap.effective_date = addDate;
+  }
+  if (isISODate(dropDate)) swap.drop_date = dropDate;
+  if (isISODate(effectiveDate)) swap.effective_date = effectiveDate;
+
+  let totalsDelta;
+  if (reapply) {
+    applySwapToSeason(sd, swap, swap.add_date, swap.drop_date);
+
+    const integrity = assessSeasonWriteIntegrity(originalSd, sd);
+    if (integrity.destructive && !force) {
+      // Discard the in-place mutation (sd IS db.seasons[year]); only the audit entry survives.
+      db.seasons[req.params.year] = originalSd;
+      addAuditEntry(
+        db,
+        'swap_edit_blocked',
+        { year: req.params.year, id: swap.id, reasons: integrity.reasons },
+        req.get('X-User-Email')
+      );
+      writeDB(db);
+      return res.status(409).json({ error: 'destructive_swap_edit_blocked', reasons: integrity.reasons });
+    }
+
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const before = captureScoreSnapshot(originalSd, todayET).totals;
+    const after = captureScoreSnapshot(sd, todayET).totals;
+    totalsDelta = {};
+    for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+      if (Math.abs(d) > 0.01) totalsDelta[m] = Math.round(d * 10) / 10;
+    }
+  }
 
   db.seasons[req.params.year] = sd;
   addAuditEntry(
@@ -1673,11 +1796,15 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
       manager: swap.manager,
       player_out: swap.player_out,
       player_in: swap.player_in,
+      add_date: swap.add_date,
+      drop_date: swap.drop_date,
+      reapplied: !!reapply,
+      forced: !!force,
     },
     req.get('X-User-Email')
   );
   writeDB(db);
-  res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
+  res.json({ ok: true, swap, ...(totalsDelta ? { totals_delta: totalsDelta } : {}), _rev: computeSeasonRev(sd) });
 });
 
 // Set the manager on a player's not-yet-attributed weekly rows. Server-side port of the client's
