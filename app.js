@@ -1191,6 +1191,16 @@ async function persistSwapMutation(year, swapId, method, path, body) {
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
+      // A date edit on an approved swap is vetted by the server's destructive-save guard; offer
+      // the commissioner an explicit override for a legitimate large correction (mirrors the
+      // approve flow's force confirm).
+      if (resp.status === 409 && err.error === 'destructive_swap_edit_blocked' && !(body && body.force)) {
+        const reasons = (err.reasons || []).join('\n• ');
+        if (confirm(`This edit looks destructive:\n\n• ${reasons}\n\nApply anyway?`)) {
+          return persistSwapMutation(year, swapId, method, path, { ...(body || {}), force: true });
+        }
+        return null;
+      }
       alert(`Swap update failed (${err.error || resp.status}). Please reload and try again.`);
       return null;
     }
@@ -8826,9 +8836,25 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const availBatters = (seasonData.batters_pool || []).filter((b) => !isCurrentlyTaken(b)).sort();
     const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !isCurrentlyTaken(p)).sort();
 
+    // Optional scheduled effective date: managers may only schedule FORWARD (min = tomorrow, no
+    // backdating) and no further than the end of the current round (the server enforces both;
+    // period boundaries start fresh from a new submission, so scheduling across one is invalid).
+    const _swapEffMin = isoDateET(new Date(Date.now() + 86400000));
+    const _swapEffMax = (() => {
+      const { round } = getCurrentScheduleRound(seasonData);
+      const scheduleDates = seasonData.schedule_dates || [];
+      let end = null;
+      for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
+        if (SEASON_SCHEDULE[i].round === round && scheduleDates[i] && scheduleDates[i].end) {
+          if (!end || scheduleDates[i].end > end) end = scheduleDates[i].end;
+        }
+      }
+      return end;
+    })();
+
     html += `<div class="swap-form-card">
       <h3>Make a Swap</h3>
-      <p class="text-muted" style="margin-bottom:0.75rem;">Swaps take effect immediately when submitted. If either player's team has already started playing today, the swap becomes effective tomorrow. Swap limits and IL status are checked automatically.</p>
+      <p class="text-muted" style="margin-bottom:0.75rem;">Swaps take effect immediately when submitted. If either player's team has already started playing today, the swap becomes effective tomorrow. You can also schedule the swap for a future date. Swap limits and IL status are checked automatically.</p>
       <div class="swap-form-grid">
         <div class="swap-form-field" style="grid-column:1 / -1;">
           <label>Player Type</label>
@@ -8861,6 +8887,11 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
             <option value="">Select reason...</option>
             ${SWAP_REASONS.map((r) => `<option value="${r}">${r}</option>`).join('')}
           </select>
+        </div>
+        <div class="swap-form-field">
+          <label for="swap-effective-date">Effective Date (optional)</label>
+          <input type="date" id="swap-effective-date" class="form-input" min="${_swapEffMin}"${_swapEffMax ? ` max="${_swapEffMax}"` : ''}>
+          <small class="text-muted" style="font-size:0.75rem;">Leave blank to apply now, or pick a future date to schedule the swap.</small>
         </div>
       </div>
       <div style="margin-top:0.75rem;">
@@ -9542,10 +9573,19 @@ window.submitSwapRequest = async function (managerName, ev) {
     const playerOut = document.getElementById('swap-player-out').value;
     const playerIn = document.getElementById('swap-player-in').value;
     const reason = document.getElementById('swap-reason').value;
+    const requestedEff = (document.getElementById('swap-effective-date') || {}).value || '';
     const swapDate = new Date().toISOString().split('T')[0];
 
     if (!playerOut || !playerIn || !reason) {
       errEl.textContent = 'All fields are required.';
+      errEl.style.display = 'block';
+      return;
+    }
+
+    // A scheduled effective date must be in the future — no backdating (the server re-validates
+    // and lets only the commissioner pick past dates, via the Swap Log editor).
+    if (requestedEff && requestedEff <= isoDateET(new Date())) {
+      errEl.textContent = 'The effective date must be a future date — leave it blank to apply the swap now.';
       errEl.style.display = 'block';
       return;
     }
@@ -9571,12 +9611,23 @@ window.submitSwapRequest = async function (managerName, ev) {
       return;
     }
 
-    // Determine effective add/drop dates from the live game schedule.
-    const { effective_date, drop_date, add_date, teams_started } = await computeSwapEffectiveDates(
-      sd,
-      playerOut,
-      playerIn
-    );
+    // Determine effective add/drop dates: a scheduled swap uses the chosen date (add on the
+    // date, drop the day before — the game-started rule is irrelevant for a future date);
+    // otherwise ask the live game schedule. The server recomputes both cases authoritatively.
+    let eff;
+    if (requestedEff) {
+      const d = new Date(requestedEff + 'T12:00:00');
+      d.setDate(d.getDate() - 1);
+      eff = {
+        effective_date: requestedEff,
+        drop_date: d.toISOString().split('T')[0],
+        add_date: requestedEff,
+        teams_started: [],
+      };
+    } else {
+      eff = await computeSwapEffectiveDates(sd, playerOut, playerIn);
+    }
+    const { effective_date, drop_date, add_date, teams_started } = eff;
 
     const swap = {
       email: LOGGED_IN_EMAIL,
@@ -9592,6 +9643,7 @@ window.submitSwapRequest = async function (managerName, ev) {
       round: round,
       week_key: weekKey,
     };
+    if (requestedEff) swap.requested_effective_date = requestedEff;
 
     // Post only the swap object to the dedicated endpoint — avoids the whole-season
     // payload that previously failed silently when the JSON was large or auth was stale.
@@ -9640,7 +9692,7 @@ window.submitSwapRequest = async function (managerName, ev) {
         type: 'success',
         text: pendingReview
           ? 'Swap submitted — it was flagged for commissioner review and will take effect once approved.'
-          : `Swap applied! ${playerOut} out, ${playerIn} in — effective ${
+          : `Swap ${requestedEff ? 'scheduled' : 'applied'}! ${playerOut} out, ${playerIn} in — effective ${
               (savedSwap && (savedSwap.effective_date || savedSwap.add_date)) || 'today'
             }.`,
       };
@@ -9877,6 +9929,14 @@ window.editSwapInline = function (swapId) {
         <label>Swap Date</label>
         <input type="date" id="edit-date-${swapId}" class="form-select" value="${swap.swap_date || ''}">
       </div>
+      <div class="swap-form-field">
+        <label>Drop Date (player out)</label>
+        <input type="date" id="edit-drop-${swapId}" class="form-select" value="${swap.drop_date || ''}">
+      </div>
+      <div class="swap-form-field">
+        <label>Add Date (player in)</label>
+        <input type="date" id="edit-add-${swapId}" class="form-select" value="${swap.add_date || ''}">
+      </div>
     </div>
     <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
       <button class="btn btn-sm btn-primary" onclick="saveSwapEdit('${swapId}')">Save Changes</button>
@@ -9892,14 +9952,20 @@ window.saveSwapEdit = async function (swapId) {
   const newIn = document.getElementById(`edit-in-${swapId}`).value;
   const newReason = document.getElementById(`edit-reason-${swapId}`).value;
   const newDate = document.getElementById(`edit-date-${swapId}`).value;
+  const newDrop = (document.getElementById(`edit-drop-${swapId}`) || {}).value || '';
+  const newAdd = (document.getElementById(`edit-add-${swapId}`) || {}).value || '';
 
-  // Atomic edit of the swap record's own fields (no roster rebuild — matches prior behavior).
-  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', {
+  // Atomic edit of the swap's own fields. For a pending swap this is record-only (approve reads
+  // the dates later); the server re-applies roster windows if the swap is already approved.
+  const body = {
     player_out: newOut,
     player_in: newIn,
     reason: newReason,
     swap_date: newDate,
-  });
+  };
+  if (newDrop) body.drop_date = newDrop;
+  if (newAdd) body.add_date = newAdd;
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body);
   if (!result) return;
 
   rerenderCurrentRosterView();
@@ -10193,9 +10259,18 @@ function swapDetailHtml(s, sd, containerId, editable) {
   if (s.round) items += row('Round', esc(s.round));
   if (s.week_key) items += row('Week', esc(s.week_key.replace('|', ' · ')));
   if (s.swap_date) items += row('Requested', esc(s.swap_date));
-  if (s.drop_date) items += row('Drop Date', esc(s.drop_date));
-  if (s.add_date) items += row('Add Date', esc(s.add_date));
+  // Commissioner: drop/add dates are inline-editable for pending/approved swaps (a date edit on
+  // an approved swap moves the live roster windows server-side and recomputes scores). Denied/
+  // undone swaps have no live windows, so their dates stay read-only history.
+  const dateEditable = editable && (s.status === 'approved' || s.status === 'pending');
+  const dateVal = (field, value) =>
+    dateEditable
+      ? `<input type="date" class="swap-detail-date-input" value="${esc(value || '')}" onclick="event.stopPropagation()" onchange="saveSwapLogDate('${containerId}','${s.id}','${field}', this.value)">`
+      : esc(value || '—');
+  if (s.drop_date || dateEditable) items += row('Drop Date', dateVal('drop_date', s.drop_date));
+  if (s.add_date || dateEditable) items += row('Add Date', dateVal('add_date', s.add_date));
   if (s.effective_date) items += row('Effective', esc(s.effective_date));
+  if (s.requested_effective_date) items += row('Scheduled For', esc(s.requested_effective_date));
   if (s.teams_started && s.teams_started.length) {
     items += row('Teams Already Playing', esc(s.teams_started.join(', ')));
   }
@@ -10335,6 +10410,33 @@ window.saveSwapLogReason = async function (containerId, swapId, newReason) {
   const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', { reason: newReason });
   if (!result) return;
   const state = getSwapLogState(containerId);
+  renderSwapLog(containerId, state.editable);
+};
+
+// Commissioner: edit a swap's drop/add date from the Swap Log detail panel. Changing the add
+// date also moves the informational effective date (they are equal by construction). On an
+// approved swap the server re-applies the roster windows and recomputes scores, so pull the
+// authoritative season down afterwards (same pattern as the auto-apply submission flow).
+window.saveSwapLogDate = async function (containerId, swapId, field, value) {
+  const state = getSwapLogState(containerId);
+  if (!value) {
+    renderSwapLog(containerId, state.editable); // restore the old value in the input
+    return;
+  }
+  const body = { [field]: value };
+  if (field === 'add_date') body.effective_date = value;
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body);
+  if (result) {
+    try {
+      const fresh = await fetch('/api/seasons');
+      if (fresh.ok) {
+        const srv = await fresh.json();
+        if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+      }
+    } catch (_) {
+      /* offline — local view may lag until reload */
+    }
+  }
   renderSwapLog(containerId, state.editable);
 };
 

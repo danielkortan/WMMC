@@ -1,5 +1,46 @@
 # WMMC — Decisions Log
 
+## Scheduled swaps (manager, future-only) + commissioner date editing (2026-07-21)
+
+**What (commissioner request):** now that swaps auto-apply, (1) managers can optionally pick a
+FUTURE effective date on the swap form (no backdating — the server rejects any date ≤ today for
+non-commissioners); (2) the commissioner can edit a swap's effective dates (drop/add) as well as
+its reason, from the Swap Log detail panel and the pending-swap inline edit form.
+
+**Key decisions:**
+
+- **Submission (`POST /swaps`) takes optional `requested_effective_date`.** When set it overrides
+  the game-started auto-dates with the same window shape (add = date, drop = day before,
+  `teams_started: []` — the game-started rule is irrelevant for a future date) and is kept on the
+  swap record (`requested_effective_date`, shown as "Scheduled For" in the log). Managers:
+  strictly after today AND no later than the current round's end (`scheduleRoundEndDate`) —
+  cross-period scheduling is invalid because rosters start fresh from a new submission (the
+  period-scoping invariant); in-round future dates ride the proven machinery (approve has always
+  taken arbitrary dates). Commissioners: any date. Round charged is still the round it's
+  submitted in (`currentScheduleRound` from today — unchanged, no client/server drift).
+- **`PUT /swaps/:id` now accepts `effective_date`/`add_date`/`drop_date`.** Record-only edits
+  (reason/players/swap_date) behave exactly as before. Changing add/drop dates on an APPROVED
+  swap re-applies the roster windows via `applySwapToSeason` (same mutation as approve/auto-apply
+  — windows re-stamp by overwrite, roster-array block is a no-op on re-apply) and is vetted by
+  `assessSeasonWriteIntegrity`: 409 `destructive_swap_edit_blocked` unless `{ force: true }`;
+  response carries `totals_delta`. Pending swaps stay record-only (approve reads the dates).
+  `effective_date` follows `add_date` unless explicitly set (they're equal by construction).
+- **Client:** swap form gained an optional "Effective Date" input (min = tomorrow, max = round
+  end); a scheduled submission skips the teams-started fetch. Swap Log detail panel renders
+  Drop/Add as inline date inputs for commissioners on pending/approved swaps only
+  (`saveSwapLogDate` — pulls the authoritative season down after, since scores may recompute);
+  the pending-swap inline edit form gained Drop/Add date fields. `persistSwapMutation` handles
+  the destructive 409 with a confirm → force retry (mirrors approveSwap).
+- **Verified** per SAVE_HARDENING_PLAN §7 on a seeded temp-DB server (staging fixture, schedule
+  shifted so today = PP2 Week 4's last day): 30/30 checks — backdate/same-day/past-round-end/
+  invalid rejected 400; scheduled swap auto-applies with correct record + `roster_dates` windows;
+  manager PUT 403; commissioner date edit + backdate re-stamp windows; per-manager totals
+  byte-identical before/after every operation. 155/155 tests, lint + format clean.
+- **Gotcha (harness):** the server rewrites `managers_seed.json` on boot from the live DB — a
+  smoke server started with `cwd: repo` + a scratch `DB_PATH` clobbers the committed seed with
+  the fixture's synthetic managers. Restore it (`git checkout -- managers_seed.json`) after any
+  temp-DB server run.
+
 ## Swap automation: auto-apply on submit + playoff limits + MLB IL verification (2026-07-20)
 
 **What (commissioner request):** managers' swap submissions no longer wait for commissioner
