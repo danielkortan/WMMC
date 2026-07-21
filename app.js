@@ -8836,10 +8836,14 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const availBatters = (seasonData.batters_pool || []).filter((b) => !isCurrentlyTaken(b)).sort();
     const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !isCurrentlyTaken(p)).sort();
 
-    // Optional scheduled effective date: managers may only schedule FORWARD (min = tomorrow, no
-    // backdating) and no further than the end of the current round (the server enforces both;
-    // period boundaries start fresh from a new submission, so scheduling across one is invalid).
-    const _swapEffMin = isoDateET(new Date(Date.now() + 86400000));
+    // Effective-date field: prefilled with the date the swap WOULD take effect if submitted
+    // as-is (the auto path — today, bumped to tomorrow once a selected player's team has
+    // started; refreshSwapAutoEffectiveDate keeps it live as players are picked). Submitting
+    // with the auto value untouched uses the auto path; changing it schedules the swap.
+    // Managers may only schedule FORWARD (no backdating) and no further than the end of the
+    // current round (the server enforces both; period boundaries start fresh from a new
+    // submission, so scheduling across one is invalid).
+    const _swapEffToday = isoDateET(new Date());
     const _swapEffMax = (() => {
       const { round } = getCurrentScheduleRound(seasonData);
       const scheduleDates = seasonData.schedule_dates || [];
@@ -8865,7 +8869,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         </div>
         <div class="swap-form-field">
           <label for="swap-player-out">Player Out (from your roster)</label>
-          <select id="swap-player-out" class="form-select">
+          <select id="swap-player-out" class="form-select" onchange="refreshSwapAutoEffectiveDate()">
             <option value="">Select player to swap out...</option>
             ${currentBatters
               .sort()
@@ -8889,9 +8893,9 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           </select>
         </div>
         <div class="swap-form-field">
-          <label for="swap-effective-date">Effective Date (optional)</label>
-          <input type="date" id="swap-effective-date" class="form-input" min="${_swapEffMin}"${_swapEffMax ? ` max="${_swapEffMax}"` : ''}>
-          <small class="text-muted" style="font-size:0.75rem;">Leave blank to apply now, or pick a future date to schedule the swap.</small>
+          <label for="swap-effective-date">Effective Date</label>
+          <input type="date" id="swap-effective-date" class="form-input" value="${_swapEffToday}" data-auto-date="${_swapEffToday}" min="${_swapEffToday}"${_swapEffMax ? ` max="${_swapEffMax}"` : ''}>
+          <small class="text-muted" style="font-size:0.75rem;">Shows when the swap will take effect — pick a later date to schedule it instead.</small>
         </div>
       </div>
       <div style="margin-top:0.75rem;">
@@ -9476,6 +9480,7 @@ window.swapTypeToggle = function (type) {
       data.pitchers.map((p) => `<option value="${p}">${dp(p)}</option>`).join('');
     clearSwapInSearch();
   }
+  window.refreshSwapAutoEffectiveDate(); // both selections were reset — back to the no-player baseline
 };
 
 // Determine which schedule round the current date falls in. Between weeks (e.g. the All-Star
@@ -9544,6 +9549,28 @@ async function computeSwapEffectiveDates(sd, playerOut, playerIn) {
   return { effective_date: todayStr, drop_date: yesterdayStr, add_date: todayStr, teams_started: [] };
 }
 
+// Keep the swap form's Effective Date input showing the date the swap WOULD take effect if
+// submitted as-is (the auto path): today, or tomorrow once either selected player's team has
+// started playing. Called whenever a player selection changes. Only overwrites the input while
+// it still holds the previous auto value (or is empty) — a date the user picked themselves is
+// never clobbered. data-auto-date always tracks the latest auto value so submitSwapRequest can
+// tell "left as suggested" (auto path) apart from "changed" (scheduled swap).
+window.refreshSwapAutoEffectiveDate = async function () {
+  const effEl = document.getElementById('swap-effective-date');
+  if (!effEl) return;
+  const sd = getSeasons()[SELECTED_SEASON];
+  if (!sd) return;
+  const playerOut = (document.getElementById('swap-player-out') || {}).value || '';
+  const playerIn = (document.getElementById('swap-player-in') || {}).value || '';
+  const prevAuto = effEl.dataset.autoDate || '';
+  const { effective_date: autoDate } = await computeSwapEffectiveDates(sd, playerOut, playerIn);
+  // Re-look-up after the await: the form may have re-rendered while the check was in flight.
+  const el = document.getElementById('swap-effective-date');
+  if (!el) return;
+  el.dataset.autoDate = autoDate;
+  if (!el.value || el.value === prevAuto) el.value = autoDate;
+};
+
 // Submit a swap request
 window.submitSwapRequest = async function (managerName, ev) {
   const errEl = document.getElementById('swap-form-error');
@@ -9573,7 +9600,11 @@ window.submitSwapRequest = async function (managerName, ev) {
     const playerOut = document.getElementById('swap-player-out').value;
     const playerIn = document.getElementById('swap-player-in').value;
     const reason = document.getElementById('swap-reason').value;
-    const requestedEff = (document.getElementById('swap-effective-date') || {}).value || '';
+    // The date input is prefilled with the auto effective date (data-auto-date, kept fresh by
+    // refreshSwapAutoEffectiveDate). Left as suggested (or cleared) = the auto path; a changed
+    // value = an explicit request to schedule the swap for that date.
+    const effEl = document.getElementById('swap-effective-date');
+    const requestedEff = effEl && effEl.value && effEl.value !== (effEl.dataset.autoDate || '') ? effEl.value : '';
     const swapDate = new Date().toISOString().split('T')[0];
 
     if (!playerOut || !playerIn || !reason) {
@@ -9585,7 +9616,8 @@ window.submitSwapRequest = async function (managerName, ev) {
     // A scheduled effective date must be in the future — no backdating (the server re-validates
     // and lets only the commissioner pick past dates, via the Swap Log editor).
     if (requestedEff && requestedEff <= isoDateET(new Date())) {
-      errEl.textContent = 'The effective date must be a future date — leave it blank to apply the swap now.';
+      errEl.textContent =
+        'The effective date must be a future date — keep the suggested date to apply the swap automatically.';
       errEl.style.display = 'block';
       return;
     }
@@ -11946,6 +11978,7 @@ window.selectSwapPlayerIn = function (playerName) {
     resultsDiv.innerHTML = '';
     resultsDiv.style.display = 'none';
   }
+  window.refreshSwapAutoEffectiveDate();
 };
 
 // ---- Initial Player Submission Handlers ----
