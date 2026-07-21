@@ -2761,6 +2761,30 @@ footer {
   background: var(--card-bg);
 }
 
+/* Nested collapsible groups (Pool Play → PP1/PP2 → week). Reuse .wrs-header/.wrs-body markup;
+   these rules add the visual hierarchy and tighten the indentation of nested content. */
+.wrs-group > .wrs-body {
+  padding: 0.5rem;
+}
+
+.wrs-group-l1 > .wrs-group-header {
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.95rem;
+}
+
+.wrs-group-l1 > .wrs-group-header:hover {
+  background: var(--primary-light);
+}
+
+.wrs-group-l2 > .wrs-group-header {
+  background: rgba(0, 45, 98, 0.08);
+}
+
+.wrs-group-l2 > .wrs-group-header:hover {
+  background: rgba(0, 45, 98, 0.13);
+}
+
 .wrs-group-label {
   font-size: 0.75rem;
   font-weight: 700;
