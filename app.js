@@ -13025,7 +13025,7 @@ window.removeFromRoster = function (manager, type, player, weekKey) {
 // Permanently removes a player from the roster AND erases their stats for the week.
 // Use when a player was erroneously rostered (e.g. pre-season submission later changed)
 // and their attributed stats need to be purged entirely, not just marked as dropped.
-window.hardRemoveFromRoster = function (manager, type, player, weekKey) {
+window.hardRemoveFromRoster = async function (manager, type, player, weekKey) {
   if (
     !confirm(
       `Remove ${player} and all their stats for this week from ${manager}'s roster?\n\nThis deletes their stats permanently and cannot be undone.`
@@ -13034,35 +13034,53 @@ window.hardRemoveFromRoster = function (manager, type, player, weekKey) {
     return;
   }
 
+  // Persist the removal through the atomic endpoint, NOT the full-season save. A hard remove is a
+  // deletion, and the server's stale-save guards re-append any roster_dates entry / weekly stat row
+  // missing from a full-season payload — silently resurrecting the removed player after a refresh.
+  // The endpoint deletes them on the server's authoritative copy so the removal actually sticks.
+  let removed = false;
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roster-remove`, {
+      method: 'POST',
+      body: JSON.stringify({ manager, weekKey, player, type }),
+    });
+    if (resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      adoptRev(data._rev);
+      removed = true;
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      alert(`Remove failed (${err.error || resp.status}). Please reload and try again.`);
+    }
+  } catch (e) {
+    alert(`Remove failed — ${e.message}. Please reload and try again.`);
+  }
+  if (!removed) return;
+
+  // Mirror the server's mutation into the local cache so the view updates without a reload.
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
-  const [round, week] = weekKey.split('|');
-
-  // Remove from roster array
-  if (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey] && sd.rosters[manager][weekKey][type]) {
-    sd.rosters[manager][weekKey][type] = sd.rosters[manager][weekKey][type].filter((p) => p !== player);
+  if (sd) {
+    const [round, week] = weekKey.split('|');
+    if (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey] && sd.rosters[manager][weekKey][type]) {
+      sd.rosters[manager][weekKey][type] = sd.rosters[manager][weekKey][type].filter((p) => p !== player);
+    }
+    if (sd.weekly_batting) {
+      sd.weekly_batting = sd.weekly_batting.filter(
+        (b) => !(b.batter === player && b.round === round && b.week === week && (b.manager === manager || !b.manager))
+      );
+    }
+    if (sd.weekly_pitching) {
+      sd.weekly_pitching = sd.weekly_pitching.filter(
+        (p) => !(p.pitcher === player && p.round === round && p.week === week && (p.manager === manager || !p.manager))
+      );
+    }
+    if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
+      delete sd.roster_dates[manager][weekKey][player];
+    }
+    setSeasonsLocal(seasons);
   }
 
-  // Remove batting stats attributed to this manager OR unattributed, for this player+week
-  if (sd.weekly_batting) {
-    sd.weekly_batting = sd.weekly_batting.filter(
-      (b) => !(b.batter === player && b.round === round && b.week === week && (b.manager === manager || !b.manager))
-    );
-  }
-
-  // Remove pitching stats attributed to this manager OR unattributed, for this player+week
-  if (sd.weekly_pitching) {
-    sd.weekly_pitching = sd.weekly_pitching.filter(
-      (p) => !(p.pitcher === player && p.round === round && p.week === week && (p.manager === manager || !p.manager))
-    );
-  }
-
-  // Remove roster_dates entry so the player doesn't reappear via the dates path
-  if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
-    delete sd.roster_dates[manager][weekKey][player];
-  }
-
-  saveSeason(SELECTED_SEASON, sd);
   renderRosterData(manager, true);
 };
 
