@@ -8000,15 +8000,29 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     }
   }
 
-  let html = '';
+  // Determine the "current" week from today's date + the season schedule (falling back to the
+  // latest week that has data). The open section then tracks the real calendar week rather than
+  // just the last week we happen to have stats for.
+  let currentWeekKey = null;
+  if (isActive) {
+    const cur = getCurrentScheduleRound(seasonData);
+    if (cur && cur.weekKey && weeksToShow.includes(cur.weekKey)) currentWeekKey = cur.weekKey;
+  }
+  if (!currentWeekKey) currentWeekKey = latestDataWeek;
 
-  // Show weeks in chronological order, latest week with data expanded
+  // Build each week's section HTML into a map keyed by weekKey; the grouped/nested layout is
+  // assembled from these below (Pool Play → PP1/PP2 → week; playoff weeks flat).
+  const weekHtml = {};
+  const weekTotals = {};
+
+  // Show weeks in chronological order, the current week expanded
   weeksToShow.forEach((weekKey) => {
+    let html = '';
     const [round, week] = weekKey.split('|');
     const schedEntry = SEASON_SCHEDULE.find((s) => s.round === round && s.week === week);
     const label = schedEntry ? schedEntry.label : `${round} - ${week}`;
     const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
-    const isCurrent = weekKey === latestDataWeek;
+    const isCurrent = weekKey === currentWeekKey;
 
     // Get roster for this week
     let weekRoster = isActive ? getWeekRoster(seasonData, managerName, round, week) : { batters: [], pitchers: [] };
@@ -8404,9 +8418,80 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     </div>`;
 
     html += '</div></div>'; // .wrs-body, .wrs-section
+
+    weekHtml[weekKey] = html;
+    weekTotals[weekKey] = weekTotal;
   });
 
-  return html;
+  // ---- Assemble the grouped / nested layout ----
+  // Pool Play nests two levels deep: Pool Play → Pool Play 1 / Pool Play 2 → each week.
+  // Playoff rounds (QF/SF/Finals) render their weeks flat. Everything starts collapsed except
+  // the branch that contains the current week (the current week's body is already open inside
+  // weekHtml; here we open its ancestor groups so it's reachable).
+  const pp1Weeks = weeksToShow.filter((wk) => wk.startsWith('PP1|'));
+  const pp2Weeks = weeksToShow.filter((wk) => wk.startsWith('PP2|'));
+  const playoffWeeks = weeksToShow.filter((wk) => !wk.startsWith('PP1|') && !wk.startsWith('PP2|'));
+
+  const sumWeeks = (wks) => Math.round(wks.reduce((s, wk) => s + (weekTotals[wk] || 0), 0) * 100) / 100;
+
+  // A collapsible group wrapper. Reuses the .wrs-header/.wrs-body markup (and toggleWeeklyScoring)
+  // so the arrow, open state, and styling match the week sections.
+  function wrsGroup(id, label, pts, open, extraClass, innerHtml) {
+    const openCls = open ? ' wrs-open' : '';
+    const disp = open ? 'block' : 'none';
+    const ptsHtml = pts > 0 ? `${fmt(pts)} PTS` : '';
+    return `<div class="wrs-section wrs-group ${extraClass}">
+      <div class="wrs-header wrs-group-header${openCls}" onclick="toggleWeeklyScoring('${id}')">
+        <span class="wrs-header-label">${label}</span>
+        <span class="wrs-header-pts">${ptsHtml}</span>
+      </div>
+      <div class="wrs-body" id="wrs-body-${id}" style="display:${disp};">${innerHtml}</div>
+    </div>`;
+  }
+
+  let out = '';
+
+  const poolWeeks = pp1Weeks.concat(pp2Weeks);
+  if (poolWeeks.length > 0) {
+    let poolInner = '';
+    if (pp1Weeks.length > 0) {
+      const inner = pp1Weeks.map((wk) => weekHtml[wk]).join('');
+      poolInner += wrsGroup(
+        'grp_pp1',
+        'Pool Play 1',
+        sumWeeks(pp1Weeks),
+        pp1Weeks.includes(currentWeekKey),
+        'wrs-group-l2',
+        inner
+      );
+    }
+    if (pp2Weeks.length > 0) {
+      const inner = pp2Weeks.map((wk) => weekHtml[wk]).join('');
+      poolInner += wrsGroup(
+        'grp_pp2',
+        'Pool Play 2',
+        sumWeeks(pp2Weeks),
+        pp2Weeks.includes(currentWeekKey),
+        'wrs-group-l2',
+        inner
+      );
+    }
+    out += wrsGroup(
+      'grp_pool',
+      'Pool Play',
+      sumWeeks(poolWeeks),
+      poolWeeks.includes(currentWeekKey),
+      'wrs-group-l1',
+      poolInner
+    );
+  }
+
+  // Playoff weeks render flat; each week's open/collapsed state is already baked into weekHtml.
+  playoffWeeks.forEach((wk) => {
+    out += weekHtml[wk];
+  });
+
+  return out;
 }
 
 // Compute per-scoring-period totals for a manager
