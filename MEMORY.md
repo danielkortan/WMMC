@@ -36,6 +36,19 @@ its reason, from the Swap Log detail panel and the pending-swap inline edit form
   invalid rejected 400; scheduled swap auto-applies with correct record + `roster_dates` windows;
   manager PUT 403; commissioner date edit + backdate re-stamp windows; per-manager totals
   byte-identical before/after every operation. 155/155 tests, lint + format clean.
+- **Follow-up (same day, commissioner request): the Effective Date field is never blank** — it
+  prefills with the date the swap WOULD take effect if submitted as-is (the auto path) and
+  `refreshSwapAutoEffectiveDate` keeps it live as players are picked (today ↔ tomorrow via the
+  teams-started check; only overwrites while the value still equals the last auto value, so a
+  user-picked date is never clobbered). `data-auto-date` tracks the latest auto value;
+  submitSwapRequest sends `requested_effective_date` ONLY when the value differs from it —
+  leaving the suggested date submits through the unchanged auto path. Server untouched.
+  Verified with Playwright (desktop 1280×900 + mobile 390×844 via the `#my-roster` hash
+  deep-link): 12/12 checks — prefill, live today↔tomorrow refresh with a stubbed
+  `/api/mlb/teams-started`, untouched-date submit has no `requested_effective_date`,
+  changed-date submit schedules correctly. NOTE the swap form lives in the roster page's
+  `rtab-swaps` SUB-tab (`.roster-tab[data-rtab="swaps"]`), and on mobile the nav buttons are
+  behind the hamburger — deep-link via URL hash instead of clicking `.nav-btn`.
 - **Gotcha (harness):** the server rewrites `managers_seed.json` on boot from the live DB — a
   smoke server started with `cwd: repo` + a scratch `DB_PATH` clobbers the committed seed with
   the fixture's synthetic managers. Restore it (`git checkout -- managers_seed.json`) after any
