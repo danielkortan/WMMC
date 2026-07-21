@@ -10380,6 +10380,70 @@ app.delete('/api/seasons/:year/player-dates', requireCommissioner, (req, res) =>
   res.json({ ok: true });
 });
 
+// POST /api/seasons/:year/roster-remove — commissioner "hard remove" of a player from one week.
+// Purges the player entirely from that week: the authoritative roster_dates window entry, the
+// derived per-week roster-array membership, and the attributed/unattributed weekly stat rows for
+// the player+week (mirroring the client's hardRemoveFromRoster).
+//
+// Why this must be a dedicated endpoint and not ride the full-season save: a hard remove is a
+// DELETION, and the full-season POST's stale-save guards re-append any roster_dates entry or weekly
+// stat row that is missing from the incoming payload (they can't distinguish a deliberate deletion
+// from a stale tab that never had the data). So a remove done through saveSeason was silently
+// reverted — the roster_dates entry came back, rebuildRosterArraysFromDates re-added the player to
+// the array, and the stat rows were restored — leaving the "removed" player fully rostered after a
+// refresh. Mutating the server's authoritative copy here is the only way the deletion sticks.
+// Body: { manager, weekKey ('round|week'), player, type ('batters'|'pitchers') }.
+app.post('/api/seasons/:year/roster-remove', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const { manager, weekKey, player, type } = req.body || {};
+  if (!manager || !weekKey || !player || (type !== 'batters' && type !== 'pitchers')) {
+    return res.status(400).json({ error: 'manager, weekKey, player, and type (batters|pitchers) are required' });
+  }
+  const [round, week] = String(weekKey).split('|');
+  if (!round || !week) return res.status(400).json({ error: 'weekKey must be "round|week"' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  // 1. Drop the per-week roster-array membership (derived cache).
+  if (
+    sd.rosters &&
+    sd.rosters[manager] &&
+    sd.rosters[manager][weekKey] &&
+    Array.isArray(sd.rosters[manager][weekKey][type])
+  ) {
+    sd.rosters[manager][weekKey][type] = sd.rosters[manager][weekKey][type].filter((p) => p !== player);
+  }
+
+  // 2. Delete the authoritative roster_dates window entry. This is the mutation the full-season
+  //    save could not express — the save guard re-appends any entry the payload omits.
+  if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
+    delete sd.roster_dates[manager][weekKey][player];
+  }
+
+  // 3. Purge the player's weekly stat rows for this week, attributed to this manager OR unattributed
+  //    (a two-way player's batter/pitcher entries have distinct names, so filtering both arrays only
+  //    ever touches the matching one).
+  if (Array.isArray(sd.weekly_batting)) {
+    sd.weekly_batting = sd.weekly_batting.filter(
+      (b) => !(b.batter === player && b.round === round && b.week === week && (b.manager === manager || !b.manager))
+    );
+  }
+  if (Array.isArray(sd.weekly_pitching)) {
+    sd.weekly_pitching = sd.weekly_pitching.filter(
+      (p) => !(p.pitcher === player && p.round === round && p.week === week && (p.manager === manager || !p.manager))
+    );
+  }
+
+  addAuditEntry(db, 'roster_remove', { year, manager, weekKey, player, type }, req.get('X-User-Email'));
+  db.seasons[year] = sd;
+  writeDB(db);
+  res.json({ ok: true, _rev: computeSeasonRev(sd) });
+});
+
 // ============================================================
 // Daily Stats — view and manually override individual day records
 // ============================================================
