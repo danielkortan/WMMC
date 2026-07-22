@@ -5084,6 +5084,36 @@ body::before {
 }
 
 /* ============================================================
+   Commissioner To-Do card
+   ============================================================ */
+.comm-todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.comm-todo-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-color, #e2e2e2);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.comm-todo-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.comm-todo-item a {
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.comm-todo-allclear {
+  color: var(--text-muted, #666);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+/* ============================================================
    In-page submission warning (My Roster page)
    ============================================================ */
 .submission-warning {
