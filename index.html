@@ -14,7 +14,7 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='54' font-size='56'%3E%E2%9A%BE%3C/text%3E%3C/svg%3E"
     />
-    <link rel="stylesheet" href="styles.css?v=f25ace94" />
+    <link rel="stylesheet" href="styles.css?v=267d90a8" />
     <link rel="stylesheet" href="mobile.css?v=1021eb10" />
     <!-- Apply the saved theme before first paint so dark-mode users don't see a
          light flash. The authoritative value is the per-account preference loaded
@@ -26,6 +26,18 @@
         }
       } catch (e) {
         /* localStorage unavailable — default light */
+      }
+      // Decide login-screen visibility before first paint. A returning user with a saved
+      // session must never see the login screen flash while app.js restores from cache and
+      // the background sync runs, so hide it up front; app.js reveals it again only if the
+      // saved session turns out invalid. Logged-out visitors keep the default (visible) so
+      // the form shows instantly without waiting for the app to boot.
+      try {
+        if (localStorage.getItem('wmmc_logged_in_email')) {
+          document.documentElement.classList.add('wmmc-has-session');
+        }
+      } catch (e) {
+        /* localStorage unavailable — default to showing the login screen */
       }
     </script>
   </head>
@@ -554,6 +566,6 @@
          shared helpers to window. app.js then consumes them as bare globals. -->
     <script type="module" src="js/index.js?v=ee1cbb67"></script>
     <script type="module" src="js/mobile.js?v=bc5fe10e"></script>
-    <script src="app.js?v=83cba7ab" defer></script>
+    <script src="app.js?v=047d703e" defer></script>
   </body>
 </html>
