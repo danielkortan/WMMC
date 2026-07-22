@@ -1364,6 +1364,32 @@ Decisions made with Daniel (asked via option picker):
   the League Info timeline (.tl-break) and commissioner schedule preview
   (.schedule-break-row), derived from the gap, PP2→QF labeled All-Star Break.
 
+## 2026-07-21 — IL check "unverified" root cause: sd.mlb_ids coverage, not the MLB API
+
+- First real IL swap after swap automation (Crochet, QF W1) posted "(IL status
+  unverified)" despite Crochet being on the IL. Root cause: `fetchPlayerILStatus`
+  bailed at `sd.mlb_ids[name]` — ids are only assigned for duplicate catalog names
+  (bootstrapPlayerPools) or when the commissioner runs roster-fix, so most rostered
+  players had NO id and the check failed open without ever calling the API.
+  Confirmed live: player-debug showed `mlb_id: null` for "Garrett Crochet".
+- Fix: unmapped names fall back to a UNIQUE normalized-name match in
+  `fetchMLBPlayerCatalog(season)` (cached in-process). The fallback id is used
+  transiently only — writing sd.mlb_ids stays a roster-fix/commissioner action so
+  its duplicate-name ambiguity guards keep their meaning.
+- Live API shape (verified in-browser on Crochet's person record,
+  `?hydrate=rosterEntries`): current entry status was `code: "D60"`,
+  `description: "Injured 60-Day"` — NOT "60-Day Injured List", so the old
+  `/injured list/i` backstop regex could never match real data; now `/injured/i`
+  ("Injured" appears only in IL statuses; codes D7/D10/D15/D60 stay primary).
+- Diagnosability: unverified swaps now persist `il_reason`
+  (no_mlb_id / no_roster_entry / api_error), the Slack ilNote spells it out
+  ("IL status unverified — no MLB id match for player"), and all three fail
+  paths console.error (before, no_mlb_id/no_roster_entry were silent and the
+  reason was discarded — Render logs had nothing).
+- statsapi.mlb.com is unreachable from Claude dev sandboxes (proxy 403), so the
+  verified path can't be exercised in dev — test via browser/prod. The MLB API
+  remains the right source; do not switch to third-party injury feeds.
+
 ## 2026-07-22 — No login-screen flash on reload for logged-in users
 
 **Symptom:** opening the link "logged out and back in" — a returning, still-authenticated
