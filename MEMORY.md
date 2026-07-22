@@ -1439,3 +1439,20 @@ Scoring invariant untouched — this only changes WHEN we render vs. fetch (cach
 background refresh is the same pattern the 45s idle poll already uses). Verified with Playwright:
 75/75 login-screen samples across a reload were `display:none` (no flash); stale/invalid saved
 email still falls back to login and is cleared.
+
+## 2026-07-22 — Pool cleanup Scan→Apply infinite loop: retired phantoms re-reported forever
+
+- Symptom: "Ronald Acuna Jr." + "Nicholas Kurtz" recurred in the audit's phantom
+  bucket on every Scan; Apply changed nothing. Cause: retire = remove from pools
+  (history kept by design), but roster-audit's unrostered branch reported every
+  non-catalog name from extractSeasonPlayerNames — swap/roster_dates history
+  resurrects the name on every scan, while roster-fix's retire is a no-op once the
+  name is already out of both pools.
+- Fix: pool membership is now required for the unrostered buckets in BOTH
+  roster-audit and roster-fix's purge pass — "not in any pool" is the terminal
+  state for a mismatched name. Its history records stay forever, by design.
+- Verified by booting server.js with global.fetch stubbed for statsapi (fake
+  catalog/teams JSON — statsapi is proxy-blocked in dev sandboxes, and the
+  in-process \_mlbCatalogCache makes this the only way to exercise audit/fix
+  here): retired phantoms no longer reported, in-pool orphan still purged,
+  totals_moved [], second apply a clean no-op.
