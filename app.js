@@ -10323,6 +10323,9 @@ function showCommissionerPanel() {
   document.getElementById('season-setup-title').textContent = `${SELECTED_SEASON} Initial Player Pool`;
 
   setupCommTabs();
+  renderCommissionerTodo();
+  refreshTodoAudit();
+  refreshTodoSyncStatus();
   renderBannerBgSection();
   renderPendingSwapRequests();
   backfillSubmissionTimestamps();
@@ -10904,6 +10907,10 @@ window.debugMLBPlayer = function () {
 function renderPendingSwapRequests() {
   const container = document.getElementById('pending-swaps-list');
   if (!container) return;
+
+  // The to-do card counts the same pending items — keep it in step with every
+  // re-render of this list (approve/deny actions included).
+  renderCommissionerTodo();
 
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -13545,6 +13552,154 @@ function renderPlayerPoolDisplay() {
 // POST /api/mlb/roster-fix (apply). The fix auto-renames/id-claims rostered names
 // with an unambiguous catalog match, retires history-referenced phantom pool
 // entries, and purges orphans; duplicate-name id picks stay manual.
+
+// ---- Commissioner To-Do ----
+// One aggregated "needs your attention" card at the top of the commissioner panel,
+// so pending work isn't scattered across sub-tabs, badges, and buried tools. Items:
+//   - pending swap requests and roster submissions awaiting approval (from season data)
+//   - player-name audit findings — missing MLB ids, misspellings, phantom pool
+//     entries (background GET /api/mlb/roster-audit, cached per page load per season
+//     since the audit fetches the MLB catalog; re-checked after a cleanup apply)
+//   - daily MLB sync gone stale during a scheduled week (from GET /api/mlb/sync-status)
+// Each item deep-links to the tool that resolves it. The async sources are
+// best-effort: a failed fetch just leaves that item off the list. To add a new item
+// type, push onto `items` in renderCommissionerTodo (sync) or follow the cache +
+// re-render pattern (async).
+const _todoAuditCache = {}; // year -> { fixable, manual }
+const _todoSyncCache = {}; // year -> { newestTs } (null newestTs = no runs recorded)
+
+function renderCommissionerTodo() {
+  const el = document.getElementById('comm-todo-card');
+  if (!el) return;
+  const sd = getSeasons()[SELECTED_SEASON];
+  if (!sd) {
+    el.style.display = 'none';
+    return;
+  }
+  const items = [];
+  const link = (label, onclick) => `<a onclick="${onclick}">${label}</a>`;
+
+  const pendingSwaps = (sd.swaps || []).filter((s) => s.status === 'pending').length;
+  if (pendingSwaps) {
+    items.push(
+      `⚠️ <strong>${pendingSwaps}</strong> pending swap request${pendingSwaps === 1 ? '' : 's'} — ` +
+        link('Review', "goToCommTab('comm-tab-swaps','pending-swaps-list')")
+    );
+  }
+
+  const periods = ['pp1', 'pp2', 'qf', 'sf', 'finals'];
+  const pendingSubs = getManagers().reduce(
+    (n, m) => n + periods.filter((p) => (getPeriodSub(sd, p, m.name) || {}).status === 'pending').length,
+    0
+  );
+  if (pendingSubs) {
+    items.push(
+      `⚠️ <strong>${pendingSubs}</strong> roster submission${pendingSubs === 1 ? '' : 's'} awaiting approval — ` +
+        link('Review', "goToCommTab('comm-tab-swaps','pending-swaps-list')")
+    );
+  }
+
+  const audit = _todoAuditCache[SELECTED_SEASON];
+  if (audit && audit.fixable + audit.manual > 0) {
+    const total = audit.fixable + audit.manual;
+    const detail = [
+      audit.fixable ? `${audit.fixable} auto-fixable` : null,
+      audit.manual ? `${audit.manual} manual review` : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
+    items.push(
+      `🏷️ <strong>${total}</strong> player name${total === 1 ? '' : 's'} need${total === 1 ? 's' : ''} attention ` +
+        `(${detail}) — missing MLB ids, misspellings, or phantom pool entries. ` +
+        link('Open Pool &amp; Name Cleanup', 'goToPoolCleanup()')
+    );
+  }
+
+  const sync = _todoSyncCache[SELECTED_SEASON];
+  if (sync && sd.status === 'active' && todayInsideScheduledWeek(sd)) {
+    const ageMs = sync.newestTs ? Date.now() - parseServerTimestamp(sync.newestTs).getTime() : Infinity;
+    if (ageMs > 36 * 60 * 60 * 1000) {
+      const last = sync.newestTs ? `last run ${fmtServerTimestamp(sync.newestTs)}` : 'no runs recorded yet';
+      items.push(
+        `🔄 Daily MLB stat sync looks stale (${last}) — ` +
+          link('Check MLB API Sync', "goToCommTab('comm-tab-stats-data','mlb-sync-controls')")
+      );
+    }
+  }
+
+  el.innerHTML =
+    `<h2>Commissioner To-Do</h2>` +
+    (items.length
+      ? `<ul class="comm-todo-list">${items.map((i) => `<li class="comm-todo-item">${i}</li>`).join('')}</ul>`
+      : `<p class="comm-todo-allclear">✅ All clear — nothing needs your attention.</p>`);
+  el.style.display = 'block';
+}
+
+// Async to-do sources: fetch once per page load per season, then re-render the card.
+async function refreshTodoAudit(force = false) {
+  const year = SELECTED_SEASON;
+  if (!force && _todoAuditCache[year]) return;
+  try {
+    const resp = await apiFetch(`/api/mlb/roster-audit?year=${year}`);
+    if (!resp.ok) return;
+    const a = await resp.json();
+    _todoAuditCache[year] = {
+      fixable:
+        (a.needs_id_assignment || []).length + (a.unrostered_auto || []).length + (a.unrostered_replace || []).length,
+      manual: (a.duplicate_review || []).length + (a.rostered_review || []).length,
+    };
+    renderCommissionerTodo();
+  } catch {
+    /* best-effort: leave the item off the list */
+  }
+}
+
+async function refreshTodoSyncStatus() {
+  const year = SELECTED_SEASON;
+  if (_todoSyncCache[year]) return;
+  try {
+    const resp = await apiFetch('/api/mlb/sync-status');
+    if (!resp.ok) return;
+    const s = await resp.json();
+    const newestTs = (s.recent_logs || []).reduce(
+      (max, l) => (l.timestamp && (!max || l.timestamp > max) ? l.timestamp : max),
+      null
+    );
+    _todoSyncCache[year] = { newestTs };
+    renderCommissionerTodo();
+  } catch {
+    /* best-effort: leave the item off the list */
+  }
+}
+
+// True when today (ET) falls inside one of the season's scheduled weeks — the sync
+// staleness check is meaningless during the All-Star break or off-season.
+function todayInsideScheduledWeek(sd) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return (sd.schedule_dates || []).some((w) => w && w.start && w.end && today >= w.start && today <= w.end);
+}
+
+// To-do link target: activate a commissioner sub-tab and scroll to an element in it.
+window.goToCommTab = function (tabId, anchorId) {
+  const btn = document.querySelector(`.comm-tab-btn[data-comm-tab="${tabId}"]`);
+  if (btn) btn.click();
+  const anchor = anchorId && document.getElementById(anchorId);
+  if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+// To-do link target: open the Season Setup sub-tab, expand the collapsed Initial
+// Player Pool section, kick off the read-only scan, and land on the cleanup card.
+window.goToPoolCleanup = function () {
+  const tabBtn = document.querySelector('.comm-tab-btn[data-comm-tab="comm-tab-season-setup"]');
+  if (tabBtn) tabBtn.click();
+  const body = document.getElementById('season-setup-body');
+  const toggle = document.getElementById('season-setup-toggle');
+  if (body && toggle && body.style.display === 'none') toggle.click();
+  window.scanPoolCleanup();
+  const results = document.getElementById('pool-cleanup-results');
+  if (results) results.scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
+
 window.scanPoolCleanup = async function () {
   const out = document.getElementById('pool-cleanup-results');
   const applyBtn = document.getElementById('pool-cleanup-apply-btn');
@@ -13648,6 +13803,8 @@ window.applyPoolCleanup = async function () {
     }
     const out2 = document.getElementById('pool-cleanup-results');
     if (out2) out2.innerHTML = html;
+    // Re-audit so the to-do card clears (or narrows to what's still manual).
+    refreshTodoAudit(true);
   } catch (e) {
     const outErr = document.getElementById('pool-cleanup-results');
     if (outErr) outErr.innerHTML = `<p class="error-text">Apply failed — ${esc(e.message)}</p>`;
