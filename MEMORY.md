@@ -1453,6 +1453,6 @@ email still falls back to login and is cleared.
   state for a mismatched name. Its history records stay forever, by design.
 - Verified by booting server.js with global.fetch stubbed for statsapi (fake
   catalog/teams JSON — statsapi is proxy-blocked in dev sandboxes, and the
-  in-process _mlbCatalogCache makes this the only way to exercise audit/fix
+  in-process \_mlbCatalogCache makes this the only way to exercise audit/fix
   here): retired phantoms no longer reported, in-pool orphan still purged,
   totals_moved [], second apply a clean no-op.
