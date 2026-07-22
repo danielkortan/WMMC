@@ -8881,8 +8881,12 @@ function topCatalogCandidates(wmmcName, catalog, n = 5) {
 //   duplicate_review   — rostered, multiple catalog entries share this name (e.g. two "Max Muncy")
 //                        OR fuzzy candidates resolve to multiple ids; requires explicit mlb_id pick
 //   rostered_review    — rostered, no exact catalog match; fuzzy candidates listed for manual pick
-//   unrostered_auto    — not rostered, fuzzy score >= 0.75; will be auto-replaced on fix
-//   unrostered_replace — not rostered, fuzzy score < 0.75; best MLB candidate will replace old name
+//   unrostered_auto    — not rostered but still in a pool, fuzzy score >= 0.75
+//   unrostered_replace — not rostered but still in a pool, fuzzy score < 0.75
+//
+// Unrostered buckets require current pool membership: a mismatched name that is
+// no longer in either pool was already retired by a fix (its history records are
+// kept by design) and must not be re-reported — that made Scan → Apply loop.
 //
 // Nothing is changed by this endpoint.
 app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
@@ -8900,6 +8904,7 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
     const allWmmcNames = extractSeasonPlayerNames(sd);
     const rostered = getRosteredNames(sd);
     const mlbIds = sd.mlb_ids || {};
+    const inPool = new Set([...(sd.batters_pool || []), ...(sd.pitchers_pool || [])]);
 
     const rosteredExact = [];
     const needsIdAssignment = [];
@@ -8987,7 +8992,14 @@ app.get('/api/mlb/roster-audit', requireCommissioner, async (req, res) => {
       // problem to report (and roster-fix no longer purges them).
       if (catalogNames.has(wmmcName)) continue;
 
-      // Unrostered with a name mismatch: roster-fix will purge these.
+      // Not in any pool: a previous fix already retired it (history-referenced
+      // phantoms like the corrective-swap leftover "Nicholas Kurtz" keep their
+      // records forever by design), or the name only ever existed in history
+      // records. Either way nothing actionable remains — re-reporting it made
+      // Scan → Apply loop endlessly with "nothing changes".
+      if (!inPool.has(wmmcName)) continue;
+
+      // Unrostered with a name mismatch: roster-fix will retire or purge these.
       const candidates = topCatalogCandidates(wmmcName, catalog, 5);
       const best = candidates[0];
       if (best && best.score >= 0.75) {
@@ -9331,6 +9343,9 @@ app.post('/api/mlb/roster-fix', requireCommissioner, async (req, res) => {
     for (const name of purgeCandidates) {
       if (renameTargets.has(name)) continue;
       if (catalogNames.has(name)) continue;
+      // Mirror the audit: a name absent from both pools was already retired (or
+      // never was a pool entry) — terminal state, nothing to retire or purge.
+      if (!(sd.batters_pool || []).includes(name) && !(sd.pitchers_pool || []).includes(name)) continue;
       const claimedId = sd.mlb_ids[name];
       if (typeof claimedId === 'number' && byId.has(claimedId)) continue;
       if (referenced.has(name)) {
