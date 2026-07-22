@@ -1403,11 +1403,17 @@ function buildSwapSlackText(sd, swap, headline) {
         minute: '2-digit',
       }) + ' ET'
     : '—';
+  const unverifiedWhy =
+    {
+      no_mlb_id: 'no MLB id match for player',
+      no_roster_entry: 'no current MLB roster entry',
+      api_error: 'MLB API unreachable',
+    }[swap.il_reason] || null;
   const ilNote =
     swap.il_status && swap.il_status !== 'unverified'
       ? ` (MLB status: ${swap.il_status})`
       : swap.il_status === 'unverified'
-        ? ' (IL status unverified)'
+        ? ` (IL status unverified${unverifiedWhy ? ` — ${unverifiedWhy}` : ''})`
         : '';
   return [
     `${headline} — *${swap.manager || '?'}*${roundWeek ? ` (${roundWeek})` : ''}`,
@@ -1422,14 +1428,31 @@ function buildSwapSlackText(sd, swap, headline) {
 // IL status codes on MLB roster entries: 7-day (concussion), 10-day, 15-day, and 60-day lists.
 const MLB_IL_STATUS_CODES = new Set(['D7', 'D10', 'D15', 'D60']);
 
-// Look up a player's official MLB roster status to verify an IL swap, via the stable MLB person
-// id in sd.mlb_ids (the source of truth for player identity) and the player's current roster
-// entry. Returns { checked: false, reason } when it can't verify (no id / no entry / API error)
-// or { checked: true, onIL, status } when it can. Callers FAIL OPEN on checked:false — an MLB
-// outage or an unmapped player must never block a legitimate IL swap.
-async function fetchPlayerILStatus(sd, playerName) {
-  const mlbId = (sd.mlb_ids || {})[playerName];
-  if (typeof mlbId !== 'number') return { checked: false, reason: 'no_mlb_id' };
+// Look up a player's official MLB roster status to verify an IL swap, then read the player's
+// current roster entry. Identity comes from the stable MLB person id in sd.mlb_ids (the source
+// of truth) when mapped; since ids are only pre-assigned for duplicate names and roster-fix
+// runs, most rostered players have no stored id, so unmapped names fall back to a UNIQUE
+// normalized-name match in the season's MLB player catalog. The fallback id is used only for
+// this lookup — writing sd.mlb_ids stays a commissioner action (roster-fix), which keeps its
+// duplicate-name ambiguity guards intact. Returns { checked: false, reason } when it can't
+// verify (no id / no entry / API error) or { checked: true, onIL, status } when it can.
+// Callers FAIL OPEN on checked:false — an MLB outage or an unresolvable name must never block
+// a legitimate IL swap. Every fail path logs, since the caller only persists the reason code.
+async function fetchPlayerILStatus(sd, season, playerName) {
+  let mlbId = (sd.mlb_ids || {})[playerName];
+  if (typeof mlbId !== 'number') {
+    try {
+      const catalog = await fetchMLBPlayerCatalog(season);
+      const matches = indexCatalogByName(catalog).byNorm.get(normalizeName(playerName)) || [];
+      if (matches.length === 1) mlbId = matches[0].id;
+    } catch (e) {
+      console.error(`IL status catalog fallback failed for ${playerName}:`, e.message);
+    }
+  }
+  if (typeof mlbId !== 'number') {
+    console.error(`IL status unverifiable for ${playerName}: no mapped id and no unique catalog name match`);
+    return { checked: false, reason: 'no_mlb_id' };
+  }
   try {
     const data = await mlbApiFetch(`/api/v1/people/${mlbId}?hydrate=rosterEntries`);
     const person = (data.people || [])[0];
@@ -1442,8 +1465,13 @@ async function fetchPlayerILStatus(sd, playerName) {
         .sort((a, b) => String(b.startDate || '').localeCompare(String(a.startDate || '')))[0] ||
       null;
     const status = current && current.status;
-    if (!status || (!status.code && !status.description)) return { checked: false, reason: 'no_roster_entry' };
-    const onIL = MLB_IL_STATUS_CODES.has(status.code) || /injured list/i.test(status.description || '');
+    if (!status || (!status.code && !status.description)) {
+      console.error(`IL status unverifiable for ${playerName} (id ${mlbId}): no current roster entry status`);
+      return { checked: false, reason: 'no_roster_entry' };
+    }
+    // Codes are the primary signal; live descriptions read "Injured 60-Day" (not
+    // "60-Day Injured List"), and "Injured" appears only in IL statuses.
+    const onIL = MLB_IL_STATUS_CODES.has(status.code) || /injured/i.test(status.description || '');
     return { checked: true, onIL, status: status.description || status.code };
   } catch (e) {
     console.error(`IL status lookup failed for ${playerName} (id ${mlbId}):`, e.message);
@@ -1520,9 +1548,10 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
     }
 
     // IL swaps must be real: the player being dropped has to be on the official MLB injured list.
-    // Verified against the MLB Stats API; unverifiable lookups fail open (il_status 'unverified').
+    // Verified against the MLB Stats API; unverifiable lookups fail open (il_status 'unverified',
+    // with the reason kept on the swap so the Slack post says why instead of just "unverified").
     if (swap.reason === 'IL Swap') {
-      const il = await fetchPlayerILStatus(sd, swap.player_out);
+      const il = await fetchPlayerILStatus(sd, req.params.year, swap.player_out);
       if (il.checked && !il.onIL) {
         return res.status(400).json({
           error:
@@ -1532,7 +1561,12 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
           code: 'not_on_il',
         });
       }
-      swap.il_status = il.checked ? il.status : 'unverified';
+      if (il.checked) {
+        swap.il_status = il.status;
+      } else {
+        swap.il_status = 'unverified';
+        swap.il_reason = il.reason;
+      }
     }
 
     // Server-computed effective dates (game-started rule), overriding the client's values —
