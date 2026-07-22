@@ -1487,6 +1487,13 @@ footer {
   overflow-y: auto;
 }
 
+/* A returning user with a saved session (class set pre-paint by the inline head script) never
+   paints the login screen — app.js restores from cache. Any inline display set later by
+   enterApp()/showLoginScreen() overrides this. */
+html.wmmc-has-session #login-screen {
+  display: none;
+}
+
 /* Subtle diamond pattern overlay */
 #login-screen::before {
   content: '';
