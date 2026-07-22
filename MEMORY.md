@@ -1389,3 +1389,22 @@ Decisions made with Daniel (asked via option picker):
 - statsapi.mlb.com is unreachable from Claude dev sandboxes (proxy 403), so the
   verified path can't be exercised in dev — test via browser/prod. The MLB API
   remains the right source; do not switch to third-party injury feeds.
+
+## 2026-07-21 — Commissioner To-Do card (PR #365)
+
+- New aggregated "needs your attention" card at the top of the commissioner panel
+  (`#comm-todo-card`, `renderCommissionerTodo` in app.js): pending swaps + pending
+  roster submissions (same definitions as the pending list; re-rendered from
+  `renderPendingSwapRequests` so approve/deny updates it), player-name audit
+  findings (background roster-audit, `_todoAuditCache` per page load per season,
+  re-checked after cleanup apply), stale daily sync (>36h during a scheduled week,
+  active season only — `todayInsideScheduledWeek` keeps the All-Star break quiet).
+- Deep links: `goToCommTab(tabId, anchorId)` for sub-tab + scroll;
+  `goToPoolCleanup()` opens Season Setup, expands the collapsed pool section,
+  auto-runs the read-only scan, scrolls to the card.
+- To add a new to-do item type: push onto `items` in `renderCommissionerTodo`
+  (sync sources) or copy the cache + re-render pattern (async sources).
+- Verified with Playwright + fabricated db.json, mocking /api/mlb/roster-audit and
+  /api/mlb/sync-status at the network layer (statsapi unreachable from sandbox).
+  Mobile note: at mobile viewports the desktop nav buttons aren't clickable via
+  Playwright — drive tab switches with `document.querySelector('[data-tab=...]').click()`.
