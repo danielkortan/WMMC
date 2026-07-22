@@ -27,6 +27,18 @@
       } catch (e) {
         /* localStorage unavailable — default light */
       }
+      // Decide login-screen visibility before first paint. A returning user with a saved
+      // session must never see the login screen flash while app.js restores from cache and
+      // the background sync runs, so hide it up front; app.js reveals it again only if the
+      // saved session turns out invalid. Logged-out visitors keep the default (visible) so
+      // the form shows instantly without waiting for the app to boot.
+      try {
+        if (localStorage.getItem('wmmc_logged_in_email')) {
+          document.documentElement.classList.add('wmmc-has-session');
+        }
+      } catch (e) {
+        /* localStorage unavailable — default to showing the login screen */
+      }
     </script>
   </head>
   <body>

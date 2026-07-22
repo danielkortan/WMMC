@@ -1345,13 +1345,25 @@ function saveManagers(managers) {
 // Initialization
 // ============================================================
 async function loadData() {
+  // ---- Instant boot from cache (no network) ----
+  // The managers list and the logged-in email are mirrored in localStorage, so we can restore
+  // the session and render from the cached seasons synchronously — before any network round-trip.
+  // This stops a returning user from seeing the login screen flash (the app appearing to "log out
+  // and back in") while the background sync below runs. The sync then refreshes the data underneath
+  // and re-renders only if it actually changed.
+  restoreSessionFromCache();
+
   // ---- Sync from server (shared database) ----
+  let changed = false;
   try {
     const [seasonsResp, managersResp] = await Promise.all([fetch('/api/seasons'), fetch('/api/managers')]);
     if (seasonsResp.ok) {
       const serverSeasons = await seasonsResp.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        setSeasonsLocal(serverSeasons);
+        if (readSeasonsJSON() !== JSON.stringify(serverSeasons)) {
+          setSeasonsLocal(serverSeasons);
+          changed = true;
+        }
         // Fresh data loaded — release the one-shot stale-save reload guard.
         try {
           sessionStorage.removeItem('wmmc_stale_reload');
@@ -1363,7 +1375,10 @@ async function loadData() {
     if (managersResp.ok) {
       const serverManagers = await managersResp.json();
       if (serverManagers && serverManagers.length > 0) {
-        setManagersLocal(serverManagers);
+        if (readManagersJSON() !== JSON.stringify(serverManagers)) {
+          setManagersLocal(serverManagers);
+          changed = true;
+        }
       }
     }
   } catch (e) {
@@ -1431,20 +1446,27 @@ async function loadData() {
     })
     .catch(() => {});
 
-  // Check for existing auth session
-  const savedAuth = localStorage.getItem('wmmc_logged_in_email');
-  if (savedAuth) {
-    const mgr = findManagerByEmail(savedAuth);
-    if (mgr) {
-      LOGGED_IN_EMAIL = savedAuth.toLowerCase();
-      enterApp(mgr);
-    } else {
+  // Finalize the login state now that the server sync has completed. If the session was already
+  // restored from cache above, this only re-renders when the fresh data actually changed. If it
+  // could NOT be restored earlier (e.g. first load on a new device, where the managers list wasn't
+  // cached yet), the sync may now have what we need, so try once more before falling back to login.
+  const wasActiveBeforeSync = !!LOGGED_IN_EMAIL;
+  if (restoreSessionFromCache()) {
+    // If the session was already active from the cache-phase restore, the first paint used cached
+    // data — rebuild the season selector (a brand-new season may not have been cached) and re-render
+    // only when the fresh sync actually changed something. If the session was restored just now
+    // (managers arrived with the sync), enterApp already rendered the fresh data.
+    if (wasActiveBeforeSync && changed) {
+      buildSeasonSelector();
+      init();
+    }
+  } else {
+    // No valid session. Clear any stale saved auth (an email that no longer maps to a manager even
+    // after the fresh sync) and reveal the login screen.
+    const savedAuth = localStorage.getItem('wmmc_logged_in_email');
+    if (savedAuth && !findManagerByEmail(savedAuth)) {
       localStorage.removeItem('wmmc_logged_in_email');
     }
-  }
-
-  // If not logged in, show login screen
-  if (!LOGGED_IN_EMAIL) {
     document.getElementById('login-screen').style.display = 'flex';
   }
 
@@ -1504,6 +1526,28 @@ function isUserMidInteraction() {
 function findManagerByEmail(email) {
   const managers = getManagers();
   return managers.find((m) => m.email && m.email.toLowerCase() === email.toLowerCase());
+}
+
+// Restore the logged-in session from the cached managers list (no network) and render from the
+// cached seasons via enterApp. Returns true if a session is active — restored just now, or already
+// restored on an earlier call. Idempotent: enterApp (which renders and starts the polls) runs only
+// on the first successful restore. When the saved email isn't found in the — possibly not-yet-synced
+// — managers list, returns false WITHOUT clearing the saved auth, so loadData can retry after the
+// server sync before deciding the session is genuinely invalid.
+function restoreSessionFromCache() {
+  if (LOGGED_IN_EMAIL) return true;
+  let savedAuth;
+  try {
+    savedAuth = localStorage.getItem('wmmc_logged_in_email');
+  } catch (_) {
+    return false;
+  }
+  if (!savedAuth) return false;
+  const mgr = findManagerByEmail(savedAuth);
+  if (!mgr) return false;
+  LOGGED_IN_EMAIL = savedAuth.toLowerCase();
+  enterApp(mgr);
+  return true;
 }
 
 function enterApp(mgr) {
@@ -1950,12 +1994,19 @@ function buildSeasonSelector() {
   select.value = String(CURRENT_YEAR);
   SELECTED_SEASON = String(CURRENT_YEAR);
 
-  select.addEventListener('change', async () => {
-    SELECTED_SEASON = select.value;
-    await syncFromServer();
-    init();
-  });
+  // Attach the change listener once — buildSeasonSelector may run again after the background sync
+  // (to pick up a season that wasn't in the cache at first paint), and re-adding it would fire the
+  // handler twice per change.
+  if (!_seasonSelectorListenerAttached) {
+    _seasonSelectorListenerAttached = true;
+    select.addEventListener('change', async () => {
+      SELECTED_SEASON = select.value;
+      await syncFromServer();
+      init();
+    });
+  }
 }
+let _seasonSelectorListenerAttached = false;
 
 // ============================================================
 // Version watcher — prompt a reload when a new build is deployed

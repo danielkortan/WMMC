@@ -1363,3 +1363,34 @@ Decisions made with Daniel (asked via option picker):
   helper + a "All-Star Break / Jul 13–19 / Games not scored" callout row in
   the League Info timeline (.tl-break) and commissioner schedule preview
   (.schedule-break-row), derived from the gap, PP2→QF labeled All-Star Break.
+
+## 2026-07-22 — No login-screen flash on reload for logged-in users
+
+**Symptom:** opening the link "logged out and back in" — a returning, still-authenticated
+user saw the login screen flash before the app appeared.
+
+**Root cause:** `#login-screen` is `display:flex` by default in CSS, and JS only hid it inside
+`enterApp()`, which ran AFTER `loadData()` awaited `/api/seasons` + `/api/managers` +
+`loadBannerConfig()`. On a link-open (worst on a Render cold start) that was a visible flash —
+the session was never actually lost (it lives in `localStorage`), only the paint order was wrong.
+
+**Fix (session persists, only data refreshes — no forced logout):**
+
+- **Pre-paint (index.html head script):** if `wmmc_logged_in_email` exists, add
+  `html.wmmc-has-session`, which CSS uses to hide `#login-screen` from the very first paint.
+  Logged-out visitors keep the default (visible) so the form still shows instantly.
+- **loadData restructured to cache-first:** new `restoreSessionFromCache()` restores the session
+  and renders from cached seasons/managers synchronously BEFORE the network sync (managers +
+  logged-in email are already mirrored in localStorage). The server sync then runs in the
+  background and re-renders only if the data actually `changed` (diffed like `syncFromServer`).
+  Idempotent — `enterApp` runs at most once (guarded on `LOGGED_IN_EMAIL`); stale saved auth is
+  cleared only if the email still maps to no manager AFTER the sync (not on the first cache miss,
+  which can happen on a new device before managers are cached).
+- `buildSeasonSelector`'s change listener is now attached once (`_seasonSelectorListenerAttached`)
+  so it can be rebuilt post-sync (to surface a brand-new season absent from the cache) without
+  double-firing.
+
+Scoring invariant untouched — this only changes WHEN we render vs. fetch (cache-first render then
+background refresh is the same pattern the 45s idle poll already uses). Verified with Playwright:
+75/75 login-screen samples across a reload were `display:none` (no flash); stale/invalid saved
+email still falls back to login and is cleared.
