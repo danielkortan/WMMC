@@ -13979,10 +13979,10 @@ function renderWeeklyUploadSections() {
       if (qfFinalized && !qfDumped) {
         html += `<div style="margin-top:0.5rem;">
           <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('QF')">Advance SF Winners &amp; Dump QF Loser Rosters</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes QF losers from SF submissions, marks them eliminated, and generates roasts.</span>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes QF losers from SF submissions, marks them eliminated, generates roasts, and posts the Hall of Shame to Slack.</span>
         </div>`;
       } else if (qfDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">QF loser rosters dumped. Roasts generated.</span></div>`;
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">QF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
       }
     } else if (i === 13) {
       // Week 14 (SF Week 2) - End Semifinals
@@ -13997,20 +13997,29 @@ function renderWeeklyUploadSections() {
       if (sfFinalized && !sfDumped) {
         html += `<div style="margin-top:0.5rem;">
           <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('SF')">Advance Finals Teams &amp; Dump SF Loser Rosters</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, and generates roasts.</span>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, generates roasts, and posts the Hall of Shame to Slack.</span>
         </div>`;
       } else if (sfDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated.</span></div>`;
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
       }
     } else if (i === 15) {
       // Week 16 (Finals Week 2) - End Finals
       const finalsFinalized = finalized.includes('Finals');
+      const finalsDumped = (sd.losers_dumped || []).includes('Finals');
       html += `<div style="margin-top:0.75rem;">
         <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals', ${i})" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${finalsFinalized ? 'Season Complete' : 'End Finals'}
         </button>
         ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
       </div>`;
+      if (finalsFinalized && !finalsDumped) {
+        html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-danger" onclick="crownChampionAndRoastFinals()">Crown Champion &amp; Roast Runner-up/4th</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Marks the runner-up and 4th-place manager eliminated, generates their roasts, and posts the season-ending Hall of Shame to Slack.</span>
+        </div>`;
+      } else if (finalsDumped) {
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Champion crowned. Runner-up/4th roasted.</span></div>`;
+      }
     }
 
     // Clear week data button (only when data exists)
@@ -14358,7 +14367,75 @@ window.dumpPlayoffLosers = async function (round) {
   for (const m of losers) {
     await generateRoastForManager(m, round);
   }
-  alert(`Dumped ${losers.length} loser roster${losers.length > 1 ? 's' : ''}: ${losers.join(', ')}`);
+  // Post the round's eliminations to Slack the same way Pool Play does — one combined
+  // message with a roast per eliminated manager. `qualifiers` (the PP playoff-field
+  // summary) doesn't apply here; the server only builds that block for round === 'PP'.
+  const posted = await postCombinedRoastsToSlack(round, null, losers);
+  alert(
+    `Dumped ${losers.length} loser roster${losers.length > 1 ? 's' : ''}: ${losers.join(', ')}.` +
+      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
+  );
+  renderWeeklyUploadSections();
+  init();
+};
+
+// Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
+// bracket, mark the runner-up and 4th-place manager as eliminated, generate their roasts,
+// and post the combined "season is over" Slack message — the Finals-round equivalent of
+// dumpPlayoffLosers. There's no next round to prune submissions from, so this is a
+// separate action rather than folded into finalizeRound('Finals', ...).
+window.crownChampionAndRoastFinals = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const matchups = playoffRoundMatchups(sd, 'Finals');
+  if (!matchups) {
+    alert('Finals participants not determined yet — make sure QF and SF are finalized.');
+    return;
+  }
+
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const seedRank = seedRankLookup(sd);
+  const winnerOf = (a, b) =>
+    roundMatchupWinner(
+      a,
+      roundBreakdown(sd, a, 'Finals', rosterLookup, weekKeyToStart).total,
+      b,
+      roundBreakdown(sd, b, 'Finals', rosterLookup, weekKeyToStart).total,
+      seedRank
+    );
+
+  const [champA, champB] = matchups[0].teams.map((t) => t.name);
+  const [thirdA, thirdB] = matchups[1].teams.map((t) => t.name);
+  const champion = winnerOf(champA, champB);
+  const runnerUp = champion === champA ? champB : champA;
+  const third = winnerOf(thirdA, thirdB);
+  const fourth = third === thirdA ? thirdB : thirdA;
+
+  const losers = [runnerUp, fourth].filter(Boolean);
+  if (losers.length === 0) {
+    alert('Could not determine Finals results — make sure scores are uploaded.');
+    return;
+  }
+
+  if (!sd.eliminated) sd.eliminated = {};
+  losers.forEach((m) => {
+    sd.eliminated[m] = 'Finals';
+  });
+  sd.losers_dumped = sd.losers_dumped || [];
+  sd.losers_dumped.push('Finals');
+  saveSeason(SELECTED_SEASON, sd);
+
+  for (const m of losers) {
+    await generateRoastForManager(m, 'Finals');
+  }
+  const posted = await postCombinedRoastsToSlack('Finals', null, losers);
+  alert(
+    `Champion: ${champion}. 3rd place: ${third}. Roasted: ${losers.join(', ')}.` +
+      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
+  );
   renderWeeklyUploadSections();
   init();
 };

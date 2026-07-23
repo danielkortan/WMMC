@@ -4931,7 +4931,13 @@ function buildPlayoffOddsSlackText(sd, todayISO) {
 // waiting on a finalize save. `final: true` (the Monday wrap-up) marks winners/losers and
 // adds the advancement/champion footer. Returns null when no confirmed seeding is stored
 // (pool play not ended in the app yet) — the caller degrades to a plain ranked list.
-function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
+// Core bracket-pairing math shared by buildPlayoffMatchupsSlackText (display) and
+// playoffMatchupResultForRoast (roast context): who played whom in QF/SF/Finals, and who
+// won, derived from the confirmed_seeding snapshot + round totals — never re-derived from
+// raw stats, so it can never disagree with the live bracket. Returns null when no confirmed
+// seeding is stored yet (pool play not ended in the app) or `round` isn't playoff-shaped.
+// `score(r, manager)` returns `{batting, pitching, total}` for round r (memoized).
+function computePlayoffPairs(sd, round) {
   const seeds =
     sd.confirmed_seeding && Array.isArray(sd.confirmed_seeding.qualifierNames)
       ? sd.confirmed_seeding.qualifierNames
@@ -4940,11 +4946,6 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
 
   const seedRank = {};
   seeds.forEach((n, i) => (seedRank[n] = i + 1));
-
-  const fmt = (n) => {
-    const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-    return s.endsWith('.0') ? s.slice(0, -2) : s;
-  };
 
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
@@ -4964,6 +4965,75 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
     return (seedRank[a] ?? Infinity) <= (seedRank[b] ?? Infinity) ? a : b;
   };
 
+  const qfPairs = [
+    { label: 'QF1', a: seeds[0], b: seeds[7] },
+    { label: 'QF4', a: seeds[3], b: seeds[4] },
+    { label: 'QF3', a: seeds[2], b: seeds[5] },
+    { label: 'QF2', a: seeds[1], b: seeds[6] },
+  ];
+
+  let pairs;
+  if (round === 'QF') {
+    pairs = qfPairs.map((p) => ({ ...p, r: 'QF', leader: winner('QF', p.a, p.b) }));
+  } else if (round === 'SF') {
+    const qfW = qfPairs.map((p) => winner('QF', p.a, p.b));
+    pairs = [
+      { label: 'SF1', a: qfW[0], b: qfW[1] },
+      { label: 'SF2', a: qfW[2], b: qfW[3] },
+    ].map((p) => ({ ...p, r: 'SF', leader: winner('SF', p.a, p.b) }));
+  } else if (round === 'Finals') {
+    const qfW = qfPairs.map((p) => winner('QF', p.a, p.b));
+    const sfPairs = [
+      { a: qfW[0], b: qfW[1] },
+      { a: qfW[2], b: qfW[3] },
+    ];
+    const sfW = sfPairs.map((p) => winner('SF', p.a, p.b));
+    const sfL = sfPairs.map((p, i) => (sfW[i] === p.a ? p.b : p.a));
+    const thirdLeader = score('Finals', sfL[0]).total >= score('Finals', sfL[1]).total ? sfL[0] : sfL[1];
+    pairs = [
+      { label: 'Championship', a: sfW[0], b: sfW[1], r: 'Finals', leader: winner('Finals', sfW[0], sfW[1]) },
+      { label: '3rd Place', a: sfL[0], b: sfL[1], r: 'Finals', leader: thirdLeader },
+    ];
+  } else {
+    return null;
+  }
+
+  return { pairs, score, seedRank };
+}
+
+// A given manager's own playoff-round matchup result (opponent, both scores, margin, won?)
+// for the elimination-roast context — "how close did they come" for QF/SF/Finals, the
+// playoff-round equivalent of the PP standings block. Null if the round/seeding isn't
+// determined yet, or the manager wasn't a participant in this round.
+function playoffMatchupResultForRoast(sd, round, manager) {
+  const computed = computePlayoffPairs(sd, round);
+  if (!computed) return null;
+  const { pairs, score } = computed;
+  const pair = pairs.find((p) => p.a === manager || p.b === manager);
+  if (!pair) return null;
+  const opponent = pair.a === manager ? pair.b : pair.a;
+  const mine = score(pair.r, manager).total;
+  const theirs = score(pair.r, opponent).total;
+  return {
+    label: pair.label,
+    opponent,
+    myScore: Math.round(mine * 100) / 100,
+    opponentScore: Math.round(theirs * 100) / 100,
+    margin: Math.round(Math.abs(mine - theirs) * 100) / 100,
+    won: pair.leader === manager,
+  };
+}
+
+function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
+  const computed = computePlayoffPairs(sd, round);
+  if (!computed) return null;
+  const { pairs, score, seedRank } = computed;
+
+  const fmt = (n) => {
+    const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    return s.endsWith('.0') ? s.slice(0, -2) : s;
+  };
+
   const matchupText = (label, r, a, b, leader) => {
     const line = (name) => {
       const s = score(r, name);
@@ -4975,51 +5045,19 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
     return `*${label}*\n${line(a)}\n${line(b)}`;
   };
 
-  const qfPairs = [
-    { label: 'QF1', a: seeds[0], b: seeds[7] },
-    { label: 'QF4', a: seeds[3], b: seeds[4] },
-    { label: 'QF3', a: seeds[2], b: seeds[5] },
-    { label: 'QF2', a: seeds[1], b: seeds[6] },
-  ];
-
   let heading;
-  let pairs;
   let footer = '';
   if (round === 'QF') {
     heading = final ? '\u{1F3C1} *Quarterfinal Results*' : '\u{1F94A} *Quarterfinal Matchups*';
-    pairs = qfPairs.map((p) => ({ ...p, r: 'QF', leader: winner('QF', p.a, p.b) }));
-    if (final) {
-      footer = `Advancing to the Semifinals: ${pairs.map((p) => `*${p.leader}*`).join(', ')}`;
-    }
+    if (final) footer = `Advancing to the Semifinals: ${pairs.map((p) => `*${p.leader}*`).join(', ')}`;
   } else if (round === 'SF') {
-    const qfW = qfPairs.map((p) => winner('QF', p.a, p.b));
     heading = final ? '\u{1F3C1} *Semifinal Results*' : '\u{1F94A} *Semifinal Matchups*';
-    pairs = [
-      { label: 'SF1', a: qfW[0], b: qfW[1] },
-      { label: 'SF2', a: qfW[2], b: qfW[3] },
-    ].map((p) => ({ ...p, r: 'SF', leader: winner('SF', p.a, p.b) }));
-    if (final) {
-      footer = `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}`;
-    }
+    if (final) footer = `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}`;
   } else if (round === 'Finals') {
-    const qfW = qfPairs.map((p) => winner('QF', p.a, p.b));
-    const sfPairs = [
-      { a: qfW[0], b: qfW[1] },
-      { a: qfW[2], b: qfW[3] },
-    ];
-    const sfW = sfPairs.map((p) => winner('SF', p.a, p.b));
-    const sfL = sfPairs.map((p, i) => (sfW[i] === p.a ? p.b : p.a));
-    const thirdLeader = score('Finals', sfL[0]).total >= score('Finals', sfL[1]).total ? sfL[0] : sfL[1];
     heading = final ? '\u{1F3C1} *Finals Results*' : '\u{1F94A} *Championship & 3rd Place*';
-    pairs = [
-      { label: 'Championship', a: sfW[0], b: sfW[1], r: 'Finals', leader: winner('Finals', sfW[0], sfW[1]) },
-      { label: '3rd Place', a: sfL[0], b: sfL[1], r: 'Finals', leader: thirdLeader },
-    ];
     if (final) {
-      footer = `\u{1F3C6} *${pairs[0].leader} wins the Whit Merrifield Memorial Cup!* \u{1F949} ${thirdLeader} takes 3rd place.`;
+      footer = `\u{1F3C6} *${pairs[0].leader} wins the Whit Merrifield Memorial Cup!* \u{1F949} ${pairs[1].leader} takes 3rd place.`;
     }
-  } else {
-    return null;
   }
 
   return (
@@ -11086,6 +11124,17 @@ function roastRoundLabel(round) {
         : 'the Finals';
 }
 
+// Escalating "how much this should sting" per round — used both in the Claude prompt
+// (generateRoastWithClaude) and the static playoff-stakes paragraph in
+// buildRoastPageContext. A Pool Play exit stings least (nobody's played a single playoff
+// game); a Finals loss stings most (a title was right there).
+const ROAST_INTENSITY = {
+  PP: { level: 'mild', stakes: 'before the games that actually count even started' },
+  QF: { level: 'medium-high', stakes: 'in the very first round of the real bracket' },
+  SF: { level: 'high', stakes: 'one win away from playing for the championship' },
+  Finals: { level: 'maximum', stakes: 'with the Whit Merrifield Memorial Cup itself on the line' },
+};
+
 // Entries in perf arrive as "Name: X pts" strings — split them back apart. Shared by
 // fallbackRoast and buildRoastPageContext.
 function parseRoastEntry(s) {
@@ -11246,19 +11295,22 @@ function fallbackRoast(manager, round, perf) {
 
 // Longer, page-only elimination-roast context appended below the joke on the manager's
 // roster page — NOT posted to Slack (the combined Slack post already stacks one roast per
-// eliminated manager, so it stays short/punchy). Adds the concrete Pool Play stakes (place
-// finished, points behind the PP1/PP2 pool winner, points outside the wild-card cut — PP
-// round only, from `standings`) and player highlights (best/worst performer, standout
-// individual games) that don't fit in the joke. Generated the same way regardless of
-// whether the joke itself came from Claude or fallbackRoast — this context is always
-// programmatic, so it's consistent either way. Every sub-bank is only mixed in when its
-// data exists (same tiering rule as fallbackRoast), so a season without daily rows or
-// standings data just gets a shorter — but still valid — context, never "undefined".
-function buildRoastPageContext(manager, round, perf, standings) {
+// eliminated manager, so it stays short/punchy). Adds the concrete stakes of how the
+// manager went out — Pool Play standings (place finished, points behind the PP1/PP2 pool
+// winner, points outside the wild-card cut — PP round only, from `standings`) or the
+// playoff head-to-head result (opponent, score, margin — QF/SF/Finals only, from
+// `matchup`) — plus player highlights (best/worst performer, standout individual games)
+// that don't fit in the joke. Generated the same way regardless of whether the joke itself
+// came from Claude or fallbackRoast — this context is always programmatic, so it's
+// consistent either way. Every sub-bank is only mixed in when its data exists (same tiering
+// rule as fallbackRoast), so a season without daily rows/standings/matchup data just gets a
+// shorter — but still valid — context, never "undefined".
+function buildRoastPageContext(manager, round, perf, standings, matchup) {
   const worst =
     parseRoastEntry(perf.batters_ranked_worst_first[0]) || parseRoastEntry(perf.pitchers_ranked_worst_first[0]);
   const best = parseRoastEntry(perf.best_batter) || parseRoastEntry(perf.best_pitcher);
   const roundLabel = roastRoundLabel(round);
+  const intensity = ROAST_INTENSITY[round] || ROAST_INTENSITY.PP;
   const ordinal = (n) => {
     const suffixes = ['th', 'st', 'nd', 'rd'];
     const v = n % 100;
@@ -11286,6 +11338,64 @@ function buildRoastPageContext(manager, round, perf, standings) {
         `${manager} finished ${ordinal(standings.poolRank)} in ${standings.pool} and ${ordinal(standings.overallRank)} overall — respectable enough to sting. ${standings.pp1_gap} pts from PP1 glory, ${standings.pp2_gap} from PP2 glory, ${standings.wildcard_gap} from a wild card lifeline that never came.`,
     ];
     parts.push(standingsBank[seed % standingsBank.length]());
+  }
+
+  // Playoff head-to-head result — QF/SF/Finals only. Wording escalates with the round
+  // (ROAST_INTENSITY): a QF exit is a shrug, an SF exit is a gut punch, a Finals loss is
+  // the whole season boiled down to one number.
+  if (matchup) {
+    const m = matchup;
+    const closeCall = m.margin <= 20;
+    const playoffBankByRound = {
+      QF: [
+        () =>
+          `${m.opponent} beat ${manager} ${m.opponentScore}–${m.myScore} in the ${m.label} matchup ${intensity.stakes} — a ${m.margin}-pt gap${closeCall ? ", close enough that it'll sting for a while" : ''}. First round, first out.`,
+        () =>
+          `The ${m.label} tape: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}. A ${m.margin}-pt loss in the opening round of the bracket — no shame in it, but no trophy either.`,
+        () =>
+          `One and done: ${m.opponent} took the ${m.label} matchup ${m.opponentScore}–${m.myScore}, and ${manager}'s playoff run lasted exactly as long as it takes to read this sentence.`,
+        () =>
+          `${manager} drew ${m.opponent} in the ${m.label} and lost ${m.opponentScore}–${m.myScore} (a ${m.margin}-pt margin). Everyone else gets to keep playing. ${manager} does not.`,
+      ],
+      SF: [
+        () =>
+          `One win from the championship, and it slipped away: ${m.opponent} beat ${manager} ${m.opponentScore}–${m.myScore} in the ${m.label}, a ${m.margin}-pt margin ${intensity.stakes}. So close the title game could see it.`,
+        () =>
+          `${manager} was ${m.margin} points from the Finals. ${m.opponent} was not — final ${m.label} score ${m.opponentScore}–${m.myScore}. That's the kind of number that keeps a manager up at night.`,
+        () =>
+          `The ${m.label} scoreboard: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}. A championship berth, gone by ${m.margin} points. Brutal doesn't begin to cover it.`,
+        () =>
+          `So close to the title game ${manager} could taste it — and then ${m.opponent} closed it out ${m.opponentScore}–${m.myScore} in the ${m.label}. ${m.margin} points from destiny. Welcome to 3rd/4th place instead.`,
+      ],
+      // The Finals round has two different games with two very different stakes — the
+      // Championship (the Cup itself) and the 3rd-place game (last spot on the podium).
+      // Runner-up gets the maximum-intensity title-game language; 4th place gets the
+      // still-brutal-but-differently-scoped "missed the podium" framing.
+      Finals:
+        m.label === 'Championship'
+          ? [
+              () =>
+                `The Whit Merrifield Memorial Cup itself was on the line, and ${m.opponent} took it from ${manager} ${m.opponentScore}–${m.myScore} in the Championship — a ${m.margin}-pt margin that will be brought up at every draft party for the rest of time.`,
+              () =>
+                `${manager} made it all the way to the Championship and still went home empty-handed: ${m.opponentScore}–${m.myScore} to ${m.opponent}, ${m.margin} points short of a title. The biggest stage, the worst possible ending.`,
+              () =>
+                `Final line of the season: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}, ${m.margin} points between a championship and a runner-up medal. This is the one that doesn't get easier with time.`,
+              () =>
+                `A whole season — Pool Play, the Quarterfinals, the Semifinals — all of it came down to the Championship, and ${manager} lost it ${m.opponentScore}–${m.myScore}. ${m.margin} points from immortality. So close, so far, so final.`,
+            ]
+          : [
+              () =>
+                `Not the Cup, but still the last thing decided all season: ${m.opponent} beat ${manager} ${m.opponentScore}–${m.myScore} in the 3rd-place game, a ${m.margin}-pt margin that's the difference between a podium finish and a plane ride home with nothing.`,
+              () =>
+                `${manager} played an entire season to get to a game for 3rd place — and lost it, ${m.opponentScore}–${m.myScore} to ${m.opponent}. ${m.margin} points from bronze. There's no medal for 4th.`,
+              () =>
+                `The consolation bracket giveth nothing: ${manager} fell ${m.opponentScore}–${m.myScore} to ${m.opponent} in the battle for 3rd, ${m.margin} points short. Closest thing to a trophy this season, and it still wasn't close enough.`,
+              () =>
+                `Final scoreboard of ${manager}'s season: a ${m.margin}-pt loss to ${m.opponent} in the 3rd-place game (${m.opponentScore}–${m.myScore}). No Cup, no bronze, just a very long offseason.`,
+            ],
+    };
+    const bank = playoffBankByRound[round];
+    if (bank) parts.push(bank[(seed + 3) % bank.length]());
   }
 
   const highlightsBank =
@@ -11324,11 +11434,13 @@ async function generateRoastWithClaude(manager, round, perf) {
 
   const roundLabel =
     round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
+  const intensity = ROAST_INTENSITY[round] || ROAST_INTENSITY.PP;
 
   const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. A manager just got eliminated and deserves a brutal, hilariously vulgar roast. Be savage, specific, and profane. Reference their worst-performing players by name. Keep it to 2-3 sentences max.
 
 Manager eliminated: ${manager}
-Eliminated in: ${roundLabel}
+Eliminated in: ${roundLabel} — this happened ${intensity.stakes}
+Roast intensity for this round: ${intensity.level} (the later the round, the more brutal and personal the roast should get — a Pool Play exit is a shrug, a Finals loss is a gut punch)
 Total score: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
 Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
@@ -11374,7 +11486,8 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
     const perf = buildManagerPerformanceForRoast(sd, manager, round);
     const roastText = await generateRoastWithClaude(manager, round, perf);
     const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, manager) : null;
-    const pageContext = buildRoastPageContext(manager, round, perf, standings);
+    const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, manager) : null;
+    const pageContext = buildRoastPageContext(manager, round, perf, standings, matchup);
 
     if (!sd.roasts) sd.roasts = {};
     sd.roasts[manager] = { round, text: roastText, page_context: pageContext, generated_at: new Date().toISOString() };
@@ -11513,7 +11626,8 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
       const perf = buildManagerPerformanceForRoast(sd, m, round);
       const text = await generateRoastWithClaude(m, round, perf);
       const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, m) : null;
-      const pageContext = buildRoastPageContext(m, round, perf, standings);
+      const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, m) : null;
+      const pageContext = buildRoastPageContext(m, round, perf, standings, matchup);
       roastByManager[m] = text;
       freshTexts[m] = { text, pageContext };
     } catch (e) {
@@ -11565,10 +11679,17 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     }
   }
 
+  // Header intensity escalates with the round (ROAST_INTENSITY): a QF exit is a shrug, an
+  // SF exit is a gut punch, a Finals loss gets the biggest send-off of the season.
+  const plural = entries.length > 1 ? 's' : '';
   const header =
     round === 'PP'
-      ? `:fire: *Pool Play is over.* ${entries.length} manager${entries.length > 1 ? 's' : ''} missed the playoffs — welcome to the Hall of Shame:`
-      : `:fire: *${round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals'} eliminations* — welcome to the Hall of Shame:`;
+      ? `:fire: *Pool Play is over.* ${entries.length} manager${plural} missed the playoffs — welcome to the Hall of Shame:`
+      : round === 'QF'
+        ? `:fire: *Quarterfinals eliminations.* ${entries.length} manager${plural} out in the first round of the bracket — welcome to the Hall of Shame:`
+        : round === 'SF'
+          ? `:rotating_light: *Semifinals eliminations.* ${entries.length} manager${plural} came within one win of the championship and fell short — welcome to the Hall of Shame:`
+          : `:skull: *The season is over.* ${entries.length} manager${plural} finished one game short of the Whit Merrifield Memorial Cup — welcome to the Hall of Shame:`;
   // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
   const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
 
