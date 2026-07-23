@@ -10961,26 +10961,36 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
   const sortedBattersAsc = Object.entries(batters).sort((a, b) => a[1] - b[1]);
   const sortedPitchersAsc = Object.entries(pitchers).sort((a, b) => a[1] - b[1]);
 
-  // Best/worst single calendar day (batting + pitching combined) among this manager's
-  // rostered players in the round, from the daily rows — same ownership rule as above.
+  // Best/worst single calendar day (batting + pitching combined), AND best/worst single
+  // individual game (one rostered player, one date) among this manager's rostered players
+  // in the round, from the daily rows — same ownership rule as above.
   const dayTotals = {};
+  const playerGames = [];
   (sd.daily_batting || []).forEach((r) => {
     if (!rounds.includes(r.round) || !r.batter || !r.date) return;
     const weekKey = `${r.round}|${r.week}`;
     if (!ownsBatter(weekKey, r.batter)) return;
-    dayTotals[r.date] = (dayTotals[r.date] || 0) + calculateBattingScore(r.delta || {});
+    const score = Math.round(calculateBattingScore(r.delta || {}) * 100) / 100;
+    dayTotals[r.date] = (dayTotals[r.date] || 0) + score;
+    playerGames.push({ name: r.batter, type: 'Batter', date: r.date, score });
   });
   (sd.daily_pitching || []).forEach((r) => {
     if (!rounds.includes(r.round) || !r.pitcher || !r.date) return;
     const weekKey = `${r.round}|${r.week}`;
     if (!ownsPitcher(weekKey, r.pitcher)) return;
-    dayTotals[r.date] = (dayTotals[r.date] || 0) + calculatePitchingScore(r.delta || {});
+    const score = Math.round(calculatePitchingScore(r.delta || {}) * 100) / 100;
+    dayTotals[r.date] = (dayTotals[r.date] || 0) + score;
+    playerGames.push({ name: r.pitcher, type: 'Pitcher', date: r.date, score });
   });
   const dayEntries = Object.entries(dayTotals)
     .map(([date, score]) => ({ date, score: Math.round(score * 100) / 100 }))
     .sort((a, b) => a.score - b.score);
   const worstDay = dayEntries.length ? dayEntries[0] : null;
   const bestDay = dayEntries.length ? dayEntries[dayEntries.length - 1] : null;
+
+  const sortedGames = [...playerGames].sort((a, b) => a.score - b.score);
+  const worstSingleGame = sortedGames.length ? sortedGames[0] : null;
+  const bestSingleGame = sortedGames.length ? sortedGames[sortedGames.length - 1] : null;
 
   return {
     manager,
@@ -10994,6 +11004,63 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
     best_pitcher: sortedPitchersAsc.length ? fmtEntry(sortedPitchersAsc[sortedPitchersAsc.length - 1]) : null,
     worst_day: worstDay,
     best_day: bestDay,
+    worst_single_game: worstSingleGame,
+    best_single_game: bestSingleGame,
+  };
+}
+
+// Pool Play standings context for the page-only roast summary: pool/overall rank, points
+// behind the manager's own pool's PP1/PP2 winner, and points behind the wild-card cutoff.
+// Reuses the exact same per-manager entries shape and currentQualification() math as the
+// playoff-odds engine (ensureFreshPlayoffOdds), so this can never disagree with the real
+// standings. PP round only — "pool play wins" and "wild card" don't apply to playoff-round
+// eliminations, so callers should skip this for QF/SF/Finals.
+function buildPoolPlayStandingsForRoast(db, sd, manager) {
+  const managers = (db.managers || []).filter((m) => m.active !== false && m.pool);
+  const me = managers.find((m) => m.name === manager);
+  if (!me) return null;
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const pp1Totals = {};
+  for (const s of computeRoundScores(batting, pitching, ['PP1'], sd)) pp1Totals[s.manager] = s.total;
+  const pp2Totals = {};
+  for (const s of computeRoundScores(batting, pitching, ['PP2'], sd)) pp2Totals[s.manager] = s.total;
+  const entries = managers.map((m) => ({
+    manager: m.name,
+    pool: m.pool,
+    pp1: pp1Totals[m.name] || 0,
+    pp2: pp2Totals[m.name] || 0,
+  }));
+
+  const combined = (e) => (e.pp1 || 0) + (e.pp2 || 0);
+  const myEntry = entries.find((e) => e.manager === manager);
+  if (!myEntry) return null;
+
+  const overallSorted = [...entries].sort((a, b) => combined(b) - combined(a));
+  const overallRank = overallSorted.findIndex((e) => e.manager === manager) + 1;
+
+  const poolEntries = entries.filter((e) => e.pool === me.pool);
+  const poolSorted = [...poolEntries].sort((a, b) => combined(b) - combined(a));
+  const poolRank = poolSorted.findIndex((e) => e.manager === manager) + 1;
+
+  const pp1PoolBest = Math.max(0, ...poolEntries.map((e) => e.pp1 || 0));
+  const pp2PoolBest = Math.max(0, ...poolEntries.map((e) => e.pp2 || 0));
+
+  const qual = currentQualification(entries);
+
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return {
+    pool: me.pool,
+    poolRank,
+    poolSize: poolEntries.length,
+    overallRank,
+    totalManagers: entries.length,
+    pp1_total: r2(myEntry.pp1 || 0),
+    pp2_total: r2(myEntry.pp2 || 0),
+    pp1_gap: r2(pp1PoolBest - (myEntry.pp1 || 0)),
+    pp2_gap: r2(pp2PoolBest - (myEntry.pp2 || 0)),
+    wildcard_gap: r2(qual.cutTotal - combined(myEntry)),
   };
 }
 
@@ -11006,39 +11073,51 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
 // the pool when that data is present, so nothing ever prints "undefined". With full data
 // this pool is ~50 templates deep — deterministic per manager+round, so re-running
 // generate-roast after the bank grows can land on a different (but still stable) pick.
+
+// Shared by fallbackRoast and buildRoastPageContext (both display text, not the Claude
+// prompt, which spells rounds out differently).
+function roastRoundLabel(round) {
+  return round === 'PP'
+    ? 'Pool Play'
+    : round === 'QF'
+      ? 'the Quarterfinals'
+      : round === 'SF'
+        ? 'the Semifinals'
+        : 'the Finals';
+}
+
+// Entries in perf arrive as "Name: X pts" strings — split them back apart. Shared by
+// fallbackRoast and buildRoastPageContext.
+function parseRoastEntry(s) {
+  const idx = s ? s.lastIndexOf(':') : -1;
+  return idx > 0
+    ? {
+        name: s.slice(0, idx),
+        pts: s
+          .slice(idx + 1)
+          .replace('pts', '')
+          .trim(),
+      }
+    : null;
+}
+
+function fmtRoastShortDate(iso) {
+  return iso
+    ? new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+    : null;
+}
+
 function fallbackRoast(manager, round, perf) {
-  // Entries in perf arrive as "Name: X pts" strings — split them back apart.
-  const parseEntry = (s) => {
-    const idx = s ? s.lastIndexOf(':') : -1;
-    return idx > 0
-      ? {
-          name: s.slice(0, idx),
-          pts: s
-            .slice(idx + 1)
-            .replace('pts', '')
-            .trim(),
-        }
-      : null;
-  };
-  const worst = parseEntry(perf.batters_ranked_worst_first[0]) ||
-    parseEntry(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
+  const worst = parseRoastEntry(perf.batters_ranked_worst_first[0]) ||
+    parseRoastEntry(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
   const other =
-    parseEntry(perf.pitchers_ranked_worst_first[0]) || parseEntry(perf.batters_ranked_worst_first[0]) || worst;
-  const best = parseEntry(perf.best_batter) || parseEntry(perf.best_pitcher);
-  const roundLabel =
-    round === 'PP'
-      ? 'Pool Play'
-      : round === 'QF'
-        ? 'the Quarterfinals'
-        : round === 'SF'
-          ? 'the Semifinals'
-          : 'the Finals';
-  const fmtShortDate = (iso) =>
-    iso
-      ? new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
-      : null;
-  const worstDayDate = perf.worst_day ? fmtShortDate(perf.worst_day.date) : null;
-  const bestDayDate = perf.best_day ? fmtShortDate(perf.best_day.date) : null;
+    parseRoastEntry(perf.pitchers_ranked_worst_first[0]) ||
+    parseRoastEntry(perf.batters_ranked_worst_first[0]) ||
+    worst;
+  const best = parseRoastEntry(perf.best_batter) || parseRoastEntry(perf.best_pitcher);
+  const roundLabel = roastRoundLabel(round);
+  const worstDayDate = perf.worst_day ? fmtRoastShortDate(perf.worst_day.date) : null;
+  const bestDayDate = perf.best_day ? fmtRoastShortDate(perf.best_day.date) : null;
 
   // Core bank: only needs a worst performer + a total — always available.
   const core = [
@@ -11165,6 +11244,80 @@ function fallbackRoast(manager, round, perf) {
   return bank[seed % bank.length]();
 }
 
+// Longer, page-only elimination-roast context appended below the joke on the manager's
+// roster page — NOT posted to Slack (the combined Slack post already stacks one roast per
+// eliminated manager, so it stays short/punchy). Adds the concrete Pool Play stakes (place
+// finished, points behind the PP1/PP2 pool winner, points outside the wild-card cut — PP
+// round only, from `standings`) and player highlights (best/worst performer, standout
+// individual games) that don't fit in the joke. Generated the same way regardless of
+// whether the joke itself came from Claude or fallbackRoast — this context is always
+// programmatic, so it's consistent either way. Every sub-bank is only mixed in when its
+// data exists (same tiering rule as fallbackRoast), so a season without daily rows or
+// standings data just gets a shorter — but still valid — context, never "undefined".
+function buildRoastPageContext(manager, round, perf, standings) {
+  const worst =
+    parseRoastEntry(perf.batters_ranked_worst_first[0]) || parseRoastEntry(perf.pitchers_ranked_worst_first[0]);
+  const best = parseRoastEntry(perf.best_batter) || parseRoastEntry(perf.best_pitcher);
+  const roundLabel = roastRoundLabel(round);
+  const ordinal = (n) => {
+    const suffixes = ['th', 'st', 'nd', 'rd'];
+    const v = n % 100;
+    return `${n}${suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]}`;
+  };
+
+  let seed = 0;
+  for (const c of `${manager}|${round}|context`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+
+  const parts = [];
+
+  if (standings) {
+    const standingsBank = [
+      () =>
+        `The final numbers: ${ordinal(standings.poolRank)} of ${standings.poolSize} in ${standings.pool}, ${ordinal(standings.overallRank)} overall out of ${standings.totalManagers}. ${manager} finished ${standings.pp1_gap} pts behind the Pool Play 1 winner in-pool, ${standings.pp2_gap} pts behind the Pool Play 2 winner, and ${standings.wildcard_gap} pts outside the wild card cut. So close, and yet.`,
+      () =>
+        `${manager} landed ${ordinal(standings.poolRank)} in ${standings.pool} — ${ordinal(standings.overallRank)} of ${standings.totalManagers} managers overall — a mere ${standings.pp1_gap} pts short of the PP1 crown and ${standings.pp2_gap} short of PP2. The wild card cut was ${standings.wildcard_gap} pts away. Close enough to taste it, far enough to miss it.`,
+      () =>
+        `Final Pool Play ledger: ${ordinal(standings.poolRank)}/${standings.poolSize} in ${standings.pool}, ${ordinal(standings.overallRank)}/${standings.totalManagers} league-wide. ${standings.pp1_gap} pts off the PP1 pace, ${standings.pp2_gap} off PP2, and ${standings.wildcard_gap} pts shy of sneaking in on the wild card. Heartbreaking arithmetic.`,
+      () =>
+        `${manager} spent the season ${ordinal(standings.overallRank)} overall (${ordinal(standings.poolRank)} in ${standings.pool}), watching the PP1 pool winner pull away by ${standings.pp1_gap} and the PP2 winner by ${standings.pp2_gap}. The wild card line finished ${standings.wildcard_gap} pts up the road. Not this year.`,
+      () =>
+        `Somewhere on a whiteboard, ${manager} is only ${standings.wildcard_gap} pts from the wild card, ${standings.pp1_gap} from the PP1 pool title, and ${standings.pp2_gap} from the PP2 pool title. In reality, that whiteboard is in the garbage, next to a ${ordinal(standings.overallRank)}-of-${standings.totalManagers} overall finish.`,
+      () =>
+        `${manager} finished ${ordinal(standings.poolRank)} in ${standings.pool} and ${ordinal(standings.overallRank)} overall — respectable enough to sting. ${standings.pp1_gap} pts from PP1 glory, ${standings.pp2_gap} from PP2 glory, ${standings.wildcard_gap} from a wild card lifeline that never came.`,
+    ];
+    parts.push(standingsBank[seed % standingsBank.length]());
+  }
+
+  const highlightsBank =
+    best && worst && perf.best_single_game && perf.worst_single_game
+      ? [
+          () =>
+            `The tape doesn't lie: ${best.name} led the roster at ${best.pts} pts while ${worst.name} brought up the rear at ${worst.pts}. The single-game swing was even wilder — ${perf.best_single_game.name} dropped ${perf.best_single_game.score} pts on ${fmtRoastShortDate(perf.best_single_game.date)}, while ${perf.worst_single_game.name} posted a rough ${perf.worst_single_game.score} on ${fmtRoastShortDate(perf.worst_single_game.date)}.`,
+          () =>
+            `Individual accolades: ${best.name} (${best.pts} pts) was the one bright spot in ${roundLabel}, and ${perf.best_single_game.name}'s ${perf.best_single_game.score}-pt outing on ${fmtRoastShortDate(perf.best_single_game.date)} was the single best game anyone on this roster turned in. On the other end, ${worst.name} (${worst.pts} pts) and ${perf.worst_single_game.name}'s ${perf.worst_single_game.score}-pt disaster on ${fmtRoastShortDate(perf.worst_single_game.date)} did the real damage.`,
+          () =>
+            `${best.name} carried the highlight reel at ${best.pts} pts, capped by a ${perf.best_single_game.score}-pt outburst on ${fmtRoastShortDate(perf.best_single_game.date)}. ${worst.name} carried the lowlight reel at ${worst.pts}, capped by ${perf.worst_single_game.score} pts on ${fmtRoastShortDate(perf.worst_single_game.date)}. Both belong in the same team photo, somehow.`,
+          () =>
+            `Two games worth framing, for very different reasons: ${perf.best_single_game.name} went for ${perf.best_single_game.score} pts on ${fmtRoastShortDate(perf.best_single_game.date)}, and ${perf.worst_single_game.name} went for ${perf.worst_single_game.score} on ${fmtRoastShortDate(perf.worst_single_game.date)}. Overall, ${best.name} (${best.pts} pts) outproduced ${worst.name} (${worst.pts} pts) by a mile, and it still wasn't enough.`,
+          () =>
+            `${manager}'s box score in two names: ${best.name}, who quietly put up ${best.pts} points and a ${perf.best_single_game.score}-pt gem on ${fmtRoastShortDate(perf.best_single_game.date)}, and ${worst.name}, who put up ${worst.pts} and a ${perf.worst_single_game.score}-pt disappearing act on ${fmtRoastShortDate(perf.worst_single_game.date)}.`,
+        ]
+      : best && worst
+        ? [
+            () =>
+              `${best.name} led the roster at ${best.pts} pts, while ${worst.name} brought up the rear at ${worst.pts}. Same team, same ${roundLabel}, wildly different seasons.`,
+            () =>
+              `Individual accolades: ${best.name} (${best.pts} pts) was the one bright spot in ${roundLabel}. ${worst.name} (${worst.pts} pts) was not.`,
+            () =>
+              `${best.name} carried the highlight reel at ${best.pts} pts. ${worst.name} carried the lowlight reel at ${worst.pts}. Both belong in the same team photo, somehow.`,
+          ]
+        : [];
+
+  if (highlightsBank.length) parts.push(highlightsBank[(seed + 7) % highlightsBank.length]());
+
+  return parts.join('\n\n');
+}
+
 // Call the Anthropic Messages API to generate a vulgar, personalized roast.
 async function generateRoastWithClaude(manager, round, perf) {
   if (!ANTHROPIC_API_KEY) return fallbackRoast(manager, round, perf);
@@ -11220,15 +11373,17 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   try {
     const perf = buildManagerPerformanceForRoast(sd, manager, round);
     const roastText = await generateRoastWithClaude(manager, round, perf);
+    const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, manager) : null;
+    const pageContext = buildRoastPageContext(manager, round, perf, standings);
 
     if (!sd.roasts) sd.roasts = {};
-    sd.roasts[manager] = { round, text: roastText, generated_at: new Date().toISOString() };
+    sd.roasts[manager] = { round, text: roastText, page_context: pageContext, generated_at: new Date().toISOString() };
 
     addAuditEntry(db, 'roast_generated', { year, manager, round }, req.get('X-User-Email'));
     db.seasons[year] = sd;
     writeDB(db);
 
-    res.json({ roast: roastText });
+    res.json({ roast: roastText, page_context: pageContext });
   } catch (err) {
     console.error('Roast generation error:', err);
     res.status(500).json({ error: 'Failed to generate roast' });
@@ -11357,8 +11512,10 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     try {
       const perf = buildManagerPerformanceForRoast(sd, m, round);
       const text = await generateRoastWithClaude(m, round, perf);
+      const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, m) : null;
+      const pageContext = buildRoastPageContext(m, round, perf, standings);
       roastByManager[m] = text;
-      freshTexts[m] = text;
+      freshTexts[m] = { text, pageContext };
     } catch (e) {
       console.error('Roast generation failed for', m, '-', e.message);
       if (existing && existing.text) roastByManager[m] = existing.text;
@@ -11370,7 +11527,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     if (sd2) {
       if (!sd2.roasts) sd2.roasts = {};
       const now = new Date().toISOString();
-      for (const [m, text] of Object.entries(freshTexts)) sd2.roasts[m] = { round, text, generated_at: now };
+      for (const [m, { text, pageContext }] of Object.entries(freshTexts)) {
+        sd2.roasts[m] = { round, text, page_context: pageContext, generated_at: now };
+      }
       db2.seasons[year] = sd2;
       writeDB(db2);
     }

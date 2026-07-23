@@ -5195,6 +5195,22 @@ body::before {
   position: relative;
   z-index: 1;
 }
+.roast-context {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 105, 53, 0.25);
+  position: relative;
+  z-index: 1;
+}
+.roast-context p {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #d8b8a5;
+  margin: 0 0 0.6rem;
+}
+.roast-context p:last-child {
+  margin-bottom: 0;
+}
 
 /* Commissioner: per-round Manager Submission Status (collapsible sections) */
 .sub-status-period {

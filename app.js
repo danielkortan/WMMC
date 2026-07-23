@@ -7653,12 +7653,23 @@ function renderRosterData(managerName, isCommissioner) {
             : roast.round === 'Finals'
               ? 'Finals'
               : roast.round;
+    // page_context is the longer, page-only follow-up (Pool Play standings + player
+    // highlights) added alongside the punchy joke that also goes to Slack — Slack keeps
+    // just roast.text since the combined post already stacks one roast per manager.
+    // Paragraphs are joined with a blank line server-side; render each as its own <p>.
+    const contextHtml = roast.page_context
+      ? `<div class="roast-context">${roast.page_context
+          .split('\n\n')
+          .map((p) => `<p>${esc(p)}</p>`)
+          .join('')}</div>`
+      : '';
     html += `<div class="roast-banner">
       <div class="roast-header">
         <span class="roast-flame">🔥</span>
         <span class="roast-label">HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}</span>
       </div>
       <div class="roast-text">${esc(roast.text)}</div>
+      ${contextHtml}
     </div>`;
   }
 
