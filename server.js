@@ -11339,6 +11339,17 @@ const ROAST_INTENSITY = {
   Finals: { level: 'maximum', stakes: 'with the Whit Merrifield Memorial Cup itself on the line' },
 };
 
+// The three podium finishers (champion, runner-up, 3rd place) become team captains for
+// next season's pool-selection draft — a standing league rule, not a joke. Appended as a
+// plain reminder sentence to the roast TEXT (not just page_context) so it's visible both
+// on the roster page and in the combined Slack post, regardless of which outcome bank
+// generated the joke or whether Claude or the fallback wrote it.
+const PODIUM_OUTCOMES = new Set(['champion', 'runner_up', 'third']);
+function withCaptainReminder(text, manager, outcome) {
+  if (!PODIUM_OUTCOMES.has(outcome)) return text;
+  return `${text} Reminder: as a top-3 finisher, ${manager} is now a team captain for next year's pool selection process.`;
+}
+
 // Entries in perf arrive as "Name: X pts" strings — split them back apart. Shared by
 // fallbackRoast and buildRoastPageContext.
 function parseRoastEntry(s) {
@@ -11908,10 +11919,14 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
 
   const { manager, round } = req.body || {};
   if (!manager || !round) return res.status(400).json({ error: 'manager and round are required' });
-  // 'eliminated' (default) is the standard "you're out" roast; 'champion'/'third' are the
-  // Finals-round sarcastic winner roasts (season champion, 3rd-place-game winner) — only
+  // 'eliminated' (default) is the standard "you're out" roast. 'champion'/'third' are the
+  // Finals-round sarcastic winner roasts (season champion, 3rd-place-game winner);
+  // 'runner_up' keeps the standard elimination joke (they really did lose the
+  // Championship) but gets the podium banner/captain reminder like the other two — only
   // meaningful for round === 'Finals', but harmless if sent for any other round.
-  const outcome = ['champion', 'third'].includes(req.body && req.body.outcome) ? req.body.outcome : 'eliminated';
+  const outcome = ['champion', 'third', 'runner_up'].includes(req.body && req.body.outcome)
+    ? req.body.outcome
+    : 'eliminated';
 
   const db = readDB();
   const sd = (db.seasons || {})[year];
@@ -11922,7 +11937,11 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
     const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, manager) : null;
     const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, manager) : null;
     const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, manager, round) : null;
-    const roastText = await generateRoastWithClaude(manager, round, perf, outcome, matchup);
+    const roastText = withCaptainReminder(
+      await generateRoastWithClaude(manager, round, perf, outcome, matchup),
+      manager,
+      outcome
+    );
     const pageContext = buildRoastPageContext(manager, round, perf, standings, matchup, journey);
 
     if (!sd.roasts) sd.roasts = {};
@@ -12031,7 +12050,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
-  const { round, qualifiers, eliminated, regenerate, winners } = req.body || {};
+  const { round, qualifiers, eliminated, regenerate, podium } = req.body || {};
   if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
     return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
   }
@@ -12043,22 +12062,25 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
 
+  // Finals-only: the top-3 podium finishers (champion, runner-up, 3rd place) get a
+  // distinct roast + banner from a plain elimination — passed explicitly by the client
+  // (crownChampionAndRoastFinals) since there's no way to self-heal "this manager is the
+  // runner-up" from stored state the way a plain elimination can be. Built before toRoast
+  // below so the runner-up (who IS in sd.eliminated, same as 4th place) can be excluded
+  // from the Hall of Shame set — they get exactly one roast, not two.
+  const podiumList = Array.isArray(podium)
+    ? podium.filter((w) => w && typeof w.manager === 'string' && w.manager && PODIUM_OUTCOMES.has(w.outcome))
+    : [];
+  const podiumManagers = new Set(podiumList.map((w) => w.manager));
+
   const toRoast = new Set();
   for (const [m, r] of Object.entries(sd.eliminated || {})) if (r === round) toRoast.add(m);
   if (Array.isArray(eliminated)) for (const m of eliminated) if (typeof m === 'string' && m) toRoast.add(m);
   for (const [m, r] of Object.entries(sd.roasts || {})) {
     if (r && r.round === round && r.text && (r.outcome || 'eliminated') === 'eliminated') toRoast.add(m);
   }
-  // Finals-only: the season champion and the 3rd-place-game winner also get a (sarcastic)
-  // roast now, alongside the Hall of Shame for the runner-up and 4th place. Passed
-  // explicitly by the client (crownChampionAndRoastFinals) — there's no sd.eliminated
-  // entry for a winner, so they can't be self-healed from stored state the way losers can.
-  const winnerList = Array.isArray(winners)
-    ? winners.filter(
-        (w) => w && typeof w.manager === 'string' && w.manager && ['champion', 'third'].includes(w.outcome)
-      )
-    : [];
-  if (toRoast.size === 0 && winnerList.length === 0) {
+  for (const m of podiumManagers) toRoast.delete(m);
+  if (toRoast.size === 0 && podiumList.length === 0) {
     return res.status(404).json({ error: `No eliminated managers or stored roasts for round ${round}` });
   }
 
@@ -12090,27 +12112,28 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     }
   }
 
-  // Winners (champion/third) — same generate-or-reuse pattern, kept in a separate map so
-  // they can get their own Slack section instead of being mixed into the Hall of Shame.
-  const winnerRoastByManager = {};
-  for (const w of winnerList) {
+  // Podium finishers (champion/runner-up/3rd) — same generate-or-reuse pattern, kept in a
+  // separate map so they can get their own Slack section instead of being mixed into the
+  // Hall of Shame. All three get the captain-for-next-year reminder appended.
+  const podiumRoastByManager = {};
+  for (const w of podiumList) {
     const m = w.manager;
     const existing = (sd.roasts || {})[m];
     if (!regenerate && existing && existing.round === round && existing.outcome === w.outcome && existing.text) {
-      winnerRoastByManager[m] = existing.text;
+      podiumRoastByManager[m] = existing.text;
       continue;
     }
     try {
       const perf = buildManagerPerformanceForRoast(sd, m, round);
       const matchup = playoffMatchupResultForRoast(sd, round, m);
       const journey = pastRoundJourneyForRoast(db, sd, m, round);
-      const text = await generateRoastWithClaude(m, round, perf, w.outcome, matchup);
+      const text = withCaptainReminder(await generateRoastWithClaude(m, round, perf, w.outcome, matchup), m, w.outcome);
       const pageContext = buildRoastPageContext(m, round, perf, null, matchup, journey);
-      winnerRoastByManager[m] = text;
+      podiumRoastByManager[m] = text;
       freshTexts[m] = { text, pageContext, outcome: w.outcome };
     } catch (e) {
-      console.error('Winner roast generation failed for', m, '-', e.message);
-      if (existing && existing.text) winnerRoastByManager[m] = existing.text;
+      console.error('Podium roast generation failed for', m, '-', e.message);
+      if (existing && existing.text) podiumRoastByManager[m] = existing.text;
     }
   }
 
@@ -12129,10 +12152,10 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   }
 
   const entries = managerOrder.filter((m) => roastByManager[m]).map((m) => [m, { text: roastByManager[m] }]);
-  const winnerEntries = winnerList
-    .filter((w) => winnerRoastByManager[w.manager])
-    .map((w) => [w.manager, { text: winnerRoastByManager[w.manager], outcome: w.outcome }]);
-  if (entries.length === 0 && winnerEntries.length === 0) {
+  const podiumEntries = podiumList
+    .filter((w) => podiumRoastByManager[w.manager])
+    .map((w) => [w.manager, { text: podiumRoastByManager[w.manager], outcome: w.outcome }]);
+  if (entries.length === 0 && podiumEntries.length === 0) {
     return res.status(500).json({ error: 'Roast generation failed for every eliminated manager' });
   }
 
@@ -12179,20 +12202,21 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     mainBlock = `${header}\n\n${sections.join('\n\n')}`;
   }
 
-  // Finals only: a second section for the champion and 3rd-place-game winner — sarcastic,
-  // not "Hall of Shame" (they won their game), so it gets its own header and trophy emoji.
-  let winnerBlock = '';
-  if (winnerEntries.length > 0) {
-    const winnerPlural = winnerEntries.length > 1 ? 's' : '';
-    const winnerHeader = `:trophy: *A word for the winners, because nobody's safe.* ${winnerEntries.length} manager${winnerPlural} won something this weekend — sort of:`;
-    const winnerSections = winnerEntries.map(
+  // Finals only: a second section for the top-3 podium finishers (champion, runner-up,
+  // 3rd place) — not "Hall of Shame" (they're captains for next year, not knocked out),
+  // so it gets its own header and trophy emoji.
+  let podiumBlock = '';
+  if (podiumEntries.length > 0) {
+    const podiumPlural = podiumEntries.length > 1 ? 's' : '';
+    const podiumHeader = `:trophy: *A word for the podium, because nobody's safe.* ${podiumEntries.length} manager${podiumPlural} finished top-3 this season — and they're your next pool captains:`;
+    const podiumSections = podiumEntries.map(
       ([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`
     );
-    winnerBlock = `${winnerHeader}\n\n${winnerSections.join('\n\n')}`;
+    podiumBlock = `${podiumHeader}\n\n${podiumSections.join('\n\n')}`;
   }
 
   const instructions = buildNextRoundInstructions(sd, round);
-  const messageBody = [summary.trimEnd(), mainBlock, winnerBlock, instructions].filter(Boolean).join('\n\n');
+  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, instructions].filter(Boolean).join('\n\n');
 
   try {
     await postScoreboardChannelSlack(messageBody);
@@ -12206,7 +12230,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
         year,
         round,
         managers: entries.length,
-        winners: winnerEntries.length,
+        podium: podiumEntries.length,
         regenerated: Object.keys(freshTexts).length,
       },
       req.get('X-User-Email')
@@ -12216,7 +12240,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
       ok: true,
       round,
       managers: entries.map(([m]) => m),
-      winners: winnerEntries.map(([m, r]) => ({ manager: m, outcome: r.outcome })),
+      podium: podiumEntries.map(([m, r]) => ({ manager: m, outcome: r.outcome })),
     });
   } catch (e) {
     console.error('[Slack] Combined roast post failed:', e.message);
