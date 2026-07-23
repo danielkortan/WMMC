@@ -5212,6 +5212,48 @@ body::before {
   margin-bottom: 0;
 }
 
+/* Finals-round sarcastic winner roasts (champion, 3rd-place-game winner) — same shape as
+   the Hall of Shame banner, gold/bronze tinted instead of the elimination orange so they
+   read as "won, but still getting ribbed" rather than "eliminated". */
+.roast-banner.roast-champion {
+  background: linear-gradient(135deg, #1a1a1a 0%, #2d2408 100%);
+  border-color: #d4af37;
+}
+.roast-banner.roast-champion::before {
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 10px,
+    rgba(212, 175, 55, 0.05) 10px,
+    rgba(212, 175, 55, 0.05) 20px
+  );
+}
+.roast-banner.roast-champion .roast-label {
+  color: #e5c158;
+}
+.roast-banner.roast-champion .roast-context {
+  border-top-color: rgba(212, 175, 55, 0.25);
+}
+.roast-banner.roast-third {
+  background: linear-gradient(135deg, #1a1a1a 0%, #2a1c10 100%);
+  border-color: #cd7f32;
+}
+.roast-banner.roast-third::before {
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 10px,
+    rgba(205, 127, 50, 0.05) 10px,
+    rgba(205, 127, 50, 0.05) 20px
+  );
+}
+.roast-banner.roast-third .roast-label {
+  color: #dd9a5c;
+}
+.roast-banner.roast-third .roast-context {
+  border-top-color: rgba(205, 127, 50, 0.25);
+}
+
 /* Commissioner: per-round Manager Submission Status (collapsible sections) */
 .sub-status-period {
   border: 1px solid var(--border);

@@ -7663,10 +7663,28 @@ function renderRosterData(managerName, isCommissioner) {
           .map((p) => `<p>${esc(p)}</p>`)
           .join('')}</div>`
       : '';
-    html += `<div class="roast-banner">
+    // outcome distinguishes the standard "you're out" roast from the Finals-round
+    // sarcastic winner roasts (champion, 3rd-place-game winner) — those aren't a Hall of
+    // Shame entry, they get their own icon/label/tint (see .roast-banner.roast-champion/
+    // .roast-third in styles.css).
+    const outcome = roast.outcome || 'eliminated';
+    const bannerClass =
+      outcome === 'champion'
+        ? 'roast-banner roast-champion'
+        : outcome === 'third'
+          ? 'roast-banner roast-third'
+          : 'roast-banner';
+    const flame = outcome === 'champion' ? '🏆' : outcome === 'third' ? '🥉' : '🔥';
+    const label =
+      outcome === 'champion'
+        ? 'CHAMPION &mdash; Whit Merrifield Memorial Cup Winner (sort of a big deal)'
+        : outcome === 'third'
+          ? '3RD PLACE &mdash; A Real Accomplishment*'
+          : `HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}`;
+    html += `<div class="${bannerClass}">
       <div class="roast-header">
-        <span class="roast-flame">🔥</span>
-        <span class="roast-label">HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}</span>
+        <span class="roast-flame">${flame}</span>
+        <span class="roast-label">${label}</span>
       </div>
       <div class="roast-text">${esc(roast.text)}</div>
       ${contextHtml}
@@ -14380,10 +14398,13 @@ window.dumpPlayoffLosers = async function (round) {
 };
 
 // Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
-// bracket, mark the runner-up and 4th-place manager as eliminated, generate their roasts,
-// and post the combined "season is over" Slack message — the Finals-round equivalent of
-// dumpPlayoffLosers. There's no next round to prune submissions from, so this is a
-// separate action rather than folded into finalizeRound('Finals', ...).
+// bracket, mark the runner-up and 4th-place manager as eliminated, generate roasts for ALL
+// FOUR participants — the runner-up and 4th place get the standard elimination roast, and
+// the champion and 3rd-place-game winner get a separate sarcastic "congratulations, sort
+// of" roast, since winning your game in the Finals round isn't a real elimination — and
+// post the combined "season is over" Slack message. There's no next round to prune
+// submissions from, so this is a separate action rather than folded into
+// finalizeRound('Finals', ...).
 window.crownChampionAndRoastFinals = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -14419,6 +14440,11 @@ window.crownChampionAndRoastFinals = async function () {
     alert('Could not determine Finals results — make sure scores are uploaded.');
     return;
   }
+  // Champion and 3rd place aren't "eliminated" — they won their game — but they still get
+  // a (sarcastic) roast for the season, so track them separately from the losers.
+  const winnerRoles = [];
+  if (champion) winnerRoles.push({ manager: champion, outcome: 'champion' });
+  if (third) winnerRoles.push({ manager: third, outcome: 'third' });
 
   if (!sd.eliminated) sd.eliminated = {};
   losers.forEach((m) => {
@@ -14431,21 +14457,26 @@ window.crownChampionAndRoastFinals = async function () {
   for (const m of losers) {
     await generateRoastForManager(m, 'Finals');
   }
-  const posted = await postCombinedRoastsToSlack('Finals', null, losers);
+  for (const w of winnerRoles) {
+    await generateRoastForManager(w.manager, 'Finals', w.outcome);
+  }
+  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, winnerRoles);
   alert(
-    `Champion: ${champion}. 3rd place: ${third}. Roasted: ${losers.join(', ')}.` +
+    `Champion: ${champion}. 3rd place: ${third}. Roasted: ${[...losers, ...winnerRoles.map((w) => w.manager)].join(', ')}.` +
       (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
   );
   renderWeeklyUploadSections();
   init();
 };
 
-// Call the server to generate and store a roast for an eliminated manager.
-async function generateRoastForManager(manager, round) {
+// Call the server to generate and store a roast. `outcome` defaults to the standard
+// "you're eliminated" roast; pass 'champion' or 'third' for the Finals-round sarcastic
+// winner roasts (season champion, 3rd-place-game winner).
+async function generateRoastForManager(manager, round, outcome) {
   try {
     await apiFetch(`/api/seasons/${SELECTED_SEASON}/generate-roast`, {
       method: 'POST',
-      body: JSON.stringify({ manager, round }),
+      body: JSON.stringify({ manager, round, outcome: outcome || 'eliminated' }),
     });
     // Re-sync seasons from server so roasts appear immediately
     const fresh = await fetch('/api/seasons');
@@ -14465,13 +14496,15 @@ async function generateRoastForManager(manager, round) {
 // (seed-ordered) and `eliminated` are fallbacks the server uses if the finalize save
 // hasn't landed yet; the server generates any missing roast itself before posting.
 // `regenerate` re-rolls every stored roast for the round (used by the repost button).
+// `winners` (Finals only) is an array of {manager, outcome:'champion'|'third'} — gets its
+// own "word for the winners" section instead of the Hall of Shame one.
 // Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
 // and the roasts still show on the roster pages. Returns true when the post went out.
-async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate) {
+async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate, winners) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
       method: 'POST',
-      body: JSON.stringify({ round, qualifiers, eliminated, regenerate }),
+      body: JSON.stringify({ round, qualifiers, eliminated, regenerate, winners }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
