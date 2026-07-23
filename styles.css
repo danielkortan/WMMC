@@ -5212,9 +5212,9 @@ body::before {
   margin-bottom: 0;
 }
 
-/* Finals-round sarcastic winner roasts (champion, 3rd-place-game winner) — same shape as
-   the Hall of Shame banner, gold/bronze tinted instead of the elimination orange so they
-   read as "won, but still getting ribbed" rather than "eliminated". */
+/* Finals-round podium roasts (champion, runner-up, 3rd-place-game winner) — same shape as
+   the Hall of Shame banner, gold/silver/bronze tinted instead of the elimination orange so
+   they read as "top-3 finish, still getting ribbed" rather than "eliminated". */
 .roast-banner.roast-champion {
   background: linear-gradient(135deg, #1a1a1a 0%, #2d2408 100%);
   border-color: #d4af37;
@@ -5233,6 +5233,25 @@ body::before {
 }
 .roast-banner.roast-champion .roast-context {
   border-top-color: rgba(212, 175, 55, 0.25);
+}
+.roast-banner.roast-runner-up {
+  background: linear-gradient(135deg, #1a1a1a 0%, #24262b 100%);
+  border-color: #b8bec7;
+}
+.roast-banner.roast-runner-up::before {
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 10px,
+    rgba(184, 190, 199, 0.05) 10px,
+    rgba(184, 190, 199, 0.05) 20px
+  );
+}
+.roast-banner.roast-runner-up .roast-label {
+  color: #cdd3da;
+}
+.roast-banner.roast-runner-up .roast-context {
+  border-top-color: rgba(184, 190, 199, 0.25);
 }
 .roast-banner.roast-third {
   background: linear-gradient(135deg, #1a1a1a 0%, #2a1c10 100%);

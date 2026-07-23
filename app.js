@@ -7663,24 +7663,24 @@ function renderRosterData(managerName, isCommissioner) {
           .map((p) => `<p>${esc(p)}</p>`)
           .join('')}</div>`
       : '';
-    // outcome distinguishes the standard "you're out" roast from the Finals-round
-    // sarcastic winner roasts (champion, 3rd-place-game winner) — those aren't a Hall of
-    // Shame entry, they get their own icon/label/tint (see .roast-banner.roast-champion/
-    // .roast-third in styles.css).
+    // outcome distinguishes the standard "you're out" roast from the Finals-round podium
+    // roasts (champion, runner-up, 3rd place — the three next-year pool captains) — those
+    // aren't a Hall of Shame entry, they get their own icon/label/tint (see
+    // .roast-banner.roast-champion/.roast-runner-up/.roast-third in styles.css).
     const outcome = roast.outcome || 'eliminated';
-    const bannerClass =
-      outcome === 'champion'
-        ? 'roast-banner roast-champion'
-        : outcome === 'third'
-          ? 'roast-banner roast-third'
-          : 'roast-banner';
-    const flame = outcome === 'champion' ? '🏆' : outcome === 'third' ? '🥉' : '🔥';
-    const label =
-      outcome === 'champion'
-        ? 'CHAMPION &mdash; Whit Merrifield Memorial Cup Winner (sort of a big deal)'
-        : outcome === 'third'
-          ? '3RD PLACE &mdash; A Real Accomplishment*'
-          : `HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}`;
+    const PODIUM_BANNER = {
+      champion: {
+        cls: 'roast-champion',
+        flame: '🏆',
+        label: 'CHAMPION &mdash; Whit Merrifield Memorial Cup Winner (sort of a big deal)',
+      },
+      runner_up: { cls: 'roast-runner-up', flame: '🥈', label: 'RUNNER-UP &mdash; So Close, Yet So Far' },
+      third: { cls: 'roast-third', flame: '🥉', label: '3RD PLACE &mdash; A Real Accomplishment*' },
+    };
+    const podium = PODIUM_BANNER[outcome];
+    const bannerClass = podium ? `roast-banner ${podium.cls}` : 'roast-banner';
+    const flame = podium ? podium.flame : '🔥';
+    const label = podium ? podium.label : `HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}`;
     html += `<div class="${bannerClass}">
       <div class="roast-header">
         <span class="roast-flame">${flame}</span>
@@ -14398,13 +14398,14 @@ window.dumpPlayoffLosers = async function (round) {
 };
 
 // Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
-// bracket, mark the runner-up and 4th-place manager as eliminated, generate roasts for ALL
-// FOUR participants — the runner-up and 4th place get the standard elimination roast, and
-// the champion and 3rd-place-game winner get a separate sarcastic "congratulations, sort
-// of" roast, since winning your game in the Finals round isn't a real elimination — and
-// post the combined "season is over" Slack message. There's no next round to prune
-// submissions from, so this is a separate action rather than folded into
-// finalizeRound('Finals', ...).
+// bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
+// bookkeeping — the runner-up genuinely did lose the Championship), generate roasts for
+// ALL FOUR participants, and post the combined "season is over" Slack message. Only 4th
+// place gets the plain elimination banner — the top 3 finishers (champion, runner-up, 3rd)
+// are next year's pool-selection captains, so they get the podium treatment (silver/gold/
+// bronze banner + captain reminder) instead of "Hall of Shame", even though the runner-up
+// and 4th place lost the same round. There's no next round to prune submissions from, so
+// this is a separate action rather than folded into finalizeRound('Finals', ...).
 window.crownChampionAndRoastFinals = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -14435,19 +14436,23 @@ window.crownChampionAndRoastFinals = async function () {
   const third = winnerOf(thirdA, thirdB);
   const fourth = third === thirdA ? thirdB : thirdA;
 
-  const losers = [runnerUp, fourth].filter(Boolean);
-  if (losers.length === 0) {
+  // Top-3 podium finishers — captains for next year's pool selection — get the podium
+  // roast/banner treatment. Only 4th place is a plain elimination.
+  const podiumRoles = [];
+  if (champion) podiumRoles.push({ manager: champion, outcome: 'champion' });
+  if (runnerUp) podiumRoles.push({ manager: runnerUp, outcome: 'runner_up' });
+  if (third) podiumRoles.push({ manager: third, outcome: 'third' });
+
+  const losers = [fourth].filter(Boolean);
+  if (losers.length === 0 && podiumRoles.length === 0) {
     alert('Could not determine Finals results — make sure scores are uploaded.');
     return;
   }
-  // Champion and 3rd place aren't "eliminated" — they won their game — but they still get
-  // a (sarcastic) roast for the season, so track them separately from the losers.
-  const winnerRoles = [];
-  if (champion) winnerRoles.push({ manager: champion, outcome: 'champion' });
-  if (third) winnerRoles.push({ manager: third, outcome: 'third' });
 
   if (!sd.eliminated) sd.eliminated = {};
-  losers.forEach((m) => {
+  // Bracket bookkeeping: the runner-up and 4th place both genuinely lost the Championship/
+  // 3rd-place game this round, regardless of which roast banner they get.
+  [runnerUp, fourth].filter(Boolean).forEach((m) => {
     sd.eliminated[m] = 'Finals';
   });
   sd.losers_dumped = sd.losers_dumped || [];
@@ -14457,12 +14462,12 @@ window.crownChampionAndRoastFinals = async function () {
   for (const m of losers) {
     await generateRoastForManager(m, 'Finals');
   }
-  for (const w of winnerRoles) {
+  for (const w of podiumRoles) {
     await generateRoastForManager(w.manager, 'Finals', w.outcome);
   }
-  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, winnerRoles);
+  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, podiumRoles);
   alert(
-    `Champion: ${champion}. 3rd place: ${third}. Roasted: ${[...losers, ...winnerRoles.map((w) => w.manager)].join(', ')}.` +
+    `Champion: ${champion}. Runner-up: ${runnerUp}. 3rd place: ${third}. 4th place: ${fourth}.` +
       (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
   );
   renderWeeklyUploadSections();
@@ -14470,8 +14475,8 @@ window.crownChampionAndRoastFinals = async function () {
 };
 
 // Call the server to generate and store a roast. `outcome` defaults to the standard
-// "you're eliminated" roast; pass 'champion' or 'third' for the Finals-round sarcastic
-// winner roasts (season champion, 3rd-place-game winner).
+// "you're eliminated" roast; pass 'champion', 'runner_up', or 'third' for the Finals-round
+// podium roasts (all three are next year's pool-selection captains).
 async function generateRoastForManager(manager, round, outcome) {
   try {
     await apiFetch(`/api/seasons/${SELECTED_SEASON}/generate-roast`, {
@@ -14496,15 +14501,15 @@ async function generateRoastForManager(manager, round, outcome) {
 // (seed-ordered) and `eliminated` are fallbacks the server uses if the finalize save
 // hasn't landed yet; the server generates any missing roast itself before posting.
 // `regenerate` re-rolls every stored roast for the round (used by the repost button).
-// `winners` (Finals only) is an array of {manager, outcome:'champion'|'third'} — gets its
-// own "word for the winners" section instead of the Hall of Shame one.
+// `podium` (Finals only) is an array of {manager, outcome:'champion'|'runner_up'|'third'}
+// — gets its own "word for the podium" section instead of the Hall of Shame one.
 // Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
 // and the roasts still show on the roster pages. Returns true when the post went out.
-async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate, winners) {
+async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate, podium) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
       method: 'POST',
-      body: JSON.stringify({ round, qualifiers, eliminated, regenerate, winners }),
+      body: JSON.stringify({ round, qualifiers, eliminated, regenerate, podium }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
