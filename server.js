@@ -5395,6 +5395,20 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         `${p.bb} free passes and a ${fmt(p.score)}-pt line from *${p.name}* — that's not pitching, that's just walking out on people. *${mgrShort}* rostered him anyway.`,
       (p, mgrShort) =>
         `*${p.name}* left ${p.bb} batters standing at first for a ${fmt(p.score)}-pt day — dude bails on commitments more than he throws strikes. *${mgrShort}*, maybe it's time for an intervention.`,
+      (p, mgrShort) =>
+        `Breaking: *${p.name}* has located ball four ${p.bb} times but not the strike zone, good for a ${fmt(p.score)}-pt day. *${mgrShort}* keeps trotting him out there like GPS is coming any minute.`,
+      (p, mgrShort) =>
+        `${p.bb} walks issued, ${fmt(p.score)} pts earned — *${p.name}* is basically running a free youth clinic on how to get to first without trying. *${mgrShort}* is the head sponsor.`,
+      (p, mgrShort) =>
+        `*${p.name}* handed out ${p.bb} walks like they were Halloween candy for a ${fmt(p.score)}-pt line. *${mgrShort}* forgot to lock the front door on this roster spot.`,
+      (p, mgrShort) =>
+        `SportsCenter's Not-Top-10: *${p.name}* issuing ${p.bb} walks for a ${fmt(p.score)}-pt day, a masterclass in throwing everywhere except where it counts. *${mgrShort}* rostered him on purpose.`,
+      (p, mgrShort) =>
+        `${p.bb} batters got a courtesy escort to first from *${p.name}* today, netting a robust ${fmt(p.score)} pts. *${mgrShort}* is out here running a taxi service, not a pitching staff.`,
+      (p, mgrShort) =>
+        `*${p.name}* walked ${p.bb} and pitched to a ${fmt(p.score)}-pt day, proving once again that control is a lifestyle choice he simply hasn't made. *${mgrShort}* remains a believer.`,
+      (p, mgrShort) =>
+        `${p.bb} walks is a lot of free real estate to give away for ${fmt(p.score)} pts, and *${p.name}* gave it away like it was rent-controlled. *${mgrShort}* signed the lease.`,
     ];
     const lobRoasts = [
       (p, mgrShort) =>
@@ -5403,18 +5417,54 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         `${p.lob} runners stranded for only ${fmt(p.score)} pts — *${p.name}* really said "every man for himself" out there. *${mgrShort}*'s guy is loyal to absolutely no one on base.`,
       (p, mgrShort) =>
         `*${p.name}* posted ${fmt(p.score)} pts while leaving ${p.lob} men on base — a real love-'em-and-leave-'em day. *${mgrShort}* should look into couples counseling for this roster spot.`,
+      (p, mgrShort) =>
+        `${p.lob} men stranded and a ${fmt(p.score)}-pt line from *${p.name}* — a wildly inefficient way to lose. *${mgrShort}* watched runners die on base like it was a group activity.`,
+      (p, mgrShort) =>
+        `*${p.name}* had ${p.lob} guys standing around waiting for a ride home and never called the Uber, good for ${fmt(p.score)} pts. *${mgrShort}* is footing the cancellation fee.`,
+      (p, mgrShort) =>
+        `SportsCenter's runner-abandonment leaderboard: *${p.name}*, ${p.lob} left on base, ${fmt(p.score)} pts. *${mgrShort}* nodded along like this was the plan all along.`,
+      (p, mgrShort) =>
+        `${p.lob} men on base and *${p.name}* couldn't bring a single one home, settling for ${fmt(p.score)} pts. *${mgrShort}*'s guy treats ducks on the pond like decorations.`,
+      (p, mgrShort) =>
+        `*${p.name}* went ${fmt(p.score)} pts today with ${p.lob} runners stranded — a real "it's not you, it's me" performance. *${mgrShort}* is the one left holding the bag.`,
+      (p, mgrShort) =>
+        `${p.lob} men left on base is basically a graveyard, and *${p.name}* dug it for only ${fmt(p.score)} pts. *${mgrShort}* brought the shovel.`,
+      (p, mgrShort) =>
+        `*${p.name}* stranded ${p.lob} runners in a ${fmt(p.score)}-pt day, which is a lot of unfinished business for one afternoon. *${mgrShort}* is used to the loose ends by now.`,
     ];
     const strikeoutRoasts = [
       (p, mgrShort) =>
         `*${p.name}* struck out ${p.so} times in a ${fmt(p.score)}-pt day, the offensive equivalent of running in place. *${mgrShort}* still gets credit for owning the league's quietest disaster.`,
       (p, mgrShort) =>
         `${p.so} strikeouts and ${fmt(p.score)} pts from *${p.name}* — not a hat trick, just a guy swinging at nothing. *${mgrShort}* watched the whole thing happen.`,
+      (p, mgrShort) =>
+        `*${p.name}* took ${p.so} called strolls back to the dugout today for a ${fmt(p.score)}-pt line. *${mgrShort}* keeps writing his name on the lineup card anyway.`,
+      (p, mgrShort) =>
+        `${p.so} strikeouts is a lot of practice swings to show for ${fmt(p.score)} pts. *${p.name}* is out here auditioning for a golf swing tutorial. *${mgrShort}* bought a ticket.`,
+      (p, mgrShort) =>
+        `SportsCenter Not Top 10: *${p.name}* whiffing ${p.so} times for ${fmt(p.score)} pts, a real "see ball, miss ball" showcase. *${mgrShort}* is the proud general manager of this act.`,
+      (p, mgrShort) =>
+        `*${p.name}* struck out ${p.so} times and produced a ${fmt(p.score)}-pt line — a masterclass in showing up to not participate. *${mgrShort}* clapped anyway.`,
+      (p, mgrShort) =>
+        `${p.so} strikeouts, ${fmt(p.score)} pts, and *${p.name}* still hasn't figured out the bat makes contact with the ball, not the air around it. *${mgrShort}* remains hopeful for no good reason.`,
+      (p, mgrShort) =>
+        `*${p.name}* went down swinging ${p.so} times today for ${fmt(p.score)} pts, a personal fireworks show with no actual fireworks. *${mgrShort}* is footing the bill.`,
     ];
     const flatRoasts = [
       (p, mgrShort) =>
         `*${p.name}* turned in the league's flattest line today at ${fmt(p.score)} pts — not bad enough to be funny, just bad enough to notice. *${mgrShort}* will pretend not to see this.`,
       (p, mgrShort) =>
         `Nobody bombed today, so *${p.name}*'s ${fmt(p.score)}-pt nothingburger gets the spotlight by default. *${mgrShort}* still owns it.`,
+      (p, mgrShort) =>
+        `*${p.name}* posted a quiet, unremarkable ${fmt(p.score)} pts — the fantasy equivalent of a background extra. *${mgrShort}* still has to explain this roster spot to somebody.`,
+      (p, mgrShort) =>
+        `In a day with no real disasters, *${p.name}*'s ${fmt(p.score)} pts wins by default, like the last slice of gas-station pizza. *${mgrShort}* is the one who ordered it.`,
+      (p, mgrShort) =>
+        `*${p.name}* did absolutely nothing today, statistically speaking — ${fmt(p.score)} pts of pure beige. *${mgrShort}* rostered a beige wall and called it a plan.`,
+      (p, mgrShort) =>
+        `SportsCenter's slowest news day features *${p.name}* posting ${fmt(p.score)} pts, which is the box-score equivalent of dead air. *${mgrShort}* is the producer who let it happen.`,
+      (p, mgrShort) =>
+        `*${p.name}*'s ${fmt(p.score)}-pt day is the roster equivalent of elevator music — technically present, forgotten immediately. *${mgrShort}* keeps it on repeat.`,
     ];
     const worstPlayerText = (() => {
       if (bottomPlayers.length) return bottomPlayers.map((p, i) => fmtPlayer(p, i, true)).join('\n');
@@ -10868,9 +10918,18 @@ app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) 
 // ============================================================
 
 // Build a plain-text performance summary for the given manager in the given round.
+// Alongside the worst-ranked batters/pitchers (used since the original roast), this also
+// surfaces the manager's best batter/pitcher and single best/worst day in the round — the
+// specific "receipts" the expanded roast bank below draws on. Ownership mirrors the
+// original rule exactly: sd.rosters[manager][round|week] arrays, scoped per row's own
+// round+week (a derived cache, but the same one this function has always used).
 function buildManagerPerformanceForRoast(sd, manager, round) {
   const roundMap = { PP: ['PP1', 'PP2'], QF: ['QF'], SF: ['SF'], Finals: ['Finals'] };
   const rounds = roundMap[round] || [round];
+  const rosters = sd.rosters && sd.rosters[manager];
+
+  const ownsBatter = (weekKey, name) => !!rosters && ((rosters[weekKey] || {}).batters || []).includes(name);
+  const ownsPitcher = (weekKey, name) => !!rosters && ((rosters[weekKey] || {}).pitchers || []).includes(name);
 
   const batters = {};
   const pitchers = {};
@@ -10878,23 +10937,18 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
   (sd.weekly_batting || []).forEach((b) => {
     if (!rounds.includes(b.round)) return;
     if (!b.batter) return;
-    // Simple ownership check: was this player on this manager's roster?
-    const rosters = sd.rosters && sd.rosters[manager];
     if (!rosters) return;
     const weekKey = `${b.round}|${b.week}`;
-    const weekRoster = rosters[weekKey] || {};
-    if (!(weekRoster.batters || []).includes(b.batter)) return;
+    if (!ownsBatter(weekKey, b.batter)) return;
     batters[b.batter] = (batters[b.batter] || 0) + (b.weekly_score || 0);
   });
 
   (sd.weekly_pitching || []).forEach((p) => {
     if (!rounds.includes(p.round)) return;
     if (!p.pitcher) return;
-    const rosters = sd.rosters && sd.rosters[manager];
     if (!rosters) return;
     const weekKey = `${p.round}|${p.week}`;
-    const weekRoster = rosters[weekKey] || {};
-    if (!(weekRoster.pitchers || []).includes(p.pitcher)) return;
+    if (!ownsPitcher(weekKey, p.pitcher)) return;
     pitchers[p.pitcher] = (pitchers[p.pitcher] || 0) + (p.weekly_score || 0);
   });
 
@@ -10902,12 +10956,31 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
   const totalPit = Object.values(pitchers).reduce((s, v) => s + v, 0);
   const total = Math.round((totalBat + totalPit) * 100) / 100;
 
-  const sortedBatters = Object.entries(batters)
-    .sort((a, b) => a[1] - b[1])
-    .map(([name, score]) => `${name}: ${Math.round(score * 100) / 100} pts`);
-  const sortedPitchers = Object.entries(pitchers)
-    .sort((a, b) => a[1] - b[1])
-    .map(([name, score]) => `${name}: ${Math.round(score * 100) / 100} pts`);
+  const fmtEntry = ([name, score]) => `${name}: ${Math.round(score * 100) / 100} pts`;
+  // Ascending by score = worst first (lowest, incl. negative pitcher scores, sorts first).
+  const sortedBattersAsc = Object.entries(batters).sort((a, b) => a[1] - b[1]);
+  const sortedPitchersAsc = Object.entries(pitchers).sort((a, b) => a[1] - b[1]);
+
+  // Best/worst single calendar day (batting + pitching combined) among this manager's
+  // rostered players in the round, from the daily rows — same ownership rule as above.
+  const dayTotals = {};
+  (sd.daily_batting || []).forEach((r) => {
+    if (!rounds.includes(r.round) || !r.batter || !r.date) return;
+    const weekKey = `${r.round}|${r.week}`;
+    if (!ownsBatter(weekKey, r.batter)) return;
+    dayTotals[r.date] = (dayTotals[r.date] || 0) + calculateBattingScore(r.delta || {});
+  });
+  (sd.daily_pitching || []).forEach((r) => {
+    if (!rounds.includes(r.round) || !r.pitcher || !r.date) return;
+    const weekKey = `${r.round}|${r.week}`;
+    if (!ownsPitcher(weekKey, r.pitcher)) return;
+    dayTotals[r.date] = (dayTotals[r.date] || 0) + calculatePitchingScore(r.delta || {});
+  });
+  const dayEntries = Object.entries(dayTotals)
+    .map(([date, score]) => ({ date, score: Math.round(score * 100) / 100 }))
+    .sort((a, b) => a.score - b.score);
+  const worstDay = dayEntries.length ? dayEntries[0] : null;
+  const bestDay = dayEntries.length ? dayEntries[dayEntries.length - 1] : null;
 
   return {
     manager,
@@ -10915,18 +10988,27 @@ function buildManagerPerformanceForRoast(sd, manager, round) {
     total,
     batting_total: Math.round(totalBat * 100) / 100,
     pitching_total: Math.round(totalPit * 100) / 100,
-    batters_ranked_worst_first: sortedBatters,
-    pitchers_ranked_worst_first: sortedPitchers,
+    batters_ranked_worst_first: sortedBattersAsc.map(fmtEntry),
+    pitchers_ranked_worst_first: sortedPitchersAsc.map(fmtEntry),
+    best_batter: sortedBattersAsc.length ? fmtEntry(sortedBattersAsc[sortedBattersAsc.length - 1]) : null,
+    best_pitcher: sortedPitchersAsc.length ? fmtEntry(sortedPitchersAsc[sortedPitchersAsc.length - 1]) : null,
+    worst_day: worstDay,
+    best_day: bestDay,
   };
 }
 
 // Static roast bank used when the Anthropic API is unavailable (no ANTHROPIC_API_KEY, or the
 // call failed). Deterministically seeded per manager+round so every eliminated manager gets a
 // DIFFERENT roast — the old single hardcoded template made a combined Slack post read like a
-// form letter. Each template works the manager's real numbers and worst performers in.
+// form letter. Each template works the manager's real numbers in: worst performers (always
+// available), best performer vs. worst performer ("betrayal"), and single best/worst day
+// (when daily rows exist for the round). Templates needing best/day data are only added to
+// the pool when that data is present, so nothing ever prints "undefined". With full data
+// this pool is ~50 templates deep — deterministic per manager+round, so re-running
+// generate-roast after the bank grows can land on a different (but still stable) pick.
 function fallbackRoast(manager, round, perf) {
   // Entries in perf arrive as "Name: X pts" strings — split them back apart.
-  const parseWorst = (s) => {
+  const parseEntry = (s) => {
     const idx = s ? s.lastIndexOf(':') : -1;
     return idx > 0
       ? {
@@ -10938,10 +11020,11 @@ function fallbackRoast(manager, round, perf) {
         }
       : null;
   };
-  const worst = parseWorst(perf.batters_ranked_worst_first[0]) ||
-    parseWorst(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
+  const worst = parseEntry(perf.batters_ranked_worst_first[0]) ||
+    parseEntry(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
   const other =
-    parseWorst(perf.pitchers_ranked_worst_first[0]) || parseWorst(perf.batters_ranked_worst_first[0]) || worst;
+    parseEntry(perf.pitchers_ranked_worst_first[0]) || parseEntry(perf.batters_ranked_worst_first[0]) || worst;
+  const best = parseEntry(perf.best_batter) || parseEntry(perf.best_pitcher);
   const roundLabel =
     round === 'PP'
       ? 'Pool Play'
@@ -10950,7 +11033,15 @@ function fallbackRoast(manager, round, perf) {
         : round === 'SF'
           ? 'the Semifinals'
           : 'the Finals';
-  const bank = [
+  const fmtShortDate = (iso) =>
+    iso
+      ? new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+      : null;
+  const worstDayDate = perf.worst_day ? fmtShortDate(perf.worst_day.date) : null;
+  const bestDayDate = perf.best_day ? fmtShortDate(perf.best_day.date) : null;
+
+  // Core bank: only needs a worst performer + a total — always available.
+  const core = [
     () =>
       `${manager} rode ${worst.name} (${worst.pts} pts) straight into the offseason. ${perf.total} points of pure "maybe next year." The league thanks you for your donation.`,
     () =>
@@ -10967,7 +11058,108 @@ function fallbackRoast(manager, round, perf) {
       `${manager}'s ${roundLabel} campaign: ${perf.total} points, ${worst.name} in witness protection at ${worst.pts} pts, and a roster that quit before the group chat did. Eliminated, emphatically.`,
     () =>
       `Legend says ${manager} is still waiting for ${worst.name} to heat up. ${worst.pts} points later, the wait continues — from the couch. ${perf.total} total. Brutal.`,
+    () =>
+      `Breaking news out of the WMMC newsroom: local manager ${manager} discovers ${worst.name} is not, in fact, good at baseball. Discovery cost: ${perf.total} points and an early flight home from ${roundLabel}. Film at 11.`,
+    () =>
+      `${manager} went with the "close your eyes and hope" strategy in ${roundLabel}. ${worst.name} posted ${worst.pts} pts, the eyes stayed closed, and ${perf.total} total points said "yeah, that tracks."`,
+    () =>
+      `Cue the highlight reel — there isn't one. ${manager} put up ${perf.total} points behind ${worst.name}'s ${worst.pts}-point disappearing act, and ${roundLabel} ended before the coffee got cold.`,
+    () =>
+      `SportsCenter's Not Top 10, entry #1: ${manager}'s ${perf.total}-point ${roundLabel} run, presented by ${worst.name}, who contributed ${worst.pts} points and a lifetime of regret.`,
+    () =>
+      `${manager} really said "trust the process," and the process said ${worst.pts} points from ${worst.name}. Final tally: ${perf.total}. The process has been fired.`,
+    () =>
+      `In today's edition of Numbers That Should Be Illegal: ${worst.name} posted ${worst.pts} points for ${manager} in ${roundLabel}. ${perf.total} total. Somebody call the commissioner — oh wait, he already saw.`,
+    () =>
+      `${manager} is the proud owner of a ${perf.total}-point ${roundLabel} exit, sponsored by ${worst.name} (${worst.pts} pts) and a whole lot of denial.`,
+    () =>
+      `Stand-up bit writes itself: a guy walks into ${roundLabel} with ${worst.name} on his roster... he doesn't walk back out. ${manager}, ${perf.total} points, thanks for playing.`,
+    () =>
+      `${manager} chasing a title with ${worst.name} at ${worst.pts} points is like bringing a pool noodle to a sword fight. ${perf.total} total. Somebody had to say it.`,
+    () =>
+      `The box score doesn't lie: ${worst.name} put up ${worst.pts} points, ${manager} put up ${perf.total}, and ${roundLabel} put both of them on a bus home.`,
+    () =>
+      `${manager}'s ${roundLabel} eulogy, one line: here lies a ${perf.total}-point roster, survived by ${worst.name}'s ${worst.pts}-point contribution and absolutely nothing else worth mentioning.`,
+    () =>
+      `Somebody page a doctor — ${worst.name}'s ${worst.pts}-point pulse was barely detectable, and it still wasn't the sickest thing about ${manager}'s ${perf.total}-point ${roundLabel} showing.`,
   ];
+
+  // "Best player betrayal" bank: needs at least one standout performer to contrast with
+  // the worst one — skipped entirely (not padded with "undefined") when perf has neither.
+  const betrayal = best
+    ? [
+        () =>
+          `${manager}'s best player was ${best.name} (${best.pts} pts) — and it still wasn't enough to cover for ${worst.name}'s ${worst.pts}. That's not a roster, that's a hostage situation.`,
+        () =>
+          `Somewhere ${best.name} is quietly proud of that ${best.pts}-point effort for ${manager}. Everyone else on the roster heard "carry me" and left him at ${perf.total} in ${roundLabel}.`,
+        () =>
+          `${manager} had ONE guy — ${best.name}, ${best.pts} pts — and built an entire ${roundLabel} campaign hoping nobody would notice the rest. ${perf.total} total. Everybody noticed.`,
+        () =>
+          `Even ${best.name}'s ${best.pts}-point highlight reel couldn't drag ${manager} out of a hole dug by ${worst.name}'s ${worst.pts}. One man can't fix a group project this bad.`,
+        () =>
+          `${manager}'s season, summarized: ${best.name} shows up (${best.pts} pts), ${worst.name} no-shows (${worst.pts} pts), and the final score — ${perf.total} — reads like a group text nobody answered.`,
+        () =>
+          `Give ${best.name} credit: ${best.pts} points is actual effort. Give ${manager} nothing, because pairing that with ${worst.name}'s ${worst.pts} added up to a ${perf.total}-point eviction notice from ${roundLabel}.`,
+        () =>
+          `${manager} leaned on ${best.name} (${best.pts} pts) so hard the guy needed a chiropractor. Everyone else, led by ${worst.name}'s ${worst.pts}, filed for workers' comp. ${perf.total} total.`,
+        () =>
+          `Star of the show: ${best.name}, ${best.pts} points. Villain of the show: ${worst.name}, ${worst.pts} points. Box office bomb: ${manager}, ${perf.total} total, out of ${roundLabel} in one weekend.`,
+        () =>
+          `${manager} built a whole campaign around ${best.name} carrying the load — ${best.pts} points worth — and forgot to check if anyone else on the roster owned a bat. ${perf.total} total. Cancelled after one season.`,
+        () =>
+          `SportsCenter Top Play: ${best.name} going off for ${best.pts} points. SportsCenter Bottom Line: it didn't matter, because ${manager} finished ${roundLabel} at ${perf.total} thanks to ${worst.name}.`,
+        () =>
+          `${manager}'s roster had a ceiling (${best.name}, ${best.pts} pts) and a basement (${worst.name}, ${worst.pts} pts) and somehow spent all of ${roundLabel} living in the basement. ${perf.total} total. Eviction notice served.`,
+        () =>
+          `${best.name} did his job — ${best.pts} points, no complaints. ${worst.name} did NOT — ${worst.pts} points, several complaints, mostly from ${manager}, who still finished at ${perf.total} and out the door.`,
+        () =>
+          `${manager} spent ${roundLabel} pointing at ${best.name}'s ${best.pts}-point line like it excused everything else. It did not. ${worst.name}'s ${worst.pts} made sure of that. ${perf.total} total, case closed.`,
+        () =>
+          `One-man band alert: ${best.name} put up ${best.pts} points solo for ${manager}, while ${worst.name} sat in the audience posting ${worst.pts}. The show still got booed off stage at ${perf.total} in ${roundLabel}.`,
+        () =>
+          `${manager} had the receipts to prove ${best.name} tried (${best.pts} pts). Nobody asked for the receipts on ${worst.name} (${worst.pts} pts) — they were self-evident. ${perf.total} total, ${roundLabel} over.`,
+      ]
+    : [];
+
+  // Best/worst single-day bank: needs both a best day and a worst day from the round's
+  // daily rows — historical seasons without daily tracking simply never draw from this pool.
+  const dayBank =
+    perf.best_day && perf.worst_day
+      ? [
+          () =>
+            `${manager}'s season had exactly one good day — ${bestDayDate}, ${perf.best_day.score} pts — and it was surrounded by enough bad ones that ${worstDayDate} (${perf.worst_day.score} pts) is the one everyone remembers. ${perf.total} total, ${roundLabel} over.`,
+          () =>
+            `Best day: ${bestDayDate} at ${perf.best_day.score} points. Worst day: ${worstDayDate} at ${perf.worst_day.score} points. Somewhere in between, ${manager}'s ${roundLabel} died quietly at ${perf.total}.`,
+          () =>
+            `On ${worstDayDate}, ${manager}'s roster combined for ${perf.worst_day.score} points — a number so bad it makes the ${perf.best_day.score}-point outlier on ${bestDayDate} look like a fluke. Because it was. ${perf.total} total.`,
+          () =>
+            `SportsCenter's daily leaderboard had ${manager} at ${perf.worst_day.score} points on ${worstDayDate}. That's not a bad beat, that's a crime scene. Even the ${perf.best_day.score}-point day on ${bestDayDate} couldn't post bail. ${perf.total} total, ${roundLabel} over.`,
+          () =>
+            `${manager} peaked on ${bestDayDate} (${perf.best_day.score} pts) and then immediately remembered who was on the roster, cratering to ${perf.worst_day.score} on ${worstDayDate}. ${perf.total} points of whiplash, and a ticket home from ${roundLabel}.`,
+          () =>
+            `The stand-up bit: "My fantasy team had a great day once." (${bestDayDate}, ${perf.best_day.score} pts.) "Once." Everyone laughs, because ${worstDayDate}'s ${perf.worst_day.score}-point disaster is right there in the box score. ${manager}, ${perf.total} total, done in ${roundLabel}.`,
+          () =>
+            `${worstDayDate} was so bad for ${manager} (${perf.worst_day.score} pts) that the league observed a moment of silence. ${bestDayDate}'s ${perf.best_day.score}-point rally couldn't get a word in. ${perf.total} points, ${roundLabel} finished.`,
+          () =>
+            `Somewhere between the ${perf.best_day.score}-point high of ${bestDayDate} and the ${perf.worst_day.score}-point low of ${worstDayDate}, ${manager} forgot how to field a competitive roster. ${perf.total} total says it all.`,
+          () =>
+            `${manager}'s ${roundLabel} in two data points: ${bestDayDate} (${perf.best_day.score} pts, "we're back!") and ${worstDayDate} (${perf.worst_day.score} pts, "never mind"). Final score ${perf.total}. Cut to black.`,
+          () =>
+            `A ${perf.best_day.score}-point day on ${bestDayDate} had ${manager} feeling like a genius. A ${perf.worst_day.score}-point face-plant on ${worstDayDate} reminded everyone he isn't. ${perf.total} total, roster retired.`,
+          () =>
+            `Somebody get ${manager} a highlight package for ${bestDayDate} (${perf.best_day.score} pts) — it's the only footage from ${roundLabel} that isn't ${worstDayDate}'s ${perf.worst_day.score}-point lowlight reel. ${perf.total} points, show's over.`,
+          () =>
+            `${manager}'s box score on ${worstDayDate} read ${perf.worst_day.score} points, which is the fantasy equivalent of forgetting to show up to your own game. ${bestDayDate}'s ${perf.best_day.score} wasn't enough of an alibi. ${perf.total} total, ${roundLabel} closed the case.`,
+          () =>
+            `Two dates to remember, ${manager}: ${bestDayDate}, when ${perf.best_day.score} points made this look winnable, and ${worstDayDate}, when ${perf.worst_day.score} points made it clear it never was. ${perf.total} total.`,
+          () =>
+            `The line for ${manager}'s season is a heart-monitor flatline with one blip: ${perf.best_day.score} points on ${bestDayDate}, right before crashing to ${perf.worst_day.score} on ${worstDayDate}. Time of death, ${roundLabel}. ${perf.total} total.`,
+          () =>
+            `${manager} will tell you about ${bestDayDate} (${perf.best_day.score} pts) at every draft party from now until forever. Nobody will let him forget ${worstDayDate} (${perf.worst_day.score} pts) either. ${perf.total} total, ${roundLabel} in the books.`,
+        ]
+      : [];
+
+  const bank = [...core, ...betrayal, ...dayBank];
   let seed = 0;
   for (const c of `${manager}|${round}`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
   return bank[seed % bank.length]();
