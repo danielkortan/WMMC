@@ -13947,6 +13947,10 @@ function renderWeeklyUploadSections() {
       </div>`;
       if (ppFinalized) {
         html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-secondary" onclick="regeneratePoolPlayRoastsOnly()">Regenerate Roasts (No Slack Post)</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast in place. Does NOT post to Slack — roasts just update on managers' roster pages.</span>
+        </div>
+        <div style="margin-top:0.5rem;">
           <button class="btn btn-sm btn-secondary" onclick="repostPoolPlayRoasts()">Regenerate &amp; Repost Roasts to Slack</button>
           <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast and reposts the combined playoff-field + Hall of Shame message to the scoreboard channel.</span>
         </div>`;
@@ -14392,6 +14396,30 @@ async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenera
     return false;
   }
 }
+
+// Commissioner action: re-roll every Pool Play roast server-side WITHOUT posting to Slack —
+// for touching up stored roasts (e.g. after the roast template bank changes) without sending
+// a second "Pool Play is over" message to the channel. Reuses the same per-manager
+// generate-roast call the initial elimination dump uses; roasts update on roster pages via
+// the re-sync, no Slack webhook involved.
+window.regeneratePoolPlayRoastsOnly = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+  if (!confirm('Regenerate every Pool Play roast? This does NOT post anything to Slack.')) return;
+
+  const qualifiers = getQFQualifiers(sd) || [];
+  const nonQualifiers = getManagers()
+    .map((m) => m.name)
+    .filter((m) => !qualifiers.includes(m));
+  for (const m of nonQualifiers) {
+    await generateRoastForManager(m, 'PP');
+  }
+  alert(
+    `Regenerated ${nonQualifiers.length} Pool Play roast${nonQualifiers.length === 1 ? '' : 's'}. Nothing was posted to Slack.`
+  );
+  renderWeeklyUploadSections();
+};
 
 // Commissioner repair action: re-roll every Pool Play roast server-side and repost the
 // combined Slack message (playoff field + Hall of Shame). Covers the failure modes of the
