@@ -11161,6 +11161,55 @@ function weeklyRaceForRoast(sd, managerA, managerB, rounds) {
   };
 }
 
+// Summarizes a manager's playoff journey UP TO (but not including) the given round, for
+// weaving "won his pool in PP2 but crashed out in the Quarterfinals" style irony into
+// QF/SF/Finals roasts. Pool Play pedigree (seed, won a pool outright vs. wild card) always
+// comes from the same locked confirmed_seeding + currentQualification math as everywhere
+// else; prior playoff-round results reuse playoffMatchupResultForRoast for each earlier
+// round so they can never disagree with the actual bracket. Returns null for round==='PP'
+// (nothing precedes Pool Play) or when confirmed_seeding isn't locked yet.
+function pastRoundJourneyForRoast(db, sd, manager, round) {
+  if (round === 'PP') return null;
+  const managers = (db.managers || []).filter((m) => m.active !== false && m.pool);
+  if (!managers.some((m) => m.name === manager)) return null;
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const pp1Totals = {};
+  for (const s of computeRoundScores(batting, pitching, ['PP1'], sd)) pp1Totals[s.manager] = s.total;
+  const pp2Totals = {};
+  for (const s of computeRoundScores(batting, pitching, ['PP2'], sd)) pp2Totals[s.manager] = s.total;
+  const entries = managers.map((m) => ({
+    manager: m.name,
+    pool: m.pool,
+    pp1: pp1Totals[m.name] || 0,
+    pp2: pp2Totals[m.name] || 0,
+  }));
+  const qual = currentQualification(entries);
+
+  const seeds =
+    sd.confirmed_seeding && Array.isArray(sd.confirmed_seeding.qualifierNames)
+      ? sd.confirmed_seeding.qualifierNames
+      : null;
+  if (!seeds) return null;
+  const seedIdx = seeds.indexOf(manager);
+  const seed = seedIdx >= 0 ? seedIdx + 1 : null;
+
+  const wonPP1 = qual.pp1Leaders.has(manager);
+  const wonPP2 = qual.pp2Leaders.has(manager);
+
+  const priorRoundsForRound = { QF: [], SF: ['QF'], Finals: ['QF', 'SF'] };
+  const priorRounds = priorRoundsForRound[round] || [];
+  const priorResults = priorRounds
+    .map((r) => {
+      const result = playoffMatchupResultForRoast(sd, r, manager);
+      return result ? { round: r, ...result } : null;
+    })
+    .filter(Boolean);
+
+  return { seed, wonPP1, wonPP2, wildcard: !wonPP1 && !wonPP2, priorResults };
+}
+
 function buildPoolPlayStandingsForRoast(db, sd, manager) {
   const managers = (db.managers || []).filter((m) => m.active !== false && m.pool);
   const me = managers.find((m) => m.name === manager);
@@ -11456,19 +11505,89 @@ function fallbackRoast(manager, round, perf) {
   return bank[seed % bank.length]();
 }
 
+// Static fallback for the season CHAMPION (Finals winner) — used when ANTHROPIC_API_KEY is
+// unset or the API call fails, same convention as fallbackRoast. Not an elimination joke:
+// sarcastic, backhanded "congratulations" that still finds a worst-performer to undercut
+// the trophy a little. Deterministically seeded per manager so a champion doesn't get the
+// same line every year.
+function fallbackChampionRoast(manager, perf) {
+  const worst =
+    parseRoastEntry(perf.batters_ranked_worst_first[0]) || parseRoastEntry(perf.pitchers_ranked_worst_first[0]);
+  const bank = [
+    () =>
+      `${manager} is your Whit Merrifield Memorial Cup champion, ${perf.total} points in the Finals and all. Even ${worst ? `${worst.name}'s ${worst.pts}-pt dead weight` : 'the weak links'} couldn't stop it. Insufferable, and earned.`,
+    () =>
+      `Congratulations to ${manager}, champion of the league, owner of a ${perf.total}-point Finals total, and apparently immune to ${worst ? `${worst.name} posting just ${worst.pts} pts` : 'a bad roster spot'}. Enjoy the offseason gloating.`,
+    () =>
+      `${manager} won the whole thing. ${perf.total} points in the Finals, a trophy, and bragging rights nobody asked to hear about for the next 12 months. ${worst ? `${worst.name} chipped in a modest ${worst.pts} — even champions carry dead weight.` : ''}`,
+    () =>
+      `Somewhere, a banner is being printed for ${manager}. ${perf.total} Finals points, one Cup, and a level of smugness that was previously theoretical. ${worst ? `${worst.name}'s ${worst.pts} points suggest the margin was closer than the trophy implies.` : ''}`,
+    () =>
+      `${manager} is this year's champion — ${perf.total} points in the Finals, a Cup on the shelf, and a full year to remind everyone about it. Nobody is happy about this except ${manager}.`,
+    () =>
+      `The league has a new champion: ${manager}, ${perf.total} points and counting. ${worst ? `${worst.name} still only managed ${worst.pts} — proof that even champions roster a dud.` : 'Flawless, apparently.'}`,
+    () =>
+      `${manager} hoisted the Whit Merrifield Memorial Cup with a ${perf.total}-point Finals. Deserved? Sure. Going to hear about it forever? Also sure.`,
+    () =>
+      `Breaking: ${manager} wins the league. ${perf.total} Finals points, a title, and a permanent seat at the head of the draft-party table. ${worst ? `Even ${worst.name}'s ${worst.pts}-pt no-show couldn't dent it.` : ''}`,
+    () =>
+      `${manager} is champion. Write it down, print it out, frame it — they will remind everyone regardless. ${perf.total} points in the Finals, and a trophy that fits their ego perfectly.`,
+    () =>
+      `This year's Whit Merrifield Memorial Cup goes to ${manager}: ${perf.total} Finals points and a full season of receipts to back it up. ${worst ? `${worst.name}'s ${worst.pts}-pt contribution says the roster wasn't perfect. The trophy says it didn't matter.` : ''}`,
+  ];
+  let seed = 0;
+  for (const c of `${manager}|champion`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+  return bank[seed % bank.length]();
+}
+
+// Static fallback for the manager who WON the 3rd-place game — used when ANTHROPIC_API_KEY
+// is unset or the API call fails, same convention as fallbackRoast. Sarcastic "hollow
+// victory" framing: a real result, but not the one anyone remembers. `matchup` here is the
+// manager's own (winning) 3rd-place-game result. Deterministically seeded per manager.
+function fallbackThirdPlaceRoast(manager, perf, matchup) {
+  const m = matchup || { opponent: 'the other loser', myScore: perf.total, opponentScore: 0, margin: 0 };
+  const bank = [
+    () =>
+      `${manager} beat ${m.opponent} ${m.myScore}–${m.opponentScore} to win 3rd place. A real, official result, for a game that exists solely because two better teams knocked you both out first.`,
+    () =>
+      `Congratulations to ${manager} on 3rd place — ${m.myScore}–${m.opponentScore} over ${m.opponent}. Somewhere between "champion" and "also-ran," and closer to the second one.`,
+    () =>
+      `${manager} won the bronze-medal game ${m.myScore}–${m.opponentScore}. It's a trophy for finishing 3rd out of 12, which is either impressive or a technicality, depending who's asking.`,
+    () =>
+      `The 3rd-place game went to ${manager}, ${m.myScore}–${m.opponentScore} over ${m.opponent}. Nobody will remember this by next season. ${manager} will remember it forever.`,
+    () =>
+      `${manager} is your 3rd-place finisher, having beaten ${m.opponent} ${m.myScore}–${m.opponentScore} in the game everyone forgot was even happening.`,
+    () =>
+      `A real result for ${manager}: 3rd place, ${m.myScore}–${m.opponentScore} over ${m.opponent}. Not a Cup. Not even a runner-up medal. Still, technically, a win.`,
+    () =>
+      `${manager} finished the season 3rd overall, closing it out ${m.myScore}–${m.opponentScore} over ${m.opponent}. The podium's smallest step, and they're standing on it.`,
+    () =>
+      `${manager} beat ${m.opponent} ${m.myScore}–${m.opponentScore} for the honor of finishing 3rd. History will record it as a footnote. ${manager} will record it as a highlight.`,
+    () =>
+      `Bronze goes to ${manager}, ${m.myScore}–${m.opponentScore} over ${m.opponent}. It's the fantasy equivalent of winning the coin flip for who gets the smaller trophy.`,
+    () =>
+      `${manager} closed the season with a 3rd-place win, ${m.myScore}–${m.opponentScore} over ${m.opponent}. A real accomplishment, filed directly under "not the one that matters."`,
+  ];
+  let seed = 0;
+  for (const c of `${manager}|third`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+  return bank[seed % bank.length]();
+}
+
 // Longer, page-only elimination-roast context appended below the joke on the manager's
 // roster page — NOT posted to Slack (the combined Slack post already stacks one roast per
 // eliminated manager, so it stays short/punchy). Adds the concrete stakes of how the
 // manager went out — Pool Play standings (place finished, points behind the PP1/PP2 pool
-// winner, points outside the wild-card cut — PP round only, from `standings`) or the
-// playoff head-to-head result (opponent, score, margin — QF/SF/Finals only, from
-// `matchup`) — plus player highlights (best/worst performer, standout individual games)
-// that don't fit in the joke. Generated the same way regardless of whether the joke itself
-// came from Claude or fallbackRoast — this context is always programmatic, so it's
-// consistent either way. Every sub-bank is only mixed in when its data exists (same tiering
-// rule as fallbackRoast), so a season without daily rows/standings/matchup data just gets a
-// shorter — but still valid — context, never "undefined".
-function buildRoastPageContext(manager, round, perf, standings, matchup) {
+// winner, points outside the wild-card cut — PP round only, from `standings`), the playoff
+// journey that got them here (seed, pool pedigree, prior-round results — QF/SF/Finals only,
+// from `journey`), and the playoff head-to-head result for THIS round (opponent, score,
+// margin — QF/SF/Finals only, from `matchup`) — plus player highlights (best/worst
+// performer, standout individual games) that don't fit in the joke. Generated the same way
+// regardless of whether the joke itself came from Claude or fallbackRoast — this context is
+// always programmatic, so it's consistent either way. Every sub-bank is only mixed in when
+// its data exists (same tiering rule as fallbackRoast), so a season without daily rows/
+// standings/journey/matchup data just gets a shorter — but still valid — context, never
+// "undefined".
+function buildRoastPageContext(manager, round, perf, standings, matchup, journey) {
   const worst =
     parseRoastEntry(perf.batters_ranked_worst_first[0]) || parseRoastEntry(perf.pitchers_ranked_worst_first[0]);
   const best = parseRoastEntry(perf.best_batter) || parseRoastEntry(perf.best_pitcher);
@@ -11484,6 +11603,40 @@ function buildRoastPageContext(manager, round, perf, standings, matchup) {
   for (const c of `${manager}|${round}|context`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
 
   const parts = [];
+
+  // The road here: Pool Play pedigree + any earlier playoff-round results, in true
+  // chronological order (PP always before QF always before SF), so "then"/"before" language
+  // here is safe — unlike best_day/worst_day, these are real sequential rounds, not
+  // independently-picked extremes.
+  if (journey && journey.seed) {
+    const roundNames = { QF: 'the Quarterfinals', SF: 'the Semifinals' };
+    const pedigreeClause =
+      journey.wonPP1 && journey.wonPP2
+        ? `arrived as the #${journey.seed} seed after winning both Pool Play periods outright`
+        : journey.wonPP1
+          ? `arrived as the #${journey.seed} seed after winning Pool Play 1`
+          : journey.wonPP2
+            ? `arrived as the #${journey.seed} seed after winning Pool Play 2`
+            : `snuck in as the #${journey.seed} wild card seed`;
+    const priorSummary = journey.priorResults
+      .map((r) => {
+        const roundName = roundNames[r.round] || r.round;
+        return r.won
+          ? `beat ${r.opponent} ${r.myScore}–${r.opponentScore} in ${roundName}`
+          : `lost to ${r.opponent} ${r.opponentScore}–${r.myScore} in ${roundName}`;
+      })
+      .join(', then ');
+
+    const journeyBank = [
+      () => `${manager} ${pedigreeClause}${priorSummary ? `, then ${priorSummary}` : ''}.`,
+      () => `Getting here: ${manager} ${pedigreeClause}${priorSummary ? `, then ${priorSummary}` : ''}.`,
+      () =>
+        `${manager}'s road to this point — ${pedigreeClause}${priorSummary ? `, then ${priorSummary}` : ''} — reads better on paper than it did today.`,
+      () =>
+        `On paper: ${manager} ${pedigreeClause}${priorSummary ? `, then ${priorSummary}` : ''}. On the scoreboard, none of that mattered today.`,
+    ];
+    parts.push(journeyBank[(seed + 11) % journeyBank.length]());
+  }
 
   if (standings) {
     const poolLabel = `Pool ${standings.pool}`;
@@ -11568,31 +11721,54 @@ function buildRoastPageContext(manager, round, perf, standings, matchup) {
           `So close to the title game ${manager} could taste it — and then ${m.opponent} closed it out ${m.opponentScore}–${m.myScore} in the ${m.label}. ${m.margin} points from destiny. Welcome to 3rd/4th place instead.`,
       ],
       // The Finals round has two different games with two very different stakes — the
-      // Championship (the Cup itself) and the 3rd-place game (last spot on the podium).
-      // Runner-up gets the maximum-intensity title-game language; 4th place gets the
-      // still-brutal-but-differently-scoped "missed the podium" framing.
+      // Championship (the Cup itself) and the 3rd-place game (last spot on the podium) —
+      // and each has a winner and a loser who both get a page context now. Runner-up and
+      // 4th place get the loss-framed banks below; the champion and 3rd-place winner
+      // (m.won === true) get sarcastic "congratulations, sort of" win-framed banks instead.
       Finals:
         m.label === 'Championship'
-          ? [
-              () =>
-                `The Whit Merrifield Memorial Cup itself was on the line, and ${m.opponent} took it from ${manager} ${m.opponentScore}–${m.myScore} in the Championship — a ${m.margin}-pt margin that will be brought up at every draft party for the rest of time.`,
-              () =>
-                `${manager} made it all the way to the Championship and still went home empty-handed: ${m.opponentScore}–${m.myScore} to ${m.opponent}, ${m.margin} points short of a title. The biggest stage, the worst possible ending.`,
-              () =>
-                `Final line of the season: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}, ${m.margin} points between a championship and a runner-up medal. This is the one that doesn't get easier with time.`,
-              () =>
-                `A whole season — Pool Play, the Quarterfinals, the Semifinals — all of it came down to the Championship, and ${manager} lost it ${m.opponentScore}–${m.myScore}. ${m.margin} points from immortality. So close, so far, so final.`,
-            ]
-          : [
-              () =>
-                `Not the Cup, but still the last thing decided all season: ${m.opponent} beat ${manager} ${m.opponentScore}–${m.myScore} in the 3rd-place game, a ${m.margin}-pt margin that's the difference between a podium finish and a plane ride home with nothing.`,
-              () =>
-                `${manager} played an entire season to get to a game for 3rd place — and lost it, ${m.opponentScore}–${m.myScore} to ${m.opponent}. ${m.margin} points from bronze. There's no medal for 4th.`,
-              () =>
-                `The consolation bracket giveth nothing: ${manager} fell ${m.opponentScore}–${m.myScore} to ${m.opponent} in the battle for 3rd, ${m.margin} points short. Closest thing to a trophy this season, and it still wasn't close enough.`,
-              () =>
-                `Final scoreboard of ${manager}'s season: a ${m.margin}-pt loss to ${m.opponent} in the 3rd-place game (${m.opponentScore}–${m.myScore}). No Cup, no bronze, just a very long offseason.`,
-            ],
+          ? m.won
+            ? [
+                () =>
+                  `${manager} beat ${m.opponent} ${m.myScore}–${m.opponentScore} to win the Whit Merrifield Memorial Cup — a ${m.margin}-pt margin, and an entire league that will bring this up at every draft party for the rest of time, one way or another.`,
+                () =>
+                  `The scoreboard doesn't lie: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}. Champion, by ${m.margin} points. Somebody get this person a trophy and a healthy dose of humility.`,
+                () =>
+                  `${manager} took the Championship ${m.myScore}–${m.opponentScore} over ${m.opponent}. Ring the bell, hang the banner, and never, ever let them stop talking about it — they won't need the reminder.`,
+                () =>
+                  `Final: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}. ${manager} is the Whit Merrifield Memorial Cup champion, by ${m.margin} points. Everyone else has to hear about it until Opening Day.`,
+              ]
+            : [
+                () =>
+                  `The Whit Merrifield Memorial Cup itself was on the line, and ${m.opponent} took it from ${manager} ${m.opponentScore}–${m.myScore} in the Championship — a ${m.margin}-pt margin that will be brought up at every draft party for the rest of time.`,
+                () =>
+                  `${manager} made it all the way to the Championship and still went home empty-handed: ${m.opponentScore}–${m.myScore} to ${m.opponent}, ${m.margin} points short of a title. The biggest stage, the worst possible ending.`,
+                () =>
+                  `Final line of the season: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}, ${m.margin} points between a championship and a runner-up medal. This is the one that doesn't get easier with time.`,
+                () =>
+                  `A whole season — Pool Play, the Quarterfinals, the Semifinals — all of it came down to the Championship, and ${manager} lost it ${m.opponentScore}–${m.myScore}. ${m.margin} points from immortality. So close, so far, so final.`,
+              ]
+          : m.won
+            ? [
+                () =>
+                  `${manager} beat ${m.opponent} ${m.myScore}–${m.opponentScore} in the 3rd-place game. Congratulations on winning the game that exists because two other people were better than both of you.`,
+                () =>
+                  `${manager} took 3rd place ${m.myScore}–${m.opponentScore} over ${m.opponent}. It's not a championship. It's not even 2nd. But go ahead, put it on the mantel.`,
+                () =>
+                  `Final score of the game nobody circles on the calendar: ${manager} ${m.myScore}, ${m.opponent} ${m.opponentScore}. 3rd place, by ${m.margin} points, and a medal that matches nobody's décor.`,
+                () =>
+                  `${manager} won the battle for 3rd — ${m.myScore}–${m.opponentScore} over ${m.opponent} — which is this league's way of saying "you also lost, just less recently."`,
+              ]
+            : [
+                () =>
+                  `Not the Cup, but still the last thing decided all season: ${m.opponent} beat ${manager} ${m.opponentScore}–${m.myScore} in the 3rd-place game, a ${m.margin}-pt margin that's the difference between a podium finish and a plane ride home with nothing.`,
+                () =>
+                  `${manager} played an entire season to get to a game for 3rd place — and lost it, ${m.opponentScore}–${m.myScore} to ${m.opponent}. ${m.margin} points from bronze. There's no medal for 4th.`,
+                () =>
+                  `The consolation bracket giveth nothing: ${manager} fell ${m.opponentScore}–${m.myScore} to ${m.opponent} in the battle for 3rd, ${m.margin} points short. Closest thing to a trophy this season, and it still wasn't close enough.`,
+                () =>
+                  `Final scoreboard of ${manager}'s season: a ${m.margin}-pt loss to ${m.opponent} in the 3rd-place game (${m.opponentScore}–${m.myScore}). No Cup, no bronze, just a very long offseason.`,
+              ],
     };
     const bank = playoffBankByRound[round];
     if (bank) parts.push(bank[(seed + 3) % bank.length]());
@@ -11649,14 +11825,45 @@ function buildRoastPageContext(manager, round, perf, standings, matchup) {
 }
 
 // Call the Anthropic Messages API to generate a vulgar, personalized roast.
-async function generateRoastWithClaude(manager, round, perf) {
-  if (!ANTHROPIC_API_KEY) return fallbackRoast(manager, round, perf);
+// Fallback text for any outcome, used both when ANTHROPIC_API_KEY is unset and as the
+// safety net after a failed/empty Claude call — one place that knows which static bank
+// belongs to which outcome so generateRoastWithClaude never has to duplicate the mapping.
+function fallbackRoastForOutcome(manager, round, perf, outcome, matchup) {
+  if (outcome === 'champion') return fallbackChampionRoast(manager, perf);
+  if (outcome === 'third') return fallbackThirdPlaceRoast(manager, perf, matchup);
+  return fallbackRoast(manager, round, perf);
+}
+
+async function generateRoastWithClaude(manager, round, perf, outcome, matchup) {
+  if (!ANTHROPIC_API_KEY) return fallbackRoastForOutcome(manager, round, perf, outcome, matchup);
 
   const roundLabel =
     round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
   const intensity = ROAST_INTENSITY[round] || ROAST_INTENSITY.PP;
 
-  const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. A manager just got eliminated and deserves a brutal, hilariously vulgar roast. Be savage, specific, and profane. Reference their worst-performing players by name. Keep it to 2-3 sentences max.
+  let prompt;
+  if (outcome === 'champion') {
+    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. ${manager} just WON THE CHAMPIONSHIP. Write a sarcastic, backhanded "congratulations" — good-natured ribbing of the winner, not a vicious elimination roast. Reference their worst-performing player(s) by name to take them down a peg. Keep it to 2-3 sentences max.
+
+Champion: ${manager}
+Championship result: ${matchup ? `${manager} ${matchup.myScore} – ${matchup.opponentScore} ${matchup.opponent}` : 'won the Finals'}
+Total score across the Finals round: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
+Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+Write the roast now. No preamble, no labels — just the roast.`;
+  } else if (outcome === 'third') {
+    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. ${manager} just WON the 3rd-place game — a real result, but a hollow one (it only exists because two other managers were better than both players in it). Write a sarcastic "congratulations, sort of" roast. Keep it to 2-3 sentences max.
+
+3rd-place finisher: ${manager}
+3rd-place game result: ${matchup ? `${manager} ${matchup.myScore} – ${matchup.opponentScore} ${matchup.opponent}` : 'won the 3rd-place game'}
+Total score across the Finals round: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
+Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+Write the roast now. No preamble, no labels — just the roast.`;
+  } else {
+    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. A manager just got eliminated and deserves a brutal, hilariously vulgar roast. Be savage, specific, and profane. Reference their worst-performing players by name. Keep it to 2-3 sentences max.
 
 Manager eliminated: ${manager}
 Eliminated in: ${roundLabel} — this happened ${intensity.stakes}
@@ -11666,6 +11873,7 @@ Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 
 Write the roast now. No preamble, no labels — just the roast.`;
+  }
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -11683,11 +11891,14 @@ Write the roast now. No preamble, no labels — just the roast.`;
 
   if (!resp.ok) {
     console.error('Anthropic API error:', resp.status, await resp.text());
-    return fallbackRoast(manager, round, perf);
+    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup);
   }
 
   const data = await resp.json();
-  return (data.content && data.content[0] && data.content[0].text) || fallbackRoast(manager, round, perf);
+  return (
+    (data.content && data.content[0] && data.content[0].text) ||
+    fallbackRoastForOutcome(manager, round, perf, outcome, matchup)
+  );
 }
 
 // POST /api/seasons/:year/generate-roast — generate and store an elimination roast (commissioner only)
@@ -11697,6 +11908,10 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
 
   const { manager, round } = req.body || {};
   if (!manager || !round) return res.status(400).json({ error: 'manager and round are required' });
+  // 'eliminated' (default) is the standard "you're out" roast; 'champion'/'third' are the
+  // Finals-round sarcastic winner roasts (season champion, 3rd-place-game winner) — only
+  // meaningful for round === 'Finals', but harmless if sent for any other round.
+  const outcome = ['champion', 'third'].includes(req.body && req.body.outcome) ? req.body.outcome : 'eliminated';
 
   const db = readDB();
   const sd = (db.seasons || {})[year];
@@ -11704,15 +11919,22 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
 
   try {
     const perf = buildManagerPerformanceForRoast(sd, manager, round);
-    const roastText = await generateRoastWithClaude(manager, round, perf);
     const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, manager) : null;
     const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, manager) : null;
-    const pageContext = buildRoastPageContext(manager, round, perf, standings, matchup);
+    const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, manager, round) : null;
+    const roastText = await generateRoastWithClaude(manager, round, perf, outcome, matchup);
+    const pageContext = buildRoastPageContext(manager, round, perf, standings, matchup, journey);
 
     if (!sd.roasts) sd.roasts = {};
-    sd.roasts[manager] = { round, text: roastText, page_context: pageContext, generated_at: new Date().toISOString() };
+    sd.roasts[manager] = {
+      round,
+      outcome,
+      text: roastText,
+      page_context: pageContext,
+      generated_at: new Date().toISOString(),
+    };
 
-    addAuditEntry(db, 'roast_generated', { year, manager, round }, req.get('X-User-Email'));
+    addAuditEntry(db, 'roast_generated', { year, manager, round, outcome }, req.get('X-User-Email'));
     db.seasons[year] = sd;
     writeDB(db);
 
@@ -11809,7 +12031,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
 
-  const { round, qualifiers, eliminated, regenerate } = req.body || {};
+  const { round, qualifiers, eliminated, regenerate, winners } = req.body || {};
   if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
     return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
   }
@@ -11824,8 +12046,19 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const toRoast = new Set();
   for (const [m, r] of Object.entries(sd.eliminated || {})) if (r === round) toRoast.add(m);
   if (Array.isArray(eliminated)) for (const m of eliminated) if (typeof m === 'string' && m) toRoast.add(m);
-  for (const [m, r] of Object.entries(sd.roasts || {})) if (r && r.round === round && r.text) toRoast.add(m);
-  if (toRoast.size === 0) {
+  for (const [m, r] of Object.entries(sd.roasts || {})) {
+    if (r && r.round === round && r.text && (r.outcome || 'eliminated') === 'eliminated') toRoast.add(m);
+  }
+  // Finals-only: the season champion and the 3rd-place-game winner also get a (sarcastic)
+  // roast now, alongside the Hall of Shame for the runner-up and 4th place. Passed
+  // explicitly by the client (crownChampionAndRoastFinals) — there's no sd.eliminated
+  // entry for a winner, so they can't be self-healed from stored state the way losers can.
+  const winnerList = Array.isArray(winners)
+    ? winners.filter(
+        (w) => w && typeof w.manager === 'string' && w.manager && ['champion', 'third'].includes(w.outcome)
+      )
+    : [];
+  if (toRoast.size === 0 && winnerList.length === 0) {
     return res.status(404).json({ error: `No eliminated managers or stored roasts for round ${round}` });
   }
 
@@ -11844,25 +12077,51 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     }
     try {
       const perf = buildManagerPerformanceForRoast(sd, m, round);
-      const text = await generateRoastWithClaude(m, round, perf);
       const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, m) : null;
       const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, m) : null;
-      const pageContext = buildRoastPageContext(m, round, perf, standings, matchup);
+      const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, m, round) : null;
+      const text = await generateRoastWithClaude(m, round, perf, 'eliminated', matchup);
+      const pageContext = buildRoastPageContext(m, round, perf, standings, matchup, journey);
       roastByManager[m] = text;
-      freshTexts[m] = { text, pageContext };
+      freshTexts[m] = { text, pageContext, outcome: 'eliminated' };
     } catch (e) {
       console.error('Roast generation failed for', m, '-', e.message);
       if (existing && existing.text) roastByManager[m] = existing.text;
     }
   }
+
+  // Winners (champion/third) — same generate-or-reuse pattern, kept in a separate map so
+  // they can get their own Slack section instead of being mixed into the Hall of Shame.
+  const winnerRoastByManager = {};
+  for (const w of winnerList) {
+    const m = w.manager;
+    const existing = (sd.roasts || {})[m];
+    if (!regenerate && existing && existing.round === round && existing.outcome === w.outcome && existing.text) {
+      winnerRoastByManager[m] = existing.text;
+      continue;
+    }
+    try {
+      const perf = buildManagerPerformanceForRoast(sd, m, round);
+      const matchup = playoffMatchupResultForRoast(sd, round, m);
+      const journey = pastRoundJourneyForRoast(db, sd, m, round);
+      const text = await generateRoastWithClaude(m, round, perf, w.outcome, matchup);
+      const pageContext = buildRoastPageContext(m, round, perf, null, matchup, journey);
+      winnerRoastByManager[m] = text;
+      freshTexts[m] = { text, pageContext, outcome: w.outcome };
+    } catch (e) {
+      console.error('Winner roast generation failed for', m, '-', e.message);
+      if (existing && existing.text) winnerRoastByManager[m] = existing.text;
+    }
+  }
+
   if (Object.keys(freshTexts).length > 0) {
     const db2 = readDB();
     const sd2 = (db2.seasons || {})[year];
     if (sd2) {
       if (!sd2.roasts) sd2.roasts = {};
       const now = new Date().toISOString();
-      for (const [m, { text, pageContext }] of Object.entries(freshTexts)) {
-        sd2.roasts[m] = { round, text, page_context: pageContext, generated_at: now };
+      for (const [m, { text, pageContext, outcome }] of Object.entries(freshTexts)) {
+        sd2.roasts[m] = { round, outcome, text, page_context: pageContext, generated_at: now };
       }
       db2.seasons[year] = sd2;
       writeDB(db2);
@@ -11870,7 +12129,10 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   }
 
   const entries = managerOrder.filter((m) => roastByManager[m]).map((m) => [m, { text: roastByManager[m] }]);
-  if (entries.length === 0) {
+  const winnerEntries = winnerList
+    .filter((w) => winnerRoastByManager[w.manager])
+    .map((w) => [w.manager, { text: winnerRoastByManager[w.manager], outcome: w.outcome }]);
+  if (entries.length === 0 && winnerEntries.length === 0) {
     return res.status(500).json({ error: 'Roast generation failed for every eliminated manager' });
   }
 
@@ -11902,34 +12164,60 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   // Header intensity escalates with the round (ROAST_INTENSITY): a QF exit is a shrug, an
   // SF exit is a gut punch, a Finals loss gets the biggest send-off of the season.
   const plural = entries.length > 1 ? 's' : '';
-  const header =
-    round === 'PP'
-      ? `:fire: *Pool Play is over.* ${entries.length} manager${plural} missed the playoffs — welcome to the Hall of Shame:`
-      : round === 'QF'
-        ? `:fire: *Quarterfinals eliminations.* ${entries.length} manager${plural} out in the first round of the bracket — welcome to the Hall of Shame:`
-        : round === 'SF'
-          ? `:rotating_light: *Semifinals eliminations.* ${entries.length} manager${plural} came within one win of the championship and fell short — welcome to the Hall of Shame:`
-          : `:skull: *The season is over.* ${entries.length} manager${plural} finished one game short of the Whit Merrifield Memorial Cup — welcome to the Hall of Shame:`;
-  // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
-  const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
+  let mainBlock = '';
+  if (entries.length > 0) {
+    const header =
+      round === 'PP'
+        ? `:fire: *Pool Play is over.* ${entries.length} manager${plural} missed the playoffs — welcome to the Hall of Shame:`
+        : round === 'QF'
+          ? `:fire: *Quarterfinals eliminations.* ${entries.length} manager${plural} out in the first round of the bracket — welcome to the Hall of Shame:`
+          : round === 'SF'
+            ? `:rotating_light: *Semifinals eliminations.* ${entries.length} manager${plural} came within one win of the championship and fell short — welcome to the Hall of Shame:`
+            : `:skull: *The season is over.* ${entries.length} manager${plural} finished one game short of the Whit Merrifield Memorial Cup — welcome to the Hall of Shame:`;
+    // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
+    const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
+    mainBlock = `${header}\n\n${sections.join('\n\n')}`;
+  }
+
+  // Finals only: a second section for the champion and 3rd-place-game winner — sarcastic,
+  // not "Hall of Shame" (they won their game), so it gets its own header and trophy emoji.
+  let winnerBlock = '';
+  if (winnerEntries.length > 0) {
+    const winnerPlural = winnerEntries.length > 1 ? 's' : '';
+    const winnerHeader = `:trophy: *A word for the winners, because nobody's safe.* ${winnerEntries.length} manager${winnerPlural} won something this weekend — sort of:`;
+    const winnerSections = winnerEntries.map(
+      ([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`
+    );
+    winnerBlock = `${winnerHeader}\n\n${winnerSections.join('\n\n')}`;
+  }
 
   const instructions = buildNextRoundInstructions(sd, round);
+  const messageBody = [summary.trimEnd(), mainBlock, winnerBlock, instructions].filter(Boolean).join('\n\n');
 
   try {
-    await postScoreboardChannelSlack(
-      `${summary}${header}\n\n${sections.join('\n\n')}${instructions ? `\n\n${instructions}` : ''}`
-    );
+    await postScoreboardChannelSlack(messageBody);
     // Audit against a fresh read — the roast-persist step above may have written since
     // this handler's first readDB, and writing that stale copy back would undo it.
     const auditDb = readDB();
     addAuditEntry(
       auditDb,
       'roasts_slack_post',
-      { year, round, managers: entries.length, regenerated: Object.keys(freshTexts).length },
+      {
+        year,
+        round,
+        managers: entries.length,
+        winners: winnerEntries.length,
+        regenerated: Object.keys(freshTexts).length,
+      },
       req.get('X-User-Email')
     );
     writeDB(auditDb);
-    res.json({ ok: true, round, managers: entries.map(([m]) => m) });
+    res.json({
+      ok: true,
+      round,
+      managers: entries.map(([m]) => m),
+      winners: winnerEntries.map(([m, r]) => ({ manager: m, outcome: r.outcome })),
+    });
   } catch (e) {
     console.error('[Slack] Combined roast post failed:', e.message);
     res.status(500).json({ error: e.message });
