@@ -7985,7 +7985,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   // For a dropped player, show the date range they were rostered (e.g. "5/4–5/6") in the
   // same grey-box style as the "not rostered" tag.  Falls back to "not rostered" only when
   // no date information is available at all.
-  function notRosteredTag(player, poolType) {
+  function notRosteredTag(player, poolType, round) {
     if (!isActive || !seasonData.rosters || !seasonData.rosters[managerName]) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
@@ -8016,18 +8016,28 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         }
       }
       if (openAdd !== null) spans.push([openAdd, null]);
-      if (spans.length > 0) {
-        const label = spans
+      // A new submission period starts fresh from its submission — a player carried forward
+      // from an earlier period shouldn't display their out-of-period add date, and a span that
+      // closed entirely before this period began doesn't belong here at all. Clamp/filter to
+      // the period this round belongs to (mirrors periodStart scoping used for carry-forward
+      // eligibility elsewhere in this file).
+      const periodStart = periodStartForRound(seasonData, round);
+      const scopedSpans = periodStart
+        ? spans.filter(([, d]) => !d || d >= periodStart).map(([a, d]) => [a < periodStart ? periodStart : a, d])
+        : spans;
+      if (scopedSpans.length > 0) {
+        const label = scopedSpans
           .map(([a, d]) => (d ? `${fmtSlashDate(a)}–${fmtSlashDate(d)}` : `${fmtSlashDate(a)}–`))
           .join(', ');
         return ` <span class="wrs-hist-tag">${label}</span>`;
       }
     }
 
-    // Fall back to week-schedule-based date range
+    // Fall back to week-schedule-based date range, scoped to this round's period.
     const mgrRoster = seasonData.rosters[managerName];
     const rosteredWeekIndices = [];
     SEASON_SCHEDULE.forEach((s, i) => {
+      if (round && s.round !== round) return;
       const wk = `${s.round}|${s.week}`;
       const wr = mgrRoster[wk];
       const arr = poolType ? wr && (wr[poolType] || []) : wr && (wr.batters || []).concat(wr.pitchers || []);
@@ -8395,7 +8405,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = batCum[batter] || 0;
         const cumRank = pRankings.batRanks[batter];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
+        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters', round)}</td>`;
         const ds = getEffBatStats(batter) || s;
         html += batStatCell(s, 'abs', ds.abs || 0);
         html += batStatCell(s, '1b', ds['1b'] || 0);
@@ -8462,7 +8472,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         const cumScore = pitCum[pitcher] || 0;
         const cumRank = pRankingsPit.pitRanks[pitcher];
         html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}</td>`;
+        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers', round)}</td>`;
         const ps = getEffPitStats(pitcher) || s;
         html += pitStatCell(s, 'gs', ps.gs || 0);
         html += pitStatCell(s, 'w', ps.w || 0);
