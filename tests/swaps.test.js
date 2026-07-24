@@ -64,27 +64,40 @@ describe('checkSwapLimit — playoffs', () => {
     }
   });
 
-  it('shares one slot per round across Free, Drop, and Trade', () => {
+  it('blocks a second swap of the same type in a round', () => {
     const used = [swap({ round: 'QF', reason: 'Drop Swap' })];
-    for (const reason of PLAYOFF_LIMITED_REASONS) {
-      const err = checkSwapLimit(used, 'Alice', reason, 'QF');
-      assert.match(err, /one Free\/Drop\/Trade swap for Quarterfinals/);
-      assert.match(err, /Drop Swap on 2026-05-01/);
-      assert.match(err, /Only IL swaps remain/);
-    }
+    const err = checkSwapLimit(used, 'Alice', 'Drop Swap', 'QF');
+    assert.match(err, /already used your Drop Swap for Quarterfinals/);
+    assert.match(err, /on 2026-05-01/);
+    assert.match(err, /other playoff swaps or an IL swap/);
   });
 
-  it('keeps IL swaps unlimited even after the slot is used', () => {
+  it('spells out the Free Swap label without the parenthetical', () => {
+    const used = [swap({ round: 'QF', reason: FREE_SWAP_REASON })];
+    const err = checkSwapLimit(used, 'Alice', FREE_SWAP_REASON, 'QF');
+    assert.match(err, /already used your Free Swap for Quarterfinals/);
+  });
+
+  it('allows one each of Free, Drop, and Trade in the same round', () => {
+    // Having used Drop and Trade, a Free Swap is still allowed, and vice versa.
+    const used = [swap({ round: 'QF', reason: 'Drop Swap' }), swap({ round: 'QF', reason: 'Trade Swap' })];
+    assert.equal(checkSwapLimit(used, 'Alice', FREE_SWAP_REASON, 'QF'), null);
+
+    const used2 = [swap({ round: 'QF', reason: FREE_SWAP_REASON }), swap({ round: 'QF', reason: 'Trade Swap' })];
+    assert.equal(checkSwapLimit(used2, 'Alice', 'Drop Swap', 'QF'), null);
+  });
+
+  it('keeps IL swaps unlimited even after a type is used', () => {
     const used = [swap({ round: 'SF', reason: 'Trade Swap' }), swap({ round: 'SF', reason: 'IL Swap' })];
     assert.equal(checkSwapLimit(used, 'Alice', 'IL Swap', 'SF'), null);
   });
 
-  it('does not let an IL swap consume the Free/Drop/Trade slot', () => {
+  it('does not let an IL swap consume a Free/Drop/Trade slot', () => {
     const used = [swap({ round: 'Finals', reason: 'IL Swap' })];
     assert.equal(checkSwapLimit(used, 'Alice', 'Drop Swap', 'Finals'), null);
   });
 
-  it('scopes the slot to its own playoff round', () => {
+  it('scopes each type slot to its own playoff round', () => {
     const used = [swap({ round: 'QF', reason: 'Drop Swap' })];
     assert.equal(checkSwapLimit(used, 'Alice', 'Drop Swap', 'SF'), null);
   });
