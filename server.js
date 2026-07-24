@@ -1268,9 +1268,9 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
 
 // --- Swap eligibility rules (mirror of js/swaps.js — keep the two copies identical; the server
 // can't import the ESM js/ module, same as detectScoreSwings). Pool play: one Free Swap per PP
-// round, unlimited IL/Drop/Trade. Playoffs: one swap total per round across Free/Drop/Trade,
-// unlimited IL. Only pending and approved swaps consume a slot — denied and undone swaps refund
-// it; commissioner adds/drops carry no `round` field and are excluded. ---
+// round, unlimited IL/Drop/Trade. Playoffs: one of each type per round — one Free, one Drop, and
+// one Trade — plus unlimited IL. Only pending and approved swaps consume a slot — denied and undone
+// swaps refund it; commissioner adds/drops carry no `round` field and are excluded. ---
 const FREE_SWAP_REASON = 'Free Swap (one per round)';
 const PLAYOFF_LIMITED_REASONS = [FREE_SWAP_REASON, 'Drop Swap', 'Trade Swap'];
 
@@ -1291,13 +1291,16 @@ function checkSwapLimit(swaps, managerName, reason, round) {
     return null; // Drop/IL/Trade unlimited during pool play
   }
 
-  // Playoffs (QF, SF, Finals): IL swaps unlimited; Free/Drop/Trade share ONE slot per round
+  // Playoffs (QF, SF, Finals): IL swaps unlimited; one each of Free, Drop, and Trade per round
   if (round === 'QF' || round === 'SF' || round === 'Finals') {
     if (reason === 'IL Swap') return null;
-    const usedSwap = managerSwaps.find((s) => PLAYOFF_LIMITED_REASONS.includes(s.reason));
-    if (usedSwap) {
-      const roundLabel = round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'the Finals';
-      return `You have already used your one Free/Drop/Trade swap for ${roundLabel} (${usedSwap.reason} on ${usedSwap.swap_date || 'an earlier date'}). Only IL swaps remain available this round.`;
+    if (PLAYOFF_LIMITED_REASONS.includes(reason)) {
+      const usedSwap = managerSwaps.find((s) => s.reason === reason);
+      if (usedSwap) {
+        const roundLabel = round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'the Finals';
+        const swapLabel = reason === FREE_SWAP_REASON ? 'Free Swap' : reason;
+        return `You have already used your ${swapLabel} for ${roundLabel} (on ${usedSwap.swap_date || 'an earlier date'}). You may still use your other playoff swaps or an IL swap.`;
+      }
     }
     return null;
   }
