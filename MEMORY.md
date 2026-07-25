@@ -1,5 +1,41 @@
 # WMMC — Decisions Log
 
+## Today is always a valid swap effective date — game start time, not the calendar (2026-07-25)
+
+**Symptom (commissioner).** The swap form showed Effective Date `07/25/2026` (today) with the
+Submit button refusing: "The effective date must be a future date — keep the suggested date to
+apply the swap automatically." Neither player's team (both NYM) had started playing, so the swap
+was legitimately eligible for today.
+
+**Root cause.** "Is this a scheduled swap?" was decided by a sentinel comparison, not by a date
+rule: `submitSwapRequest` treated ANY value differing from `data-auto-date` as a scheduled swap,
+and both client and server then rejected a scheduled date `<= today`. So the moment
+`data-auto-date` drifted from the input (a form re-render, a stale/failed teams-started check, or
+the manager typing today's date back in), today's date was reclassified as a backdated schedule
+request and blocked — even though today was exactly what the auto path would have produced.
+
+**Fix (`app.js` + `server.js`, twin change).** Only a date **strictly after today** schedules a
+swap. Today is never "scheduled" — it means "apply now" and routes to the auto path, where
+`computeSwapEffectiveDates` / `computeSwapEffectiveDatesServer` (the teams-started check) decide
+whether it lands today or tomorrow. So today is always submittable regardless of `data-auto-date`,
+and a player whose game already started still correctly slips to tomorrow instead of erroring.
+Only `< today` is rejected as backdating (client message + server 400 `effective_date_not_future`).
+The commissioner is unchanged: any date, today included, stays an explicit correction (server
+`isCommissioner` keeps the exact date rather than re-deriving it), so Swap Log date edits and
+backdated corrections behave exactly as before. `data-auto-date` still exists — it now only
+suppresses "user picked the same future date the auto path suggested", never gates today.
+
+**Verified** on a seeded temp-DB server (staging fixture, schedule shifted so today = PP2 Week 3
+day 3, stubbed statsapi via a `--require` fetch preload) — 27/27 checks: requested-today with no
+games started applies today (drop yesterday / add today, no `requested_effective_date` recorded);
+requested-today with the OUT player's team already playing bumps to tomorrow with `teams_started`
+populated; blank behaves identically to today; yesterday 400s; tomorrow still schedules; past
+round-end and malformed dates still 400; commissioner today keeps today even mid-game and
+commissioner backdating still works; per-manager totals byte-identical after every case. Playwright
+at 390×844 reproduced the exact report — auto-date drifted to tomorrow while the field read today —
+and confirmed it now submits with "effective 2026-07-25" instead of the error, that backdating is
+still refused client-side, and no page errors. 157/157 tests, lint + format clean.
+
 ## Scheduled swaps (manager, future-only) + commissioner date editing (2026-07-21)
 
 **What (commissioner request):** now that swaps auto-apply, (1) managers can optionally pick a

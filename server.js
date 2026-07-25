@@ -1573,22 +1573,27 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
     }
 
     // Server-computed effective dates (game-started rule), overriding the client's values —
-    // unless the submitter scheduled the swap for a specific effective date. Managers may only
-    // schedule FORWARD (strictly after today — no backdating — and no later than the current
-    // round's end); the commissioner may pick any date (corrections). A scheduled date drives
-    // the same add/drop window shape as the auto path: drop the day before, add on the date.
+    // unless the submitter scheduled the swap for a specific FUTURE effective date. Requesting
+    // today is not scheduling: it means "apply now", so it falls through to the auto path, where
+    // the players' teams' game start times decide whether the swap lands today or tomorrow.
+    // Managers may only schedule FORWARD (no backdating, and no later than the current round's
+    // end); the commissioner may pick any date, today included, as an explicit correction. A
+    // scheduled date drives the same add/drop window shape as the auto path: drop the day
+    // before, add on the date.
     const requestedEff = swap.requested_effective_date;
     delete swap.requested_effective_date;
+    const isCommissioner = !!req.manager.commissioner;
+    let scheduledEff = '';
     if (requestedEff !== undefined && requestedEff !== null && requestedEff !== '') {
       if (typeof requestedEff !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(requestedEff)) {
         return res.status(400).json({ error: 'Invalid effective date (expected YYYY-MM-DD).' });
       }
-      if (!req.manager.commissioner) {
-        if (requestedEff <= todayET) {
+      if (!isCommissioner) {
+        if (requestedEff < todayET) {
           return res.status(400).json({
             error:
-              'The effective date must be a future date — swaps cannot be backdated. ' +
-              'Leave it blank to apply the swap automatically.',
+              'The effective date cannot be in the past — swaps cannot be backdated. ' +
+              "Use today's date (or leave it blank) to apply the swap automatically.",
             code: 'effective_date_not_future',
           });
         }
@@ -1600,10 +1605,13 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
           });
         }
       }
-      swap.requested_effective_date = requestedEff;
-      swap.effective_date = requestedEff;
-      swap.add_date = requestedEff;
-      swap.drop_date = isoDateAddDays(requestedEff, -1);
+      if (requestedEff !== todayET || isCommissioner) scheduledEff = requestedEff;
+    }
+    if (scheduledEff) {
+      swap.requested_effective_date = scheduledEff;
+      swap.effective_date = scheduledEff;
+      swap.add_date = scheduledEff;
+      swap.drop_date = isoDateAddDays(scheduledEff, -1);
       swap.teams_started = [];
     } else {
       const eff = await computeSwapEffectiveDatesServer(sd, swap.player_out, swap.player_in);
