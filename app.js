@@ -9013,11 +9013,12 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
 
     // Effective-date field: prefilled with the date the swap WOULD take effect if submitted
     // as-is (the auto path — today, bumped to tomorrow once a selected player's team has
-    // started; refreshSwapAutoEffectiveDate keeps it live as players are picked). Submitting
-    // with the auto value untouched uses the auto path; changing it schedules the swap.
-    // Managers may only schedule FORWARD (no backdating) and no further than the end of the
-    // current round (the server enforces both; period boundaries start fresh from a new
-    // submission, so scheduling across one is invalid).
+    // started; refreshSwapAutoEffectiveDate keeps it live as players are picked). Today always
+    // means "apply now" and is always accepted — the players' teams' game start times, not the
+    // calendar, decide whether that lands today or tomorrow. Only a date STRICTLY AFTER today
+    // schedules the swap, and managers may only schedule FORWARD (no backdating) and no further
+    // than the end of the current round (the server enforces both; period boundaries start fresh
+    // from a new submission, so scheduling across one is invalid).
     const _swapEffToday = isoDateET(new Date());
     const _swapEffMax = (() => {
       const { round } = getCurrentScheduleRound(seasonData);
@@ -9070,7 +9071,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         <div class="swap-form-field">
           <label for="swap-effective-date">Effective Date</label>
           <input type="date" id="swap-effective-date" class="form-input" value="${_swapEffToday}" data-auto-date="${_swapEffToday}" min="${_swapEffToday}"${_swapEffMax ? ` max="${_swapEffMax}"` : ''}>
-          <small class="text-muted" style="font-size:0.75rem;">Shows when the swap will take effect — pick a later date to schedule it instead.</small>
+          <small class="text-muted" style="font-size:0.75rem;">Shows when the swap will take effect — today applies it now (tomorrow instead if a game has already started), or pick a later date to schedule it.</small>
         </div>
       </div>
       <div style="margin-top:0.75rem;">
@@ -9776,10 +9777,15 @@ window.submitSwapRequest = async function (managerName, ev) {
     const playerIn = document.getElementById('swap-player-in').value;
     const reason = document.getElementById('swap-reason').value;
     // The date input is prefilled with the auto effective date (data-auto-date, kept fresh by
-    // refreshSwapAutoEffectiveDate). Left as suggested (or cleared) = the auto path; a changed
-    // value = an explicit request to schedule the swap for that date.
+    // refreshSwapAutoEffectiveDate). Only a date STRICTLY AFTER today schedules the swap. Today
+    // is never a "scheduled" date — it means "apply now", which is the auto path: the selected
+    // players' teams' game start times decide whether that lands today or tomorrow. So today is
+    // always submittable, even if data-auto-date has drifted (a re-render, a stale game-start
+    // check, or the manager typing the date back in).
     const effEl = document.getElementById('swap-effective-date');
-    const requestedEff = effEl && effEl.value && effEl.value !== (effEl.dataset.autoDate || '') ? effEl.value : '';
+    const todayET = isoDateET(new Date());
+    const effValue = (effEl && effEl.value) || '';
+    const requestedEff = effValue > todayET && effValue !== (effEl.dataset.autoDate || '') ? effValue : '';
     const swapDate = new Date().toISOString().split('T')[0];
 
     if (!playerOut || !playerIn || !reason) {
@@ -9788,11 +9794,12 @@ window.submitSwapRequest = async function (managerName, ev) {
       return;
     }
 
-    // A scheduled effective date must be in the future — no backdating (the server re-validates
-    // and lets only the commissioner pick past dates, via the Swap Log editor).
-    if (requestedEff && requestedEff <= isoDateET(new Date())) {
+    // Only backdating is blocked — today is allowed (it applies the swap now, subject to the
+    // game-start rule). The server re-validates and lets only the commissioner pick past dates,
+    // via the Swap Log editor.
+    if (effValue && effValue < todayET) {
       errEl.textContent =
-        'The effective date must be a future date — keep the suggested date to apply the swap automatically.';
+        'The effective date cannot be in the past — keep today to apply the swap now, or pick a later date to schedule it.';
       errEl.style.display = 'block';
       return;
     }
