@@ -1,6 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { periodStartForRound, isPlayerActiveAsOfWeekEnd, isGameDateEligible } from '../js/eligibility.js';
+import {
+  periodStartForRound,
+  isPlayerActiveAsOfWeekEnd,
+  isGameDateEligible,
+  isManagerActiveInRound,
+  isManagerInRound,
+} from '../js/eligibility.js';
 
 // A compact schedule spanning a period boundary (PP1 → PP2), with a gap, to exercise the rules.
 const schedule = [
@@ -82,6 +88,76 @@ describe('isPlayerActiveAsOfWeekEnd — period boundary (the PP1→PP2 leak the 
     const kept = [{ add_date: '2026-05-04' }, { add_date: '2026-06-08' }];
     const periodStart = periodStartForRound('PP2', schedule, scheduleDates);
     assert.equal(isPlayerActiveAsOfWeekEnd(kept, { periodStart, weekEnd: '2026-06-14' }), true);
+  });
+});
+
+describe('isManagerActiveInRound', () => {
+  it('never restricts pool play — every manager plays PP1 and PP2', () => {
+    assert.equal(isManagerActiveInRound('PP1', 'PP'), true);
+    assert.equal(isManagerActiveInRound('PP2', 'PP'), true);
+    assert.equal(isManagerActiveInRound('PP2', 'QF'), true);
+  });
+
+  it('a manager who missed the playoff field is out of every playoff round', () => {
+    assert.equal(isManagerActiveInRound('QF', 'PP'), false);
+    assert.equal(isManagerActiveInRound('SF', 'PP'), false);
+    assert.equal(isManagerActiveInRound('Finals', 'PP'), false);
+  });
+
+  it('a manager eliminated IN a round still played that round', () => {
+    assert.equal(isManagerActiveInRound('QF', 'QF'), true); // lost the QF — but played it
+    assert.equal(isManagerActiveInRound('SF', 'QF'), false);
+    assert.equal(isManagerActiveInRound('SF', 'SF'), true);
+    assert.equal(isManagerActiveInRound('Finals', 'SF'), false);
+    assert.equal(isManagerActiveInRound('Finals', 'Finals'), true); // runner-up / 4th place
+  });
+
+  it('a manager who was never eliminated is active everywhere', () => {
+    for (const r of ['PP1', 'PP2', 'QF', 'SF', 'Finals']) {
+      assert.equal(isManagerActiveInRound(r, null), true);
+      assert.equal(isManagerActiveInRound(r, undefined), true);
+    }
+  });
+
+  it('fails open on rounds it does not recognize — never hide on unreadable data', () => {
+    assert.equal(isManagerActiveInRound('QF', 'Wildcard'), true);
+    assert.equal(isManagerActiveInRound('Consolation', 'PP'), true);
+    assert.equal(isManagerActiveInRound(null, 'PP'), true);
+  });
+});
+
+describe('isManagerInRound', () => {
+  const eliminated = { Austin: 'PP', Cam: 'QF' };
+
+  it('pool play is open to everyone, whatever the sources say', () => {
+    assert.equal(isManagerInRound('Austin', 'PP1', { participants: ['Ryan'], eliminated }), true);
+    assert.equal(isManagerInRound('Austin', 'PP2', { participants: ['Ryan'], eliminated }), true);
+  });
+
+  it('the bracket field is authoritative when known — anyone not in it is out', () => {
+    const participants = ['Ryan', 'Cam'];
+    assert.equal(isManagerInRound('Ryan', 'QF', { participants, eliminated }), true);
+    assert.equal(isManagerInRound('Austin', 'QF', { participants, eliminated }), false);
+    // Not in the SF field, even though sd.eliminated hasn't been written yet.
+    assert.equal(isManagerInRound('Cam', 'SF', { participants: ['Ryan'], eliminated: {} }), false);
+  });
+
+  it('falls back to sd.eliminated before the bracket is derivable', () => {
+    assert.equal(isManagerInRound('Austin', 'QF', { participants: [], eliminated }), false);
+    assert.equal(isManagerInRound('Cam', 'QF', { participants: null, eliminated }), true);
+    assert.equal(isManagerInRound('Cam', 'SF', { participants: [], eliminated }), false);
+    assert.equal(isManagerInRound('Ryan', 'Finals', { participants: [], eliminated }), true);
+  });
+
+  it('ignores blank participant entries rather than treating them as a known field', () => {
+    // A half-built bracket (missing names) must not silently exclude everyone.
+    assert.equal(isManagerInRound('Ryan', 'QF', { participants: [null, '', undefined], eliminated }), true);
+    assert.equal(isManagerInRound('Austin', 'QF', { participants: [null, ''], eliminated }), false);
+  });
+
+  it('with nothing known at all, nobody is filtered out', () => {
+    assert.equal(isManagerInRound('Anyone', 'Finals', {}), true);
+    assert.equal(isManagerInRound('Anyone', 'Finals'), true);
   });
 });
 

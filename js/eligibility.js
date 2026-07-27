@@ -55,6 +55,40 @@ export function isPlayerActiveAsOfWeekEnd(entries, { periodStart = null, weekEnd
   return !!latestAdd && (!latestDrop || latestAdd > latestDrop);
 }
 
+// The rounds that knock managers out, in order. `sd.eliminated[manager]` holds the round a manager
+// went out IN — 'PP' means they missed the playoff field entirely, 'QF' means they played the
+// quarterfinals and lost, and so on. Pool play itself never restricts anyone: every manager is in
+// PP1/PP2.
+export const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
+
+// Is a manager eliminated in `eliminatedRound` still competing in schedule round `round`?
+// A manager eliminated IN a round still PLAYED that round — 'QF' is out of SF and Finals, not QF.
+// `eliminatedRound` is null/undefined for a manager who was never eliminated. An unrecognized
+// round on either side returns true: never hide a manager on the strength of data we can't read.
+export function isManagerActiveInRound(round, eliminatedRound) {
+  if (!round || round === 'PP1' || round === 'PP2') return true;
+  if (!eliminatedRound) return true;
+  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(eliminatedRound);
+  const roundIdx = ELIMINATION_ROUND_ORDER.indexOf(round);
+  if (elimIdx < 0 || roundIdx < 0) return true;
+  return elimIdx >= roundIdx;
+}
+
+// Whether `manager` is still in the competition for schedule round `round` — the guard that keeps
+// an eliminated manager from being shown as the owner of a player in a round they aren't playing.
+// Sources, most authoritative first:
+//   1. `participants` — the round's actual bracket field (QF/SF/Finals). When known, it is the
+//      whole truth: anyone not in it is out.
+//   2. `eliminated` — the sd.eliminated map, covering the window before a bracket is derivable.
+// Pool play, an unknown round, and "nothing known yet" all return true, so a missing bracket can
+// never hide a legitimately active manager.
+export function isManagerInRound(manager, round, { participants = null, eliminated = null } = {}) {
+  if (!round || round === 'PP1' || round === 'PP2') return true;
+  const field = (participants || []).filter((n) => typeof n === 'string' && n);
+  if (field.length) return field.includes(manager);
+  return isManagerActiveInRound(round, (eliminated || {})[manager]);
+}
+
 // Whether a single game on `gameDate` falls within a player's effective scoring window for a week,
 // honoring an optional per-player add/drop override and the week's calendar [weekStart, weekEnd].
 // Mirrors isDateEligibleForPlayer / computeEffective* in server.js: an add/drop override replaces

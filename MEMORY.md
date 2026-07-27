@@ -1492,3 +1492,36 @@ email still falls back to login and is cleared.
   in-process \_mlbCatalogCache makes this the only way to exercise audit/fix
   here): retired phantoms no longer reported, in-pool orphan still purged,
   totals_moved [], second apply a clean no-op.
+
+## 2026-07-27 — Live tab: eliminated managers still "owned" players (Austin on Joc Pederson)
+
+- **Symptom (commissioner, during QF):** the Live tab's expanded box score tagged players with
+  managers who missed the playoff field — Joc Pederson badged `Austin Johnson` mid-QF.
+- **Cause:** `/api/mlb/live/game/:gamePk` resolved ownership as
+  `findManagerForPlayerWeek(...) || findManagerForPlayer(...)`. The fallback is an **all-weeks**
+  scan of the `sd.rosters` derived cache, so any player not on a current-round roster got
+  attributed to whoever last held them — typically a PP2 roster belonging to a manager knocked out
+  rounds ago. Same class of bug as the 2026-06 Best/Worst outage: arrays-based attribution vs the
+  `roster_dates` date windows that actually decide scoring.
+- **Fix:** ownership everywhere on the Live tab now comes from `buildWeekRosterIndex(sd, round,
+week, weekEnd)` — the period-scoped `roster_dates` ∪ the week's stored arrays, drop-filtered,
+  extracted verbatim from the inline block `/api/mlb/live` already used, so both endpoints share
+  one derivation. The all-weeks fallback is gone. Outside a scheduled week the box score renders
+  with no tags rather than guessing from history.
+- **Round gate:** new `isManagerInRound` / `isManagerActiveInRound` (canonical + unit-tested in
+  `js/eligibility.js`, mirrored in `server.js` — keep the copies identical, same rule as
+  SCORING/detectScoreSwings). Authority order: the round's real bracket field
+  (`roundParticipants` → `computePlayoffPairs`, the same confirmed-seeding math as the Playoff
+  Bracket card and the Slack matchup posts), then `sd.eliminated` for the window before the
+  finalize save lands. **Both fail open** — pool play, an unknown round, or nothing known at all
+  never hides anyone. Note `sd.eliminated[m]` is the round a manager went out IN, so `'QF'` means
+  they PLAYED the QF: active iff `elimIdx >= roundIdx`.
+- `/api/mlb/daily` (the Live tab's historical-date view) got the same gate on its manager list and
+  player attribution — it was listing every eliminated manager as a 0-point ghost row.
+- **Invariant check (before/after, fabricated QF season, 8 qualifiers + 4 eliminated):** the only
+  two diffs were Joc Pederson `tag=Austin Johnson` → `tag=(none)` and the four ghost rows
+  disappearing. Every active manager's `round_total` unchanged (14 → 14 ×8) and `/api/mlb/live`
+  byte-identical. Display-only — no writes, no scoring-engine or `managerWeekSubtotal` changes.
+- **Gotcha repeat:** statsapi is proxy-blocked here, so the box score endpoint was exercised by
+  booting server.js with `--require` a preload stubbing `globalThis.fetch` (canned schedule +
+  boxscore). Booting against a scratch `DB_PATH` still rewrote `managers_seed.json` — revert it.
