@@ -3678,26 +3678,27 @@ function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
     return ` <span class="wrs-hist-tag">${parts.join(', ')}</span>`;
   }
 
-  // Whether the player is still rostered as of a period's end (latest add with no later drop).
-  // Used to grey out players dropped within/before the period.
-  function activeAsOf(player, periodEnd) {
-    let latestAdd = null;
-    let latestDrop = null;
-    let hasDates = false;
+  // Roster status of a player within a period: 'active', 'dropped' or 'scheduled' (an add whose
+  // date hasn't arrived yet). Evaluated as of TODAY while the period is still running, so a
+  // scheduled swap doesn't read as already applied — the outgoing player stays ungreyed until
+  // their drop date and the incoming player is flagged as scheduled until their add date. A
+  // finished period is read at its end, a not-yet-started one at its start (an early submission
+  // dated to the period's first day is active there, exactly as before).
+  function periodStatus(player, periodStart, periodEnd) {
+    const asOf =
+      periodEnd && todayISO > periodEnd ? periodEnd : periodStart && todayISO < periodStart ? periodStart : todayISO;
+    const entries = [];
     for (const players of Object.values(detailMgrRosterDates)) {
-      const e = players[player];
-      if (!e) continue;
-      if (e.add_date && (!periodEnd || e.add_date <= periodEnd)) {
-        hasDates = true;
-        if (!latestAdd || e.add_date > latestAdd) latestAdd = e.add_date;
-      }
-      if (e.drop_date && (!periodEnd || e.drop_date <= periodEnd)) {
-        hasDates = true;
-        if (!latestDrop || e.drop_date > latestDrop) latestDrop = e.drop_date;
-      }
+      if (players[player]) entries.push(players[player]);
     }
-    if (!hasDates) return true; // array-only member (original); treat as active
-    return !latestDrop || (latestAdd && latestAdd > latestDrop);
+    // Upper-bounded by the period end (as before) so a later period's dates never leak back. No
+    // lower bound — an out-of-period add/drop is handled by periodPlayerTag's clipping.
+    const scoped = entries.map((e) => ({
+      add_date: e.add_date && (!periodEnd || e.add_date <= periodEnd) ? e.add_date : null,
+      drop_date: e.drop_date && (!periodEnd || e.drop_date <= periodEnd) ? e.drop_date : null,
+    }));
+    const status = rosterStatusAsOf(scoped, { asOf });
+    return status === 'none' ? 'active' : status; // array-only member (original); treat as active
   }
 
   // Order players so a swapped-in player sits directly beneath the player he replaced —
@@ -3730,10 +3731,13 @@ function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
         : orderPlayersWithSwapChains(names, scoreByPlayer)
             .map((name) => {
               const pts = Math.round((scoreByPlayer[name] || 0) * 100) / 100;
-              const active = activeAsOf(name, p.lastEnd);
-              const tag = periodPlayerTag(name, p.firstStart, p.lastEnd);
+              const status = periodStatus(name, p.firstStart, p.lastEnd);
+              const rowCls = status === 'dropped' ? 'dropped-player' : status === 'scheduled' ? 'scheduled-player' : '';
+              const tag =
+                periodPlayerTag(name, p.firstStart, p.lastEnd) +
+                (status === 'scheduled' ? ' <span class="sched-pill">Scheduled</span>' : '');
               const safeName = jsStr(name);
-              return `<tr class="${active ? '' : 'dropped-player'}">
+              return `<tr class="${rowCls}">
         <td>${displayPlayer(name, sd)}${tag}</td>
         <td class="num"><button class="pqv-pts-btn" onclick="showPlayerQuickView('${safeName}','${typeArg}','${safeMgr}')"><strong>${fmt(pts)}</strong></button></td>
       </tr>`;
@@ -7784,6 +7788,9 @@ function renderRosterData(managerName, isCommissioner) {
   html += `</div>`;
 
   container.innerHTML = html;
+  // The Swaps tab's "All Swaps" list is the shared swap log scoped to this manager — it renders
+  // into its container after the innerHTML above, and keeps its own expand/filter state.
+  renderSwapLog(ROSTER_SWAP_LOG_ID, false, managerName);
   // Initialize type-to-search inputs after DOM is rendered
   setupPlayerSearchInputs();
   setupSwapPlayerSearch();
@@ -7875,6 +7882,10 @@ function computeCumulativeRankings(batCumulative, pitCumulative) {
 function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   const isActive = !!(seasonData && seasonData.status === 'active');
   const isHistorical = !!(DATA && DATA.batting_weekly);
+  // Every roster view reads its date windows AS OF today, so a scheduled (future-dated) swap
+  // never reads as already applied: the outgoing player stays on the roster — and keeps
+  // scoring — until their drop date, and the incoming player shows as scheduled until theirs.
+  const todayISO = isoDateET(new Date());
 
   const batting = isHistorical ? DATA.batting_weekly || [] : seasonData.weekly_batting || [];
   const pitching = isHistorical ? DATA.pitching_weekly || [] : seasonData.weekly_pitching || [];
@@ -7950,7 +7961,28 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   // First week's start date is the season boundary: swaps recorded before this date are pre-season
   const seasonStartDate = scheduleDates && scheduleDates[0] ? scheduleDates[0].start : null;
 
-  // Get inline date tag for a player in a given week
+  // Which list a player belongs in. Needed to put a player the (derived) roster arrays dropped
+  // early — a scheduled swap's outgoing player — back into the right table. Mirrors the pool-based
+  // classification in rebuildRosterArraysFromDates, falling back to the arrays and the stat rows.
+  const batPool = new Set(seasonData ? seasonData.batters_pool || [] : []);
+  const pitPool = new Set(seasonData ? seasonData.pitchers_pool || [] : []);
+  function poolTypeOf(player) {
+    const inBat = batPool.has(player);
+    const inPit = pitPool.has(player);
+    if (inBat && !inPit) return 'batters';
+    if (inPit && !inBat) return 'pitchers';
+    const mgrRoster = (isActive && seasonData.rosters && seasonData.rosters[managerName]) || {};
+    for (const wr of Object.values(mgrRoster)) {
+      if ((wr.batters || []).includes(player)) return 'batters';
+      if ((wr.pitchers || []).includes(player)) return 'pitchers';
+    }
+    if (batting.some((b) => b.batter === player)) return 'batters';
+    if (pitching.some((p) => p.pitcher === player)) return 'pitchers';
+    return null;
+  }
+
+  // Get inline date tag for a player in a given week. A date still in the future belongs to a
+  // SCHEDULED swap, so it reads in the future tense ("Drops Jul 30") — the move has not happened.
   function playerDateTag(player, weekKey, weekIdx) {
     if (!scheduleDates || !scheduleDates[weekIdx]) return '';
     const weekDates = scheduleDates[weekIdx];
@@ -7964,22 +7996,28 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       seasonData.roster_dates[managerName][weekKey][player];
 
     const tags = [];
+    let scheduled = false;
+    const tagFor = (verbPast, verbFuture, date) => {
+      if (date > todayISO) scheduled = true;
+      return `${date > todayISO ? verbFuture : verbPast} ${fmtShortDate(date)}`;
+    };
     if (rd && rd.add_date) {
-      tags.push(`Added ${fmtShortDate(rd.add_date)}`);
+      tags.push(tagFor('Added', 'Adds', rd.add_date));
     } else {
       const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
-      if (addSwap && addSwap.swap_date) tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
+      if (addSwap && addSwap.swap_date) tags.push(tagFor('Added', 'Adds', addSwap.swap_date));
     }
     if (rd && rd.drop_date) {
-      tags.push(`Dropped ${fmtShortDate(rd.drop_date)}`);
+      tags.push(tagFor('Dropped', 'Drops', rd.drop_date));
     } else {
       const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
-      if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
+      if (dropSwap && dropSwap.swap_date) tags.push(tagFor('Dropped', 'Drops', dropSwap.swap_date));
     }
     if (tags.length === 0) {
       return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
     }
-    return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
+    const cls = `roster-date-tag roster-date-swap${scheduled ? ' roster-date-scheduled' : ''}`;
+    return ` <span class="${cls}">${tags.join(' · ')}</span>`;
   }
 
   // For a dropped player, show the date range they were rostered (e.g. "5/4–5/6") in the
@@ -8158,11 +8196,45 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
       };
     }
+    // A SCHEDULED swap is recorded (and applied to the derived roster arrays) the moment it is
+    // submitted, even though its dates are in the future. Re-derive both ends from the date
+    // windows AS OF today so the swap doesn't take effect early in this view:
+    //   pendingDrop — outgoing player, still rostered and still scoring until their drop date.
+    //                 applySwapToSeason already pulled them out of the week's array, so put them
+    //                 back; roster_dates is the source of truth, the arrays are a derived cache.
+    //   pendingAdd  — incoming player, already in the array but not on the roster until their
+    //                 add date. Listed (so the move is visible) but not counted as active.
+    const periodStartThisRound = periodStartForRound(seasonData, round);
+    const statusAsOfToday = (player) => {
+      const entries = [];
+      for (const wkDates of Object.values((isActive && (seasonData.roster_dates || {})[managerName]) || {})) {
+        if (wkDates[player]) entries.push(wkDates[player]);
+      }
+      return rosterStatusAsOf(entries, { periodStart: periodStartThisRound, asOf: todayISO });
+    };
+    const pendingDrop = new Set();
+    const pendingAdd = new Set();
+    if (isActive) {
+      for (const [p, d] of Object.entries(weekRosterDates)) {
+        if (d.drop_date && d.drop_date > todayISO && statusAsOfToday(p) === 'active') pendingDrop.add(p);
+        if (d.add_date && d.add_date > todayISO && statusAsOfToday(p) === 'scheduled') pendingAdd.add(p);
+      }
+    }
+    if (pendingDrop.size > 0) {
+      const restore = (listKey) =>
+        [...pendingDrop].filter((p) => poolTypeOf(p) === listKey && !weekRoster[listKey].includes(p));
+      weekRoster = {
+        batters: weekRoster.batters.concat(restore('batters')),
+        pitchers: weekRoster.pitchers.concat(restore('pitchers')),
+      };
+    }
+
     // Players dropped during this week (drop_date present in current weekRosterDates) are treated
-    // as historical/greyed-out, the same as players dropped in a previous week.
+    // as historical/greyed-out, the same as players dropped in a previous week — unless the drop
+    // is still scheduled, in which case they are simply on the roster.
     const droppedThisWeek = new Set(
       Object.entries(weekRosterDates)
-        .filter(([, d]) => d.drop_date)
+        .filter(([p, d]) => d.drop_date && !pendingDrop.has(p))
         .map(([p]) => p)
     );
 
@@ -8366,7 +8438,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     };
 
     // ---- Batters for this week ----
-    const activeBatCount = weekRoster.batters.filter((p) => !droppedThisWeek.has(p)).length;
+    // A scheduled add is listed but not yet counted — the roster is still the pre-swap one.
+    const activeBatCount = weekRoster.batters.filter((p) => !droppedThisWeek.has(p) && !pendingAdd.has(p)).length;
     html += `<div class="wrs-group-label">BATTERS (${activeBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
     // Build batter stat lookup for this week
@@ -8399,13 +8472,16 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       allBattersThisWeek.forEach((p) => (batScoreByPlayer[p] = (batStatMap[p] || {}).weekly_score || 0));
       orderWithSwapChains([...allBattersThisWeek], batScoreByPlayer, approvedSwaps, managerName).forEach((batter) => {
         const s = batStatMap[batter] || {};
-        const onRoster = weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
+        const isScheduled = pendingAdd.has(batter);
+        const onRoster = !isScheduled && weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
         const wkRank = weekRanks.batRanks[batter];
         const { batCum, periodRankings: pRankings } = getRoundData(round, week);
         const cumScore = batCum[batter] || 0;
         const cumRank = pRankings.batRanks[batter];
-        html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters', round)}</td>`;
+        html += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        const batTag =
+          isScheduled || onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters', round);
+        html += `<td>${displayPlayer(batter, seasonData)}${batTag}</td>`;
         const ds = getEffBatStats(batter) || s;
         html += batStatCell(s, 'abs', ds.abs || 0);
         html += batStatCell(s, '1b', ds['1b'] || 0);
@@ -8439,7 +8515,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     }
 
     // ---- Pitchers for this week ----
-    const activePitCount = weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p)).length;
+    const activePitCount = weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p) && !pendingAdd.has(p)).length;
     html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${activePitCount}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
     const pitStatMap = {};
@@ -8466,13 +8542,18 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       allPitchersThisWeek.forEach((p) => (pitScoreByPlayer[p] = (pitStatMap[p] || {}).weekly_score || 0));
       orderWithSwapChains([...allPitchersThisWeek], pitScoreByPlayer, approvedSwaps, managerName).forEach((pitcher) => {
         const s = pitStatMap[pitcher] || {};
-        const onRoster = weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
+        const isScheduled = pendingAdd.has(pitcher);
+        const onRoster = !isScheduled && weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
         const wkRank = weekRanks.pitRanks[pitcher];
         const { pitCum, periodRankings: pRankingsPit } = getRoundData(round, week);
         const cumScore = pitCum[pitcher] || 0;
         const cumRank = pRankingsPit.pitRanks[pitcher];
-        html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers', round)}</td>`;
+        html += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        const pitTag =
+          isScheduled || onRoster
+            ? playerDateTag(pitcher, weekKey, weekIdx)
+            : notRosteredTag(pitcher, 'pitchers', round);
+        html += `<td>${displayPlayer(pitcher, seasonData)}${pitTag}</td>`;
         const ps = getEffPitStats(pitcher) || s;
         html += pitStatCell(s, 'gs', ps.gs || 0);
         html += pitStatCell(s, 'w', ps.w || 0);
@@ -8870,6 +8951,9 @@ function currentScheduleWeekKey() {
   return `${SEASON_SCHEDULE[idx].round}|${SEASON_SCHEDULE[idx].week}`;
 }
 
+// Container id for the My Roster copy of the swap log (manager-scoped).
+const ROSTER_SWAP_LOG_ID = 'roster-swap-log';
+
 function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
   const isActive = !!(seasonData && seasonData.status === 'active');
 
@@ -9189,37 +9273,14 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     html += `</div>`;
   }
 
-  // All Swaps table (compact)
+  // All Swaps — the same click-to-expand log as the league-wide Swap Log tab, scoped to this
+  // manager. Populated by renderSwapLog(ROSTER_SWAP_LOG_ID, ...) once the container is in the DOM
+  // (renderRosterData does it right after setting innerHTML).
   html += `<div class="swap-list-section">
-    <h3>All Swaps</h3>`;
-  if (mySwaps.length > 0) {
-    const sorted = [...mySwaps].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-    html += '<div class="table-wrapper"><table class="data-table compact-table swap-table"><thead><tr>';
-    html += '<th>Player In</th><th>Player Out</th><th>Reason</th><th>Date</th><th>Status</th>';
-    html += '</tr></thead><tbody>';
-    sorted.forEach((s) => {
-      const status = s.status || 'approved';
-      const badgeClass =
-        status === 'approved'
-          ? 'swap-badge-approved'
-          : status === 'pending'
-            ? 'swap-badge-pending'
-            : 'swap-badge-denied';
-      const badgeLabel = status.charAt(0).toUpperCase() + status.slice(1);
-      const date = s.swap_date || serverTimestampLocalDate(s.timestamp);
-      html += `<tr>`;
-      html += `<td>${s.player_in ? displayPlayer(s.player_in, seasonData) : '—'}</td>`;
-      html += `<td>${s.player_out ? displayPlayer(s.player_out, seasonData) : '—'}</td>`;
-      html += `<td>${esc(s.reason || '')}</td>`;
-      html += `<td>${date}</td>`;
-      html += `<td><span class="swap-badge ${badgeClass}">${badgeLabel}</span></td>`;
-      html += `</tr>`;
-    });
-    html += '</tbody></table></div>';
-  } else {
-    html += '<p class="text-muted">No swaps recorded.</p>';
-  }
-  html += '</div>';
+    <h3>All Swaps</h3>
+    <p class="text-muted" style="margin-bottom:0.75rem;">Click any swap to see its full details.</p>
+    <div id="${ROSTER_SWAP_LOG_ID}"></div>
+  </div>`;
 
   // ---- Initial Player Submission ----
   if (isActive) {
@@ -10408,8 +10469,9 @@ function setupCommTabs() {
 const _swapLogState = {};
 function getSwapLogState(containerId) {
   if (!_swapLogState[containerId]) {
-    // manager/type: '' = "All" (no filtering).
-    _swapLogState[containerId] = { manager: '', type: '', expanded: new Set(), editable: false };
+    // manager/type: '' = "All" (no filtering). scopeManager pins the log to a single manager
+    // (the My Roster copy) — unlike the `manager` filter it is not user-changeable.
+    _swapLogState[containerId] = { manager: '', type: '', expanded: new Set(), editable: false, scopeManager: null };
   }
   return _swapLogState[containerId];
 }
@@ -10439,8 +10501,21 @@ function serverTimestampLocalDate(ts) {
   return d ? fmtDateISO(d) : '';
 }
 
+// True while an approved swap's add date is still in the future — the swap is recorded but has
+// not taken effect yet, so both rosters are still the pre-swap ones.
+function swapIsScheduled(s) {
+  if (!s || s.status !== 'approved') return false;
+  const effective = s.add_date || s.requested_effective_date || s.effective_date;
+  return !!effective && effective > isoDateET(new Date());
+}
+
 function swapStatusBadge(s) {
-  if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
+  if (s.status === 'approved') {
+    const scheduled = swapIsScheduled(s)
+      ? ` <span class="swap-badge swap-badge-scheduled">Scheduled ${fmtShortDate(s.add_date || s.requested_effective_date || s.effective_date)}</span>`
+      : '';
+    return `<span class="swap-badge swap-badge-approved">Approved</span>${scheduled}`;
+  }
   if (s.status === 'denied') return '<span class="swap-badge swap-badge-denied">Denied</span>';
   if (s.status === 'undone') return '<span class="swap-badge swap-badge-denied">Undone</span>';
   return '<span class="swap-badge swap-badge-pending">Pending</span>';
@@ -10495,9 +10570,9 @@ function swapDetailHtml(s, sd, containerId, editable) {
   // restores the original) rather than stacking a reverse swap. See POST /swaps/:id/undo.
   let actions = '';
   if (s.status === 'approved' && isLoggedInCommissioner()) {
-    actions = `<div class="swap-detail-actions" style="margin-top:0.6rem;">
+    actions = `<div class="swap-detail-actions">
         <button class="btn btn-sm btn-danger" onclick="undoSwap('${jsStr(s.id)}')">Undo swap</button>
-        <span class="text-muted" style="font-size:0.8rem;margin-left:0.5rem;">Removes ${esc(s.player_in || '')}, restores ${esc(s.player_out || '')}.</span>
+        <span class="swap-detail-actions-note">Removes ${esc(s.player_in || '')}, restores ${esc(s.player_out || '')}.</span>
       </div>`;
   }
   return `<div class="swap-detail-panel">${items}${actions}</div>`;
@@ -10517,18 +10592,25 @@ function swapFilterSelectHtml(containerId, label, kind, allValues, selected, all
 // Render the swap log into `containerId`. When `editable` is true (commissioner),
 // the reason cell becomes an inline dropdown; otherwise it is read-only. The same
 // details are available to everyone via the click-to-expand row.
-function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommissioner()) {
+// `scopeManager` pins the log to one manager's swaps — the My Roster copy, which shows the same
+// rows and the same expandable detail panel as the league-wide log, minus the Manager column
+// and its filter.
+function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommissioner(), scopeManager = null) {
   const container = document.getElementById(containerId);
   if (!container) return;
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
-  const allSwaps = sd && sd.swaps ? [...sd.swaps] : [];
+  const emailMap = (DATA && DATA.email_map) || {};
+  const managerOf = (s) => s.manager || emailMap[s.email] || s.email || '';
+  let allSwaps = [...getSeasonSwaps(sd)];
 
   const state = getSwapLogState(containerId);
   state.editable = editable;
+  state.scopeManager = scopeManager;
+  if (scopeManager) allSwaps = allSwaps.filter((s) => managerOf(s) === scopeManager);
 
   if (allSwaps.length === 0) {
-    container.innerHTML = '<p class="text-muted">No swap history yet.</p>';
+    container.innerHTML = `<p class="text-muted">${scopeManager ? 'No swaps recorded.' : 'No swap history yet.'}</p>`;
     return;
   }
 
@@ -10540,7 +10622,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
   });
 
   // Available filter values from the full swap set.
-  const allManagers = [...new Set(allSwaps.map((s) => s.manager).filter(Boolean))].sort();
+  const allManagers = [...new Set(allSwaps.map(managerOf).filter(Boolean))].sort();
   const allTypes = [...new Set(allSwaps.map((s) => s.reason || SWAP_NO_REASON_LABEL))].sort();
 
   // Drop a saved selection that no longer matches any swap (e.g. after a season switch).
@@ -10549,11 +10631,13 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
 
   const typeOf = (s) => s.reason || SWAP_NO_REASON_LABEL;
   const filtered = allSwaps.filter(
-    (s) => (!state.manager || s.manager === state.manager) && (!state.type || typeOf(s) === state.type)
+    (s) => (!state.manager || managerOf(s) === state.manager) && (!state.type || typeOf(s) === state.type)
   );
 
   let html = '<div class="swap-log-filters">';
-  html += swapFilterSelectHtml(containerId, 'Manager', 'manager', allManagers, state.manager, 'All managers');
+  if (!scopeManager) {
+    html += swapFilterSelectHtml(containerId, 'Manager', 'manager', allManagers, state.manager, 'All managers');
+  }
   html += swapFilterSelectHtml(containerId, 'Type', 'type', allTypes, state.type, 'All types');
   html += '</div>';
 
@@ -10563,8 +10647,11 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
     return;
   }
 
+  const cols = scopeManager ? 6 : 7;
   html +=
-    '<table class="data-table swap-log-table"><thead><tr><th style="width:1.5rem;"></th><th>Manager</th><th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
+    '<table class="data-table swap-log-table"><thead><tr><th style="width:1.5rem;"></th>' +
+    (scopeManager ? '' : '<th>Manager</th>') +
+    '<th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
   filtered.forEach((s) => {
     const date = serverTimestampLocalDate(s.timestamp) || s.swap_date || '';
     const outTxt = displayPlayer(s.player_out || '—', sd);
@@ -10582,7 +10669,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
     }
     html += `<tr class="swap-log-row${isOpen ? ' swap-log-row-open' : ''}" onclick="toggleSwapDetail('${containerId}','${s.id}')">
       <td class="swap-log-caret">${isOpen ? '▾' : '▸'}</td>
-      <td>${esc(s.manager || '—')}</td>
+      ${scopeManager ? '' : `<td>${esc(managerOf(s) || '—')}</td>`}
       <td>${outTxt}</td>
       <td>${inTxt}</td>
       <td style="white-space:nowrap;font-size:0.82rem;">${date}</td>
@@ -10590,7 +10677,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
       <td style="font-size:0.82rem;color:var(--text-muted);">${reasonCell}</td>
     </tr>`;
     html += `<tr class="swap-log-detail-row" id="swap-detail-${containerId}-${s.id}" style="display:${isOpen ? '' : 'none'};">
-      <td colspan="7">${swapDetailHtml(s, sd, containerId, editable)}</td>
+      <td colspan="${cols}">${swapDetailHtml(s, sd, containerId, editable)}</td>
     </tr>`;
   });
   html += '</tbody></table>';
@@ -10620,14 +10707,14 @@ window.swapLogSetFilter = function (containerId, kind, value) {
   const state = getSwapLogState(containerId);
   if (kind === 'manager') state.manager = value;
   else state.type = value;
-  renderSwapLog(containerId, state.editable);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
 };
 
 window.saveSwapLogReason = async function (containerId, swapId, newReason) {
   const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', { reason: newReason });
   if (!result) return;
   const state = getSwapLogState(containerId);
-  renderSwapLog(containerId, state.editable);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
 };
 
 // Commissioner: edit a swap's drop/add date from the Swap Log detail panel. Changing the add
@@ -10637,7 +10724,7 @@ window.saveSwapLogReason = async function (containerId, swapId, newReason) {
 window.saveSwapLogDate = async function (containerId, swapId, field, value) {
   const state = getSwapLogState(containerId);
   if (!value) {
-    renderSwapLog(containerId, state.editable); // restore the old value in the input
+    renderSwapLog(containerId, state.editable, state.scopeManager); // restore the old value in the input
     return;
   }
   const body = { [field]: value };
@@ -10654,7 +10741,7 @@ window.saveSwapLogDate = async function (containerId, swapId, field, value) {
       /* offline — local view may lag until reload */
     }
   }
-  renderSwapLog(containerId, state.editable);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
 };
 
 // ---- MLB API Sync Log (Commissioner Tab: Stats Data) ----
@@ -12873,6 +12960,51 @@ window.updateCommRosterWeekView = function (managerName) {
     };
   }
 
+  // A SCHEDULED (future-dated) swap is recorded — and applied to the derived roster arrays — the
+  // moment it is submitted. Re-derive both ends from the date windows AS OF TODAY so it doesn't
+  // take effect early here either (same rule as buildPerWeekRoster):
+  //   commPendingDrop — outgoing player, still rostered and still scoring until their drop date.
+  //   commPendingAdd  — incoming player, listed but not on the roster until their add date.
+  const commToday = isoDateET(new Date());
+  const commPeriodStart = periodStartForRound(sd, round);
+  const commStatusAsOfToday = (player) => {
+    const entries = [];
+    for (const wkDates of Object.values(commMgrRosterDates)) {
+      if (wkDates[player]) entries.push(wkDates[player]);
+    }
+    return rosterStatusAsOf(entries, { periodStart: commPeriodStart, asOf: commToday });
+  };
+  const commPendingDrop = new Set();
+  const commPendingAdd = new Set();
+  for (const [p, d] of Object.entries(rosterDates)) {
+    if (d.drop_date && d.drop_date > commToday && commStatusAsOfToday(p) === 'active') commPendingDrop.add(p);
+    if (d.add_date && d.add_date > commToday && commStatusAsOfToday(p) === 'scheduled') commPendingAdd.add(p);
+  }
+  if (commPendingDrop.size > 0) {
+    // The arrays are a derived cache — put the still-rostered player back where roster_dates says.
+    const commBatPool = new Set(sd.batters_pool || []);
+    const commPitPool = new Set(sd.pitchers_pool || []);
+    const commPoolTypeOf = (player) => {
+      const inBat = commBatPool.has(player);
+      const inPit = commPitPool.has(player);
+      if (inBat && !inPit) return 'batters';
+      if (inPit && !inBat) return 'pitchers';
+      for (const wr of Object.values(commMgrRosters)) {
+        if ((wr.batters || []).includes(player)) return 'batters';
+        if ((wr.pitchers || []).includes(player)) return 'pitchers';
+      }
+      if (batting.some((b) => b.batter === player)) return 'batters';
+      if (pitching.some((p) => p.pitcher === player)) return 'pitchers';
+      return null;
+    };
+    const restore = (listKey) =>
+      [...commPendingDrop].filter((p) => commPoolTypeOf(p) === listKey && !roster[listKey].includes(p));
+    roster = {
+      batters: roster.batters.concat(restore('batters')),
+      pitchers: roster.pitchers.concat(restore('pitchers')),
+    };
+  }
+
   // Build the complete set of batters/pitchers who were on the roster at ANY point this week.
   // Sources: current roster (pool-filtered) + roster_dates (commissioner add/drop) + approved swaps.
   // Swap-added players are only included if they have actual stats or a roster_dates entry —
@@ -12937,10 +13069,11 @@ window.updateCommRosterWeekView = function (managerName) {
       allWeekPitching.push(p);
     }
   });
-  // Players dropped during this week (drop_date in current rosterDates) are treated as historical.
+  // Players dropped during this week (drop_date in current rosterDates) are treated as historical —
+  // unless the drop is still scheduled, in which case they are simply on the roster.
   const commDroppedThisWeek = new Set(
     Object.entries(rosterDates)
-      .filter(([, d]) => d.drop_date)
+      .filter(([p, d]) => d.drop_date && !commPendingDrop.has(p))
       .map(([p]) => p)
   );
 
@@ -12982,7 +13115,10 @@ window.updateCommRosterWeekView = function (managerName) {
     const end = dates.drop_date || (weekDates ? weekDates.end : null);
     if (!start || !end) return '';
     const hasSwap = !!(dates.add_date || dates.drop_date);
-    return ` <span class="roster-date-tag${hasSwap ? ' roster-date-swap' : ''}">${fmtDateRangeShort(start, end)}</span>`;
+    // A date still ahead of today belongs to a scheduled swap that hasn't taken effect.
+    const scheduled = dates.add_date > commToday || dates.drop_date > commToday;
+    const cls = `roster-date-tag${hasSwap ? ' roster-date-swap' : ''}${scheduled ? ' roster-date-scheduled' : ''}`;
+    return ` <span class="${cls}">${fmtDateRangeShort(start, end)}</span>`;
   }
 
   // ---- Batters Table ----
@@ -13005,7 +13141,8 @@ window.updateCommRosterWeekView = function (managerName) {
     .filter((b) => historicalBatters.has(b.batter))
     .reduce((s, b) => s + (b.weekly_score || 0), 0);
 
-  const commActiveBatCount = roster.batters.filter((p) => !commDroppedThisWeek.has(p)).length;
+  // A scheduled add is listed but not yet counted — the roster is still the pre-swap one.
+  const commActiveBatCount = roster.batters.filter((p) => !commDroppedThisWeek.has(p) && !commPendingAdd.has(p)).length;
   let batHtml = `<div class="wrs-group-label">BATTERS (${commActiveBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
   if (allBattersThisWeek.size > 0) {
@@ -13020,7 +13157,11 @@ window.updateCommRosterWeekView = function (managerName) {
     allBattersThisWeek.forEach((p) => (commBatScoreByPlayer[p] = (batStatMap[p] || {}).weekly_score || 0));
     orderWithSwapChains([...allBattersThisWeek], commBatScoreByPlayer, approvedSwaps, managerName).forEach((batter) => {
       const s = batStatMap[batter] || {};
-      const onRoster = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
+      // canDrop keys off raw array membership so a commissioner can still cancel a scheduled add;
+      // onRoster is the as-of-today status that drives the greying and the date tag.
+      const canDrop = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
+      const isScheduled = commPendingAdd.has(batter);
+      const onRoster = canDrop && !isScheduled;
       const wkRank = weekRanks.batRanks[batter];
       const cumScore = commBatCum[batter] || 0;
       const cumRank = cumRankings.batRanks[batter];
@@ -13031,8 +13172,8 @@ window.updateCommRosterWeekView = function (managerName) {
         pDates.add_date || pDates.drop_date
           ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
           : ' <span class="wrs-hist-tag">not rostered</span>';
-      batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
+      batHtml += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+      batHtml += `<td>${displayPlayer(batter, sd)}${isScheduled || onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
       batHtml += `<td class="num${manual('1b')}">${s['1b'] || 0}</td>`;
       batHtml += `<td class="num${manual('2b')}">${s['2b'] || 0}</td>`;
@@ -13048,7 +13189,7 @@ window.updateCommRosterWeekView = function (managerName) {
       batHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
       batHtml += `<td style="white-space:nowrap;">`;
       batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
-      if (onRoster) {
+      if (canDrop) {
         batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button> `;
       }
       batHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Remove</button>`;
@@ -13092,7 +13233,9 @@ window.updateCommRosterWeekView = function (managerName) {
     .filter((p) => historicalPitchers.has(p.pitcher))
     .reduce((s, p) => s + (p.weekly_score || 0), 0);
 
-  const commActivePitCount = roster.pitchers.filter((p) => !commDroppedThisWeek.has(p)).length;
+  const commActivePitCount = roster.pitchers.filter(
+    (p) => !commDroppedThisWeek.has(p) && !commPendingAdd.has(p)
+  ).length;
   let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${commActivePitCount}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
   if (allPitchersThisWeek.size > 0) {
@@ -13107,7 +13250,9 @@ window.updateCommRosterWeekView = function (managerName) {
     orderWithSwapChains([...allPitchersThisWeek], commPitScoreByPlayer, approvedSwaps, managerName).forEach(
       (pitcher) => {
         const s = pitStatMap[pitcher] || {};
-        const onRoster = roster.pitchers.includes(pitcher) && !commDroppedThisWeek.has(pitcher);
+        const canDrop = roster.pitchers.includes(pitcher) && !commDroppedThisWeek.has(pitcher);
+        const isScheduled = commPendingAdd.has(pitcher);
+        const onRoster = canDrop && !isScheduled;
         const wkRank = weekRanks.pitRanks[pitcher];
         const cumScore = commPitCum[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
@@ -13118,8 +13263,8 @@ window.updateCommRosterWeekView = function (managerName) {
           pDates.add_date || pDates.drop_date
             ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
             : ' <span class="wrs-hist-tag">not rostered</span>';
-        pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : pitDroppedTag}</td>`;
+        pitHtml += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        pitHtml += `<td>${displayPlayer(pitcher, sd)}${isScheduled || onRoster ? commDateTag(pitcher) : pitDroppedTag}</td>`;
         pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
         pitHtml += `<td class="num${manual('w')}">${s.w || 0}</td>`;
         pitHtml += `<td class="num${manual('qs')}">${s.qs != null ? fmtDec(s.qs) : 0}</td>`;
@@ -13137,7 +13282,7 @@ window.updateCommRosterWeekView = function (managerName) {
         pitHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
         pitHtml += `<td style="white-space:nowrap;">`;
         pitHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safeP}','${weekKey}')">Edit</button> `;
-        if (onRoster) {
+        if (canDrop) {
           pitHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button> `;
         }
         pitHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Remove</button>`;

@@ -9787,6 +9787,11 @@ app.get('/api/mlb/live', async (req, res) => {
     // their own submission, so a PP1 holdover with no drop must not appear here.
     // Mirrors managerWeekSubtotal and rebuildRosterArraysFromDates. null = PP1 (no bound).
     const periodStart = periodStartForRound(sd, weekRound);
+    // Evaluate the windows AS OF TODAY, not the week's end: a SCHEDULED (future-dated) swap is
+    // recorded the moment it is submitted, so bounding by the week end would apply it early —
+    // dropping a player who is still rostered (and still scoring) and adding one who isn't on yet.
+    // today is inside [start, end] by construction (that is how activeIdx was picked).
+    const asOf = today;
     const managerBatters = {}; // manager -> string[]
     const managerPitchers = {}; // manager -> string[]
     const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
@@ -9805,7 +9810,7 @@ app.get('/api/mlb/live', async (req, res) => {
             if (
               d.add_date &&
               (!periodStart || d.add_date >= periodStart) &&
-              (!end || d.add_date <= end) &&
+              (!asOf || d.add_date <= asOf) &&
               (!latestAdd[p] || d.add_date > latestAdd[p])
             ) {
               latestAdd[p] = d.add_date;
@@ -9813,7 +9818,7 @@ app.get('/api/mlb/live', async (req, res) => {
             if (
               d.drop_date &&
               (!periodStart || d.drop_date >= periodStart) &&
-              (!end || d.drop_date <= end) &&
+              (!asOf || d.drop_date <= asOf) &&
               (!latestDrop[p] || d.drop_date > latestDrop[p])
             ) {
               latestDrop[p] = d.drop_date;

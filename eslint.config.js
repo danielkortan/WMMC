@@ -38,6 +38,7 @@ const projectGlobals = {
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
   checkSwapLimit: 'readonly',
+  rosterStatusAsOf: 'readonly',
 };
 
 const projectRules = {
