@@ -3336,6 +3336,50 @@ html.wmmc-has-session #login-screen {
   overflow-wrap: anywhere;
 }
 
+/* Manager's inline editor for a swap that hasn't taken effect yet. Full-width footer under the
+   detail grid, same as the actions row it drops out of. */
+.swap-sched-edit {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, rgba(0, 0, 0, 0.02));
+}
+
+.swap-sched-edit-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.swap-sched-edit-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: 0.85rem;
+}
+
+.swap-sched-edit-fields label span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.swap-sched-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  min-width: 0;
+}
+
 .swap-detail-key {
   color: var(--text-muted);
   text-transform: uppercase;

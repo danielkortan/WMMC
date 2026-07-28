@@ -1742,6 +1742,36 @@ app.post('/api/seasons/:year/swaps/:id/deny', requireCommissioner, (req, res) =>
   res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 });
 
+// A swap is SCHEDULED while its add date has not arrived: nothing has actually moved yet — the
+// incoming player is not on the roster and the outgoing player is still scoring — so the manager
+// who submitted it can still change or cancel it themselves. The moment it takes effect the
+// roster and the scoring windows are live and only the commissioner may touch it.
+// Returns { status, body } to reject with, or null when the caller may proceed.
+function swapModifyGuard(req, swap) {
+  if (req.manager && req.manager.commissioner) return null; // commissioners are unrestricted
+  if (!swap.manager || swap.manager !== (req.manager || {}).name) {
+    return { status: 403, body: { error: 'You can only change your own swaps.', code: 'not_your_swap' } };
+  }
+  if (swap.status !== 'approved' && swap.status !== 'pending') {
+    return {
+      status: 409,
+      body: { error: `This swap is ${swap.status} and can no longer be changed.`, code: 'swap_not_open' },
+    };
+  }
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const effective = swap.add_date || swap.effective_date || swap.requested_effective_date;
+  if (!effective || effective <= todayET) {
+    return {
+      status: 403,
+      body: {
+        error: 'This swap has already taken effect — only the commissioner can change it now.',
+        code: 'swap_already_effective',
+      },
+    };
+  }
+  return null;
+}
+
 // PUT /api/seasons/:year/swaps/:id — atomically patch a swap's own fields (player_out, player_in,
 // reason, swap_date, effective_date, add_date, drop_date). Record-only edits (reason, players,
 // swap_date) behave exactly as before: they edit the swap RECORD only and do not rebuild rosters.
@@ -1751,7 +1781,13 @@ app.post('/api/seasons/:year/swaps/:id/deny', requireCommissioner, (req, res) =>
 // integrity guard — a flagged edit is rejected (409, no write) unless { force: true }. Replaces
 // the whole-season POST so an edit can't be lost to a stale 409 or clobber unrelated data.
 // Part of #275 (ROSTER_OPS_PLAN.md §3b); date editing added with the scheduled-swaps change.
-app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
+//
+// Managers may also call this, but only for their own still-SCHEDULED swap (swapModifyGuard) and
+// only for the two fields that are safe to change without re-running submission: the effective
+// date and the reason. Changing the PLAYERS is commissioner-only — a player swap on a live record
+// would leave the previous pair's roster windows behind, and the swap-limit/IL checks belong to
+// the submission path — so a manager cancels and resubmits instead.
+app.put('/api/seasons/:year/swaps/:id', requireAuth, async (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
   }
@@ -1782,6 +1818,60 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
     }
   }
 
+  const isCommish = !!req.manager.commissioner;
+  if (!isCommish) {
+    const denied = swapModifyGuard(req, swap);
+    if (denied) return res.status(denied.status).json(denied.body);
+    if (playerOut !== undefined || playerIn !== undefined || swapDate !== undefined || force) {
+      return res.status(403).json({
+        error:
+          'To change the players in a scheduled swap, cancel it and submit a new one — that re-checks your swap limits and IL status.',
+        code: 'manager_field_not_editable',
+      });
+    }
+    // Same rules the submission path enforces for a scheduled date: strictly forward (a date that
+    // is today or earlier means "apply now", which is no longer a scheduled swap), and no later
+    // than the end of the round — a new period starts fresh from its own submission.
+    if (isISODate(addDate)) {
+      const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      if (addDate <= todayET) {
+        return res.status(400).json({
+          error:
+            'A scheduled swap must stay in the future. To apply it right away, cancel it and submit a new swap with today as the effective date.',
+          code: 'effective_date_not_future',
+        });
+      }
+      const roundEnd = scheduleRoundEndDate(sd, swap.round || currentScheduleRound(sd).round);
+      if (roundEnd && addDate > roundEnd) {
+        return res.status(400).json({
+          error: `The effective date can be no later than the end of the current round (${roundEnd}).`,
+          code: 'effective_date_past_round',
+        });
+      }
+    }
+    // A reason change moves which allotment the swap spends, so re-run the same checks submission
+    // does — with THIS swap excluded, so re-saving an unchanged reason can't collide with itself.
+    if (typeof reason === 'string' && reason && reason !== swap.reason) {
+      const others = (sd.swaps || []).filter((s) => String(s.id) !== String(swap.id));
+      const limitError = checkSwapLimit(others, swap.manager, reason, swap.round);
+      if (limitError) return res.status(400).json({ error: limitError, code: 'swap_limit' });
+      if (reason === 'IL Swap') {
+        const il = await fetchPlayerILStatus(sd, req.params.year, swap.player_out);
+        if (il.checked && !il.onIL) {
+          return res.status(400).json({
+            error:
+              `${swap.player_out} is not on the official MLB injured list` +
+              `${il.status ? ` (current status: ${il.status})` : ''}. ` +
+              `An IL swap requires the player you're dropping to be on the IL — use your Free, Drop, or Trade swap instead.`,
+            code: 'not_on_il',
+          });
+        }
+        swap.il_status = il.checked ? il.status : 'unverified';
+        if (!il.checked) swap.il_reason = il.reason;
+      }
+    }
+  }
+
   // Only an approved swap has live roster windows to move; pending swaps get their dates read at
   // approval time, so a record-only update suffices there.
   const scoringDatesChanged =
@@ -1802,6 +1892,14 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
   }
   if (isISODate(dropDate)) swap.drop_date = dropDate;
   if (isISODate(effectiveDate)) swap.effective_date = effectiveDate;
+  // A manager sends only the effective (add) date; rebuild the canonical scheduled-swap window
+  // shape the submission path produces — drop the day before, add on the date.
+  if (!isCommish && isISODate(addDate)) {
+    swap.drop_date = isoDateAddDays(addDate, -1);
+    swap.effective_date = addDate;
+    swap.requested_effective_date = addDate;
+    swap.teams_started = [];
+  }
 
   let totalsDelta;
   if (reapply) {
@@ -1818,7 +1916,16 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
         req.get('X-User-Email')
       );
       writeDB(db);
-      return res.status(409).json({ error: 'destructive_swap_edit_blocked', reasons: integrity.reasons });
+      // The commissioner can retry with { force }; a manager cannot, so tell them what to do next.
+      return res.status(409).json({
+        error: 'destructive_swap_edit_blocked',
+        reasons: integrity.reasons,
+        ...(isCommish
+          ? {}
+          : {
+              detail: `This change would move scores (${integrity.reasons.join('; ')}). Ask the commissioner to make it.`,
+            }),
+      });
     }
 
     const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -1845,6 +1952,7 @@ app.put('/api/seasons/:year/swaps/:id', requireCommissioner, (req, res) => {
       drop_date: swap.drop_date,
       reapplied: !!reapply,
       forced: !!force,
+      by_manager: !isCommish,
     },
     req.get('X-User-Email')
   );
@@ -2045,9 +2153,14 @@ app.post('/api/seasons/:year/swaps/:id/approve', requireCommissioner, (req, res)
 // window (the bug that brought us here); undo instead erases the records this swap created — it
 // removes player_in entirely (roster array + roster_dates window + stat attribution) and lifts the
 // drop_date it stamped on player_out — restoring the roster to its pre-swap state with no residue.
-// Commissioner-only. A revert can legitimately drop a manager's total (player_in's points go away),
-// so it guards on a ≥40-pt crater and requires { force } to override. Part of #275.
-app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) => {
+// A revert can legitimately drop a manager's total (player_in's points go away), so it guards on a
+// ≥40-pt crater and requires { force } to override. Part of #275.
+//
+// Open to the commissioner for any approved swap, and to a manager for their own still-SCHEDULED
+// swap (swapModifyGuard) — cancelling before the effective date. Because nothing has taken effect
+// yet, that cancel can't crater anything and a manager never gets the force override; if the guard
+// somehow fires the swap is left alone and they're pointed at the commissioner.
+app.post('/api/seasons/:year/swaps/:id/undo', requireAuth, (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
   }
@@ -2056,12 +2169,18 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) =>
   if (!sd) return res.status(404).json({ error: 'Season not found' });
   const swap = findSwap(sd, req.params.id);
   if (!swap) return res.status(404).json({ error: 'Swap not found' });
+  const isCommish = !!req.manager.commissioner;
+  if (!isCommish) {
+    const denied = swapModifyGuard(req, swap);
+    if (denied) return res.status(denied.status).json(denied.body);
+  }
   if (swap.status !== 'approved') {
     return res
       .status(409)
       .json({ error: 'swap_not_approved', detail: `Only an approved swap can be undone (this is ${swap.status}).` });
   }
-  const { force } = req.body || {};
+  // A manager can never force past the crater guard — that override is the commissioner's call.
+  const force = isCommish ? (req.body || {}).force : false;
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const originalSd = JSON.parse(JSON.stringify(sd));
 
@@ -2146,7 +2265,7 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) =>
     addAuditEntry(
       db,
       'swap_undo_blocked',
-      { year: req.params.year, id: swap.id, reasons: craters },
+      { year: req.params.year, id: swap.id, reasons: craters, by_manager: !isCommish },
       req.get('X-User-Email')
     );
     writeDB(db);
@@ -2154,7 +2273,13 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) =>
       `:warning: *Swap undo blocked (${req.params.year})* — ${swap.manager}: removing ${swap.player_in}, restoring ${swap.player_out}.\n• ` +
         `${craters.join('\n• ')}\nRe-run with force to apply.`
     ).catch(() => {});
-    return res.status(409).json({ error: 'destructive_undo_blocked', reasons: craters });
+    // A manager has no force override — a scheduled cancel shouldn't be able to trip this at all,
+    // so if it does, something is off and the commissioner needs to look at it.
+    return res.status(409).json({
+      error: 'destructive_undo_blocked',
+      reasons: craters,
+      ...(isCommish ? {} : { detail: 'Cancelling this swap would change scores. Ask the commissioner to undo it.' }),
+    });
   }
 
   db.seasons[req.params.year] = sd;
@@ -2168,6 +2293,7 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireCommissioner, (req, res) =>
       player_out: swap.player_out,
       player_in: swap.player_in,
       forced: !!force,
+      by_manager: !isCommish,
     },
     req.get('X-User-Email')
   );

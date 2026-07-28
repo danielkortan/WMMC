@@ -1183,7 +1183,7 @@ async function savePool(year, type, pool, teamMap, opts = {}) {
 // denied a swap but it didn't stick and the request came back" bug — and can't clobber unrelated
 // season data. Mirrors the confirmed server swap + new _rev into localStorage. Returns the server
 // payload on success, or null on failure (caller surfaces the error). Part of #275.
-async function persistSwapMutation(year, swapId, method, path, body) {
+async function persistSwapMutation(year, swapId, method, path, body, onError) {
   try {
     const resp = await apiFetch(`/api/seasons/${year}/swaps/${swapId}${path}`, {
       method,
@@ -1193,15 +1193,26 @@ async function persistSwapMutation(year, swapId, method, path, body) {
       const err = await resp.json().catch(() => ({}));
       // A date edit on an approved swap is vetted by the server's destructive-save guard; offer
       // the commissioner an explicit override for a legitimate large correction (mirrors the
-      // approve flow's force confirm).
-      if (resp.status === 409 && err.error === 'destructive_swap_edit_blocked' && !(body && body.force)) {
+      // approve flow's force confirm). Managers have no force — the server rejects it — so they
+      // get the plain error and are pointed at the commissioner instead.
+      if (
+        resp.status === 409 &&
+        err.error === 'destructive_swap_edit_blocked' &&
+        !(body && body.force) &&
+        isLoggedInCommissioner()
+      ) {
         const reasons = (err.reasons || []).join('\n• ');
         if (confirm(`This edit looks destructive:\n\n• ${reasons}\n\nApply anyway?`)) {
           return persistSwapMutation(year, swapId, method, path, { ...(body || {}), force: true });
         }
         return null;
       }
-      alert(`Swap update failed (${err.error || resp.status}). Please reload and try again.`);
+      // The server sends a plain-English `detail` for the rejections a manager can actually hit
+      // (not yours, already in effect, players not editable, date out of range) — show that rather
+      // than the machine code, inline when the caller has somewhere to put it.
+      const msg = err.detail || err.error || `Swap update failed (${resp.status}). Please reload and try again.`;
+      if (onError) onError(msg);
+      else alert(msg);
       return null;
     }
     const data = await resp.json().catch(() => ({}));
@@ -8935,6 +8946,27 @@ function getSeasonSwaps(seasonData) {
   return [];
 }
 
+// Tomorrow (ET) as an ISO date — the earliest a manager may schedule a swap for, since only a
+// date strictly after today schedules one (today means "apply now").
+function tomorrowET() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return isoDateET(d);
+}
+
+// Last calendar day of a round — the latest a manager may schedule a swap for, since a new period
+// starts fresh from its own submission. Client twin of the server's scheduleRoundEndDate.
+function scheduleRoundEnd(seasonData, round) {
+  const dates = (seasonData && seasonData.schedule_dates) || [];
+  let end = null;
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    if (SEASON_SCHEDULE[i].round === round && dates[i] && dates[i].end) {
+      if (!end || dates[i].end > end) end = dates[i].end;
+    }
+  }
+  return end;
+}
+
 // Schedule week whose date window contains today (ET). During a gap between weeks (e.g. the
 // All-Star break) or after the season it falls back to the latest started week; before the
 // season starts, the first week.
@@ -9104,17 +9136,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     // than the end of the current round (the server enforces both; period boundaries start fresh
     // from a new submission, so scheduling across one is invalid).
     const _swapEffToday = isoDateET(new Date());
-    const _swapEffMax = (() => {
-      const { round } = getCurrentScheduleRound(seasonData);
-      const scheduleDates = seasonData.schedule_dates || [];
-      let end = null;
-      for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
-        if (SEASON_SCHEDULE[i].round === round && scheduleDates[i] && scheduleDates[i].end) {
-          if (!end || scheduleDates[i].end > end) end = scheduleDates[i].end;
-        }
-      }
-      return end;
-    })();
+    const _swapEffMax = scheduleRoundEnd(seasonData, getCurrentScheduleRound(seasonData).round);
 
     html += `<div class="swap-form-card">
       <h3>Make a Swap</h3>
@@ -10568,14 +10590,62 @@ function swapDetailHtml(s, sd, containerId, editable) {
   }
   // Commissioner-only Undo for an approved swap: cleanly reverses it (removes the added player,
   // restores the original) rather than stacking a reverse swap. See POST /swaps/:id/undo.
-  let actions = '';
-  if (s.status === 'approved' && isLoggedInCommissioner()) {
-    actions = `<div class="swap-detail-actions">
+  const actions =
+    s.status === 'approved' && isLoggedInCommissioner()
+      ? `<div class="swap-detail-actions">
         <button class="btn btn-sm btn-danger" onclick="undoSwap('${jsStr(s.id)}')">Undo swap</button>
         <span class="swap-detail-actions-note">Removes ${esc(s.player_in || '')}, restores ${esc(s.player_out || '')}.</span>
+      </div>`
+      : managerSwapActionsHtml(s, sd, containerId);
+  return `<div class="swap-detail-panel">${items}${actions}</div>`;
+}
+
+// A manager owns their swap right up until it takes effect: while it is still SCHEDULED they can
+// change the effective date or the reason, or cancel it outright. Once the add date arrives the
+// roster windows are live and only the commissioner can change it — the server enforces exactly
+// this (swapModifyGuard); these controls just mirror it. Changing the PLAYERS means cancelling and
+// resubmitting, so the swap limit and IL checks re-run on the submission path.
+function managerSwapActionsHtml(s, sd, containerId) {
+  const me = (findManagerByEmail(LOGGED_IN_EMAIL || '') || {}).name;
+  if (!me || s.manager !== me || s.status !== 'approved') return '';
+
+  const editId = `sched-edit-${containerId}-${s.id}`;
+  if (!swapIsScheduled(s)) {
+    return `<div class="swap-detail-actions">
+        <span class="swap-detail-actions-note">This swap has already taken effect — ask the commissioner if it needs to change.</span>
       </div>`;
   }
-  return `<div class="swap-detail-panel">${items}${actions}</div>`;
+
+  const effective = s.add_date || s.requested_effective_date || s.effective_date;
+  const minDate = tomorrowET(); // strictly forward, same rule the submission path enforces
+  const maxDate = scheduleRoundEnd(sd, s.round || (getCurrentScheduleRound(sd) || {}).round);
+  const reasonOpts = SWAP_REASONS.map(
+    (r) => `<option value="${esc(r)}"${r === s.reason ? ' selected' : ''}>${esc(r)}</option>`
+  ).join('');
+
+  return `<div class="swap-detail-actions">
+      <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();toggleScheduledSwapEdit('${editId}')">Edit swap</button>
+      <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();cancelScheduledSwap('${containerId}','${jsStr(s.id)}')">Cancel swap</button>
+      <span class="swap-detail-actions-note">Scheduled for ${esc(effective)} — you can change or cancel it until then.</span>
+    </div>
+    <div class="swap-sched-edit" id="${editId}" style="display:none;" onclick="event.stopPropagation()">
+      <div class="swap-sched-edit-fields">
+        <label>
+          <span>Effective Date</span>
+          <input type="date" class="form-input" id="${editId}-date" value="${esc(effective || '')}" min="${esc(minDate)}"${maxDate ? ` max="${esc(maxDate)}"` : ''}>
+        </label>
+        <label>
+          <span>Reason</span>
+          <select class="form-select" id="${editId}-reason">${reasonOpts}</select>
+        </label>
+      </div>
+      <div class="swap-sched-edit-actions">
+        <button class="btn btn-sm btn-primary" onclick="saveScheduledSwap('${containerId}','${jsStr(s.id)}')">Save changes</button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleScheduledSwapEdit('${editId}')">Close</button>
+        <span class="swap-detail-actions-note">To swap different players, cancel this swap and submit a new one.</span>
+      </div>
+      <p class="error-text" id="${editId}-error" style="display:none;"></p>
+    </div>`;
 }
 
 // Render a labeled filter dropdown; the empty value means "All" (no filtering).
@@ -10730,18 +10800,102 @@ window.saveSwapLogDate = async function (containerId, swapId, field, value) {
   const body = { [field]: value };
   if (field === 'add_date') body.effective_date = value;
   const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body);
-  if (result) {
-    try {
-      const fresh = await fetch('/api/seasons');
-      if (fresh.ok) {
-        const srv = await fresh.json();
-        if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
-      }
-    } catch (_) {
-      /* offline — local view may lag until reload */
-    }
-  }
+  if (result) await refreshSeasonsFromServer();
   renderSwapLog(containerId, state.editable, state.scopeManager);
+};
+
+// ---- Manager: change or cancel a swap that hasn't taken effect yet ----
+// The server owns the rules (swapModifyGuard: your own swap, still scheduled); these handlers just
+// drive the inline form in the swap-log detail panel and refresh the views the change moves.
+
+window.toggleScheduledSwapEdit = function (editId) {
+  const el = document.getElementById(editId);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+};
+
+// Pull the authoritative season down after a swap mutation: the server re-applies the roster
+// windows and recomputes scores, so the local copy is stale until we re-fetch (same pattern as
+// the auto-apply submission and commissioner approve flows).
+async function refreshSeasonsFromServer() {
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (fresh.ok) {
+      const srv = await fresh.json();
+      if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+    }
+  } catch (_) {
+    /* offline — local view may lag until reload */
+  }
+}
+
+// Re-render whatever swap log the action came from plus the roster page beneath it, so the
+// per-week tables and the swap row both reflect the change without a reload.
+function refreshAfterSwapChange(containerId) {
+  const state = getSwapLogState(containerId);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
+  const me = findManagerByEmail(LOGGED_IN_EMAIL || '');
+  if (me && document.getElementById('roster-content')) renderRosterData(me.name, isLoggedInCommissioner());
+  if (document.getElementById('swap-log-public')) renderSwapLog('swap-log-public', false);
+}
+
+window.saveScheduledSwap = async function (containerId, swapId) {
+  const editId = `sched-edit-${containerId}-${swapId}`;
+  const dateEl = document.getElementById(`${editId}-date`);
+  const reasonEl = document.getElementById(`${editId}-reason`);
+  const errEl = document.getElementById(`${editId}-error`);
+  const showErr = (msg) => {
+    if (!errEl) return alert(msg);
+    errEl.textContent = msg;
+    errEl.style.display = 'block';
+  };
+  if (errEl) errEl.style.display = 'none';
+
+  const body = {};
+  if (dateEl && dateEl.value) body.add_date = dateEl.value;
+  if (reasonEl && reasonEl.value) body.reason = reasonEl.value;
+  if (!Object.keys(body).length) return;
+  // Mirror the server's forward-only rule so the common mistake gets an answer without a round trip.
+  if (body.add_date && body.add_date <= isoDateET(new Date())) {
+    return showErr(
+      'A scheduled swap must stay in the future. To apply it right away, cancel it and submit a new swap effective today.'
+    );
+  }
+
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body, showErr);
+  if (!result) return;
+  await refreshSeasonsFromServer();
+  refreshAfterSwapChange(containerId);
+};
+
+window.cancelScheduledSwap = async function (containerId, swapId) {
+  const sd = getSeasons()[SELECTED_SEASON];
+  const swap = ((sd && sd.swaps) || []).find((s) => String(s.id) === String(swapId));
+  if (!swap) return;
+  if (
+    !confirm(
+      `Cancel this scheduled swap? ${swap.player_out} stays on your roster, ${swap.player_in} is removed, ` +
+        'and the swap goes back into your allotment for this round.'
+    )
+  ) {
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps/${swapId}/undo`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || err.error || `Cancel failed (${resp.status}). Please reload and try again.`);
+      return;
+    }
+  } catch (e) {
+    alert(`Cancel failed — ${e.message}. Please reload and try again.`);
+    return;
+  }
+  await refreshSeasonsFromServer();
+  refreshAfterSwapChange(containerId);
 };
 
 // ---- MLB API Sync Log (Commissioner Tab: Stats Data) ----

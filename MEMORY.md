@@ -1,5 +1,59 @@
 # WMMC — Decisions Log
 
+## Managers can edit/cancel their OWN swap until it takes effect (2026-07-28)
+
+**What (commissioner request).** A manager who schedules a swap should be able to change or cancel
+it themselves right up until the effective date; once it applies, only the commissioner can touch
+it. Buttons live on the swap itself in My Roster → Swaps.
+
+**The rule, in one line:** a swap is the manager's to change while `today < swap.add_date`. Before
+that nothing has moved — the incoming player is not on the roster and the outgoing player is still
+scoring — so a change or cancel is free. From the add date on, the roster windows are live and it
+is the commissioner's call. Same predicate as the `swapIsScheduled()` badge added the same day.
+
+**Server (the authority).** New `swapModifyGuard(req, swap)` returns the rejection for a
+non-commissioner unless the swap is theirs, is `approved`/`pending`, and is still scheduled.
+Both endpoints moved from `requireCommissioner` to `requireAuth` and call it:
+
+- **`PUT /swaps/:id`** — commissioner behavior is untouched. A manager may change only the
+  **effective date** and the **reason**. Deliberately NOT the players: a player change on a live
+  record leaves the previous pair's roster windows behind, and the swap-limit/IL checks belong to
+  the submission path — so a manager cancels and resubmits, which refunds the slot (`checkSwapLimit`
+  counts only approved/pending) and re-runs every check. A manager's date goes through the same
+  rules submission enforces (strictly forward, ≤ round end) and is rebuilt into the canonical
+  scheduled shape server-side (drop = add − 1, effective = add), so the client only sends
+  `add_date`. A reason change re-runs `checkSwapLimit` with THIS swap excluded (so re-saving an
+  unchanged reason can't collide with itself) and re-verifies IL status when the new reason is
+  `IL Swap`. `force` is rejected for managers.
+- **`POST /swaps/:id/undo`** — a manager can cancel their own scheduled swap. `force` is
+  commissioner-only, and the 409 carries a manager-readable `detail` pointing at the commissioner.
+
+**Client.** `managerSwapActionsHtml` adds **Edit swap** / **Cancel swap** to the swap-log detail
+panel for the owner while it is scheduled (an inline Effective Date + Reason form, min = tomorrow,
+max = round end), and a read-only "already taken effect — ask the commissioner" note once it is
+live. Commissioners keep exactly the controls they had (Undo + inline date inputs) — the manager
+buttons are the `else` branch, so there are never two sets. `persistSwapMutation` gained an
+`onError` callback so these rejections render inline instead of in an `alert`, and it only offers
+the destructive-guard force retry to a commissioner.
+
+**Verified** with a 19-check API permission matrix, each phase on a fresh fixture DB (another
+manager's swap → 403 `not_your_swap`; player/`force` fields → 403 `manager_field_not_editable`;
+today-or-earlier → 400 `effective_date_not_future`; past round end → 400
+`effective_date_past_round`; own scheduled swap edit → 200 with windows re-stamped and the
+canonical shape preserved; cancel → `undone` with the incoming player's window erased and the
+outgoing player's drop lifted; undone swap → 409 `swap_not_open`; backdated swap → 403
+`swap_already_effective` for the manager but 200 for the commissioner). Playwright drove both
+buttons end-to-end as a NON-commissioner at 1280×950 and 390×844: the edit moves the date and the
+per-week roster table updates live to "Drops Jul 31" / "Adds Aug 1", the cancel restores the
+outgoing player as a plain active row, no page errors, no horizontal overflow. Commissioner view
+re-checked as unchanged. Per-manager totals byte-identical. 169/169 tests, lint + format clean.
+
+**Fixture gotcha worth remembering.** A synthetic season with weekly rows but NO daily rows makes
+any date edit look catastrophic: `recomputeMidWeekAddScores` re-windows the weekly score, finds no
+dailies to re-sum, and zeroes it — tripping `assessSeasonWriteIntegrity` with a fake ≥40-pt crater.
+It fires identically for the commissioner, so it is the fixture, not the product. Give the players
+a date edit touches real `daily_batting`/`daily_pitching` rows before concluding anything.
+
 ## A scheduled swap must not apply early in the roster VIEWS (2026-07-28)
 
 **Symptom (commissioner).** A swap submitted 7/28 effective 7/31 showed all the right
