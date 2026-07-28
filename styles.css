@@ -2410,48 +2410,410 @@ html.wmmc-has-session #login-screen {
 }
 
 /* ============================================================ */
-/* Roster Scoring Summary Grid */
+/* My Roster — season scoring flow                              */
+/* Pool Play panel (total + PP1/PP2 nested) connecting down     */
+/* into the QF -> SF -> Finals track. Built by                  */
+/* renderRosterScoreFlow in app.js.                             */
 /* ============================================================ */
 
-.roster-score-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+.score-flow {
+  margin-bottom: 1.25rem;
 }
 
-.roster-score-card {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  text-align: center;
-}
-
-.roster-score-total {
-  border-color: var(--primary);
-  background: rgba(59, 130, 246, 0.06);
-}
-
-.roster-score-label {
-  font-size: 0.75rem;
-  font-weight: 600;
+.sf-eyebrow {
+  font-size: 0.7rem;
+  font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 0.25rem;
+  letter-spacing: 0.08em;
 }
 
-.roster-score-value {
-  font-size: 1.4rem;
+.sf-sep {
+  margin: 0 0.4em;
+  opacity: 0.5;
+}
+
+/* ---- Pool Play panel ---- */
+
+.sf-pool {
+  position: relative;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1rem 1.15rem 1.1rem;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* Navy spine marking pool play as the season's trunk. */
+.sf-pool::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--primary);
+}
+
+.sf-pool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+
+.sf-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.sf-hero-value {
+  font-size: 2.4rem;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.sf-hero-split {
+  font-size: 0.82rem;
+  color: var(--text-light);
+  font-variant-numeric: tabular-nums;
+}
+
+/* PP1 / PP2 read as the two halves the hero total is made of. */
+.sf-subs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--border);
+}
+
+.sf-sub {
+  background: rgba(0, 45, 98, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.55rem 0.75rem;
+}
+
+.sf-sub-empty {
+  opacity: 0.55;
+  border-style: dashed;
+  background: transparent;
+}
+
+.sf-sub-label {
+  font-size: 0.68rem;
   font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.sf-sub-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.sf-sub-split {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Qualification chip ---- */
+
+.sf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+  line-height: 1.25;
+}
+
+.sf-chip-mark {
+  font-size: 0.85em;
+}
+
+.sf-chip-note {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  opacity: 0.75;
+  letter-spacing: 0.01em;
+}
+
+.sf-chip-qualified {
+  background: rgba(45, 124, 45, 0.12);
+  border-color: rgba(45, 124, 45, 0.35);
+  color: var(--success);
+}
+
+.sf-chip-projected {
+  background: rgba(0, 45, 98, 0.08);
+  border-color: rgba(0, 45, 98, 0.25);
+  color: var(--primary);
+}
+
+.sf-chip-missed {
+  background: rgba(196, 30, 58, 0.1);
+  border-color: rgba(196, 30, 58, 0.32);
+  color: var(--danger);
+}
+
+.sf-chip-projected-out {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+/* ---- Connector from pool play into the bracket ---- */
+
+.sf-bridge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  height: 2.6rem;
+}
+
+.sf-bridge::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: linear-gradient(to bottom, var(--border), var(--border));
+}
+
+.sf-bridge-pill {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.75rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-muted);
+}
+
+/* Terminal connector — the line stops at the pill instead of running past it. */
+.sf-bridge-end::before {
+  bottom: 50%;
+}
+
+.sf-bridge-out .sf-bridge-pill {
+  border-color: rgba(196, 30, 58, 0.35);
+  color: var(--danger);
+}
+
+/* ---- Playoff round track ---- */
+
+.sf-rounds {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.sf-round {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem 0.8rem;
+  box-shadow: var(--shadow);
+  border-top: 3px solid var(--border);
+}
+
+.sf-round-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.15rem;
+}
+
+.sf-round-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--text);
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+}
+
+.sf-round-split {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sf-round-vs {
+  margin-top: 0.45rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+  font-size: 0.74rem;
+  color: var(--text-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sf-round-opp {
+  font-weight: 600;
   color: var(--text);
 }
 
-.roster-score-detail {
-  font-size: 0.7rem;
+.sf-round-oppscore {
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
-  margin-top: 0.2rem;
+}
+
+.sf-flag {
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0.12rem 0.4rem;
+  border-radius: 5px;
+  background: var(--border);
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+.sf-arrow {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 1.1rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.sf-arrow::before {
+  content: '\203A'; /* single right angle quote — a light chevron */
+  font-size: 1.4rem;
+  opacity: 0.6;
+}
+
+/* Round states */
+
+.sf-state-won {
+  border-top-color: var(--success);
+}
+
+.sf-state-won .sf-flag {
+  background: rgba(45, 124, 45, 0.14);
+  color: var(--success);
+}
+
+.sf-state-champion {
+  border-top-color: var(--rank1);
+  background: var(--winner);
+}
+
+.sf-state-champion .sf-flag {
+  background: var(--rank1);
+  color: #4a3b00;
+}
+
+.sf-state-runner-up {
+  border-top-color: var(--rank2);
+}
+
+.sf-state-runner-up .sf-flag {
+  background: var(--rank2);
+  color: #33333f;
+}
+
+.sf-state-third {
+  border-top-color: var(--rank3);
+}
+
+.sf-state-third .sf-flag {
+  background: rgba(205, 127, 50, 0.18);
+  color: var(--rank3);
+}
+
+.sf-state-lost {
+  border-top-color: var(--danger);
+}
+
+.sf-state-lost .sf-flag {
+  background: rgba(196, 30, 58, 0.12);
+  color: var(--danger);
+}
+
+.sf-state-live {
+  border-top-color: var(--primary);
+}
+
+.sf-state-live .sf-flag {
+  background: rgba(0, 45, 98, 0.1);
+  color: var(--primary);
+}
+
+/* Rounds not yet played (or no longer reachable) recede: no fill, no shadow,
+   dashed outline, and a flag that reads as a placeholder rather than a result. */
+.sf-state-upcoming,
+.sf-state-locked,
+.sf-state-out {
+  box-shadow: none;
+  background: transparent;
+  border-style: dashed;
+  border-top-style: dashed;
+}
+
+.sf-state-out {
+  opacity: 0.5;
+}
+
+.sf-state-upcoming .sf-round-value,
+.sf-state-locked .sf-round-value,
+.sf-state-out .sf-round-value {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.sf-state-upcoming .sf-flag,
+.sf-state-locked .sf-flag,
+.sf-state-out .sf-flag {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.sf-round-empty .sf-round-value {
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+html.theme-dark .sf-sub {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+html.theme-dark .sf-state-champion .sf-flag {
+  color: #2b2200;
 }
 
 /* ============================================================ */
@@ -3336,8 +3698,16 @@ html.wmmc-has-session #login-screen {
 /* ============================================================ */
 
 @media (max-width: 768px) {
-  .roster-score-grid {
-    grid-template-columns: repeat(3, 1fr);
+  /* Track wraps to a vertical stack; the chevrons turn to point down. */
+  .sf-rounds {
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .sf-arrow {
+    width: auto;
+    height: 0.9rem;
+    transform: rotate(90deg);
   }
 
   .period-players-groups {
