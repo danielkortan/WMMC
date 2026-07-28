@@ -7621,6 +7621,323 @@ function buildCustomDropdown(container, options, selectedValue, onChange) {
   };
 }
 
+// ============================================================
+// My Roster — season scoring flow (Pool Play panel + playoff track)
+// ============================================================
+//
+// Replaces the old flat row of stat cards. Pool play is one panel: the combined
+// total as the hero number with PP1 and PP2 nested underneath as its two halves,
+// plus a qualification chip. When the season has reached the bracket, a connector
+// flows down into a QF -> SF -> Finals track, each node carrying that round's
+// score and whether the manager advanced, went out, or is still playing.
+//
+// Round keys that roll up into one flow node. Historical seasons store the finals
+// and 3rd-place weeks under their own round names (F1/F2, 3PWK1/3PWK2) and older
+// imports use the 'PP1P'/'PP2P' variants, so each node sums every alias it owns.
+const FLOW_ROUND_ALIASES = {
+  PP1: ['PP1', 'PP1P'],
+  PP2: ['PP2', 'PP2P'],
+  QF: ['QF'],
+  SF: ['SF'],
+  Finals: ['Finals', 'F1', 'F2'],
+  Third: ['3PWK1', '3PWK2'],
+};
+
+// Sum a set of computeRosterPeriodScores entries. Returns null when none of the
+// keys have data, so callers can distinguish "not played yet" from "scored zero".
+function sumFlowPeriods(periodScores, keys) {
+  let bat = 0,
+    pit = 0,
+    found = false;
+  keys.forEach((k) => {
+    const s = periodScores[k];
+    if (!s) return;
+    found = true;
+    bat += s.batting || 0;
+    pit += s.pitching || 0;
+  });
+  if (!found) return null;
+  bat = Math.round(bat * 100) / 100;
+  pit = Math.round(pit * 100) / 100;
+  return { batting: bat, pitching: pit, total: Math.round((bat + pit) * 100) / 100 };
+}
+
+// Final pass over a built track: promote the last node to its podium state and give
+// every node its result label. Runs after the whole track is known because a
+// semifinal loss reads "Lost" (not "Eliminated") when a 3rd-place game follows it.
+function labelFlowStates(flow) {
+  const rounds = flow.rounds;
+  const last = rounds[rounds.length - 1];
+  const thirdGame = !!last && last.label === '3rd Place Game';
+  if (last && last.key === 'Finals') {
+    if (last.state === 'won') last.state = thirdGame ? 'third' : 'champion';
+    else if (last.state === 'lost' && !thirdGame) last.state = 'runner-up';
+  }
+  const FLAGS = {
+    won: 'Advanced',
+    lost: 'Eliminated',
+    champion: 'Champion',
+    'runner-up': 'Runner-Up',
+    third: '3rd Place',
+    live: 'In progress',
+    upcoming: 'Upcoming',
+    locked: 'TBD',
+    out: 'Out',
+    played: '',
+  };
+  rounds.forEach((r, i) => {
+    if (r.state === 'lost' && thirdGame) r.flag = i === rounds.length - 1 ? '4th Place' : 'Lost';
+    else r.flag = FLAGS[r.state] || '';
+  });
+  return flow;
+}
+
+// Derive the whole flow for one manager.
+//
+// Scoring invariant: every number rendered here still comes from
+// computeRosterPeriodScores (i.e. managerWeekSubtotal over the date-windowed,
+// period-scoped rosters) — the same values the old stat cards showed. The only
+// additional reads are the opponent's round total and who advanced, which come
+// from roundBreakdown/roundMatchupWinner — the Playoff Bracket card's own source —
+// so this panel can never disagree with the bracket about a result. Nothing here
+// writes to seasonData.
+function buildRosterScoreFlow(managerName, seasonData, periodScores) {
+  const pp1 = sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.PP1);
+  const pp2 = sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.PP2);
+  const flow = {
+    pool: sumFlowPeriods(periodScores, [...FLOW_ROUND_ALIASES.PP1, ...FLOW_ROUND_ALIASES.PP2]) || {
+      batting: 0,
+      pitching: 0,
+      total: 0,
+    },
+    pp1,
+    pp2,
+    hasPoolData: !!(pp1 || pp2),
+    status: null,
+    rounds: [],
+    showPlayoffs: false,
+    eliminatedInPool: false,
+  };
+
+  // ---- Historical season: the bracket snapshot is the record ----
+  if (DATA && DATA.team_weekly) {
+    const b = (DATA && DATA.bracket) || null;
+    const seedIdx = b && Array.isArray(b.seeds) ? b.seeds.findIndex((s) => s.manager === managerName) : -1;
+    const seed = seedIdx >= 0 ? seedIdx + 1 : null;
+    if (b) {
+      flow.status =
+        seed != null
+          ? { kind: 'qualified', label: `Qualified · #${seed} seed` }
+          : { kind: 'missed', label: 'Missed the playoffs' };
+      flow.eliminatedInPool = seed == null;
+      flow.showPlayoffs = seed != null;
+    }
+    if (!b || seed == null) return flow;
+
+    const inMatch = (m) => !!m && (m.manager1 === managerName || m.manager2 === managerName);
+    const mkHist = (key, label, m, score) => {
+      if (!inMatch(m)) return { key, label, score, state: score ? 'played' : 'out' };
+      const meFirst = m.manager1 === managerName;
+      return {
+        key,
+        label,
+        score,
+        state: m.winner === managerName ? 'won' : 'lost',
+        opponent: meFirst ? m.manager2 : m.manager1,
+        opponentScore: meFirst ? m.score2 : m.score1,
+      };
+    };
+    const find = (list) => (list || []).find(inMatch) || null;
+
+    flow.rounds.push(mkHist('QF', 'Quarterfinals', find(b.qf_matchups), sumFlowPeriods(periodScores, ['QF'])));
+    flow.rounds.push(mkHist('SF', 'Semifinals', find(b.sf_matchups), sumFlowPeriods(periodScores, ['SF'])));
+
+    // The final slot is whichever game they actually played — the championship or,
+    // for a semifinal loser, the 3rd-place game (its own weeks in team_weekly).
+    flow.rounds.push(
+      inMatch(b.consolation)
+        ? mkHist('Finals', '3rd Place Game', b.consolation, sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.Third))
+        : mkHist('Finals', 'Finals', b.finals, sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.Finals))
+    );
+    return labelFlowStates(flow);
+  }
+
+  if (!seasonData || seasonData.status === 'completed') return flow;
+
+  // ---- Active season ----
+  const finalized = new Set(seasonData.finalized_rounds || []);
+  const ppFinal = finalized.has('PP');
+  const seeding = getSeeding(seasonData);
+  const seedEntry = seeding ? seeding.seeds.find((s) => s.manager === managerName) : null;
+  const seed = seedEntry ? seedEntry.seed : null;
+  const inField = !!(seeding && seeding.qualifierNames.includes(managerName));
+
+  if (seeding && flow.hasPoolData) {
+    const wonPP1 = !!(seeding.pp1Leaders && seeding.pp1Leaders.has(managerName));
+    const wonPP2 = !!(seeding.pp2Leaders && seeding.pp2Leaders.has(managerName));
+    const isWildcard = !!(seeding.wildcardSet && seeding.wildcardSet.has(managerName));
+    const note =
+      wonPP1 && wonPP2
+        ? 'Won both pool periods'
+        : wonPP1
+          ? 'Won Pool Play 1'
+          : wonPP2
+            ? 'Won Pool Play 2'
+            : isWildcard
+              ? 'Wild card'
+              : '';
+    if (ppFinal) {
+      flow.status = inField
+        ? { kind: 'qualified', label: `Qualified · #${seed} seed`, note }
+        : { kind: 'missed', label: 'Missed the playoffs' };
+    } else {
+      flow.status = inField
+        ? { kind: 'projected', label: `Projected · #${seed} seed`, note }
+        : { kind: 'projected-out', label: 'Outside the playoff field' };
+    }
+  }
+  flow.eliminatedInPool = ppFinal && !!seeding && !inField;
+
+  const rosterLookup = buildRosterLookup(seasonData);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const seedRank = seedRankLookup(seasonData);
+
+  // The manager's matchup in a playoff round, or null when the round's participants
+  // aren't determined yet (prior round not finalized) or they aren't in it.
+  const myMatchup = (round) => {
+    const matchups = playoffRoundMatchups(seasonData, round);
+    if (!matchups) return null;
+    for (const m of matchups) {
+      const i = m.teams.findIndex((t) => t.name === managerName);
+      if (i >= 0) return { label: m.label, opponent: m.teams[1 - i].name };
+    }
+    return null;
+  };
+
+  let knockedOut = flow.eliminatedInPool;
+  [
+    { key: 'QF', label: 'Quarterfinals' },
+    { key: 'SF', label: 'Semifinals' },
+    { key: 'Finals', label: 'Finals' },
+  ].forEach((r) => {
+    const score = sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES[r.key]);
+    const mine = myMatchup(r.key);
+    if (!mine) {
+      flow.rounds.push({ key: r.key, label: r.label, score, state: knockedOut ? 'out' : score ? 'played' : 'locked' });
+      return;
+    }
+    const isThird = mine.label === '3rd Place';
+    const label = r.key === 'Finals' && isThird ? '3rd Place Game' : r.label;
+    const opponentScore = roundBreakdown(seasonData, mine.opponent, r.key, rosterLookup, weekKeyToStart).total;
+    if (!finalized.has(r.key)) {
+      flow.rounds.push({
+        key: r.key,
+        label,
+        score,
+        state: score && score.total ? 'live' : 'upcoming',
+        opponent: mine.opponent,
+        opponentScore,
+      });
+      return;
+    }
+    const myTotal = roundBreakdown(seasonData, managerName, r.key, rosterLookup, weekKeyToStart).total;
+    const won = roundMatchupWinner(managerName, myTotal, mine.opponent, opponentScore, seedRank) === managerName;
+    if (!won) knockedOut = true;
+    flow.rounds.push({
+      key: r.key,
+      label,
+      score,
+      state: won ? 'won' : 'lost',
+      opponent: mine.opponent,
+      opponentScore,
+    });
+  });
+
+  flow.showPlayoffs = !flow.eliminatedInPool && (ppFinal || flow.rounds.some((r) => r.score));
+  return labelFlowStates(flow);
+}
+
+// Render the flow built above. Pure presentation — no data derivation here.
+function renderRosterScoreFlow(flow) {
+  if (!flow.hasPoolData && !flow.rounds.some((r) => r.score)) return '';
+
+  const split = (s) => (s ? `Bat ${fmt(s.batting)}<span class="sf-sep">·</span>Pit ${fmt(s.pitching)}` : '&nbsp;');
+
+  const CHIP_TEXT = {
+    qualified: '✓',
+    projected: '◎',
+    missed: '✕',
+    'projected-out': '◌',
+  };
+  const chip = flow.status
+    ? `<span class="sf-chip sf-chip-${flow.status.kind}">
+         <span class="sf-chip-mark" aria-hidden="true">${CHIP_TEXT[flow.status.kind] || ''}</span>
+         <span class="sf-chip-text">${esc(flow.status.label)}${
+           flow.status.note ? `<span class="sf-chip-note">${esc(flow.status.note)}</span>` : ''
+         }</span>
+       </span>`
+    : '';
+
+  const sub = (label, s) => `<div class="sf-sub${s ? '' : ' sf-sub-empty'}">
+      <div class="sf-sub-label">${label}</div>
+      <div class="sf-sub-value">${s ? fmt(s.total) : '—'}</div>
+      <div class="sf-sub-split">${split(s)}</div>
+    </div>`;
+
+  let html = '<div class="score-flow">';
+
+  html += `<div class="sf-pool">
+    <div class="sf-pool-head">
+      <div class="sf-eyebrow">Pool Play</div>
+      ${chip}
+    </div>
+    <div class="sf-hero">
+      <div class="sf-hero-value">${fmt(flow.pool.total)}</div>
+      <div class="sf-hero-split">${split(flow.pool)}</div>
+    </div>
+    <div class="sf-subs">
+      ${sub('Pool Play 1', flow.pp1)}
+      ${sub('Pool Play 2', flow.pp2)}
+    </div>
+  </div>`;
+
+  if (flow.eliminatedInPool) {
+    html += `<div class="sf-bridge sf-bridge-end sf-bridge-out"><span class="sf-bridge-pill">Season Over</span></div>`;
+    return html + '</div>';
+  }
+
+  if (!flow.showPlayoffs) return html + '</div>';
+
+  html += `<div class="sf-bridge"><span class="sf-bridge-pill">Playoffs</span></div>`;
+
+  const WON_STATES = new Set(['won', 'champion', 'third']);
+  html += '<div class="sf-rounds">';
+  flow.rounds.forEach((r, i) => {
+    if (i > 0) html += '<span class="sf-arrow" aria-hidden="true"></span>';
+    let vs = '';
+    if (r.opponent) {
+      const verb = WON_STATES.has(r.state) ? 'def.' : r.state === 'lost' || r.state === 'runner-up' ? 'lost to' : 'vs';
+      vs = `<div class="sf-round-vs">${verb} <span class="sf-round-opp">${esc(r.opponent)}</span>${
+        r.opponentScore != null ? ` <span class="sf-round-oppscore">${fmt(r.opponentScore)}</span>` : ''
+      }</div>`;
+    }
+    // A round with no score yet drops the Bat/Pit line entirely so the placeholder
+    // card stays compact — it matters most on mobile, where the track is a stack.
+    html += `<div class="sf-round sf-state-${r.state}${r.score ? '' : ' sf-round-empty'}">
+      <div class="sf-round-head">
+        <span class="sf-eyebrow">${esc(r.label)}</span>
+        ${r.flag ? `<span class="sf-flag">${esc(r.flag)}</span>` : ''}
+      </div>
+      <div class="sf-round-value">${r.score ? fmt(r.score.total) : '—'}</div>
+      ${r.score ? `<div class="sf-round-split">${split(r.score)}</div>` : ''}
+      ${vs}
+    </div>`;
+  });
+  html += '</div>';
+
+  return html + '</div>';
+}
+
 function renderRosterData(managerName, isCommissioner) {
   const container = document.getElementById('roster-content');
   const seasons = getSeasons();
@@ -7703,55 +8020,9 @@ function renderRosterData(managerName, isCommissioner) {
     }
   }
 
-  // ---- Scoring Summary Cards ----
-  // Order: Pool Play Total, Pool Play 1, Pool Play 2, then any playoff rounds with data.
-  html += '<div class="roster-score-grid">';
-
-  const pp1 = periodScores['PP1'] || { batting: 0, pitching: 0, total: 0 };
-  const pp2 = periodScores['PP2'] || { batting: 0, pitching: 0, total: 0 };
-  const ppTotalBat = Math.round((pp1.batting + pp2.batting) * 100) / 100;
-  const ppTotalPit = Math.round((pp1.pitching + pp2.pitching) * 100) / 100;
-  const ppTotal = Math.round((ppTotalBat + ppTotalPit) * 100) / 100;
-  const hasPPData = ppTotal > 0 || periodScores['PP1'] || periodScores['PP2'];
-
-  if (hasPPData) {
-    html += `<div class="roster-score-card roster-score-total">
-      <div class="roster-score-label">Pool Play Total</div>
-      <div class="roster-score-value">${fmt(ppTotal)}</div>
-      <div class="roster-score-detail">Bat: ${fmt(ppTotalBat)} | Pit: ${fmt(ppTotalPit)}</div>
-    </div>`;
-  }
-
-  [
-    { key: 'PP1', label: 'Pool Play 1' },
-    { key: 'PP2', label: 'Pool Play 2' },
-  ].forEach((p) => {
-    const s = periodScores[p.key];
-    if (s) {
-      html += `<div class="roster-score-card">
-        <div class="roster-score-label">${p.label}</div>
-        <div class="roster-score-value">${fmt(s.total)}</div>
-        <div class="roster-score-detail">Bat: ${fmt(s.batting)} | Pit: ${fmt(s.pitching)}</div>
-      </div>`;
-    }
-  });
-
-  [
-    { key: 'QF', label: 'Quarterfinals' },
-    { key: 'SF', label: 'Semifinals' },
-    { key: 'Finals', label: 'Finals' },
-  ].forEach((p) => {
-    const s = periodScores[p.key];
-    if (s) {
-      html += `<div class="roster-score-card">
-        <div class="roster-score-label">${p.label}</div>
-        <div class="roster-score-value">${fmt(s.total)}</div>
-        <div class="roster-score-detail">Bat: ${fmt(s.batting)} | Pit: ${fmt(s.pitching)}</div>
-      </div>`;
-    }
-  });
-
-  html += '</div>';
+  // ---- Season Scoring Flow ----
+  // Pool Play panel (total + PP1/PP2 nested) flowing into the playoff track.
+  html += renderRosterScoreFlow(buildRosterScoreFlow(managerName, seasonData, periodScores));
 
   // Preserve the active tab when re-rendering
   const activeTabBtn = document.querySelector('.roster-tab.active');
