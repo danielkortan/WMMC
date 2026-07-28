@@ -3208,6 +3208,19 @@ html.theme-dark .sf-state-champion .sf-flag {
   font-weight: 600;
 }
 
+/* A swap whose effective date has not arrived yet — the dates read in the future tense
+   ("Drops Jul 30" / "Adds Jul 31"), so mark them as a pending change rather than history. */
+.roster-date-scheduled {
+  color: #2563eb;
+}
+
+/* The incoming half of a scheduled swap: listed so the move is visible, but not on the roster
+   yet and not counted in the roster totals. Distinct from .wrs-hist-row (already dropped). */
+.wrs-sched-row td {
+  color: var(--text-muted);
+  background: rgba(37, 99, 235, 0.04);
+}
+
 .wrs-week-total {
   display: flex;
   justify-content: space-between;
@@ -3542,6 +3555,12 @@ html.theme-dark .sf-state-champion .sf-flag {
   color: #dc2626;
 }
 
+/* Approved but not yet effective — a future-dated (scheduled) swap. Shown alongside Approved. */
+.swap-badge-scheduled {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
 /* All Swaps List */
 .swap-list-section {
   margin-top: 1rem;
@@ -3640,7 +3659,10 @@ html.theme-dark .sf-state-champion .sf-flag {
 
 .swap-detail-panel {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  /* min(220px, 100%) rather than a flat 220px: the panel lives in a table cell, and a hard
+     floor makes the grid's min-content 220px × columns, which widens the whole swap-log
+     table and pushes the panel's content past its right edge. */
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 0.4rem 1.5rem;
   padding: 0.85rem 1.1rem;
 }
@@ -3652,6 +3674,72 @@ html.theme-dark .sf-state-champion .sf-flag {
   font-size: 0.85rem;
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.3rem;
+  /* Grid items default to min-width:auto, so a long value (an email, a player name) would push
+     the column — and the panel — past the table it sits in. Let the value wrap instead. */
+  min-width: 0;
+}
+
+/* The Undo row is a full-width footer under the grid, not another two-column item — without the
+   span it lands in the last column and its button + explanatory note overflow the panel. */
+.swap-detail-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  margin-top: 0.6rem;
+}
+
+.swap-detail-actions-note {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Manager's inline editor for a swap that hasn't taken effect yet. Full-width footer under the
+   detail grid, same as the actions row it drops out of. */
+.swap-sched-edit {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, rgba(0, 0, 0, 0.02));
+}
+
+.swap-sched-edit-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.swap-sched-edit-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: 0.85rem;
+}
+
+.swap-sched-edit-fields label span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.swap-sched-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  min-width: 0;
 }
 
 .swap-detail-key {
@@ -3665,6 +3753,8 @@ html.theme-dark .sf-state-champion .sf-flag {
 .swap-detail-val {
   text-align: right;
   font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Commissioner-only inline reason editor inside the detail panel */
@@ -4652,6 +4742,27 @@ body::before {
 
 .dropped-player td {
   opacity: 0.65;
+}
+
+/* Scoreboard detail: a player whose add date is still in the future (scheduled swap). */
+.scheduled-player td {
+  opacity: 0.75;
+  background: rgba(37, 99, 235, 0.04);
+}
+
+.sched-pill {
+  display: inline-block;
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #1d4ed8;
+  background: #dbeafe;
+  border: 1px solid #bfdbfe;
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  margin-left: 0.3rem;
+  vertical-align: middle;
 }
 
 /* Scoreboard manager detail — per-period (PP1 / PP2 / playoffs) subsections */

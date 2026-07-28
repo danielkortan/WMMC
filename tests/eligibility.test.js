@@ -1,6 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { periodStartForRound, isPlayerActiveAsOfWeekEnd, isGameDateEligible } from '../js/eligibility.js';
+import {
+  periodStartForRound,
+  isPlayerActiveAsOfWeekEnd,
+  isGameDateEligible,
+  rosterStatusAsOf,
+} from '../js/eligibility.js';
 
 // A compact schedule spanning a period boundary (PP1 → PP2), with a gap, to exercise the rules.
 const schedule = [
@@ -82,6 +87,82 @@ describe('isPlayerActiveAsOfWeekEnd — period boundary (the PP1→PP2 leak the 
     const kept = [{ add_date: '2026-05-04' }, { add_date: '2026-06-08' }];
     const periodStart = periodStartForRound('PP2', schedule, scheduleDates);
     assert.equal(isPlayerActiveAsOfWeekEnd(kept, { periodStart, weekEnd: '2026-06-14' }), true);
+  });
+});
+
+describe('rosterStatusAsOf — a swap already in effect', () => {
+  const today = '2026-05-12';
+
+  it('reads an add with no drop as active', () => {
+    assert.equal(rosterStatusAsOf([{ add_date: '2026-05-04' }], { asOf: today }), 'active');
+  });
+
+  it('reads a drop on/before today as dropped', () => {
+    const e = [{ add_date: '2026-05-04' }, { drop_date: '2026-05-12' }];
+    assert.equal(rosterStatusAsOf(e, { asOf: today }), 'dropped');
+  });
+
+  it('reads a re-add after a drop as active again', () => {
+    const e = [{ add_date: '2026-05-04' }, { drop_date: '2026-05-08' }, { add_date: '2026-05-10' }];
+    assert.equal(rosterStatusAsOf(e, { asOf: today }), 'active');
+  });
+
+  it('reads a player with no dates at all as none', () => {
+    assert.equal(rosterStatusAsOf([], { asOf: today }), 'none');
+    assert.equal(rosterStatusAsOf(null, { asOf: today }), 'none');
+  });
+});
+
+describe('rosterStatusAsOf — a SCHEDULED (future-dated) swap must not apply early', () => {
+  // The reported case: on 7/28 a swap is submitted effective 7/31 — Drohan out (drop 7/30),
+  // Mize in (add 7/31). Both date windows are recorded immediately, but neither has happened.
+  const today = '2026-07-28';
+  const outgoing = [{ add_date: '2026-07-24' }, { drop_date: '2026-07-30' }];
+  const incoming = [{ add_date: '2026-07-31' }];
+
+  it('keeps the outgoing player active until their drop date', () => {
+    assert.equal(rosterStatusAsOf(outgoing, { asOf: today }), 'active');
+    assert.equal(rosterStatusAsOf(outgoing, { asOf: '2026-07-29' }), 'active');
+    assert.equal(rosterStatusAsOf(outgoing, { asOf: '2026-07-30' }), 'dropped'); // drop day is inclusive
+  });
+
+  it('holds the incoming player as scheduled until their add date', () => {
+    assert.equal(rosterStatusAsOf(incoming, { asOf: today }), 'scheduled');
+    assert.equal(rosterStatusAsOf(incoming, { asOf: '2026-07-30' }), 'scheduled');
+    assert.equal(rosterStatusAsOf(incoming, { asOf: '2026-07-31' }), 'active');
+  });
+
+  it('keeps a submission player (no add_date) active until a scheduled drop lands', () => {
+    const submitted = [{ drop_date: '2026-07-30' }];
+    assert.equal(rosterStatusAsOf(submitted, { asOf: today }), 'active');
+    assert.equal(rosterStatusAsOf(submitted, { asOf: '2026-07-30' }), 'dropped');
+  });
+
+  it('treats a scheduled drop-then-readd as still rostered now', () => {
+    const e = [{ drop_date: '2026-07-30' }, { add_date: '2026-08-01' }];
+    assert.equal(rosterStatusAsOf(e, { asOf: today }), 'active');
+  });
+
+  it('without asOf, future dates read as already applied (past-tense reading)', () => {
+    assert.equal(rosterStatusAsOf(outgoing, {}), 'dropped');
+    assert.equal(rosterStatusAsOf(incoming, {}), 'active');
+  });
+});
+
+describe('rosterStatusAsOf — period scoping', () => {
+  it("ignores a prior period's add so a holdover is not rostered in the new period", () => {
+    const pp1Only = [{ add_date: '2026-05-04' }];
+    assert.equal(rosterStatusAsOf(pp1Only, { periodStart: '2026-06-08', asOf: '2026-06-10' }), 'none');
+  });
+
+  it('honors an add made for the new period', () => {
+    const kept = [{ add_date: '2026-05-04' }, { add_date: '2026-06-08' }];
+    assert.equal(rosterStatusAsOf(kept, { periodStart: '2026-06-08', asOf: '2026-06-10' }), 'active');
+  });
+
+  it('a scheduled add inside the new period reads as scheduled, not none', () => {
+    const e = [{ add_date: '2026-06-12' }];
+    assert.equal(rosterStatusAsOf(e, { periodStart: '2026-06-08', asOf: '2026-06-10' }), 'scheduled');
   });
 });
 
