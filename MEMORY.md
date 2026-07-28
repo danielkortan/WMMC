@@ -1607,3 +1607,40 @@ email still falls back to login and is cleared.
   in-process \_mlbCatalogCache makes this the only way to exercise audit/fix
   here): retired phantoms no longer reported, in-pool orphan still purged,
   totals_moved [], second apply a clean no-op.
+
+## 2026-07-28 — My Roster scoring blocks redesigned as a Pool Play → playoffs flow
+
+**Problem.** The My Roster header was a flat `.roster-score-grid` of equal-weight stat cards
+(Pool Play Total, Pool Play 1, Pool Play 2, then any playoff round with data). Nothing showed
+that PP1 + PP2 _are_ the pool total, and a playoff round appeared as just another card — no
+seed, no opponent, no sense of advancing or going out.
+
+**Redesign (`renderRosterScoreFlow` + `buildRosterScoreFlow` in app.js, `.score-flow` /
+`.sf-*` in styles.css + mobile.css).**
+
+- **Pool Play panel** — combined total as the hero number with PP1/PP2 nested underneath as
+  its two halves, plus a qualification chip: `Qualified · #N seed` / `Projected · #N seed`
+  (before "End Pool Play") / `Missed the playoffs` / `Outside the playoff field`, with a note
+  line for `Won Pool Play 1|2` / `Won both pool periods` / `Wild card`.
+- **Connector + round track** — a labelled bridge flows down into QF → SF → Finals nodes,
+  each with the round score, `def./lost to <opponent> <score>`, and a state:
+  `won/lost/live/upcoming/locked/out` plus podium states `champion` (gold), `runner-up`
+  (silver), `third` (bronze). A semifinal loser's last node becomes the 3rd Place Game.
+  Eliminated in pool play → the bridge terminates at a `Season Over` pill, no track.
+
+**Invariant.** Every score shown is still `computeRosterPeriodScores` (→ `managerWeekSubtotal`
+over the date-windowed, period-scoped rosters) — unchanged numbers, verified against
+`data.json`'s bracket seed totals. The _opponent's_ total and who advanced come from
+`roundBreakdown` + `roundMatchupWinner` (the Playoff Bracket card's own source), so the panel
+can never disagree with the bracket about a result. Nothing writes to `seasonData`.
+
+**Gotcha worth remembering.** Historical seasons key `team_weekly` rounds as
+`PP1/PP2/QF/SF/F1/F2/3PWK1/3PWK2` (not `Finals`), so the old cards silently rendered no finals
+row at all for completed seasons. `FLOW_ROUND_ALIASES` rolls each node up from all its aliases
+(incl. the legacy `PP1P`/`PP2P` imports).
+
+**Verified with Playwright** against fabricated `db.json` states — mid-pool-play, PP finalized
+
+- QF live, lost QF, missed the field, full run to champion, SF loss → 3rd place — plus the real
+  `data.json` 2025 season (champion / 3rd place / lost QF / missed) at 1280px, 390px mobile, and
+  dark theme.
