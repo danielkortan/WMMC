@@ -1,5 +1,66 @@
 # WMMC — Decisions Log
 
+## A scheduled swap must not apply early in the roster VIEWS (2026-07-28)
+
+**Symptom (commissioner).** A swap submitted 7/28 effective 7/31 showed all the right
+"scheduled" verbiage on the form, but "the swap appears to effectively be in place immediately."
+On My Roster's current week the outgoing player (Drohan, drop 7/30) had vanished from the pitcher
+table and the count read PITCHERS (3) with the incoming player (Mize, add 7/31) already in it;
+the scoreboard detail panel greyed Drohan as `dropped-player` while Mize rendered active; the
+Live tab credited Mize (not yet rostered) and dropped Drohan.
+
+**Root cause.** `roster_dates` was correct the whole time — which is why SCORING was never wrong,
+and why per-manager totals are byte-identical before and after this fix. The views were the
+problem: every one of them asked "is this player rostered?" with an upper bound of the WEEK/PERIOD
+END rather than TODAY, so a drop or add anywhere later in the same week read as already applied.
+Compounding it, `applySwapToSeason` pulls the outgoing player out of `sd.rosters[mgr][weekKey]`
+immediately on submission — and a scheduled drop's player typically has 0 points so far this week,
+so `droppedPitchers`' "only show a dropped player who banked points" filter hid him entirely.
+
+**Fix.** New canonical pure helper `rosterStatusAsOf(entries, { periodStart, asOf })` in
+`js/eligibility.js` (unit-tested; bridged to `app.js` through `js/index.js`), returning
+`active | dropped | scheduled | none`. A pending drop with no effective add still reads `active`,
+which covers a submission player (no `add_date` of their own) being dropped by a scheduled swap.
+Applied in four places:
+
+- **`buildPerWeekRoster`** (My Roster per-week): pending-drop players are put BACK into the week's
+  roster arrays (the arrays are a derived cache; `roster_dates` is the source of truth) and their
+  tag reads in the future tense ("Drops Jul 30"); pending-add players stay listed but get
+  `.wrs-sched-row` + "Adds Jul 31" and are excluded from the BATTERS/PITCHERS count.
+- **`buildManagerDetailPanelHtml`** (scoreboard expand): the as-of date is clamped into the
+  period's own window — a finished period still reads at its end and a not-yet-started one at its
+  start (so an early submission is unaffected), but an IN-PROGRESS period now reads as of today.
+  Scheduled players get `.scheduled-player` + a "Scheduled" pill.
+- **`updateCommRosterWeekView`** (commissioner per-week editor): same treatment. The Drop button
+  keys off raw array membership (`canDrop`), not the new status, so a commissioner can still
+  cancel a scheduled add.
+- **`GET /api/mlb/live`** (server): the roster derivation is bounded by `today` instead of the
+  week's `end` (today is inside the week by construction there).
+
+**Also fixed in the same PR** (both reported alongside): the Swap Log detail panel's "Undo swap"
+row landed in the grid's last column, where the button + its note overflowed the panel and made
+the whole page scroll horizontally — it now spans the grid as a footer (`grid-column: 1 / -1`),
+and the panel's `minmax(220px, 1fr)` became `minmax(min(220px, 100%), 1fr)` so the grid can't
+widen the table it sits in. My Roster → Swaps → "All Swaps" was a flat 5-column table with no
+detail; it is now `renderSwapLog(containerId, editable, scopeManager)` — the same click-to-expand
+log as the Swap Log tab, filtered to that manager, minus the Manager column and its filter. An
+approved-but-not-yet-effective swap now carries a "Scheduled <date>" badge next to Approved.
+
+**Verified** on a seeded temp-DB server reproducing the report (today = QF Week 2 day 2, swap
+effective in 3 days), Playwright at 1280×900 desktop + 390×844 mobile, before/after on both
+builds: baseline reproduced every symptom exactly (Drohan `wrs-hist-row`/`dropped-player`, Mize
+active, Live attributing Mize, `document.body` scrolling horizontally); after, all four views show
+the outgoing player active with a future-tense tag and the incoming player as scheduled, and the
+page no longer scrolls. Per-manager totals — scoreboard rows, period score cards, per-week and
+per-group subtotals, and the commissioner editor's BATTERS/PITCHERS pts — diffed byte-identical
+(SAVE_HARDENING_PLAN §7). 169/169 tests, lint + format clean.
+
+**Note for next time.** `sd.rosters` is genuinely "who was rostered at any point in this week"
+after `rebuildRosterArraysFromDates`, but `applySwapToSeason` ALSO does an immediate out→in
+rewrite of the swap's `week_key` entry. The two disagree for a scheduled swap. Don't try to fix
+that in the server — the arrays are a derived cache by design and changing their semantics moves
+`findManagerForPlayerWeek`, Best/Worst and the Live tab. Fix the reader, as here.
+
 ## Today is always a valid swap effective date — game start time, not the calendar (2026-07-25)
 
 **Symptom (commissioner).** The swap form showed Effective Date `07/25/2026` (today) with the
