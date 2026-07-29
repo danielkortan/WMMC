@@ -9715,10 +9715,141 @@ app.get('/api/mlb/recent-stats', requireCommissioner, async (req, res) => {
   }
 });
 
+// ============================================================
+// Live day (the game day the Live views should be showing)
+// ============================================================
+// The "live day" is NOT the ET calendar date. MLB games routinely start before midnight ET and
+// finish after it, so a hard midnight cutoff blanks a still-running slate: at 12:00am the Live
+// tab jumped to the new (empty) date, every manager's daily total reset to 0.00, and games still
+// in the 7th disappeared from Today's Games.
+//
+// Instead a game day is owned by the date it STARTS on — which is already how MLB's own schedule
+// groups games (a 10:05pm ET first pitch keeps that day's date all the way to the final out). That
+// day stays live through the following morning until the new day's slate is about to begin:
+//
+//     rollover = min(earliest first pitch of the new calendar day - 2h, 12:00pm ET)
+//
+// Before the rollover the previous date is still the live day; at or after it, the new calendar
+// date takes over. Two guards keep the hold-over honest: a previous date with no games at all
+// never holds the view (there is nothing to show), and an unreachable MLB API falls back to the
+// plain calendar date rather than freezing on a day we cannot confirm.
+//
+// This governs DISPLAY/READ surfaces only (the Live tab and its per-game boxscores). Paths that
+// STAMP dates into the database — swap add_date/drop_date, the sync snapshot date, the roster
+// backfills — deliberately keep using the true ET calendar date: roster date windows are the
+// scoring invariant's source of truth, and back-dating a write into an already-scored day would
+// rewrite a certified total.
+const LIVE_DAY_LEAD_MS = 2 * 60 * 60 * 1000; // show the new day starting 2h before its first pitch
+const LIVE_DAY_MAX_HOUR = 12; // ...and never hold the previous day past noon ET
+const LIVE_DAY_CACHE_MS = 60 * 1000; // the Live tab polls every 2m; don't re-hit MLB for each caller
+
+let _liveDayCache = null; // { until: epochMs, value: {...} }
+
+// Minutes past midnight in Eastern time. hourCycle 'h23' so midnight is 0, not 24.
+function etMinutesOfDay(d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  return hour * 60 + minute;
+}
+
+// Epoch ms for `hour`:00 Eastern on an ISO date. Mirrors getNextEasternHour's DST handling:
+// sample the UTC offset at noon UTC, which never lands on a 2am Eastern transition.
+function etEpochForHour(isoDate, hour) {
+  const [yr, mo, dy] = isoDate.split('-').map(Number);
+  const noonUTC = new Date(Date.UTC(yr, mo - 1, dy, 12, 0, 0));
+  const noonEasternHour = +new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).format(noonUTC);
+  const offsetHours = noonEasternHour - 12; // -4 (EDT) or -5 (EST)
+  return Date.UTC(yr, mo - 1, dy, hour - offsetHours, 0, 0);
+}
+
+// Resolve the current live day. See the block comment above for the rule. Never throws —
+// on any MLB API failure it degrades to the ET calendar date.
+async function resolveLiveDay(now = new Date()) {
+  if (_liveDayCache && now.getTime() < _liveDayCache.until) return _liveDayCache.value;
+
+  const calendarDay = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const rolledOver = (reason) => ({
+    live_day: calendarDay,
+    calendar_day: calendarDay,
+    live_day_is_previous: false,
+    rollover_at: null,
+    reason,
+  });
+
+  const cache = (value, until) => {
+    _liveDayCache = { until, value };
+    return value;
+  };
+
+  const minutesNow = etMinutesOfDay(now);
+  const noonEpoch = etEpochForHour(calendarDay, LIVE_DAY_MAX_HOUR);
+  // Past the latest possible rollover — no schedule lookup needed.
+  if (minutesNow >= LIVE_DAY_MAX_HOUR * 60) {
+    return cache(rolledOver('past_noon_et'), now.getTime() + LIVE_DAY_CACHE_MS);
+  }
+
+  const previousDay = isoDateAddDays(calendarDay, -1);
+  let scheduleData;
+  try {
+    scheduleData = await mlbApiFetch(
+      `/api/v1/schedule?sportId=1&startDate=${previousDay}&endDate=${calendarDay}&gameType=R,F,D,L,W`
+    );
+  } catch (e) {
+    console.error('[LiveDay] schedule lookup failed, falling back to the calendar date:', e.message);
+    // Short cache so a transient blip doesn't pin the fallback for long.
+    return cache(rolledOver('schedule_unavailable'), now.getTime() + 15_000);
+  }
+
+  const gamesByDate = {};
+  for (const entry of scheduleData.dates || []) gamesByDate[entry.date] = entry.games || [];
+
+  // Nothing played yesterday — there is no slate to hold over.
+  if (!(gamesByDate[previousDay] || []).length) {
+    return cache(rolledOver('no_games_previous_day'), now.getTime() + LIVE_DAY_CACHE_MS);
+  }
+
+  // Earliest scheduled first pitch on the new calendar day (gameDate is the UTC first-pitch stamp).
+  let earliestStart = null;
+  for (const g of gamesByDate[calendarDay] || []) {
+    const t = g.gameDate ? Date.parse(g.gameDate) : NaN;
+    if (Number.isFinite(t) && (earliestStart === null || t < earliestStart)) earliestStart = t;
+  }
+
+  // No games today → hold yesterday until the noon cap.
+  const rolloverEpoch = earliestStart === null ? noonEpoch : Math.min(earliestStart - LIVE_DAY_LEAD_MS, noonEpoch);
+
+  if (now.getTime() >= rolloverEpoch) {
+    return cache(rolledOver('after_rollover'), now.getTime() + LIVE_DAY_CACHE_MS);
+  }
+
+  const value = {
+    live_day: previousDay,
+    calendar_day: calendarDay,
+    live_day_is_previous: true,
+    rollover_at: new Date(rolloverEpoch).toISOString(),
+    reason: earliestStart === null ? 'no_games_today' : 'before_first_pitch_lead',
+  };
+  // Never cache across the rollover instant, or the view would sit on a stale day.
+  return cache(value, Math.min(now.getTime() + LIVE_DAY_CACHE_MS, rolloverEpoch));
+}
+
 // Which teams have a game today (ET) that has already started (Live/Final, or first-pitch time
 // already passed)? Returns a Set of team abbreviations. Shared by GET /api/mlb/teams-started and
 // the swap auto-apply path (computeSwapEffectiveDatesServer). Throws on MLB API failure — each
 // caller picks its own fallback.
+//
+// Intentionally uses the ET CALENDAR date, not the live day: its callers stamp roster windows,
+// and back-dating a swap into an already-played day would rewrite a certified total.
 async function fetchStartedTeamsToday() {
   // MLB games are dated in Eastern time; use ET so a late-evening UTC rollover
   // doesn't shift "today" to tomorrow.
@@ -9792,11 +9923,16 @@ app.get('/api/mlb/live', async (req, res) => {
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
-  // Use Eastern time — MLB games are dated in ET, and late-evening games would produce
-  // a UTC date that's already tomorrow, breaking game-date comparisons entirely.
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // The live day, not the ET calendar date — see resolveLiveDay. A slate that started last
+  // night keeps this view through the following morning, so `today` here means "the game day
+  // being shown" and every date comparison below (active week, roster asOf, today_score,
+  // per-team ACTIVE/DONE/REMAINING) hangs off it.
+  const liveDay = await resolveLiveDay();
+  const today = liveDay.live_day;
 
-  // Find the schedule week whose [start, end] contains today.
+  // Find the schedule week whose [start, end] contains the live day. During the hold-over
+  // window this is still LAST week on a Monday morning, which is the point: the just-finished
+  // week stays on screen until the new slate is about to start.
   const scheduleDates = sd.schedule_dates || [];
   let activeIdx = -1;
   for (let i = 0; i < scheduleDates.length; i++) {
@@ -9813,6 +9949,7 @@ app.get('/api/mlb/live', async (req, res) => {
       active_week: null,
       reason: 'no_active_week_for_today',
       today,
+      ...liveDay,
       fetched_at: new Date().toISOString(),
       games: [],
       managers: [],
@@ -9913,10 +10050,15 @@ app.get('/api/mlb/live', async (req, res) => {
     // their own submission, so a PP1 holdover with no drop must not appear here.
     // Mirrors managerWeekSubtotal and rebuildRosterArraysFromDates. null = PP1 (no bound).
     const periodStart = periodStartForRound(sd, weekRound);
-    // Evaluate the windows AS OF TODAY, not the week's end: a SCHEDULED (future-dated) swap is
-    // recorded the moment it is submitted, so bounding by the week end would apply it early —
+    // Evaluate the windows AS OF THE LIVE DAY, not the week's end: a SCHEDULED (future-dated) swap
+    // is recorded the moment it is submitted, so bounding by the week end would apply it early —
     // dropping a player who is still rostered (and still scoring) and adding one who isn't on yet.
     // today is inside [start, end] by construction (that is how activeIdx was picked).
+    //
+    // Using the live day rather than the calendar date also keeps the hold-over window internally
+    // consistent: at 3am, a swap stamped add_date = the new calendar date must NOT retroactively
+    // join last night's roster, and the player it replaced must keep the points he actually earned
+    // in the games still on screen. The new roster takes over when the day does, at the rollover.
     const asOf = today;
     const managerBatters = {}; // manager -> string[]
     const managerPitchers = {}; // manager -> string[]
@@ -10174,6 +10316,7 @@ app.get('/api/mlb/live', async (req, res) => {
       season: year,
       active_week: { round: weekRound, week: weekName, start, end, week_index: activeIdx },
       today,
+      ...liveDay,
       fetched_at: new Date().toISOString(),
       summary: {
         games_total: games.length,
@@ -10358,11 +10501,11 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
   // Resolve the active week so we can flag each MLB player as rostered (or not)
-  // for the currently-running WMMC week. If today doesn't fall inside a week,
+  // for the currently-running WMMC week. If the live day doesn't fall inside a week,
   // we just leave week-specific lookups off and fall back to historical roster.
-  // Use Eastern time — MLB game dates are ET-based; a UTC "today" drifts to tomorrow
-  // after ~8 PM ET and breaks the rostered-player flagging logic.
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Use the live day (see resolveLiveDay), so a box opened at 1am for a game that started
+  // last night resolves against the week — and the roster — that game actually belongs to.
+  const today = (await resolveLiveDay()).live_day;
   const scheduleDates = sd.schedule_dates || [];
   let activeIdx = -1;
   for (let i = 0; i < scheduleDates.length; i++) {
