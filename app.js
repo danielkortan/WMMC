@@ -8669,18 +8669,42 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       const row = rows.find((r) => r[key] === name);
       return row ? row.weekly_score || 0 : 0;
     };
-    const droppedBatters = [...historicalBatters].filter(
-      (p) =>
-        (!weekRoster.batters.includes(p) || droppedThisWeek.has(p)) &&
-        allWeekBatting.some((b) => b.batter === p) &&
-        playerWeekScore(allWeekBatting, 'batter', p) > 0
-    );
-    const droppedPitchers = [...historicalPitchers].filter(
-      (p) =>
-        (!weekRoster.pitchers.includes(p) || droppedThisWeek.has(p)) &&
-        allWeekPitching.some((pt) => pt.pitcher === p) &&
-        playerWeekScore(allWeekPitching, 'pitcher', p) > 0
-    );
+
+    // …but a player who was genuinely on the roster for part of this week belongs in the week's
+    // table whether or not those days produced anything. A swap that lands mid-week leaves the
+    // outgoing player rostered for the days before it; the points gate above dropped them from
+    // the view entirely when their in-window games were blank — or when the sync never wrote a
+    // weekly row for them at all — so a swapped-out player vanished from the very week they were
+    // swapped out of, even though the scoreboard still listed them. Read the window from this
+    // week's roster_dates entry (the source of truth), falling back to the approved swap that
+    // moved them, and keep the player when that window overlaps the week at all.
+    const weekEnd = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+    function rosteredDuringWeek(player) {
+      const rd = weekRosterDates[player];
+      const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
+      const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
+      if (!rd && !addSwap && !dropSwap) return false;
+      const addDate = (rd && rd.add_date) || (addSwap && addSwap.swap_date) || null;
+      const dropDate = (rd && rd.drop_date) || (dropSwap && dropSwap.swap_date) || null;
+      // A drop recorded before the season started is a pre-season orphan, not a window.
+      if (seasonStartDate && dropDate && dropDate < seasonStartDate) return false;
+      if (addDate && weekEnd && addDate > weekEnd) return false;
+      if (dropDate && weekStart && dropDate < weekStart) return false;
+      return true;
+    }
+    // The eligibility sets span both lists (roster_dates keys are type-agnostic), so a
+    // statless player is only placed by their own pool type.
+    const droppedBatters = [...historicalBatters].filter((p) => {
+      if (weekRoster.batters.includes(p) && !droppedThisWeek.has(p)) return false;
+      const scored = allWeekBatting.some((b) => b.batter === p) && playerWeekScore(allWeekBatting, 'batter', p) > 0;
+      return scored || (poolTypeOf(p) === 'batters' && rosteredDuringWeek(p));
+    });
+    const droppedPitchers = [...historicalPitchers].filter((p) => {
+      if (weekRoster.pitchers.includes(p) && !droppedThisWeek.has(p)) return false;
+      const scored =
+        allWeekPitching.some((pt) => pt.pitcher === p) && playerWeekScore(allWeekPitching, 'pitcher', p) > 0;
+      return scored || (poolTypeOf(p) === 'pitchers' && rosteredDuringWeek(p));
+    });
 
     // Compute weekly rankings for this week
     const weekRanks = computeWeeklyRankings(
@@ -13437,23 +13461,25 @@ window.updateCommRosterWeekView = function (managerName) {
     if (d.drop_date && d.drop_date > commToday && commStatusAsOfToday(p) === 'active') commPendingDrop.add(p);
     if (d.add_date && d.add_date > commToday && commStatusAsOfToday(p) === 'scheduled') commPendingAdd.add(p);
   }
+  // Which list a player belongs in — needed both to restore a pending drop into the right table
+  // and to place a statless player who was only rostered for part of the week.
+  const commBatPool = new Set(sd.batters_pool || []);
+  const commPitPool = new Set(sd.pitchers_pool || []);
+  const commPoolTypeOf = (player) => {
+    const inBat = commBatPool.has(player);
+    const inPit = commPitPool.has(player);
+    if (inBat && !inPit) return 'batters';
+    if (inPit && !inBat) return 'pitchers';
+    for (const wr of Object.values(commMgrRosters)) {
+      if ((wr.batters || []).includes(player)) return 'batters';
+      if ((wr.pitchers || []).includes(player)) return 'pitchers';
+    }
+    if (batting.some((b) => b.batter === player)) return 'batters';
+    if (pitching.some((p) => p.pitcher === player)) return 'pitchers';
+    return null;
+  };
   if (commPendingDrop.size > 0) {
     // The arrays are a derived cache — put the still-rostered player back where roster_dates says.
-    const commBatPool = new Set(sd.batters_pool || []);
-    const commPitPool = new Set(sd.pitchers_pool || []);
-    const commPoolTypeOf = (player) => {
-      const inBat = commBatPool.has(player);
-      const inPit = commPitPool.has(player);
-      if (inBat && !inPit) return 'batters';
-      if (inPit && !inBat) return 'pitchers';
-      for (const wr of Object.values(commMgrRosters)) {
-        if ((wr.batters || []).includes(player)) return 'batters';
-        if ((wr.pitchers || []).includes(player)) return 'pitchers';
-      }
-      if (batting.some((b) => b.batter === player)) return 'batters';
-      if (pitching.some((p) => p.pitcher === player)) return 'pitchers';
-      return null;
-    };
     const restore = (listKey) =>
       [...commPendingDrop].filter((p) => commPoolTypeOf(p) === listKey && !roster[listKey].includes(p));
     roster = {
@@ -13540,18 +13566,34 @@ window.updateCommRosterWeekView = function (managerName) {
     const row = rows.find((r) => r[key] === name);
     return row ? row.weekly_score || 0 : 0;
   };
-  const droppedBatters = [...historicalBatters].filter(
-    (p) =>
-      (!roster.batters.includes(p) || commDroppedThisWeek.has(p)) &&
-      allWeekBatting.some((b) => b.batter === p) &&
-      commPlayerWeekScore(allWeekBatting, 'batter', p) > 0
-  );
-  const droppedPitchers = [...historicalPitchers].filter(
-    (p) =>
-      (!roster.pitchers.includes(p) || commDroppedThisWeek.has(p)) &&
-      allWeekPitching.some((pt) => pt.pitcher === p) &&
-      commPlayerWeekScore(allWeekPitching, 'pitcher', p) > 0
-  );
+  // …unless they were actually on the roster for part of this week, in which case they belong in
+  // the week's table with or without points — same rule as buildPerWeekRoster (a mid-week swap
+  // leaves the outgoing player rostered for the days before it, and a blank stat line, or no
+  // weekly row at all, must not erase them from the week they were swapped out of).
+  const commWeekEnd = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+  const commRosteredDuringWeek = (player) => {
+    const rd = rosterDates[player];
+    const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
+    const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
+    if (!rd && !addSwap && !dropSwap) return false;
+    const addDate = (rd && rd.add_date) || (addSwap && addSwap.swap_date) || null;
+    const dropDate = (rd && rd.drop_date) || (dropSwap && dropSwap.swap_date) || null;
+    if (seasonStartDate && dropDate && dropDate < seasonStartDate) return false;
+    if (addDate && commWeekEnd && addDate > commWeekEnd) return false;
+    if (dropDate && weekStart && dropDate < weekStart) return false;
+    return true;
+  };
+  const droppedBatters = [...historicalBatters].filter((p) => {
+    if (roster.batters.includes(p) && !commDroppedThisWeek.has(p)) return false;
+    const scored = allWeekBatting.some((b) => b.batter === p) && commPlayerWeekScore(allWeekBatting, 'batter', p) > 0;
+    return scored || (commPoolTypeOf(p) === 'batters' && commRosteredDuringWeek(p));
+  });
+  const droppedPitchers = [...historicalPitchers].filter((p) => {
+    if (roster.pitchers.includes(p) && !commDroppedThisWeek.has(p)) return false;
+    const scored =
+      allWeekPitching.some((pt) => pt.pitcher === p) && commPlayerWeekScore(allWeekPitching, 'pitcher', p) > 0;
+    return scored || (commPoolTypeOf(p) === 'pitchers' && commRosteredDuringWeek(p));
+  });
 
   function getPlayerDates(player) {
     const rd = rosterDates[player];
@@ -13563,6 +13605,18 @@ window.updateCommRosterWeekView = function (managerName) {
       add_date: (addSwap && addSwap.swap_date) || '',
       drop_date: (dropSwap && dropSwap.swap_date) || '',
     };
+  }
+
+  // The span a no-longer-active player was rostered for inside THIS week. No add_date here means
+  // they carried in from an earlier week, so the span opens at the week start — it used to render
+  // as a bare "?", which is now common enough to matter (every mid-week swap produces one).
+  function commDroppedSpanTag(player) {
+    const dates = getPlayerDates(player);
+    if (!dates.add_date && !dates.drop_date) return ' <span class="wrs-hist-tag">not rostered</span>';
+    const start = dates.add_date || weekStart;
+    const startLabel = start ? fmtSlashDate(start) : '?';
+    const endLabel = dates.drop_date ? fmtSlashDate(dates.drop_date) : 'now';
+    return ` <span class="wrs-hist-tag">${startLabel}–${endLabel}</span>`;
   }
 
   function commDateTag(player) {
@@ -13625,10 +13679,7 @@ window.updateCommRosterWeekView = function (managerName) {
       const safeB = jsStr(batter);
       const manual = (f) => ((s.manual_fields || []).includes(f) ? ' stat-manual' : '');
       const pDates = getPlayerDates(batter);
-      const batDroppedTag =
-        pDates.add_date || pDates.drop_date
-          ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
-          : ' <span class="wrs-hist-tag">not rostered</span>';
+      const batDroppedTag = commDroppedSpanTag(batter);
       batHtml += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
       batHtml += `<td>${displayPlayer(batter, sd)}${isScheduled || onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
@@ -13716,10 +13767,7 @@ window.updateCommRosterWeekView = function (managerName) {
         const safeP = jsStr(pitcher);
         const manual = (f) => ((s.manual_fields || []).includes(f) ? ' stat-manual' : '');
         const pDates = getPlayerDates(pitcher);
-        const pitDroppedTag =
-          pDates.add_date || pDates.drop_date
-            ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
-            : ' <span class="wrs-hist-tag">not rostered</span>';
+        const pitDroppedTag = commDroppedSpanTag(pitcher);
         pitHtml += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
         pitHtml += `<td>${displayPlayer(pitcher, sd)}${isScheduled || onRoster ? commDateTag(pitcher) : pitDroppedTag}</td>`;
         pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
