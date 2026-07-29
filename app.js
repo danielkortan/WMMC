@@ -6858,8 +6858,17 @@ function dayBeforeISO(dateStr) {
 // Back-fill missing add/drop dates in roster_dates from approved swap records.
 // Runs on every commissioner roster render so existing swaps (approved before this
 // feature existed) also get their dates populated automatically.
+//
+// The swap record's own add_date/drop_date are authoritative when present — the server stamps
+// them at submission/approval and they do NOT always straddle swap_date. When the outgoing or
+// incoming player's team has already played today, or the manager scheduled the swap for a
+// future date, the swap takes effect TOMORROW: add_date = swap_date + 1 and drop_date =
+// swap_date. Only pre-add_date/drop_date legacy records fall back to the swap_date-derived
+// window (out keeps credit through the day BEFORE swap_date; in starts ON swap_date), and only
+// those get the self-heal for entries that stored the raw swap_date as the drop date.
 function backfillRosterDatesFromSwaps(seasonData) {
   if (!seasonData || !seasonData.swaps) return false;
+  const isISO = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
   let changed = false;
   for (const swap of seasonData.swaps) {
     if (swap.status !== 'approved' || !swap.week_key || !swap.swap_date || !swap.manager) continue;
@@ -6869,15 +6878,19 @@ function backfillRosterDatesFromSwaps(seasonData) {
       seasonData.roster_dates[swap.manager][swap.week_key] = {};
     }
     const wkDates = seasonData.roster_dates[swap.manager][swap.week_key];
+    const legacyDrop = dayBeforeISO(swap.swap_date);
     if (swap.player_out) {
-      // The outgoing player keeps credit through the day BEFORE the swap takes
-      // effect; the incoming player starts ON swap_date. Storing swap_date as the
-      // drop_date double-counts the swap day for both players, so use the adjacent
-      // date — and self-heal legacy entries that stored the raw swap_date.
-      const effectiveDrop = dayBeforeISO(swap.swap_date);
+      const stamped = isISO(swap.drop_date) ? swap.drop_date : null;
+      const effectiveDrop = stamped || legacyDrop;
       if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
       const cur = wkDates[swap.player_out].drop_date;
-      if ((!cur || cur === swap.swap_date) && cur !== effectiveDrop) {
+      // Fill when absent. Overwrite only to undo a known-bad value: the legacy raw-swap_date
+      // entry (no stamped drop date), or a drop date this backfill itself mis-derived as
+      // swap_date - 1 on an effective-tomorrow swap. A commissioner's manual edit to any other
+      // date is left alone.
+      const stale = cur === swap.swap_date && !stamped;
+      const misDerived = !!stamped && cur === legacyDrop && stamped !== legacyDrop;
+      if ((!cur || stale || misDerived) && cur !== effectiveDrop) {
         wkDates[swap.player_out].drop_date = effectiveDrop;
         changed = true;
       }
@@ -6885,7 +6898,7 @@ function backfillRosterDatesFromSwaps(seasonData) {
     if (swap.player_in) {
       if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
       if (!wkDates[swap.player_in].add_date) {
-        wkDates[swap.player_in].add_date = swap.swap_date;
+        wkDates[swap.player_in].add_date = isISO(swap.add_date) ? swap.add_date : swap.swap_date;
         changed = true;
       }
     }

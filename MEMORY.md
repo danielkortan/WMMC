@@ -1676,3 +1676,38 @@ row at all for completed seasons. `FLOW_ROUND_ALIASES` rolls each node up from a
 - QF live, lost QF, missed the field, full run to champion, SF loss → 3rd place — plus the real
   `data.json` 2025 season (champion / 3rd place / lost QF / missed) at 1280px, 390px mobile, and
   dark theme.
+
+---
+
+## 2026-07-29 — `backfillRosterDatesFromSwaps` was clobbering effective-tomorrow drop dates
+
+**Bug.** A manager swapped Gavin Williams → Tarik Skubal at night, after Williams' game had
+started. The server did the right thing: `computeSwapEffectiveDatesServer` returned the
+"already started" shape — `add_date = tomorrow`, `drop_date = today (= swap_date)` — and
+`applySwapToSeason` wrote it into `roster_dates`. Then the client's
+`backfillRosterDatesFromSwaps` ran on the next roster render and rewrote the drop date to
+`swap_date − 1`, so the scoreboard showed Williams dropped a day early — and the silent
+render-time `saveSeason` persisted the corruption.
+
+**Cause.** The backfill predates `swap.add_date`/`swap.drop_date` existing on swap records. It
+derived the whole window from `swap_date` alone (out drops the day before, in adds on the day)
+and treated `drop_date === swap_date` as legacy residue to self-heal. But that is exactly the
+legitimate shape of an effective-tomorrow swap — both the "team already played today" path and
+a manager-scheduled future effective date (`drop_date = scheduledEff − 1`, which equals
+`swap_date` when scheduled for tomorrow). The self-heal was firing on correct data. The
+`add_date` fill had the same flaw (wrote `swap_date`, not `swap_date + 1`).
+
+**Fix.** The swap record's stamped `add_date`/`drop_date` are now authoritative when present;
+the `swap_date`-derived window is a fallback for legacy records only, and the raw-`swap_date`
+self-heal is scoped to those. Added a narrow reverse heal (`misDerived`): when a swap carries a
+stamped drop date but `roster_dates` holds exactly `swap_date − 1`, restore the stamped value —
+that is the fingerprint of this bug, so already-corrupted seasons self-repair on the next
+render. A commissioner's manual edit to any other date is still left alone.
+
+**Invariant.** Roster windows still come from `roster_dates` + approved `swaps`; this makes the
+two agree instead of letting a render-time repair overwrite the server's stamp. No scoring math
+changed — only which drop date the windows use, and only where it was demonstrably wrong.
+
+**Note.** `backfillRosterDatesFromSwaps` lives in `app.js`, so per the testing convention it has
+no unit test. It is a good candidate to extract into `js/` (alongside `js/eligibility.js`) so
+this date-window logic becomes testable.
