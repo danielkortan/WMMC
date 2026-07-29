@@ -1876,3 +1876,56 @@ verification drove the real endpoint over HTTP against a stubbed upstream that c
 build, 8 concurrent warm reads (zero upstream), Finals never re-fetched across a refresh cycle,
 a game going Final re-fetching exactly that boxscore, and an all-Final slate costing nothing.
 Per the testing convention these live in `server.js` and so have no committed unit test.
+
+## 2026-07-29 — A mid-week trade erased the outgoing manager's drop-day points
+
+**Symptom (commissioner).** The 7am QF matchup post disagreed with the app: Daniel Kortan 416.4
+(B 315 / P 101.4) in Slack vs 453.7 (B 315 / P 138.7) on the board — exactly Gavin Williams' QF
+Week 2 start (37.35) missing, the day of his 7/28 drop. Alex Thalacker was short 12 batting points
+the same morning. The Jul-28 "Best & Worst" showed Kortan at P 0 for a day his pitcher had thrown
+seven innings. Separately, "Blocked a destructive season save — Anton Capria total drops 78.9"
+repeated with **no matching swap anywhere in the swap log** — because it is not a swap event at all,
+it is the full-season save guard refusing a write.
+
+**Cause.** `player_dates` stores ONE scoring window per player per week; the weekly stat row is
+likewise one row per player per week with a single sticky `manager`. Neither can express a player
+who changes hands INSIDE a week — which is exactly what an effective-tomorrow trade does
+(`drop_date = today` for the seller, `add_date = tomorrow` for the buyer, both in the same week).
+`syncPlayerDatesFromRosterDates` wrote each manager's claim straight into the shared slot, so the
+last one written won and the other side of the handover was discarded. `rebuildWeeklyFromDaily`
+then recomputed the shared row against that single surviving window and stamped whoever currently
+held the player as its `manager`. With the buyer's `{start: 7/29}` surviving, the seller's drop-day
+points were erased from the database outright; with the seller's `{end: 7/28}` surviving instead,
+the buyer was credited with a start he never owned. **Which one happened depended on manager key
+order** — the same data scored differently on different passes, which is why a client's save could
+compute a total 78.9 below the stored one and trip the ≥40-pt crater guard with nothing in the swap
+log to explain it. The live view was immune (PR #381 gave `/api/mlb/live` per-manager windows), so
+the app looked right while every stored/Slack number was wrong — and would have stayed wrong once
+the week rolled out of live enrichment.
+
+**Fix.** Three layers, all keyed on "the date windows are the truth, `manager` is a derived cache":
+
+- `syncPlayerDatesFromRosterDates` merges every manager's claim to the widest window instead of
+  last-writer-wins, so no day anyone rostered him is dropped from the row (and the result no longer
+  depends on key order).
+- `applyManagerScoreSplits` (new, run at the end of `rebuildWeeklyFromDaily` and
+  `recomputeMidWeekAddScores`) writes `row.manager_scores = { manager: points }` for contested
+  players only — each owner's own days, from the daily rows. `managerWeekSubtotal` (server + the
+  app.js mirror) reads it, and claims a row attributed to another manager when this manager has his
+  own window that week. The client is not sent daily rows, so the split has to be persisted for the
+  two copies to agree.
+- `findManagerForPlayerDate` (new) resolves the daily Best/Worst owner AS OF the date scored rather
+  than from the current roster array, so a player's final rostered day is credited to the manager
+  who actually had him. `drop_date` is inclusive, so a drop ON the date still counts that date.
+
+**Vetted** per `SAVE_HARDENING_PLAN.md` §7 on a fixture reproducing the incident, old code vs new: no
+swap and single-owner mid-week drop are byte-identical (100 / 74.7); the trade case goes from
+"seller 37.35, buyer 25.3" (order A,B) or "seller 37.35, buyer 37.35" (order B,A) to a stable
+seller 74.7 / buyer 25.3 in both orders; the daily high/low went from having no attribution at all to
+crediting the seller. Every manager total on `tests/fixtures/staging-seed.json` is unchanged, both
+directly and after a full `syncPlayerDatesFromRosterDates` + `recomputeMidWeekAddScores` pass.
+
+**Not yet done:** the vet against the LIVE db (no prod access from this sandbox). Run the before/
+after per-manager comparison there before trusting the first post-deploy numbers, and expect the
+first sync after deploy to move the affected managers UP by the points that were erased — the score
+guard warns on a >200-pt jump but only blocks drops, so it will not stand in the way.
