@@ -13257,6 +13257,12 @@ function scoreboardAutoPostPlan(sd, todayISO) {
     return { summaryRound: lastEnded.round };
   }
 
+  // Opening day. Nobody has played a game yet, so a scoreboard would be all zeroes —
+  // post the season-welcome draft roast instead. Checked after the wrap-up branch purely
+  // for symmetry; the two can never both match (a round can't end before the season starts).
+  const seasonStart = windows.reduce((min, w) => (!min || w.start < min ? w.start : min), null);
+  if (seasonStart && todayISO === seasonStart) return { welcome: true };
+
   const current = windows.find((w) => w.start <= todayISO && todayISO <= w.end);
   if (!current) return null; // between rounds or after the season
   if (current.round === 'PP1' || current.round === 'PP2') return {};
@@ -13279,6 +13285,234 @@ function hasScoreboardData(sd) {
   const hasSchedule = Array.isArray(sd.schedule_dates) && sd.schedule_dates.some((d) => d && d.start && d.end);
   const hasScores = (sd.weekly_batting || []).length > 0 || (sd.weekly_pitching || []).length > 0;
   return hasSchedule || hasScores;
+}
+
+// ============================================================
+// Season-opening welcome post
+// ============================================================
+// Fires once, at 7am on the season's first day, before a single game has been played. A
+// scoreboard would be all zeroes, so this posts a league-wide roast of the DRAFT instead:
+// consensus picks, single-team stacks, near-identical rosters. Deliberately league-wide
+// rather than one roast per manager — the per-manager format belongs to eliminations, and a
+// full slate of them on day 1 would just get collapsed behind Slack's "View Full Message".
+
+// Draft-day facts, derived from sd.initial_submissions — the canonical origin of PP1 roster
+// membership (per the scoring invariant, players enter a roster only via a submission or a
+// swap). Unapproved submissions count here: at 7am on opening day the commissioner may not
+// have approved anything yet, and this post has no scoring consequence whatsoever.
+// Returns null when fewer than two managers have drafted — nothing to compare, no post.
+function buildDraftFacts(db, sd) {
+  const teamOf = (name) =>
+    (sd.batters_team && sd.batters_team[name]) || (sd.pitchers_team && sd.pitchers_team[name]) || null;
+
+  const subs = sd.initial_submissions || {};
+  const rosters = [];
+  for (const m of db.managers || []) {
+    const sub = subs[m.name];
+    if (!sub) continue;
+    const players = [...(sub.batters || []), ...(sub.pitchers || [])].filter(Boolean);
+    if (players.length) rosters.push({ manager: m.name, players });
+  }
+  if (rosters.length < 2) return null;
+
+  // Who drafted each player.
+  const owners = new Map();
+  for (const r of rosters) {
+    for (const p of r.players) {
+      if (!owners.has(p)) owners.set(p, []);
+      owners.get(p).push(r.manager);
+    }
+  }
+
+  // Consensus picks: the guys almost everyone took. Ties break by name so the same draft
+  // always produces the same post.
+  const byCountThenName = (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]);
+  const mostRostered = [...owners.entries()]
+    .filter(([, o]) => o.length > 1)
+    .sort(byCountThenName)
+    .slice(0, 3)
+    .map(([name, o]) => ({ name, count: o.length, team: teamOf(name) }));
+
+  // The contrarian: most players nobody else wanted.
+  const soloCounts = rosters.map((r) => ({
+    manager: r.manager,
+    count: r.players.filter((p) => owners.get(p).length === 1).length,
+  }));
+  soloCounts.sort((a, b) => b.count - a.count || a.manager.localeCompare(b.manager));
+  const contrarian = soloCounts[0] && soloCounts[0].count > 0 ? soloCounts[0] : null;
+
+  // Biggest single-team stack on one roster — only interesting at 3+.
+  let biggestStack = null;
+  for (const r of rosters) {
+    const perTeam = {};
+    for (const p of r.players) {
+      const t = teamOf(p);
+      if (t) perTeam[t] = (perTeam[t] || 0) + 1;
+    }
+    for (const [team, count] of Object.entries(perTeam)) {
+      if (count < 3) continue;
+      if (
+        !biggestStack ||
+        count > biggestStack.count ||
+        (count === biggestStack.count && r.manager.localeCompare(biggestStack.manager) < 0)
+      ) {
+        biggestStack = { manager: r.manager, team, count };
+      }
+    }
+  }
+
+  // The two managers who drafted closest to the same team as each other.
+  let twins = null;
+  for (let i = 0; i < rosters.length; i++) {
+    for (let j = i + 1; j < rosters.length; j++) {
+      const set = new Set(rosters[j].players);
+      const shared = rosters[i].players.filter((p) => set.has(p));
+      if (shared.length < 3) continue;
+      if (!twins || shared.length > twins.shared) {
+        twins = { a: rosters[i].manager, b: rosters[j].manager, shared: shared.length, players: shared.slice(0, 3) };
+      }
+    }
+  }
+
+  return {
+    managerCount: rosters.length,
+    totalPicks: rosters.reduce((n, r) => n + r.players.length, 0),
+    uniquePlayers: owners.size,
+    mostRostered,
+    contrarian,
+    biggestStack,
+    twins,
+  };
+}
+
+// Static welcome roast, assembled straight from the facts. Used when ANTHROPIC_API_KEY is
+// unset and as the safety net after a failed Claude call — same convention as fallbackRoast.
+function fallbackWelcomeRoast(facts) {
+  const lines = [];
+  const top = facts.mostRostered[0];
+  if (top) {
+    lines.push(
+      `${top.count} of you drafted *${top.name}*${top.team ? ` (${top.team})` : ''}. Bold. Original. ` +
+        `Truly the mark of ${top.count} people who opened the same rankings page.`
+    );
+  }
+  if (facts.biggestStack) {
+    lines.push(
+      `*${facts.biggestStack.manager}* took ${facts.biggestStack.count} ${facts.biggestStack.team} players, ` +
+        `which is less a strategy than a cry for help. One rainout and the season's over.`
+    );
+  }
+  if (facts.twins) {
+    lines.push(
+      `*${facts.twins.a}* and *${facts.twins.b}* share ${facts.twins.shared} players. ` +
+        `At least one of you is redundant and we're all going to find out which.`
+    );
+  }
+  if (facts.contrarian) {
+    lines.push(
+      `*${facts.contrarian.manager}* has ${facts.contrarian.count} players nobody else wanted. ` +
+        `Either a genius or someone who drafted from memory. History suggests the latter.`
+    );
+  }
+  if (!lines.length) lines.push('Rosters are in. Somehow all of them look like a mistake.');
+  return lines.join('\n\n');
+}
+
+// Claude-written version of the same roast — the facts are computed here and handed over as
+// context, so the model embellishes real draft data rather than inventing players.
+async function generateWelcomeRoastWithClaude(facts) {
+  if (!ANTHROPIC_API_KEY) return fallbackWelcomeRoast(facts);
+
+  const factLines = [
+    `Managers who have drafted: ${facts.managerCount}`,
+    `Total picks: ${facts.totalPicks} across ${facts.uniquePlayers} different players`,
+    facts.mostRostered.length
+      ? `Most-drafted players: ${facts.mostRostered.map((p) => `${p.name}${p.team ? ` (${p.team})` : ''} — taken by ${p.count} managers`).join('; ')}`
+      : null,
+    facts.biggestStack
+      ? `Biggest single-team stack: ${facts.biggestStack.manager} drafted ${facts.biggestStack.count} players from the ${facts.biggestStack.team}`
+      : null,
+    facts.twins
+      ? `Most similar rosters: ${facts.twins.a} and ${facts.twins.b} share ${facts.twins.shared} players (e.g. ${facts.twins.players.join(', ')})`
+      : null,
+    facts.contrarian
+      ? `Most unique picks: ${facts.contrarian.manager}, ${facts.contrarian.count} players nobody else drafted`
+      : null,
+  ].filter(Boolean);
+
+  const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. The season starts TODAY and nobody has played a game yet. Write the season-opening post: a savage, funny, profane roast of the DRAFT ITSELF — the herd-mentality picks, the deranged team stacks, the managers who drafted nearly identical rosters.
+
+Roast the league as a whole. Do NOT write a separate roast for every manager, and do not invent players, teams, or statistics — use only the facts below. Naming two or three managers where it lands is good. Keep it to 4-6 sentences.
+
+Draft facts:
+${factLines.join('\n')}
+
+Write the roast now. No preamble, no labels — just the roast.`;
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!resp.ok) {
+      console.error('[Welcome] Anthropic API error:', resp.status, await resp.text());
+      return fallbackWelcomeRoast(facts);
+    }
+    const data = await resp.json();
+    return (data.content && data.content[0] && data.content[0].text) || fallbackWelcomeRoast(facts);
+  } catch (e) {
+    console.error('[Welcome] Roast generation failed:', e.message);
+    return fallbackWelcomeRoast(facts);
+  }
+}
+
+// Assemble the message body: header, the roast, then the draft-fact receipts so the numbers
+// the roast leans on are visible even if the model got flowery about them.
+function buildWelcomeSlackText(facts, roast, year) {
+  const receipts = [];
+  if (facts.mostRostered.length) {
+    receipts.push(`• *Consensus picks:* ${facts.mostRostered.map((p) => `${p.name} (${p.count})`).join(', ')}`);
+  }
+  if (facts.biggestStack) {
+    receipts.push(
+      `• *Biggest stack:* ${facts.biggestStack.manager} — ${facts.biggestStack.count} ${facts.biggestStack.team}`
+    );
+  }
+  if (facts.twins) {
+    receipts.push(`• *Most alike:* ${facts.twins.a} & ${facts.twins.b} — ${facts.twins.shared} shared players`);
+  }
+  if (facts.contrarian) {
+    receipts.push(`• *Most unique picks:* ${facts.contrarian.manager} — ${facts.contrarian.count}`);
+  }
+  receipts.push(`• *The field:* ${facts.managerCount} managers, ${facts.uniquePlayers} different players drafted`);
+
+  return [
+    `:baseball: *Welcome to the ${year} Whit Merrifield Memorial Cup.* First pitch is today — nobody has scored a point yet, so all we have to go on is your questionable taste in baseball players.`,
+    roast.trim(),
+    receipts.join('\n'),
+    ':link: Full scoreboard: <http://wmmc.live|wmmc.live>',
+  ].join('\n\n');
+}
+
+async function postSeasonWelcomeSlack(db, year) {
+  const sd = (db.seasons || {})[year] || {};
+  const facts = buildDraftFacts(db, sd);
+  if (!facts) {
+    console.log('[Welcome] Skipping — fewer than two managers have submitted a roster yet');
+    return false;
+  }
+  const roast = await generateWelcomeRoastWithClaude(facts);
+  await postScoreboardChannelSlack(buildWelcomeSlackText(facts, roast, year));
+  return true;
 }
 
 let scoreboardTimer = null;
@@ -13321,13 +13555,22 @@ function scheduleScoreboardPost() {
       db.last_scoreboard_post_date = todayET;
       writeDB(db);
 
-      console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
+      console.log(`[Scoreboard] 7am run for ${todayET} at ${now.toISOString()}`);
       const plan = scoreboardAutoPostPlan(sd, todayET);
 
       if (!plan) {
         console.log(
           `[Scoreboard] Skipping — no post scheduled for ${todayET} (between rounds, or playoff round not started)`
         );
+      } else if (plan.welcome) {
+        // Opening day: no games played, so no scoreboard and no odds compute — just the
+        // draft roast. Also bypasses the sync window, which only opens the day after the
+        // season starts (that is exactly why day 1 was silent before).
+        postSeasonWelcomeSlack(readDB(), season)
+          .then((posted) =>
+            console.log(posted ? '[Welcome] Season-opening post sent' : '[Welcome] Nothing to post — no rosters yet')
+          )
+          .catch((e) => console.error('[Welcome] Post failed:', e.message));
       } else if (plan.summaryRound || isWithinSyncWindow(sd)) {
         // End-of-round recaps bypass the sync window. That window closes the day AFTER the
         // Finals' last day, but a recap posts the MONDAY after a round ends — those coincide
