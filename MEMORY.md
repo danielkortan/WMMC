@@ -1,5 +1,40 @@
 # WMMC — Decisions Log
 
+## A mid-week swap erased the outgoing player from My Roster's week (2026-07-29)
+
+**Symptom (manager).** Skubal was swapped in for Gavin Williams on 7/29, mid-QF Week 2. The
+scoreboard's period panel listed both (Williams tagged `7/20–7/28`), but My Roster's
+`QF - Week 2` section showed only Bibee, Drohan and Skubal — the player who had been rostered for
+the first two days of that week was simply gone.
+
+**Root cause.** `buildPerWeekRoster`'s `droppedBatters` / `droppedPitchers` gate required a player
+who is no longer on the week's roster array to (a) have a weekly stat row for the week and (b)
+have `weekly_score > 0`. The intent was to suppress noise rows for post-drop games. But a player
+swapped out early in a week routinely fails both: their in-window days can be blank, and if they
+never played inside the week the sync never writes a weekly row at all — so the row vanished
+instead of showing zeros. The scoreboard was unaffected because it lists a player once they score
+in **any** week of the period, and Williams had scored in QF Week 1.
+
+**Fix.** Keep the points gate, but OR it with a real window test: `rosteredDuringWeek(player)`
+reads the player's `add_date`/`drop_date` from **this week's `roster_dates` entry** (source of
+truth), falls back to the approved swap that moved them, and keeps the player when that window
+overlaps the week's schedule range at all. Because the eligibility sets are type-agnostic
+(`roster_dates` keys span both lists), the statless branch is gated on `poolTypeOf(player)`. The
+same gate — the same defect — was in the commissioner's per-week roster manager
+(`updateCommRosterWeekView`), so it got the same treatment; `commPoolTypeOf` was hoisted out of
+the pending-drop block to make that possible, and the dropped-player tag there now opens the span
+at the week start instead of a bare `?` when the add lives in an earlier week.
+
+**Score-neutral by construction** — nothing here touches `roster_dates`, `swaps`, the eligibility
+sets that feed `batTotal`/`pitTotal`, or any scoring path; the added rows carry the player's own
+window-scoped stats and contribute 0 to a week they earned 0 in. Verified in the running app
+against a fabricated QF-in-progress season: a full dump of every scoreboard row, week header, week
+total and subtotal for all 8 managers is **byte-identical** before and after. Three scenarios
+driven with Playwright at 1280×950 and 390×844: swap effective today → Williams renders greyed as
+`7/20–7/28` directly above Skubal, week total unchanged at 55; swap in QF Week 1 → he shows in
+Week 1 and does **not** leak into Week 2; scheduled (future) swap → unchanged, he stays active
+with `Drops Jul 30` and Skubal reads as scheduled. No page errors, no horizontal overflow.
+
 ## Eliminated managers' stale playoff rosters blocked the swap pool (2026-07-29)
 
 **Symptom (commissioner).** Tarik Skubal was on no surviving manager's roster but never appeared in
