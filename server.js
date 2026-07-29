@@ -13515,6 +13515,92 @@ async function postSeasonWelcomeSlack(db, year) {
   return true;
 }
 
+// Earliest first pitch (epoch ms) among today's MLB games, or null when the slate is empty.
+// `gameDate` is the UTC first-pitch stamp — same field fetchStartedTeamsToday reads.
+async function fetchFirstPitchToday(todayISO) {
+  const scheduleData = await mlbApiFetch(
+    `/api/v1/schedule?sportId=1&startDate=${todayISO}&endDate=${todayISO}&gameType=R,F,D,L,W`
+  );
+  let earliest = null;
+  for (const entry of scheduleData.dates || []) {
+    for (const g of entry.games || []) {
+      const t = g.gameDate ? Date.parse(g.gameDate) : NaN;
+      if (Number.isFinite(t) && (earliest === null || t < earliest)) earliest = t;
+    }
+  }
+  return earliest;
+}
+
+const WELCOME_LEAD_MS = 60 * 60 * 1000; // land the welcome post an hour before first pitch
+const WELCOME_RETRY_MS = 30 * 60 * 1000; // ...and retry this often if rosters aren't in yet
+
+let welcomeTimer = null;
+
+// Send the season-opening post, then claim the day so it can only go out once.
+// The claim is written AFTER a successful post, not before (the opposite of the daily
+// scoreboard): a welcome post that failed because nobody had drafted yet should be retried,
+// not consumed. Retries stay bounded — scheduleSeasonWelcomePost no-ops once the ET date
+// rolls past opening day, so a season where nobody ever drafts just goes quiet.
+async function fireSeasonWelcomePost(season, todayET) {
+  if (readDB().last_welcome_post_date === todayET) return;
+
+  let posted = false;
+  try {
+    posted = await postSeasonWelcomeSlack(readDB(), season);
+  } catch (e) {
+    console.error('[Welcome] Post failed:', e.message);
+  }
+
+  if (posted) {
+    const db = readDB();
+    db.last_welcome_post_date = todayET;
+    writeDB(db);
+    console.log('[Welcome] Season-opening post sent');
+  } else {
+    console.log(`[Welcome] Nothing posted — retrying in ${WELCOME_RETRY_MS / 60000} minutes`);
+    welcomeTimer = setTimeout(() => scheduleSeasonWelcomePost('retry'), WELCOME_RETRY_MS);
+  }
+}
+
+// Arm the season-opening post for an hour before the day's first pitch.
+//
+// Safe to call on any day: it no-ops unless today is the season's first day and the post
+// hasn't gone out. Called both from the 7am run and at boot, so a restart during the ~6-hour
+// gap between 7am and first pitch re-arms the timer rather than silently losing the post.
+// If the MLB schedule lookup fails, or the season somehow opens on a day with no games, it
+// posts immediately — a welcome post at the wrong hour beats no welcome post at all.
+async function scheduleSeasonWelcomePost(reason) {
+  const db = readDB();
+  const season = (db.google_sheets_config || {}).season || new Date().getFullYear().toString();
+  const sd = (db.seasons || {})[season];
+  if (!hasScoreboardData(sd)) return;
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (db.last_welcome_post_date === todayET) return;
+
+  const windows = roundDateWindows(sd.schedule_dates || []);
+  const seasonStart = windows.reduce((min, w) => (!min || w.start < min ? w.start : min), null);
+  if (!seasonStart || todayET !== seasonStart) return;
+
+  let firstPitch = null;
+  try {
+    firstPitch = await fetchFirstPitchToday(todayET);
+    if (firstPitch === null) console.log('[Welcome] No MLB games scheduled today — posting now');
+  } catch (e) {
+    console.error('[Welcome] First-pitch lookup failed — posting now instead of waiting:', e.message);
+  }
+
+  const delay = firstPitch === null ? 0 : Math.max(0, firstPitch - WELCOME_LEAD_MS - Date.now());
+  if (welcomeTimer) clearTimeout(welcomeTimer);
+  welcomeTimer = setTimeout(() => fireSeasonWelcomePost(season, todayET), delay);
+  console.log(
+    `[Welcome] Opening day (${reason}) — post armed for ` +
+      (delay > 0
+        ? `${new Date(Date.now() + delay).toISOString()} (first pitch ${new Date(firstPitch).toISOString()})`
+        : 'now')
+  );
+}
+
 let scoreboardTimer = null;
 
 function scheduleScoreboardPost() {
@@ -13564,13 +13650,10 @@ function scheduleScoreboardPost() {
         );
       } else if (plan.welcome) {
         // Opening day: no games played, so no scoreboard and no odds compute — just the
-        // draft roast. Also bypasses the sync window, which only opens the day after the
-        // season starts (that is exactly why day 1 was silent before).
-        postSeasonWelcomeSlack(readDB(), season)
-          .then((posted) =>
-            console.log(posted ? '[Welcome] Season-opening post sent' : '[Welcome] Nothing to post — no rosters yet')
-          )
-          .catch((e) => console.error('[Welcome] Post failed:', e.message));
+        // draft roast, and not now. It lands an hour before first pitch, when people are
+        // actually looking, rather than at 7am. Bypasses the sync window too, which only
+        // opens the day after the season starts (exactly why day 1 used to be silent).
+        scheduleSeasonWelcomePost('7am run').catch((e) => console.error('[Welcome] Scheduling failed:', e.message));
       } else if (plan.summaryRound || isWithinSyncWindow(sd)) {
         // End-of-round recaps bypass the sync window. That window closes the day AFTER the
         // Finals' last day, but a recap posts the MONDAY after a round ends — those coincide
@@ -13613,6 +13696,12 @@ function scheduleScoreboardPost() {
     `[Scoreboard] Auto-post enabled. Next post at ${next.toISOString()} (7am Eastern, in ${Math.round(delay / 60000)} minutes)`
   );
   scoreboardTimer = setTimeout(runAndReschedule, delay);
+
+  // Re-arm the season-opening post on every boot. Its timer can sit for hours between the
+  // 7am run and first pitch, and an in-memory setTimeout does not survive a restart or a
+  // deploy — without this, one restart on opening day would lose the post for the season.
+  // No-ops on every other day of the year.
+  scheduleSeasonWelcomePost('boot').catch((e) => console.error('[Welcome] Boot scheduling failed:', e.message));
 }
 
 // ============================================================
