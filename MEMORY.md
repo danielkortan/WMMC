@@ -1964,3 +1964,103 @@ Calendar sim re-run: WELCOME on 5/04, daily 5/05→7/13, recaps 7/13 PP2 / 8/03 
 8/31 Finals, silent ASB and after 8/31 — 113 posts, and unchanged with the Finals ending
 Saturday. 178/178 tests, lint + format clean. Server-only (Slack-post concern, like
 `buildPlayoffMatchupsSlackText`), so no committed unit test per the testing convention.
+
+## 2026-07-29 — A mid-week trade erased the outgoing manager's drop-day points
+
+**Symptom (commissioner).** The 7am QF matchup post disagreed with the app: Daniel Kortan 416.4
+(B 315 / P 101.4) in Slack vs 453.7 (B 315 / P 138.7) on the board — exactly Gavin Williams' QF
+Week 2 start (37.35) missing, the day of his 7/28 drop. Alex Thalacker was short 12 batting points
+the same morning. The Jul-28 "Best & Worst" showed Kortan at P 0 for a day his pitcher had thrown
+seven innings. Separately, "Blocked a destructive season save — Anton Capria total drops 78.9"
+repeated with **no matching swap anywhere in the swap log** — because it is not a swap event at all,
+it is the full-season save guard refusing a write.
+
+**Cause.** `player_dates` stores ONE scoring window per player per week; the weekly stat row is
+likewise one row per player per week with a single sticky `manager`. Neither can express a player
+who changes hands INSIDE a week — which is exactly what an effective-tomorrow trade does
+(`drop_date = today` for the seller, `add_date = tomorrow` for the buyer, both in the same week).
+`syncPlayerDatesFromRosterDates` wrote each manager's claim straight into the shared slot, so the
+last one written won and the other side of the handover was discarded. `rebuildWeeklyFromDaily`
+then recomputed the shared row against that single surviving window and stamped whoever currently
+held the player as its `manager`. With the buyer's `{start: 7/29}` surviving, the seller's drop-day
+points were erased from the database outright; with the seller's `{end: 7/28}` surviving instead,
+the buyer was credited with a start he never owned. **Which one happened depended on manager key
+order** — the same data scored differently on different passes, which is why a client's save could
+compute a total 78.9 below the stored one and trip the ≥40-pt crater guard with nothing in the swap
+log to explain it. The live view was immune (PR #381 gave `/api/mlb/live` per-manager windows), so
+the app looked right while every stored/Slack number was wrong — and would have stayed wrong once
+the week rolled out of live enrichment.
+
+**Fix.** Three layers, all keyed on "the date windows are the truth, `manager` is a derived cache":
+
+- `syncPlayerDatesFromRosterDates` merges every manager's claim to the widest window instead of
+  last-writer-wins, so no day anyone rostered him is dropped from the row (and the result no longer
+  depends on key order).
+- `applyManagerScoreSplits` (new, run at the end of `rebuildWeeklyFromDaily` and
+  `recomputeMidWeekAddScores`) writes `row.manager_scores = { manager: points }` for contested
+  players only — each owner's own days, from the daily rows. `managerWeekSubtotal` (server + the
+  app.js mirror) reads it, and claims a row attributed to another manager when this manager has his
+  own window that week. The client is not sent daily rows, so the split has to be persisted for the
+  two copies to agree.
+- `findManagerForPlayerDate` (new) resolves the daily Best/Worst owner AS OF the date scored rather
+  than from the current roster array, so a player's final rostered day is credited to the manager
+  who actually had him. `drop_date` is inclusive, so a drop ON the date still counts that date.
+
+**Vetted** per `SAVE_HARDENING_PLAN.md` §7 on a fixture reproducing the incident, old code vs new: no
+swap and single-owner mid-week drop are byte-identical (100 / 74.7); the trade case goes from
+"seller 37.35, buyer 25.3" (order A,B) or "seller 37.35, buyer 37.35" (order B,A) to a stable
+seller 74.7 / buyer 25.3 in both orders; the daily high/low went from having no attribution at all to
+crediting the seller. Every manager total on `tests/fixtures/staging-seed.json` is unchanged, both
+directly and after a full `syncPlayerDatesFromRosterDates` + `recomputeMidWeekAddScores` pass.
+
+**Not yet done:** the vet against the LIVE db (no prod access from this sandbox). Run the before/
+after per-manager comparison there before trusting the first post-deploy numbers, and expect the
+first sync after deploy to move the affected managers UP by the points that were erased — the score
+guard warns on a >200-pt jump but only blocks drops, so it will not stand in the way.
+
+## 2026-07-29 — A wrong certified total sat in Slack for three hours with nothing watching
+
+**Incident.** The 7am QF post scored Daniel Kortan 416.4 while the app showed 453.7 — exactly Gavin
+Williams' 37.35 start on 7/28, the day his effective-tomorrow trade dropped him. The Jul-28 Best &
+Worst showed Kortan at P 0 the same morning, and "Blocked a destructive season save — Anton Capria
+total drops 78.9" repeated three times with no swap in the log to explain it.
+
+**What it turned out to be.** Not a scoring bug. The certified totals came from a server process
+holding a `db.json` in which that manager-week scored 0, while the row it was derived from — and
+every daily record behind it — said 37.35. `/api/seasons` and `/api/diag/manager`, milliseconds
+apart in the same paste, returned contradictory answers from the same file. The process restarted
+at 09:34 ET and every reading since agrees at 37.35 (total 3171.65 → 3209). The drift healed with
+the restart; **the cause of the drift itself was never proven** — the process holding the evidence
+is gone. Ruled out along the way: a code-version difference (the incident shape scores correctly on
+all eight builds merged that day), duplicate/ghost rows, client-server drift (both copies of
+`managerWeekSubtotal` are byte-equivalent), stale client caching (`/api/seasons` ETags the body
+itself), and multiple instances (`/api/build` returned a single process id across 12 calls).
+
+**The real defect was that nothing noticed.** Every guard in `server.js` compares a total against
+ANOTHER total — the swing guard against yesterday's snapshot, the save guard against the stored
+season — so a rollup that quietly stops matching the stats underneath it is invisible to all of
+them. Finding it took six rounds of hand-querying the DB from a browser console.
+
+**Fix: `auditWeeklyRollupDrift`.** Recomputes each manager-week straight from the daily rows inside
+that manager's own roster windows (from `roster_dates`, period-scoped, both bounds inclusive) and
+reports where the certified subtotal disagrees, naming the players responsible. Deliberately does
+NOT read the weekly rows or their sticky `manager` field — those are the cache being audited. Runs
+after the 4am compile and again before the 7am post (on a fresh read, since a blocked compile
+leaves rejected scores in memory), alerts via `postSlack` once per distinct finding-set per
+process, and is exposed on demand at `GET /api/diag/rollup-audit`. Detection only. Commissioner
+overrides (`drop_locked` / `manual_fields`) are exempt — a hand-set number is supposed to differ.
+
+On this incident it would have posted at 4am: _"Daniel Kortan QF|Week 2: certified 0 vs 37.35 from
+the daily rows (under by 37.35) — Gavin Williams -37.35."_
+
+**Verified** on the incident shape (rollup loses the row → flagged, names the player), a stale
+rollup score on a full-week player (flagged), a ghost row crediting a player the manager no longer
+rosters (flagged, +50), a commissioner override (correctly silent), and both seasons of
+`tests/fixtures/staging-seed.json` (silent — no false positives). Kept in `server.js` with no `js/`
+copy and no unit test, matching the live-day precedent: the client has no use for it and the
+project already carries enough hand-synced duplicate pairs.
+
+**Side note worth keeping.** The per-manager window scoring added in the same PR makes the
+certified number self-healing for exactly the class of player that broke here: any player whose
+roster window covers only part of a week is now scored from the daily rows rather than from the
+stored rollup, so a bad rollup score for him can no longer reach a total.

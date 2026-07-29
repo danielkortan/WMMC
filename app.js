@@ -901,14 +901,15 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const weekManagerRows = rowsArr.filter((r) => r.manager === managerName && matchesRoundWeek(r));
   const allWeekRows = weekManagerRows.slice();
   rowsArr.forEach((r) => {
-    if (
-      matchesRoundWeek(r) &&
-      !r.manager &&
-      eligible.has(r[playerKey]) &&
-      !allWeekRows.some((x) => x[playerKey] === r[playerKey])
-    ) {
-      allWeekRows.push(r);
-    }
+    if (!matchesRoundWeek(r) || r.manager === managerName) return;
+    // A row attributed to ANOTHER manager still counts here when this manager held the player for
+    // part of the week — a mid-week handover (trade / waiver pickup). `manager` is a sticky derived
+    // cache naming whoever held him at compile time, so it cannot arbitrate a contested week; the
+    // date windows can, and manager_scores carries the split the server computed from daily data.
+    const contested = !!(r.manager_scores && Object.prototype.hasOwnProperty.call(r.manager_scores, managerName));
+    if (r.manager && !weekRosterDates[r[playerKey]] && !contested) return;
+    if (!eligible.has(r[playerKey]) || allWeekRows.some((x) => x[playerKey] === r[playerKey])) return;
+    allWeekRows.push(r);
   });
 
   const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
@@ -918,13 +919,26 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
     // player only when they have a row of this type or sit in this type's roster array). The
     // scores still sum to the returned subtotal: array-only players contribute 0.
     const scoreByPlayer = {};
-    for (const r of finalRows) scoreByPlayer[r[playerKey]] = (scoreByPlayer[r[playerKey]] || 0) + (r.weekly_score || 0);
+    for (const r of finalRows) {
+      scoreByPlayer[r[playerKey]] = (scoreByPlayer[r[playerKey]] || 0) + rowScore(r, managerName);
+    }
     const typeRoster = new Set(weekRoster[listKey] || []);
     for (const p of eligible) {
       if (p in scoreByPlayer || typeRoster.has(p)) detailOut.push({ player: p, score: scoreByPlayer[p] || 0 });
     }
   }
-  return finalRows.reduce((s, r) => s + (r.weekly_score || 0), 0);
+  return finalRows.reduce((s, r) => s + rowScore(r, managerName), 0);
+}
+
+// What ONE manager earned from ONE weekly stat row. Normally the row's stored weekly_score — but a
+// player held by two managers inside one week (a mid-week trade) has a single row covering both
+// their windows, so the compile stores the per-manager split on it. Mirrors managerRowScoreForWeek
+// in server.js; the client is not sent daily rows, so it reads the split rather than re-deriving it.
+function rowScore(row, managerName) {
+  if (row.manager_scores && Object.prototype.hasOwnProperty.call(row.manager_scores, managerName)) {
+    return row.manager_scores[managerName] || 0;
+  }
+  return row.weekly_score || 0;
 }
 
 // ============================================================

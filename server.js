@@ -3380,6 +3380,63 @@ function recomputeAllWeeklyScores(sd) {
   });
 }
 
+// Split a contested week's rows per manager. A weekly row is stored once per player per week, but
+// a player can be held by two managers inside one week (a mid-week trade or waiver pickup: dropped
+// by A on the 28th, added by B on the 29th). The row's weekly_score then covers the merged window —
+// everyone's days — and the sticky `manager` field names only one of them, so any consumer that
+// reads either one credits the wrong manager. `manager_scores` records what each owner actually
+// earned inside HIS OWN window, so the server and the client (which is not sent daily rows, and so
+// cannot re-derive this) agree on the split. Written only for genuinely contested players; removed
+// again as soon as a week has a single owner, so the normal case carries no extra state.
+function applyManagerScoreSplits(sd, round, week) {
+  const weekKey = `${round}|${week}`;
+  const weekIdx = getScheduleWeekIndex(round, week);
+  const weekDates = weekIdx >= 0 ? (sd.schedule_dates || [])[weekIdx] : null;
+
+  const ownersOf = (player, listKey) => {
+    const owners = new Map(); // manager -> that manager's roster_dates entry for this week (or null)
+    for (const [mgr, weeks] of Object.entries(sd.roster_dates || {})) {
+      const entry = ((weeks || {})[weekKey] || {})[player];
+      if (entry) owners.set(mgr, entry);
+    }
+    for (const [mgr, weeks] of Object.entries(sd.rosters || {})) {
+      const arr = ((weeks || {})[weekKey] || {})[listKey] || [];
+      if (arr.includes(player) && !owners.has(mgr)) owners.set(mgr, null);
+    }
+    return owners;
+  };
+
+  const split = (rows, playerKey, listKey, dailyRows, scoreOf) => {
+    for (const row of rows) {
+      if (row.round !== round || row.week !== week) continue;
+      const owners = ownersOf(row[playerKey], listKey);
+      if (owners.size < 2) {
+        delete row.manager_scores;
+        continue;
+      }
+      const records = (dailyRows || []).filter(
+        (r) => r[playerKey] === row[playerKey] && r.round === round && r.week === week
+      );
+      if (records.length === 0) {
+        delete row.manager_scores;
+        continue;
+      }
+      const scores = {};
+      for (const [mgr, entry] of owners) {
+        const w = managerWeekWindowServer(entry, weekDates);
+        const total = records
+          .filter((r) => !w || ((!w.start || r.date >= w.start) && (!w.end || r.date <= w.end)))
+          .reduce((sum, r) => sum + scoreOf(r.delta || {}), 0);
+        scores[mgr] = Math.round(total * 100) / 100;
+      }
+      row.manager_scores = scores;
+    }
+  };
+
+  split(sd.weekly_batting || [], 'batter', 'batters', sd.daily_batting, calculateBattingScore);
+  split(sd.weekly_pitching || [], 'pitcher', 'pitchers', sd.daily_pitching, calculatePitchingScore);
+}
+
 // Rebuild weekly_batting/pitching summary rows for one week by aggregating
 // ALL stored daily_batting/pitching records for that week. This ensures the
 // weekly row always reflects the full week's accumulated games — not just the
@@ -3497,6 +3554,8 @@ function rebuildWeeklyFromDaily(sd, round, week) {
       source: 'mlbapi',
     });
   }
+
+  applyManagerScoreSplits(sd, round, week);
 }
 
 // One-shot migration: make the MLB Stats API the single source of truth for
@@ -3714,6 +3773,57 @@ function detectCurrentRound(scheduleDates) {
 // contributes to the subtotal is pushed as { player, score } — used by the
 // daily score-snapshot trail to record per-player breakdowns without changing
 // the numeric return value the other callers rely on.
+// What ONE manager earned from ONE weekly stat row. Normally that is the row's stored
+// weekly_score. It is not when the player changed hands inside the week: a week's scoring window is
+// stored once per player (player_dates), not once per owner, so the row a mid-week trade leaves
+// behind is the sum for BOTH managers over the merged window — crediting it whole to either one is
+// wrong in both directions. When this manager's own add/drop dates cover only part of the week, sum
+// the daily rows inside HIS window instead. Both bounds inclusive: add_date is the first day he
+// scores, drop_date the last (the effective-tomorrow swap shape — drop today, add tomorrow — exists
+// precisely so the outgoing player keeps the day his team already played).
+//
+// Deliberate commissioner values always win: a drop_locked / manual_fields row, or a hand-set
+// (non-auto) player_dates entry, keeps its stored number. So does a week with no daily rows for the
+// player (gsheets-era weeks), where there is nothing to re-derive from.
+function managerRowScoreForWeek(sd, row, playerKey, managerName, weekKey, weekDates, ownDates) {
+  const stored = row.weekly_score || 0;
+  // A contested week carries the split the compile already worked out (applyManagerScoreSplits).
+  if (row.manager_scores && Object.prototype.hasOwnProperty.call(row.manager_scores, managerName)) {
+    return row.manager_scores[managerName] || 0;
+  }
+  const window = managerWeekWindowServer(ownDates, weekDates);
+  if (!window) return stored;
+  if (row.drop_locked || (row.manual_fields && row.manual_fields.length > 0)) return stored;
+  const override = (((sd.player_dates || {})[weekKey] || {})[playerKey] || {})[row[playerKey]];
+  if (override && !override.auto) return stored;
+
+  const isBatting = playerKey === 'batter';
+  const records = ((isBatting ? sd.daily_batting : sd.daily_pitching) || []).filter(
+    (r) => r[playerKey] === row[playerKey] && r.round === row.round && r.week === row.week
+  );
+  if (records.length === 0) return stored;
+
+  const inWindow = records.filter(
+    (r) => (!window.start || r.date >= window.start) && (!window.end || r.date <= window.end)
+  );
+  const total = inWindow.reduce(
+    (sum, r) => sum + (isBatting ? calculateBattingScore(r.delta || {}) : calculatePitchingScore(r.delta || {})),
+    0
+  );
+  return Math.round(total * 100) / 100;
+}
+
+// The slice of a week one manager held a player, or null when he held him for the whole week.
+// Mirrors managerWeekWindow in js/eligibility.js — keep the two copies identical.
+function managerWeekWindowServer(dates, weekDates) {
+  if (!dates) return null;
+  const weekStart = (weekDates && weekDates.start) || null;
+  const weekEnd = (weekDates && weekDates.end) || null;
+  const start = dates.add_date && (!weekStart || dates.add_date > weekStart) ? dates.add_date : null;
+  const end = dates.drop_date && (!weekEnd || dates.drop_date < weekEnd) ? dates.drop_date : null;
+  return start || end ? { start, end } : null;
+}
+
 function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut) {
   if (!sd || !managerName) return 0;
   const round = schedWeek.round;
@@ -3832,21 +3942,33 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   const weekManagerRows = rowsArr.filter((r) => r.manager === managerName && matchesRoundWeek(r));
   const allWeekRows = weekManagerRows.slice();
   rowsArr.forEach((r) => {
-    if (
-      matchesRoundWeek(r) &&
-      !r.manager &&
-      eligible.has(r[playerKey]) &&
-      !allWeekRows.some((x) => x[playerKey] === r[playerKey])
-    ) {
-      allWeekRows.push(r);
-    }
+    if (!matchesRoundWeek(r) || r.manager === managerName) return;
+    // Unattributed rows are claimed by eligibility, as before. A row attributed to ANOTHER manager
+    // is claimed too when this manager has his own add/drop window for that player THIS week — the
+    // mid-week handover. `manager` is a sticky derived cache (the sync stamps whoever holds the
+    // player at compile time), so it cannot arbitrate a player who changed hands inside the week;
+    // the date windows can, and managerRowScoreForWeek gives each side only its own days.
+    const contested = !!(r.manager_scores && Object.prototype.hasOwnProperty.call(r.manager_scores, managerName));
+    if (r.manager && !weekRosterDates[r[playerKey]] && !contested) return;
+    if (!eligible.has(r[playerKey]) || allWeekRows.some((x) => x[playerKey] === r[playerKey])) return;
+    allWeekRows.push(r);
   });
 
   const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
+  const rowScore = (r) =>
+    managerRowScoreForWeek(
+      sd,
+      r,
+      playerKey,
+      managerName,
+      weekKey,
+      scheduleDates[weekIdx],
+      weekRosterDates[r[playerKey]]
+    );
   if (detailOut) {
-    for (const r of finalRows) detailOut.push({ player: r[playerKey], score: r.weekly_score || 0 });
+    for (const r of finalRows) detailOut.push({ player: r[playerKey], score: rowScore(r) });
   }
-  return finalRows.reduce((s, r) => s + (r.weekly_score || 0), 0);
+  return finalRows.reduce((s, r) => s + rowScore(r), 0);
 }
 
 // Sum batting + pitching weekly_scores for the given rounds, scoped per
@@ -3958,6 +4080,210 @@ function captureScoreSnapshot(sd, dateISO) {
     totals[m].pitching = Math.round(totals[m].pitching * 100) / 100;
   }
   return { date: dateISO, captured_at: new Date().toISOString(), totals, detail };
+}
+
+// ============================================================
+// Weekly-rollup drift audit
+// ============================================================
+// Certified totals are summed from the weekly_* rollup rows. Those rows are a DERIVED CACHE of the
+// daily rows plus each manager's add/drop windows — and on 2026-07-29 the cache and its source
+// disagreed for three hours with nothing noticing: a manager's certified QF week scored 0 while the
+// stored row (and the daily record behind it) both said 37.35, so the 7am post went out 37.35
+// light. Every guard in the file compares a total against ANOTHER total — the swing guard against
+// yesterday's, the save guard against the stored one — so a rollup that quietly stops matching the
+// stats underneath it is invisible to all of them. This recomputes each manager's week straight
+// from the daily rows inside their own roster windows and reports where the rollup disagrees.
+//
+// Detection only — it never mutates the season. Commissioner overrides are excluded rather than
+// flagged: a drop_locked / manual_fields row is a deliberate hand-set number that is SUPPOSED to
+// differ from the daily rows.
+
+// Which players a manager rostered during one week, and the slice of that week they were his.
+// Derived from roster_dates alone (period-scoped, both bounds inclusive) — deliberately NOT from
+// the weekly rows or their sticky `manager` field, since those are the cache being audited. Falls
+// back to the week's roster array only for players with no date events at all (an initial
+// submission that predates roster_dates).
+function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
+  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
+  const weekStart = weekDates.start || null;
+  const weekEnd = weekDates.end || null;
+  if (!weekStart || !weekEnd) return {};
+
+  const periodStart = periodStartForRound(sd, round);
+  const mgrDates = (sd.roster_dates || {})[manager] || {};
+  const latestAdd = {};
+  const latestDrop = {};
+  for (const players of Object.values(mgrDates)) {
+    for (const [p, d] of Object.entries(players || {})) {
+      if (!d) continue;
+      if (
+        d.add_date &&
+        (!periodStart || d.add_date >= periodStart) &&
+        d.add_date <= weekEnd &&
+        (!latestAdd[p] || d.add_date > latestAdd[p])
+      ) {
+        latestAdd[p] = d.add_date;
+      }
+      if (
+        d.drop_date &&
+        (!periodStart || d.drop_date >= periodStart) &&
+        d.drop_date <= weekEnd &&
+        (!latestDrop[p] || d.drop_date > latestDrop[p])
+      ) {
+        latestDrop[p] = d.drop_date;
+      }
+    }
+  }
+
+  const windows = {};
+  for (const p of new Set([...Object.keys(latestAdd), ...Object.keys(latestDrop)])) {
+    const add = latestAdd[p] || null;
+    const drop = latestDrop[p] || null;
+    const start = add && add > weekStart ? add : weekStart;
+    if (add && (!drop || add > drop)) {
+      windows[p] = { start, end: weekEnd }; // still rostered at the week's end
+    } else if (drop && drop >= weekStart) {
+      windows[p] = { start, end: drop }; // dropped mid-week; the drop day still counts
+    }
+    // dropped before this week began, and not re-added: not his at all this week
+  }
+
+  const arr = ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {};
+  for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
+    if (!windows[p] && !latestAdd[p] && !latestDrop[p]) windows[p] = { start: weekStart, end: weekEnd };
+  }
+  return windows;
+}
+
+// Compare every manager-week's certified subtotal against the same week rebuilt from daily rows.
+// Returns one finding per disagreeing manager-week, each naming the players responsible.
+function auditWeeklyRollupDrift(sd, { tolerance = 0.5 } = {}) {
+  const findings = [];
+  if (!sd) return findings;
+  const dailyBatAll = sd.daily_batting || [];
+  const dailyPitAll = sd.daily_pitching || [];
+  if (dailyBatAll.length === 0 && dailyPitAll.length === 0) return findings;
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const managers = new Set(Object.keys(sd.rosters || {}));
+  for (const r of batting) if (r.manager) managers.add(r.manager);
+  for (const r of pitching) if (r.manager) managers.add(r.manager);
+  const r2 = (n) => Math.round(n * 100) / 100;
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const weekDates = (sd.schedule_dates || [])[idx];
+    if (!weekDates || !weekDates.start || !weekDates.end) return;
+    const { round, week } = schedWeek;
+    const dailyBat = dailyBatAll.filter((r) => r.round === round && r.week === week);
+    const dailyPit = dailyPitAll.filter((r) => r.round === round && r.week === week);
+    if (dailyBat.length === 0 && dailyPit.length === 0) return; // not played yet, or a gsheets-era week
+
+    // Hand-set rows are exempt on both sides of the comparison.
+    const overridden = new Set();
+    const collectOverrides = (rows, key) => {
+      for (const r of rows) {
+        if (r.round !== round || r.week !== week) continue;
+        if (r.drop_locked || (r.manual_fields && r.manual_fields.length > 0)) overridden.add(r[key]);
+      }
+    };
+    collectOverrides(batting, 'batter');
+    collectOverrides(pitching, 'pitcher');
+    for (const r of [...dailyBat, ...dailyPit]) {
+      if (r.drop_locked || (r.manual_fields && r.manual_fields.length > 0)) overridden.add(r.batter || r.pitcher);
+    }
+
+    for (const mgr of managers) {
+      const batDetail = [];
+      const pitDetail = [];
+      const certBat = managerWeekSubtotal(sd, mgr, schedWeek, idx, batting, 'batter', 'batters', batDetail);
+      const certPit = managerWeekSubtotal(sd, mgr, schedWeek, idx, pitching, 'pitcher', 'pitchers', pitDetail);
+      const windows = managerWeekRosterWindows(sd, mgr, round, week, idx);
+      if (!certBat && !certPit && Object.keys(windows).length === 0) continue;
+
+      const fromDaily = {};
+      for (const [player, w] of Object.entries(windows)) {
+        if (overridden.has(player)) continue;
+        const inWindow = (r) => (!w.start || r.date >= w.start) && (!w.end || r.date <= w.end);
+        let pts = 0;
+        for (const r of dailyBat) if (r.batter === player && inWindow(r)) pts += calculateBattingScore(r.delta || {});
+        for (const r of dailyPit) if (r.pitcher === player && inWindow(r)) pts += calculatePitchingScore(r.delta || {});
+        fromDaily[player] = r2(pts);
+      }
+
+      const certified = {};
+      for (const d of [...batDetail, ...pitDetail]) {
+        if (overridden.has(d.player)) continue;
+        certified[d.player] = r2((certified[d.player] || 0) + (d.score || 0));
+      }
+
+      const sum = (o) => r2(Object.values(o).reduce((s, v) => s + v, 0));
+      const certTotal = sum(certified);
+      const dailyTotal = sum(fromDaily);
+      if (Math.abs(certTotal - dailyTotal) <= tolerance) continue;
+
+      const players = [];
+      for (const p of new Set([...Object.keys(certified), ...Object.keys(fromDaily)])) {
+        const c = certified[p] || 0;
+        const d = fromDaily[p] || 0;
+        if (Math.abs(c - d) > tolerance) players.push({ player: p, certified: c, from_daily: d, delta: r2(c - d) });
+      }
+      players.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+      findings.push({
+        manager: mgr,
+        week: `${round}|${week}`,
+        certified: certTotal,
+        from_daily: dailyTotal,
+        delta: r2(certTotal - dailyTotal),
+        players,
+      });
+    }
+  });
+
+  return findings;
+}
+
+function buildRollupDriftSlackText(findings, year) {
+  const lines = findings.slice(0, 8).map((f) => {
+    const who = f.players
+      .slice(0, 4)
+      .map((p) => `${p.player} ${p.delta > 0 ? '+' : ''}${p.delta}`)
+      .join(', ');
+    const sign = f.delta > 0 ? 'over' : 'under';
+    return (
+      `• *${f.manager}* ${f.week}: certified ${f.certified} vs ${f.from_daily} from the daily rows ` +
+      `(${sign} by ${Math.abs(f.delta)})${who ? ` — ${who}` : ''}`
+    );
+  });
+  const more = findings.length > lines.length ? `\n_…and ${findings.length - lines.length} more._` : '';
+  return (
+    `:mag: *Scoring drift detected (${year})* — the certified totals disagree with the stats they are ` +
+    `derived from. The posted scoreboard is using the certified numbers, so they are wrong until this ` +
+    `is resolved.\n${lines.join('\n')}${more}\n` +
+    `_Re-run Sync Now to recompile from the daily rows; if it persists, the roster windows are the ` +
+    `next thing to check._`
+  );
+}
+
+// One alert per distinct finding-set per process — the 4am compile and the 7am post both run this,
+// and an unresolved drift would otherwise re-post every morning.
+let lastRollupDriftSignature = null;
+
+async function alertOnRollupDrift(sd, year, trigger) {
+  try {
+    const findings = auditWeeklyRollupDrift(sd);
+    if (findings.length === 0) return [];
+    const signature = findings.map((f) => `${f.manager}|${f.week}|${f.delta}`).join(';');
+    console.error(`[Rollup audit] (${trigger}) ${findings.length} manager-week(s) drifted: ${signature}`);
+    if (signature !== lastRollupDriftSignature) {
+      lastRollupDriftSignature = signature;
+      await postSlack(buildRollupDriftSlackText(findings, year)).catch(() => {});
+    }
+    return findings;
+  } catch (e) {
+    console.error('[Rollup audit] error (continuing):', e.message);
+    return [];
+  }
 }
 
 // Append a snapshot to the rolling trail (one per date — a same-day re-run
@@ -4331,7 +4657,9 @@ function computeDailyHighLow(sd, date) {
   const pitcherManager = {};
   const addToManager = (playerName, pdType, score, round, week) => {
     const playerType = pdType === 'batter' ? 'batting' : 'pitching';
-    const mgr = findManagerForPlayerWeek(sd, playerName, playerType, round, week);
+    // Resolve the owner AS OF this date, not as of now: a player swapped out yesterday still owns
+    // yesterday's points for the manager who rostered him then.
+    const mgr = findManagerForPlayerDate(sd, playerName, playerType, round, week, date);
     if (!mgr) return;
 
     const weekKey = `${round}|${week}`;
@@ -5807,6 +6135,17 @@ function syncPlayerDatesFromRosterDates(sd) {
     }
   }
 
+  // Collect every manager's claim on each (weekKey, player) BEFORE writing, then store the widest
+  // window any of them had. player_dates holds one window per player per week, but a player can
+  // change hands MID-WEEK (a trade: dropped by A on the 28th — his last rostered, still-scoring day
+  // — and added by B on the 29th). Writing each claim straight into the shared slot let the last
+  // one seen win, so one side of the handover was thrown away and the shared weekly row was then
+  // recomputed against a window its points never sat in: A's drop-day points were erased from the
+  // database outright. Worse, nothing orders those writes, so which side survived depended on
+  // manager key order. Merging keeps every day somebody rostered him; managerWeekSubtotal splits
+  // those days back out per manager so neither owner is credited for the other's days.
+  // (Mirrors mergeWeekWindows / managerWeekWindow in js/eligibility.js — keep in sync.)
+  const merged = {}; // weekKey -> player -> { start, end, whole } | null
   for (const mgrDates of Object.values(sd.roster_dates)) {
     for (const [weekKey, players] of Object.entries(mgrDates)) {
       // Look up the week start date to distinguish mid-week adds from initial roster.
@@ -5829,21 +6168,36 @@ function syncPlayerDatesFromRosterDates(sd) {
         // cutoff on that side without falling back to weekDates.
         const needsStart = !!(dates.add_date && weekStart && dates.add_date > weekStart);
         const needsEnd = !!dates.drop_date;
-        if (!needsStart && !needsEnd) continue;
 
-        const entry = {
-          start: needsStart ? dates.add_date : null,
-          end: needsEnd ? dates.drop_date : null,
-          auto: true,
-        };
-
-        for (const type of ['batter', 'pitcher']) {
-          if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
-          if (!sd.player_dates[weekKey][type]) sd.player_dates[weekKey][type] = {};
-          const existing = sd.player_dates[weekKey][type][player];
-          if (existing && !existing.auto) continue; // preserve manual commissioner override
-          sd.player_dates[weekKey][type][player] = entry;
+        if (!merged[weekKey]) merged[weekKey] = {};
+        const cur = merged[weekKey][player];
+        if (cur && cur.whole) continue; // a whole-week claim swallows every narrower one
+        if (!needsStart && !needsEnd) {
+          merged[weekKey][player] = { whole: true };
+          continue;
         }
+        const start = needsStart ? dates.add_date : null;
+        const end = needsEnd ? dates.drop_date : null;
+        if (!cur) {
+          merged[weekKey][player] = { start, end };
+          continue;
+        }
+        cur.start = cur.start === null || start === null ? null : start < cur.start ? start : cur.start;
+        cur.end = cur.end === null || end === null ? null : end > cur.end ? end : cur.end;
+      }
+    }
+  }
+
+  for (const [weekKey, players] of Object.entries(merged)) {
+    for (const [player, window] of Object.entries(players)) {
+      if (window.whole || (!window.start && !window.end)) continue;
+      const entry = { start: window.start || null, end: window.end || null, auto: true };
+      for (const type of ['batter', 'pitcher']) {
+        if (!sd.player_dates[weekKey]) sd.player_dates[weekKey] = {};
+        if (!sd.player_dates[weekKey][type]) sd.player_dates[weekKey][type] = {};
+        const existing = sd.player_dates[weekKey][type][player];
+        if (existing && !existing.auto) continue; // preserve manual commissioner override
+        sd.player_dates[weekKey][type][player] = entry;
       }
     }
   }
@@ -5934,6 +6288,16 @@ function recomputeMidWeekAddScores(sd, wipedAutoEntries = new Set()) {
         }
       });
     }
+  }
+
+  // Refresh the per-manager split for every week just recomputed — a swap approval or a save is
+  // exactly when a player changes hands mid-week, and the split has to land with the same write.
+  const touchedWeeks = new Set(
+    [...toRecompute].map((key) => key.slice(0, key.lastIndexOf('|', key.lastIndexOf('|') - 1)))
+  );
+  for (const weekKey of touchedWeeks) {
+    const wkParts = weekKey.split('|');
+    applyManagerScoreSplits(sd, wkParts[0], wkParts.slice(1).join('|'));
   }
 }
 // Mirrors the client-side repairGhostInitialRosterPlayers in app.js.
@@ -6037,6 +6401,45 @@ function findManagerForPlayer(sd, playerName, type) {
     }
   }
   return null;
+}
+
+// Find the manager who rostered a player ON a specific date, from the date windows.
+// findManagerForPlayerWeek (below) reads the per-week roster ARRAY, which answers "who holds him
+// now" — the wrong question for a day already played. A swap removes the outgoing player from the
+// array the moment it is applied, so his final rostered day (drop_date is INCLUSIVE) lost its owner
+// and his points for that day vanished from the daily leaderboard entirely — the manager showed 0
+// for a day his pitcher had just thrown seven innings. Windows are period-scoped, and a drop ON the
+// date still counts that date. Falls back to the array lookup for players with no date events at
+// all (an initial-submission roster that predates roster_dates).
+function findManagerForPlayerDate(sd, playerName, type, round, week, date) {
+  if (!date) return findManagerForPlayerWeek(sd, playerName, type, round, week);
+  const periodStart = periodStartForRound(sd, round);
+  for (const [manager, weeks] of Object.entries(sd.roster_dates || {})) {
+    let latestAdd = null;
+    let latestDrop = null;
+    for (const players of Object.values(weeks || {})) {
+      const d = (players || {})[playerName];
+      if (!d) continue;
+      if (
+        d.add_date &&
+        (!periodStart || d.add_date >= periodStart) &&
+        d.add_date <= date &&
+        (!latestAdd || d.add_date > latestAdd)
+      ) {
+        latestAdd = d.add_date;
+      }
+      if (
+        d.drop_date &&
+        (!periodStart || d.drop_date >= periodStart) &&
+        d.drop_date < date &&
+        (!latestDrop || d.drop_date > latestDrop)
+      ) {
+        latestDrop = d.drop_date;
+      }
+    }
+    if (latestAdd && (!latestDrop || latestAdd > latestDrop)) return manager;
+  }
+  return findManagerForPlayerWeek(sd, playerName, type, round, week);
 }
 
 // Find manager for a player in a specific week
@@ -7929,6 +8332,22 @@ app.get('/api/mlb/ghost-audit', requireCommissioner, (req, res) => {
 // what the manager actually rostered (initial_submissions + per-week rosters +
 // swaps) against what currently scores (the per-week / per-player breakdown) to
 // spot players wrongly excluded by a stray add/drop date. Mutates nothing.
+// GET /api/diag/rollup-audit?year=YYYY[&tolerance=N]
+// Every manager-week whose certified subtotal disagrees with the same week rebuilt from the daily
+// rows inside that manager's own roster windows, each naming the players responsible. This is the
+// "why does Slack disagree with the app" question answered directly: on 2026-07-29 it would have
+// returned Daniel Kortan QF|Week 2, certified 0 vs 37.35, Gavin Williams — in one call, instead of
+// an hour of reading the DB by hand. Read-only.
+app.get('/api/diag/rollup-audit', requireCommissioner, (req, res) => {
+  const year = (req.query.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+  const tolerance = Number.isFinite(parseFloat(req.query.tolerance)) ? parseFloat(req.query.tolerance) : 0.5;
+  const findings = auditWeeklyRollupDrift(sd, { tolerance });
+  res.json({ year, tolerance, clean: findings.length === 0, findings });
+});
+
 app.get('/api/diag/manager', requireCommissioner, (req, res) => {
   const year = (req.query.year || new Date().getFullYear()).toString();
   const name = (req.query.name || '').trim();
@@ -13587,6 +14006,10 @@ function scheduleScoreboardPost() {
             console.error('[PlayoffOdds] Pre-post odds compute failed (continuing):', e.message);
             return null;
           })
+          // Vet the numbers about to be posted against the stats they come from. The post goes out
+          // either way (a silent wrong scoreboard is worse than a flagged one) — but the
+          // commissioner gets told, instead of finding out hours later from a manager.
+          .then(() => alertOnRollupDrift((readDB().seasons || {})[season], season, '7am-scoreboard'))
           .then(() => postScoreboardSlack(readDB(), season, plan))
           .then(() =>
             console.log(
@@ -13826,6 +14249,14 @@ function scheduleMLBApiSync() {
               () => {}
             );
           }
+        }
+
+        // Audit what was just persisted against the stats it was derived from. Runs on a FRESH
+        // read for the same reason recordSyncStatus does: after a blocked compile the in-memory sd
+        // holds rejected scores, and the numbers that matter are the ones actually on disk — the
+        // ones the 7am post will use.
+        if (statsCompiled) {
+          await alertOnRollupDrift((readDB().seasons || {})[season], season, 'auto-4am');
         }
 
         // Refresh the playoff odds after the stats settle (no-op outside PP2
