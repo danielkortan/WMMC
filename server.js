@@ -13328,7 +13328,14 @@ function scheduleScoreboardPost() {
         console.log(
           `[Scoreboard] Skipping — no post scheduled for ${todayET} (between rounds, or playoff round not started)`
         );
-      } else if (isWithinSyncWindow(sd)) {
+      } else if (plan.summaryRound || isWithinSyncWindow(sd)) {
+        // End-of-round recaps bypass the sync window. That window closes the day AFTER the
+        // Finals' last day, but a recap posts the MONDAY after a round ends — those coincide
+        // only because every round currently ends on a Sunday. Move the Finals' last day to
+        // any other weekday and the championship recap would be silently swallowed by a gate
+        // about whether STATS should still be synced, not whether a summary should be posted.
+        // A recap is only ever produced on the one Monday scoreboardAutoPostPlan names for a
+        // round that just ended, so this can't post past the end of the season.
         // Backstop for the 4am compute (e.g. server restarted in between): make
         // sure today's playoff odds exist before posting, then post from a fresh
         // db read so the new odds are included. Odds failures never block the post.

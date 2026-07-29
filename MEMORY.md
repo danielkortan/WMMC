@@ -1910,3 +1910,18 @@ this lives in `server.js` and so has no committed unit test.
 
 **Still to check outside the code:** whether the staging Render service has a scoreboard
 webhook set in its dashboard — if so, unset it; the guard silences the post either way.
+
+**Follow-up same session — end-of-round recaps were gated by the sync window.** Auditing the
+four recap posts the commissioner expects (end of pool play, QF, SF, end of season) surfaced a
+latent bug: the 7am runtime gate is `plan && isWithinSyncWindow(sd)`, and `isWithinSyncWindow`
+closes the day AFTER the Finals' last day, while a recap posts the MONDAY after a round ends.
+Those coincide only because every round currently ends on a Sunday (Finals end 8/30 → recap
+8/31 → sync window closes 8/31, passing by exactly one day). With the Finals ending any other
+weekday the championship recap is silently swallowed. Fixed by letting recaps bypass the sync
+window (`plan.summaryRound || isWithinSyncWindow(sd)`) — a recap is only produced on the single
+Monday `scoreboardAutoPostPlan` names for a just-ended round, so it can't post past the season.
+**Verified:** day-by-day calendar sim (2026-04-01 → 09-15) on the real 2026 dates — daily posts
+5/05→7/13 incl. the PP2 recap, silent ASB 7/14–7/20, QF daily from 7/21, recaps on 7/13 PP2 /
+8/03 QF / 8/17 SF / 8/31 Finals, nothing after 8/31 — re-run with the Finals ending Saturday and
+with 5-day weeks (all rounds ending Friday): all four recaps fire in every shape, post count
+112/111/102. Before the fix the Saturday variant produced only three recaps.
