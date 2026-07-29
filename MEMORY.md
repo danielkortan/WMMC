@@ -1805,3 +1805,39 @@ pre-fix build — no regression); drop_date = displayed day (78.90, was 47.90 �
 day before (47.90, correctly excluded); effective-today swap (47.90, correct); added ON the
 displayed day (52.90, credited); added tomorrow (47.90, correctly excluded). Certified base 162
 throughout.
+
+## 2026-07-29 — Live tab: cache the MLB fetch layer, never the roster layer
+
+**Problem.** `/api/mlb/live` rebuilt everything per request: the week's schedule plus one
+boxscore per Live-or-Final game across the entire schedule week, sequentially (~100 round-trips
+by Sunday, re-fetching immutable Final boxscores every time). Unauthenticated and uncached, so
+each manager polling every 2 minutes paid the full cost alone — opening the tab was, in effect,
+forcing the sync.
+
+**Decision: cache the MLB half, recompute the scoring half.** Four layers, all over MLB-derived
+data only — parsed boxscores per `gamePk` (Final = immutable, in-progress = 15s TTL), the week
+schedule (shared with the box-score panel endpoint), a per-week snapshot with single-flight
+dedupe + stale-while-revalidate, and a demand-driven warmer that runs only while games are live
+and someone is watching.
+
+Deliberately NOT cached: anything downstream of `readDB()`. The manager list, the date-windowed
+rosters, and the certified totals are recomputed on every request. The invariant requires every
+view to read managers and roster windows completely, every time; caching the finished payload
+would have meant a swap approved seconds ago silently not appearing until a TTL expired. Verified
+with a harness: applying a drop to `db.json` mid-run moved the manager total 123.5 → 25 and
+dropped the player on the very next poll, with zero new MLB fetches.
+
+**Cache-key subtlety.** Parsed boxscores are keyed by WMMC _display name_, so every entry is
+stamped with a fingerprint of `sd.mlb_ids` — a commissioner re-pointing a player id invalidates
+the parses instead of serving stats attributed to the old name.
+
+**TTL ordering constraint (a real bug, caught in testing).** `LIVE_BOXSCORE_TTL_MS` must stay
+below `LIVE_SNAPSHOT_TTL_MS`. At 45s vs 30s, every snapshot rebuild re-served the same cached
+mid-game line and live scores lagged an extra TTL behind. Now 15s, with the constraint documented
+at the constant.
+
+**Note.** MLB was unreachable from the dev sandbox (network policy blocks `statsapi.mlb.com`), so
+verification drove the real endpoint over HTTP against a stubbed upstream that counts calls: cold
+build, 8 concurrent warm reads (zero upstream), Finals never re-fetched across a refresh cycle,
+a game going Final re-fetching exactly that boxscore, and an all-Final slate costing nothing.
+Per the testing convention these live in `server.js` and so have no committed unit test.

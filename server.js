@@ -9908,13 +9908,284 @@ app.get('/api/mlb/teams-started', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Live-tab MLB fetch cache
+//
+// /api/mlb/live is unauthenticated and polled by every manager who has the tab open
+// (every 2 minutes — LIVE_POLL_MS in app.js). Rebuilding it from scratch costs one
+// schedule fetch plus one boxscore fetch per Live-or-Final game in the WHOLE schedule
+// week, which by Sunday is ~100 sequential round-trips to statsapi.mlb.com — including
+// re-fetching Monday's Final boxscores, which can never change. Nothing was shared
+// between callers, so each manager paid that cost alone and opening the tab felt like
+// it was forcing the sync rather than reading one the server already had.
+//
+// Four layers fix it, and every one of them caches ONLY MLB-derived data:
+//   1. Parsed boxscores keyed by gamePk. A Final game's boxscore is immutable, so it is
+//      kept for the life of the process; an in-progress game gets a short TTL, and a
+//      game cached mid-flight is always re-fetched once it goes Final (that is when
+//      CG/CGSO/NH become creditable — see parseBoxscore's gameIsFinal).
+//   2. The week's schedule, so concurrent callers share one lookup.
+//   3. A per-week snapshot of 1+2 with single-flight dedupe and stale-while-revalidate:
+//      N managers cause one upstream refresh, not N, and a caller with a usable snapshot
+//      is answered from memory instead of waiting on MLB.
+//   4. A demand-driven warmer that keeps the snapshot fresh while games are live and
+//      somebody is actually watching, then stops on its own. Without it a lone manager
+//      polling every 2 minutes would always be served a 2-minute-old snapshot.
+//
+// What is deliberately NOT cached: everything downstream of readDB(). The manager list,
+// the date-windowed rosters, and the certified totals are recomputed on every request
+// exactly as before. The core scoring invariant requires each view to read managers and
+// roster windows completely, every time — a swap approved seconds ago has to show up on
+// the next poll, not whenever a snapshot happens to expire.
+// ---------------------------------------------------------------------------
+// In-progress games only (Final ones never expire). MUST stay below LIVE_SNAPSHOT_TTL_MS:
+// if a cached mid-game parse outlived the snapshot that holds it, every snapshot rebuild
+// would re-serve the same stale line and live scores would lag a whole extra TTL behind.
+const LIVE_BOXSCORE_TTL_MS = 15 * 1000;
+const LIVE_SCHEDULE_TTL_MS = 30 * 1000;
+const LIVE_SNAPSHOT_TTL_MS = 30 * 1000; // serve straight from memory below this age
+const LIVE_SNAPSHOT_MAX_STALE_MS = 5 * 60 * 1000; // above this, block on a fresh build
+const LIVE_BOXSCORE_CACHE_MAX = 400; // ~2 schedule weeks of games
+const LIVE_BOXSCORE_CONCURRENCY = 5; // only ever reached on a cold snapshot build
+const LIVE_WARM_WINDOW_MS = 10 * 60 * 1000; // keep warming this long after the last request
+const LIVE_WARM_INTERVAL_MS = 30 * 1000;
+
+// Fingerprint of the MLB-id → WMMC-name mapping. Parsed boxscores are keyed by WMMC
+// display name, so a commissioner claiming/re-pointing an id changes what a cached parse
+// means. Stamping every cache entry with this makes such a change invalidate the cache
+// instead of silently serving stats attributed to the old name.
+function mlbIdMapFingerprint(sd) {
+  const ids = (sd && sd.mlb_ids) || {};
+  let hash = 2166136261; // FNV-1a
+  let count = 0;
+  for (const [name, id] of Object.entries(ids)) {
+    count++;
+    const s = `${name}:${id}`;
+    for (let i = 0; i < s.length; i++) {
+      hash ^= s.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return `${count}:${(hash >>> 0).toString(36)}`;
+}
+
+// Drop the least-recently-used entries until `map` is back within `max`.
+function pruneByLastUsed(map, max) {
+  if (map.size <= max) return;
+  const byAge = [...map.entries()].sort((a, b) => (a[1].lastUsed || 0) - (b[1].lastUsed || 0));
+  for (const [key] of byAge.slice(0, map.size - max)) map.delete(key);
+}
+
+// Track an in-flight promise per key so concurrent callers share one upstream request.
+// The stored promise is cleared when it settles; callers get the original promise (with
+// its rejection intact) while the bookkeeping chain swallows its own copy of the error.
+function singleFlight(inflightMap, key, start) {
+  const existing = inflightMap.get(key);
+  if (existing) return existing;
+  const p = start();
+  inflightMap.set(key, p);
+  p.catch(() => {}).finally(() => {
+    if (inflightMap.get(key) === p) inflightMap.delete(key);
+  });
+  return p;
+}
+
+const _boxscoreCache = new Map(); // gamePk -> { fp, final, fetchedAt, lastUsed, batting, pitching }
+const _boxscoreInflight = new Map();
+
+// Parsed boxscore for one game, from cache when it is still trustworthy.
+// gameIsFinal comes from the schedule, not the boxscore (which carries no game state).
+async function getParsedBoxscore(gamePk, gameIsFinal, idToWmmcName, fp) {
+  const key = String(gamePk);
+  const now = Date.now();
+  const hit = _boxscoreCache.get(key);
+  // A cache entry is usable when it was parsed under the same id map AND its game state
+  // still matches: a Final parse stays valid forever, an in-progress parse only until the
+  // TTL runs out — and never once the game has since gone Final.
+  const usable =
+    hit && hit.fp === fp && (hit.final ? gameIsFinal : !gameIsFinal && now - hit.fetchedAt < LIVE_BOXSCORE_TTL_MS);
+  if (usable) {
+    hit.lastUsed = now;
+    return hit;
+  }
+
+  return singleFlight(_boxscoreInflight, `${key}|${gameIsFinal ? 'F' : 'L'}|${fp}`, async () => {
+    const box = await mlbApiFetch(`/api/v1/game/${gamePk}/boxscore`);
+    const { batting, pitching } = parseBoxscore(box, idToWmmcName, gameIsFinal);
+    const entry = { fp, final: !!gameIsFinal, fetchedAt: Date.now(), lastUsed: Date.now(), batting, pitching };
+    _boxscoreCache.set(key, entry);
+    pruneByLastUsed(_boxscoreCache, LIVE_BOXSCORE_CACHE_MAX);
+    return entry;
+  });
+}
+
+const _weekScheduleCache = new Map(); // "start|end" -> { fetchedAt, lastUsed, data }
+const _weekScheduleInflight = new Map();
+
+// The week's MLB schedule, hydrated with team info (the bare endpoint omits abbreviations,
+// which leaves the UI rendering "?" for every matchup).
+async function fetchWeekSchedule(start, end) {
+  const key = `${start}|${end}`;
+  const now = Date.now();
+  const hit = _weekScheduleCache.get(key);
+  if (hit && now - hit.fetchedAt < LIVE_SCHEDULE_TTL_MS) {
+    hit.lastUsed = now;
+    return hit.data;
+  }
+  return singleFlight(_weekScheduleInflight, key, async () => {
+    const data = await mlbApiFetch(
+      `/api/v1/schedule?sportId=1&startDate=${start}&endDate=${end}&gameType=R,F,D,L,W&hydrate=team`
+    );
+    _weekScheduleCache.set(key, { fetchedAt: Date.now(), lastUsed: Date.now(), data });
+    pruneByLastUsed(_weekScheduleCache, 3);
+    return data;
+  });
+}
+
+// Normalize the raw schedule payload into the `games` array the Live tab renders.
+function gamesFromSchedule(scheduleData) {
+  const games = [];
+  for (const dateEntry of scheduleData.dates || []) {
+    for (const g of dateEntry.games || []) {
+      games.push({
+        game_id: g.gamePk,
+        date: dateEntry.date,
+        scheduled_time: g.gameDate || null,
+        state: g.status?.abstractGameState || 'Preview',
+        status_detail: g.status?.detailedState || null,
+        inning: g.linescore?.currentInning || null,
+        inning_half: g.linescore?.inningHalf || null,
+        away: {
+          team: g.teams?.away?.team?.abbreviation || null,
+          team_name: g.teams?.away?.team?.name || null,
+          score: g.teams?.away?.score ?? null,
+        },
+        home: {
+          team: g.teams?.home?.team?.abbreviation || null,
+          team_name: g.teams?.home?.team?.name || null,
+          score: g.teams?.home?.score ?? null,
+        },
+      });
+    }
+  }
+  return games;
+}
+
+const _liveSnapshots = new Map(); // "year|start|end" -> { fp, fetchedAt, games, gameStats }
+const _liveSnapshotInflight = new Map();
+
+// Fetch the week's schedule + every Live/Final boxscore in it. Boxscores run a few at a
+// time rather than one-by-one: with the per-game cache in front, the only build that hits
+// more than a handful of games is the first one after a restart.
+async function buildLiveWeekSnapshot(start, end, idToWmmcName, fp) {
+  const games = gamesFromSchedule(await fetchWeekSchedule(start, end));
+  const needed = games.filter((g) => g.state === 'Live' || g.state === 'Final');
+
+  const gameStats = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < needed.length) {
+      const game = needed[next++];
+      try {
+        const parsed = await getParsedBoxscore(game.game_id, game.state === 'Final', idToWmmcName, fp);
+        gameStats.push({
+          game_id: game.game_id,
+          date: game.date,
+          state: game.state,
+          batting: parsed.batting,
+          pitching: parsed.pitching,
+        });
+      } catch {
+        // One unreadable boxscore must not sink the whole board — skip it, as before.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(LIVE_BOXSCORE_CONCURRENCY, needed.length) }, worker));
+
+  // Restore schedule order — the workers finish out of order, and a snapshot is reused by
+  // many requests, so the per-player game lists must not shuffle between polls.
+  gameStats.sort((a, b) => a.date.localeCompare(b.date) || a.game_id - b.game_id);
+
+  return { fp, fetchedAt: Date.now(), games, gameStats };
+}
+
+// The week snapshot, with stale-while-revalidate. Returns as soon as there is anything
+// usable to return; only a missing or badly stale snapshot makes the caller wait.
+async function getLiveWeekSnapshot(year, start, end, idToWmmcName, fp) {
+  const key = `${year}|${start}|${end}`;
+  const hit = _liveSnapshots.get(key);
+  const age = hit && hit.fp === fp ? Date.now() - hit.fetchedAt : Infinity;
+  if (hit) hit.lastUsed = Date.now();
+  if (age < LIVE_SNAPSHOT_TTL_MS) return hit;
+
+  const refresh = () =>
+    singleFlight(_liveSnapshotInflight, key, async () => {
+      const snap = await buildLiveWeekSnapshot(start, end, idToWmmcName, fp);
+      _liveSnapshots.set(key, { ...snap, lastUsed: Date.now() });
+      pruneByLastUsed(_liveSnapshots, 3);
+      return snap;
+    });
+
+  if (age < LIVE_SNAPSHOT_MAX_STALE_MS) {
+    // Good enough to serve right now; get the next poll a fresher one.
+    refresh().catch((e) => console.error('[Live] background snapshot refresh failed:', e.message));
+    return hit;
+  }
+  return refresh();
+}
+
+// Demand-driven warmer. Every /api/mlb/live request extends the window; while that window
+// is open and the last snapshot had a live game, refresh on a timer so the next caller is
+// answered from a snapshot that is seconds old rather than a poll-interval old. Re-reads
+// the database each tick so it never pins a stale roster or a stale id map.
+let _liveWarmUntil = 0;
+let _liveWarmTimer = null;
+let _liveWarmYear = null;
+
+function noteLiveInterest(year) {
+  _liveWarmYear = year;
+  _liveWarmUntil = Date.now() + LIVE_WARM_WINDOW_MS;
+  if (!_liveWarmTimer) {
+    _liveWarmTimer = setTimeout(liveWarmTick, LIVE_WARM_INTERVAL_MS);
+    if (_liveWarmTimer.unref) _liveWarmTimer.unref();
+  }
+}
+
+async function liveWarmTick() {
+  _liveWarmTimer = null;
+  if (Date.now() >= _liveWarmUntil) return; // nobody watching — stand down
+  try {
+    const sd = (readDB().seasons || {})[_liveWarmYear];
+    const scheduleDates = (sd && sd.schedule_dates) || [];
+    const today = (await resolveLiveDay()).live_day;
+    const week = scheduleDates.find((d) => d && d.start && d.end && today >= d.start && today <= d.end);
+    if (week) {
+      const key = `${_liveWarmYear}|${week.start}|${week.end}`;
+      // Only worth warming while something is actually in progress; an all-Final slate is
+      // already served from the immutable boxscore cache.
+      const prev = _liveSnapshots.get(key);
+      if (!prev || (prev.games || []).some((g) => g.state === 'Live')) {
+        await getLiveWeekSnapshot(_liveWarmYear, week.start, week.end, buildIdToWmmcName(sd), mlbIdMapFingerprint(sd));
+      }
+    }
+  } catch (e) {
+    console.error('[Live] warm tick failed:', e.message);
+  }
+  if (Date.now() < _liveWarmUntil && !_liveWarmTimer) {
+    _liveWarmTimer = setTimeout(liveWarmTick, LIVE_WARM_INTERVAL_MS);
+    if (_liveWarmTimer.unref) _liveWarmTimer.unref();
+  }
+}
+
 // GET /api/mlb/live?year=2026
 // Live scoring snapshot for the schedule week that contains today's date.
 // Combines the in-progress + final games' boxscore stats with the upcoming Preview games
 // so the UI can render running totals plus a "games left" indicator per manager.
 //
 // Unlike /preview or /sync this endpoint includes Live games and is safe to poll on a
-// short interval (~60s). It's read-only — nothing is written to the database.
+// short interval (~60s). It's read-only — nothing is written to the database. The MLB
+// half of the work is served from the shared cache above, so poll cost does not scale
+// with the number of managers watching; the roster/scoring half is recomputed per request.
 app.get('/api/mlb/live', async (req, res) => {
   const { year } = req.query;
   if (!year) return res.status(400).json({ error: 'year is required' });
@@ -9965,53 +10236,18 @@ app.get('/api/mlb/live', async (req, res) => {
   try {
     const idToWmmcName = buildIdToWmmcName(sd);
 
-    // Pull the week's full schedule including in-progress + scheduled games.
-    // hydrate=team is required because the bare schedule endpoint returns team.id/name
-    // but not abbreviation, leaving the UI to render "?" for matchups.
-    const scheduleData = await mlbApiFetch(
-      `/api/v1/schedule?sportId=1&startDate=${start}&endDate=${end}&gameType=R,F,D,L,W&hydrate=team`
-    );
+    // The week's schedule + every Live/Final boxscore in it, shared across all managers
+    // watching. Preview games have no stats yet, so the snapshot skips them.
+    noteLiveInterest(year);
+    const snapshot = await getLiveWeekSnapshot(year, start, end, idToWmmcName, mlbIdMapFingerprint(sd));
+    const games = snapshot.games;
 
-    const games = [];
-    for (const dateEntry of scheduleData.dates || []) {
-      for (const g of dateEntry.games || []) {
-        const state = g.status?.abstractGameState || 'Preview';
-        games.push({
-          game_id: g.gamePk,
-          date: dateEntry.date,
-          scheduled_time: g.gameDate || null,
-          state,
-          status_detail: g.status?.detailedState || null,
-          inning: g.linescore?.currentInning || null,
-          inning_half: g.linescore?.inningHalf || null,
-          away: {
-            team: g.teams?.away?.team?.abbreviation || null,
-            team_name: g.teams?.away?.team?.name || null,
-            score: g.teams?.away?.score ?? null,
-          },
-          home: {
-            team: g.teams?.home?.team?.abbreviation || null,
-            team_name: g.teams?.home?.team?.name || null,
-            score: g.teams?.home?.score ?? null,
-          },
-        });
-      }
-    }
-
-    // Fetch boxscores for Live + Final games. Preview games have no stats yet.
-    // Done sequentially to avoid hammering the MLB API; ~15 games/day is fine on a 60s poll.
+    // Aggregate the snapshot's per-game stats into weekly running totals.
     // Keyed by `${wmmcName}::${type}` so two-way players (e.g. Ohtani) get separate
     // batting and pitching entries instead of colliding into one row.
     const playerAgg = {};
-    for (const game of games) {
-      if (game.state !== 'Live' && game.state !== 'Final') continue;
-      let box;
-      try {
-        box = await mlbApiFetch(`/api/v1/game/${game.game_id}/boxscore`);
-      } catch {
-        continue;
-      }
-      const { batting, pitching } = parseBoxscore(box, idToWmmcName, game.state === 'Final');
+    for (const game of snapshot.gameStats) {
+      const { batting, pitching } = game;
 
       const collect = (statsMap, type, scorer) => {
         for (const [name, stats] of Object.entries(statsMap)) {
@@ -10354,7 +10590,12 @@ app.get('/api/mlb/live', async (req, res) => {
       active_week: { round: weekRound, week: weekName, start, end, week_index: activeIdx },
       today,
       ...liveDay,
-      fetched_at: new Date().toISOString(),
+      // fetched_at is when the MLB data behind this response was actually pulled, not when
+      // the response was assembled — a cached snapshot must not claim to be current. age_ms
+      // lets the UI say how old the numbers are instead of implying they are live to the second.
+      fetched_at: new Date(snapshot.fetchedAt).toISOString(),
+      age_ms: Date.now() - snapshot.fetchedAt,
+      served_at: new Date().toISOString(),
       summary: {
         games_total: games.length,
         games_live: games.filter((g) => g.state === 'Live').length,
@@ -10566,9 +10807,9 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
     try {
       const range = scheduleDates[activeIdx];
       if (range?.start && range?.end) {
-        const sched = await mlbApiFetch(
-          `/api/v1/schedule?sportId=1&startDate=${range.start}&endDate=${range.end}&gameType=R,F,D,L,W`
-        );
+        // Shared with /api/mlb/live — opening a box score while the tab is polling
+        // reuses that week's schedule instead of pulling it down again.
+        const sched = await fetchWeekSchedule(range.start, range.end);
         for (const dateEntry of sched.dates || []) {
           for (const g of dateEntry.games || []) {
             if (String(g.gamePk) === String(gamePk)) {

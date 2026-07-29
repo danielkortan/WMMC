@@ -2594,9 +2594,13 @@ function renderLiveContent(d) {
         : null;
       dayNote = ` · showing ${fmtShortDate(d.live_day)}` + (rollover ? ` until today's games load at ${rollover}` : '');
     }
+    // fetched_at is when the server actually pulled from MLB, which for a cached snapshot is
+    // older than this response. Call out a noticeably old snapshot rather than letting the
+    // timestamp read as live-to-the-second.
+    const ageNote = d.age_ms > 90_000 ? ` (${Math.round(d.age_ms / 1000)}s old)` : '';
     statusEl.textContent =
       `${s.games_live ?? 0} live · ${s.games_final ?? 0} final · ${s.games_preview ?? 0} upcoming` +
-      (updated ? ` · updated ${updated} ${pollNote}` : '') +
+      (updated ? ` · updated ${updated}${ageNote} ${pollNote}` : '') +
       dayNote;
   }
 
