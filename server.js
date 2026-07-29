@@ -4082,6 +4082,210 @@ function captureScoreSnapshot(sd, dateISO) {
   return { date: dateISO, captured_at: new Date().toISOString(), totals, detail };
 }
 
+// ============================================================
+// Weekly-rollup drift audit
+// ============================================================
+// Certified totals are summed from the weekly_* rollup rows. Those rows are a DERIVED CACHE of the
+// daily rows plus each manager's add/drop windows — and on 2026-07-29 the cache and its source
+// disagreed for three hours with nothing noticing: a manager's certified QF week scored 0 while the
+// stored row (and the daily record behind it) both said 37.35, so the 7am post went out 37.35
+// light. Every guard in the file compares a total against ANOTHER total — the swing guard against
+// yesterday's, the save guard against the stored one — so a rollup that quietly stops matching the
+// stats underneath it is invisible to all of them. This recomputes each manager's week straight
+// from the daily rows inside their own roster windows and reports where the rollup disagrees.
+//
+// Detection only — it never mutates the season. Commissioner overrides are excluded rather than
+// flagged: a drop_locked / manual_fields row is a deliberate hand-set number that is SUPPOSED to
+// differ from the daily rows.
+
+// Which players a manager rostered during one week, and the slice of that week they were his.
+// Derived from roster_dates alone (period-scoped, both bounds inclusive) — deliberately NOT from
+// the weekly rows or their sticky `manager` field, since those are the cache being audited. Falls
+// back to the week's roster array only for players with no date events at all (an initial
+// submission that predates roster_dates).
+function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
+  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
+  const weekStart = weekDates.start || null;
+  const weekEnd = weekDates.end || null;
+  if (!weekStart || !weekEnd) return {};
+
+  const periodStart = periodStartForRound(sd, round);
+  const mgrDates = (sd.roster_dates || {})[manager] || {};
+  const latestAdd = {};
+  const latestDrop = {};
+  for (const players of Object.values(mgrDates)) {
+    for (const [p, d] of Object.entries(players || {})) {
+      if (!d) continue;
+      if (
+        d.add_date &&
+        (!periodStart || d.add_date >= periodStart) &&
+        d.add_date <= weekEnd &&
+        (!latestAdd[p] || d.add_date > latestAdd[p])
+      ) {
+        latestAdd[p] = d.add_date;
+      }
+      if (
+        d.drop_date &&
+        (!periodStart || d.drop_date >= periodStart) &&
+        d.drop_date <= weekEnd &&
+        (!latestDrop[p] || d.drop_date > latestDrop[p])
+      ) {
+        latestDrop[p] = d.drop_date;
+      }
+    }
+  }
+
+  const windows = {};
+  for (const p of new Set([...Object.keys(latestAdd), ...Object.keys(latestDrop)])) {
+    const add = latestAdd[p] || null;
+    const drop = latestDrop[p] || null;
+    const start = add && add > weekStart ? add : weekStart;
+    if (add && (!drop || add > drop)) {
+      windows[p] = { start, end: weekEnd }; // still rostered at the week's end
+    } else if (drop && drop >= weekStart) {
+      windows[p] = { start, end: drop }; // dropped mid-week; the drop day still counts
+    }
+    // dropped before this week began, and not re-added: not his at all this week
+  }
+
+  const arr = ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {};
+  for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
+    if (!windows[p] && !latestAdd[p] && !latestDrop[p]) windows[p] = { start: weekStart, end: weekEnd };
+  }
+  return windows;
+}
+
+// Compare every manager-week's certified subtotal against the same week rebuilt from daily rows.
+// Returns one finding per disagreeing manager-week, each naming the players responsible.
+function auditWeeklyRollupDrift(sd, { tolerance = 0.5 } = {}) {
+  const findings = [];
+  if (!sd) return findings;
+  const dailyBatAll = sd.daily_batting || [];
+  const dailyPitAll = sd.daily_pitching || [];
+  if (dailyBatAll.length === 0 && dailyPitAll.length === 0) return findings;
+
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const managers = new Set(Object.keys(sd.rosters || {}));
+  for (const r of batting) if (r.manager) managers.add(r.manager);
+  for (const r of pitching) if (r.manager) managers.add(r.manager);
+  const r2 = (n) => Math.round(n * 100) / 100;
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const weekDates = (sd.schedule_dates || [])[idx];
+    if (!weekDates || !weekDates.start || !weekDates.end) return;
+    const { round, week } = schedWeek;
+    const dailyBat = dailyBatAll.filter((r) => r.round === round && r.week === week);
+    const dailyPit = dailyPitAll.filter((r) => r.round === round && r.week === week);
+    if (dailyBat.length === 0 && dailyPit.length === 0) return; // not played yet, or a gsheets-era week
+
+    // Hand-set rows are exempt on both sides of the comparison.
+    const overridden = new Set();
+    const collectOverrides = (rows, key) => {
+      for (const r of rows) {
+        if (r.round !== round || r.week !== week) continue;
+        if (r.drop_locked || (r.manual_fields && r.manual_fields.length > 0)) overridden.add(r[key]);
+      }
+    };
+    collectOverrides(batting, 'batter');
+    collectOverrides(pitching, 'pitcher');
+    for (const r of [...dailyBat, ...dailyPit]) {
+      if (r.drop_locked || (r.manual_fields && r.manual_fields.length > 0)) overridden.add(r.batter || r.pitcher);
+    }
+
+    for (const mgr of managers) {
+      const batDetail = [];
+      const pitDetail = [];
+      const certBat = managerWeekSubtotal(sd, mgr, schedWeek, idx, batting, 'batter', 'batters', batDetail);
+      const certPit = managerWeekSubtotal(sd, mgr, schedWeek, idx, pitching, 'pitcher', 'pitchers', pitDetail);
+      const windows = managerWeekRosterWindows(sd, mgr, round, week, idx);
+      if (!certBat && !certPit && Object.keys(windows).length === 0) continue;
+
+      const fromDaily = {};
+      for (const [player, w] of Object.entries(windows)) {
+        if (overridden.has(player)) continue;
+        const inWindow = (r) => (!w.start || r.date >= w.start) && (!w.end || r.date <= w.end);
+        let pts = 0;
+        for (const r of dailyBat) if (r.batter === player && inWindow(r)) pts += calculateBattingScore(r.delta || {});
+        for (const r of dailyPit) if (r.pitcher === player && inWindow(r)) pts += calculatePitchingScore(r.delta || {});
+        fromDaily[player] = r2(pts);
+      }
+
+      const certified = {};
+      for (const d of [...batDetail, ...pitDetail]) {
+        if (overridden.has(d.player)) continue;
+        certified[d.player] = r2((certified[d.player] || 0) + (d.score || 0));
+      }
+
+      const sum = (o) => r2(Object.values(o).reduce((s, v) => s + v, 0));
+      const certTotal = sum(certified);
+      const dailyTotal = sum(fromDaily);
+      if (Math.abs(certTotal - dailyTotal) <= tolerance) continue;
+
+      const players = [];
+      for (const p of new Set([...Object.keys(certified), ...Object.keys(fromDaily)])) {
+        const c = certified[p] || 0;
+        const d = fromDaily[p] || 0;
+        if (Math.abs(c - d) > tolerance) players.push({ player: p, certified: c, from_daily: d, delta: r2(c - d) });
+      }
+      players.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+      findings.push({
+        manager: mgr,
+        week: `${round}|${week}`,
+        certified: certTotal,
+        from_daily: dailyTotal,
+        delta: r2(certTotal - dailyTotal),
+        players,
+      });
+    }
+  });
+
+  return findings;
+}
+
+function buildRollupDriftSlackText(findings, year) {
+  const lines = findings.slice(0, 8).map((f) => {
+    const who = f.players
+      .slice(0, 4)
+      .map((p) => `${p.player} ${p.delta > 0 ? '+' : ''}${p.delta}`)
+      .join(', ');
+    const sign = f.delta > 0 ? 'over' : 'under';
+    return (
+      `• *${f.manager}* ${f.week}: certified ${f.certified} vs ${f.from_daily} from the daily rows ` +
+      `(${sign} by ${Math.abs(f.delta)})${who ? ` — ${who}` : ''}`
+    );
+  });
+  const more = findings.length > lines.length ? `\n_…and ${findings.length - lines.length} more._` : '';
+  return (
+    `:mag: *Scoring drift detected (${year})* — the certified totals disagree with the stats they are ` +
+    `derived from. The posted scoreboard is using the certified numbers, so they are wrong until this ` +
+    `is resolved.\n${lines.join('\n')}${more}\n` +
+    `_Re-run Sync Now to recompile from the daily rows; if it persists, the roster windows are the ` +
+    `next thing to check._`
+  );
+}
+
+// One alert per distinct finding-set per process — the 4am compile and the 7am post both run this,
+// and an unresolved drift would otherwise re-post every morning.
+let lastRollupDriftSignature = null;
+
+async function alertOnRollupDrift(sd, year, trigger) {
+  try {
+    const findings = auditWeeklyRollupDrift(sd);
+    if (findings.length === 0) return [];
+    const signature = findings.map((f) => `${f.manager}|${f.week}|${f.delta}`).join(';');
+    console.error(`[Rollup audit] (${trigger}) ${findings.length} manager-week(s) drifted: ${signature}`);
+    if (signature !== lastRollupDriftSignature) {
+      lastRollupDriftSignature = signature;
+      await postSlack(buildRollupDriftSlackText(findings, year)).catch(() => {});
+    }
+    return findings;
+  } catch (e) {
+    console.error('[Rollup audit] error (continuing):', e.message);
+    return [];
+  }
+}
+
 // Append a snapshot to the rolling trail (one per date — a same-day re-run
 // replaces the prior entry), pruned to MAX_SCORE_SNAPSHOTS.
 function recordScoreSnapshot(sd, snapshot) {
@@ -8128,6 +8332,22 @@ app.get('/api/mlb/ghost-audit', requireCommissioner, (req, res) => {
 // what the manager actually rostered (initial_submissions + per-week rosters +
 // swaps) against what currently scores (the per-week / per-player breakdown) to
 // spot players wrongly excluded by a stray add/drop date. Mutates nothing.
+// GET /api/diag/rollup-audit?year=YYYY[&tolerance=N]
+// Every manager-week whose certified subtotal disagrees with the same week rebuilt from the daily
+// rows inside that manager's own roster windows, each naming the players responsible. This is the
+// "why does Slack disagree with the app" question answered directly: on 2026-07-29 it would have
+// returned Daniel Kortan QF|Week 2, certified 0 vs 37.35, Gavin Williams — in one call, instead of
+// an hour of reading the DB by hand. Read-only.
+app.get('/api/diag/rollup-audit', requireCommissioner, (req, res) => {
+  const year = (req.query.year || new Date().getFullYear()).toString();
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+  const tolerance = Number.isFinite(parseFloat(req.query.tolerance)) ? parseFloat(req.query.tolerance) : 0.5;
+  const findings = auditWeeklyRollupDrift(sd, { tolerance });
+  res.json({ year, tolerance, clean: findings.length === 0, findings });
+});
+
 app.get('/api/diag/manager', requireCommissioner, (req, res) => {
   const year = (req.query.year || new Date().getFullYear()).toString();
   const name = (req.query.name || '').trim();
@@ -13498,6 +13718,10 @@ function scheduleScoreboardPost() {
             console.error('[PlayoffOdds] Pre-post odds compute failed (continuing):', e.message);
             return null;
           })
+          // Vet the numbers about to be posted against the stats they come from. The post goes out
+          // either way (a silent wrong scoreboard is worse than a flagged one) — but the
+          // commissioner gets told, instead of finding out hours later from a manager.
+          .then(() => alertOnRollupDrift((readDB().seasons || {})[season], season, '7am-scoreboard'))
           .then(() => postScoreboardSlack(readDB(), season, plan))
           .then(() =>
             console.log(
@@ -13737,6 +13961,14 @@ function scheduleMLBApiSync() {
               () => {}
             );
           }
+        }
+
+        // Audit what was just persisted against the stats it was derived from. Runs on a FRESH
+        // read for the same reason recordSyncStatus does: after a blocked compile the in-memory sd
+        // holds rejected scores, and the numbers that matter are the ones actually on disk — the
+        // ones the 7am post will use.
+        if (statsCompiled) {
+          await alertOnRollupDrift((readDB().seasons || {})[season], season, 'auto-4am');
         }
 
         // Refresh the playoff odds after the stats settle (no-op outside PP2

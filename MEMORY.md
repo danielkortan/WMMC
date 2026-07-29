@@ -1929,3 +1929,50 @@ directly and after a full `syncPlayerDatesFromRosterDates` + `recomputeMidWeekAd
 after per-manager comparison there before trusting the first post-deploy numbers, and expect the
 first sync after deploy to move the affected managers UP by the points that were erased — the score
 guard warns on a >200-pt jump but only blocks drops, so it will not stand in the way.
+
+## 2026-07-29 — A wrong certified total sat in Slack for three hours with nothing watching
+
+**Incident.** The 7am QF post scored Daniel Kortan 416.4 while the app showed 453.7 — exactly Gavin
+Williams' 37.35 start on 7/28, the day his effective-tomorrow trade dropped him. The Jul-28 Best &
+Worst showed Kortan at P 0 the same morning, and "Blocked a destructive season save — Anton Capria
+total drops 78.9" repeated three times with no swap in the log to explain it.
+
+**What it turned out to be.** Not a scoring bug. The certified totals came from a server process
+holding a `db.json` in which that manager-week scored 0, while the row it was derived from — and
+every daily record behind it — said 37.35. `/api/seasons` and `/api/diag/manager`, milliseconds
+apart in the same paste, returned contradictory answers from the same file. The process restarted
+at 09:34 ET and every reading since agrees at 37.35 (total 3171.65 → 3209). The drift healed with
+the restart; **the cause of the drift itself was never proven** — the process holding the evidence
+is gone. Ruled out along the way: a code-version difference (the incident shape scores correctly on
+all eight builds merged that day), duplicate/ghost rows, client-server drift (both copies of
+`managerWeekSubtotal` are byte-equivalent), stale client caching (`/api/seasons` ETags the body
+itself), and multiple instances (`/api/build` returned a single process id across 12 calls).
+
+**The real defect was that nothing noticed.** Every guard in `server.js` compares a total against
+ANOTHER total — the swing guard against yesterday's snapshot, the save guard against the stored
+season — so a rollup that quietly stops matching the stats underneath it is invisible to all of
+them. Finding it took six rounds of hand-querying the DB from a browser console.
+
+**Fix: `auditWeeklyRollupDrift`.** Recomputes each manager-week straight from the daily rows inside
+that manager's own roster windows (from `roster_dates`, period-scoped, both bounds inclusive) and
+reports where the certified subtotal disagrees, naming the players responsible. Deliberately does
+NOT read the weekly rows or their sticky `manager` field — those are the cache being audited. Runs
+after the 4am compile and again before the 7am post (on a fresh read, since a blocked compile
+leaves rejected scores in memory), alerts via `postSlack` once per distinct finding-set per
+process, and is exposed on demand at `GET /api/diag/rollup-audit`. Detection only. Commissioner
+overrides (`drop_locked` / `manual_fields`) are exempt — a hand-set number is supposed to differ.
+
+On this incident it would have posted at 4am: _"Daniel Kortan QF|Week 2: certified 0 vs 37.35 from
+the daily rows (under by 37.35) — Gavin Williams -37.35."_
+
+**Verified** on the incident shape (rollup loses the row → flagged, names the player), a stale
+rollup score on a full-week player (flagged), a ghost row crediting a player the manager no longer
+rosters (flagged, +50), a commissioner override (correctly silent), and both seasons of
+`tests/fixtures/staging-seed.json` (silent — no false positives). Kept in `server.js` with no `js/`
+copy and no unit test, matching the live-day precedent: the client has no use for it and the
+project already carries enough hand-synced duplicate pairs.
+
+**Side note worth keeping.** The per-manager window scoring added in the same PR makes the
+certified number self-healing for exactly the class of player that broke here: any player whose
+roster window covers only part of a week is now scored from the daily rows rather than from the
+stored rollup, so a bad rollup score for him can no longer reach a total.
