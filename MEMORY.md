@@ -1763,3 +1763,45 @@ source and drove it through 17 cases (midnight, the 2h lead, the noon cap, early
 empty previous/current days, MLB down, and an EST/DST date). Not extracted to `js/` because the
 server cannot import the ESM modules — that would mean a 4th hand-synced duplicate pair, which
 the project already flags as a maintenance burden, and the client has no need for the logic.
+
+## 2026-07-29 — Live board dropped a swapped-out player's points on his final rostered day
+
+**Bug (pre-existing, surfaced while testing the live-day work).** Submit an effective-tomorrow
+swap and the manager's live Daily immediately fell by the outgoing player's points for a day he
+was still rostered. Measured: Daniel Kortan 78.90 → 47.90 the moment a swap stamped
+`drop_date = <the day being shown>` landed. Confirmed identical on pre-live-day code
+(commit `5e1dd1d`), so the live-day change did not cause it — it only widened the window in
+which it is visible to include the morning hold-over.
+
+**Cause.** `/api/mlb/live` built its roster list with `isCurrentlyRostered`, which asks _is he
+rostered right now_, not _was he rostered on the day being scored_:
+
+    return !latestDrop[p] || latestAdd[p] > latestDrop[p];
+
+`drop_date` is inclusive — the player's last rostered, still-scoring day. That is the entire
+point of the effective-tomorrow shape (`drop_date = today, add_date = tomorrow`): the outgoing
+player's team already played today, so he keeps today's points, and
+`syncPlayerDatesFromRosterDates` says so outright ("drop*date sets an end cutoff at the player's
+last rostered day"). A player whose drop landed ON the displayed day was therefore still owed
+that day, but the check excluded him — from `managerBatters`, so from `weekManagerByPlayer`, so
+`continue`d out of `playerRows` entirely. The per-date guard that would have caught it,
+`isDateEligibleForPlayer`, only runs \_after* the manager resolves, so it never got the chance.
+
+**Fix.** `isRosteredForDay` keeps a player whose `latestDrop >= asOf`. Scoring is then bounded by
+the player's own roster window (`gamesInRosterWindow`) rather than by `player_dates`, and
+`running_score`/`stats`/`games` are computed from the windowed set so the client's per-day panel
+cannot disagree with the totals. The `player_dates` dependency mattered:
+`syncPlayerDatesFromRosterDates` only runs during a sync, and this endpoint is read-only, so on a
+season with absent or stale entries `isDateEligibleForPlayer` falls back to the whole week and
+would have over-credited a dropped player. `player_dates` still applies on top as the
+commissioner's manual override.
+
+**Impact was display-only.** The certified base came out 162 in every scenario — that is
+`managerWeekSubtotal`, a different code path, untouched. Only the live Daily under-reported, and
+it self-corrected at the next nightly sync. No certified total was ever wrong.
+
+**Verified** on the hold-over board, six scenarios: no swap (78.90, byte-identical to the
+pre-fix build — no regression); drop_date = displayed day (78.90, was 47.90 — fixed); dropped the
+day before (47.90, correctly excluded); effective-today swap (47.90, correct); added ON the
+displayed day (52.90, credited); added tomorrow (47.90, correctly excluded). Certified base 162
+throughout.
