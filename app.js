@@ -2163,6 +2163,16 @@ let _livePollTimer = null;
 let _liveLastFetchedAt = 0;
 let _liveLastSawLiveGame = 0;
 let _liveViewDate = null; // null = today/live, 'YYYY-MM-DD' = historical date view
+// The game day the live view is currently showing, as resolved by the server (see resolveLiveDay
+// in server.js). This is NOT always the ET calendar date: a slate that started last night holds
+// the view through the following morning, until 2h before the new day's first pitch or noon ET,
+// whichever is earlier. Populated from every /api/mlb/live response; until the first one lands we
+// fall back to the calendar date, which is correct for all but the hold-over window.
+let _liveDayET = null;
+// Epoch ms at which the live day flips to the new calendar date, or null when it already has.
+let _liveRolloverAt = null;
+const _calendarDayET = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const liveDayET = () => _liveDayET || _calendarDayET();
 // Tracks which manager rows have their today's-stats drop-down expanded so the
 // 2-minute poll re-render doesn't collapse the panel under the user.
 const _liveExpandedManagers = new Set();
@@ -2247,19 +2257,23 @@ function updateLiveDateNav() {
   const nextBtn = document.getElementById('live-date-next');
   const labelEl = document.getElementById('live-date-label');
   if (!prevBtn || !nextBtn || !labelEl) return;
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Bound the nav by the live day, not the calendar date: during the hold-over window the live
+  // view already IS the previous date, so stepping "forward" to the calendar date would land on a
+  // day whose games haven't started — and the historical endpoint has nothing for it yet.
+  const liveDay = liveDayET();
   if (_liveViewDate === null) {
-    labelEl.textContent = 'Today';
+    // Calling last night's slate "Today" during the hold-over window reads as a bug. Name the
+    // day we are actually showing; it flips back to "Today" at the rollover.
+    labelEl.textContent = _liveRolloverAt ? fmtShortDate(liveDay) : 'Today';
     nextBtn.disabled = true;
   } else {
     labelEl.textContent = _liveViewDate;
-    nextBtn.disabled = _liveViewDate >= todayET;
+    nextBtn.disabled = _liveViewDate >= liveDay;
   }
 }
 
 window.liveDatePrev = function () {
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const from = _liveViewDate || todayET;
+  const from = _liveViewDate || liveDayET();
   const d = new Date(from + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() - 1);
   _liveViewDate = d.toISOString().slice(0, 10);
@@ -2270,12 +2284,12 @@ window.liveDatePrev = function () {
 
 window.liveDateNext = function () {
   if (!_liveViewDate) return;
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const liveDay = liveDayET();
   const d = new Date(_liveViewDate + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() + 1);
   const next = d.toISOString().slice(0, 10);
-  if (next >= todayET) {
-    // Arrived at today — switch back to live polling mode
+  if (next >= liveDay) {
+    // Arrived at the live day — switch back to live polling mode
     _liveViewDate = null;
     updateLiveDateNav();
     startLivePolling();
@@ -2495,7 +2509,18 @@ function shouldKeepPolling(data) {
 
 function scheduleNextLivePoll(data) {
   stopLivePolling();
-  if (!shouldKeepPolling(data)) return;
+  if (!shouldKeepPolling(data)) {
+    // Polling is otherwise done for the night, but during the hold-over window the board is
+    // pinned to last night's slate. Wake once at the rollover so a tab left open overnight
+    // flips to the new game day on its own instead of showing yesterday all morning.
+    if (data?.live_day_is_previous && data.rollover_at) {
+      const wait = Date.parse(data.rollover_at) - Date.now();
+      if (Number.isFinite(wait) && wait > 0) {
+        _livePollTimer = setTimeout(() => refreshLive(), wait + 1000);
+      }
+    }
+    return;
+  }
   _livePollTimer = setTimeout(() => {
     if (document.visibilityState === 'visible') refreshLive();
     else scheduleNextLivePoll(data); // tab hidden — re-arm without fetching
@@ -2529,9 +2554,17 @@ function renderLiveContent(d) {
   const managersEl = document.getElementById('live-managers');
   const gamesEl = document.getElementById('live-games');
 
+  // Adopt the server's live day before rendering — the date nav bounds and the
+  // hold-over note both key off it.
+  if (d.live_day) {
+    _liveDayET = d.live_day;
+    _liveRolloverAt = d.live_day_is_previous && d.rollover_at ? Date.parse(d.rollover_at) : null;
+    if (_liveViewDate === null) updateLiveDateNav();
+  }
+
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No active schedule week for today (${d.today}).`;
+    if (statusEl) statusEl.textContent = `No active schedule week for ${d.today}.`;
     if (managersEl) managersEl.innerHTML = '';
     if (gamesEl) gamesEl.innerHTML = '';
     return;
@@ -2552,9 +2585,19 @@ function renderLiveContent(d) {
     } else {
       pollNote = '· polling paused — no live games';
     }
+    // During the hold-over window the board is showing LAST night's slate, which would otherwise
+    // look like a stale page on a morning refresh. Say so, and say when it flips over.
+    let dayNote = '';
+    if (d.live_day_is_previous) {
+      const rollover = d.rollover_at
+        ? new Date(d.rollover_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : null;
+      dayNote = ` · showing ${fmtShortDate(d.live_day)}` + (rollover ? ` until today's games load at ${rollover}` : '');
+    }
     statusEl.textContent =
       `${s.games_live ?? 0} live · ${s.games_final ?? 0} final · ${s.games_preview ?? 0} upcoming` +
-      (updated ? ` · updated ${updated} ${pollNote}` : '');
+      (updated ? ` · updated ${updated} ${pollNote}` : '') +
+      dayNote;
   }
 
   // Manager standings: round total (incl. live) · weekly · rank delta · daily · today's player counts.
@@ -2784,9 +2827,12 @@ function renderLiveContent(d) {
         : '';
       return `<div ${rowAttrs}>${stateLabel}<span class="live-game-line">${escapeHtml(scoreLine)}</span>${arrow}</div>${detail}`;
     };
+    // "Today" is the live day: during the hold-over window these are last night's games, still
+    // listed under the date they started on (which is how MLB dates them too).
+    const gamesHeading = d.live_day_is_previous ? `${fmtShortDate(today)} Games` : "Today's Games";
     gamesEl.innerHTML = `
       <div class="card">
-        <h3>Today's Games <span class="muted">(${today})</span></h3>
+        <h3>${gamesHeading} <span class="muted">(${today})</span></h3>
         ${todays.length ? todays.map(fmtGame).join('') : '<div class="empty">No games today.</div>'}
       </div>`;
 
@@ -2951,11 +2997,19 @@ window.toggleLiveManagerDetails = function (mgrKey, managerName) {
 // (live games or the 30-min grace period) AND the data is older than the poll
 // interval. Otherwise leave the stale data on screen — switching to another tab and
 // back will resume polling.
+//
+// The one exception is a passed rollover: a tab backgrounded overnight is showing a game day
+// that is now over, and background timer throttling means the rollover timer armed by
+// scheduleNextLivePoll may never have fired. Refresh on sight in that case.
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     const liveTab = document.querySelector('.nav-btn.active[data-tab="live"]');
     if (!liveTab) return;
+    if (_liveRolloverAt && Date.now() >= _liveRolloverAt) {
+      refreshLive();
+      return;
+    }
     const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
     const stale = Date.now() - _liveLastFetchedAt > LIVE_POLL_MS;
     if (withinGrace && stale) refreshLive();

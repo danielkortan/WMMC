@@ -1711,3 +1711,55 @@ changed — only which drop date the windows use, and only where it was demonstr
 **Note.** `backfillRosterDatesFromSwaps` lives in `app.js`, so per the testing convention it has
 no unit test. It is a good candidate to extract into `js/` (alongside `js/eligibility.js`) so
 this date-window logic becomes testable.
+
+## 2026-07-29 — Live tab: "live day" replaces the hard midnight cutoff
+
+**Bug.** At midnight ET the Live tab went blank. `/api/mlb/live` computed `today` as the ET
+calendar date and keyed everything off it — the active-week lookup, the roster `asOf` window,
+`today_score`, the per-team ACTIVE/DONE/REMAINING counts, and the client's Today's Games filter.
+At 00:00 all of them flipped at once, so a 10pm first pitch still in the 7th vanished and every
+manager's Daily reset to 0.00 while games were literally in progress.
+
+**Fix.** New `resolveLiveDay()` in `server.js`. A game day belongs to the date it _starts_ on
+(which is already how MLB's schedule groups games — a 10:05pm ET start keeps that date to the
+final out), and that day stays live through the following morning until
+
+    rollover = min(earliest first pitch of the new calendar day − 2h, 12:00pm ET)
+
+Two guards: a previous day with no games never holds the view over, and an unreachable MLB API
+falls back to the plain calendar date rather than freezing on an unconfirmed day. Result cached
+~60s and never across the rollover instant. The response now carries `live_day`, `calendar_day`,
+`live_day_is_previous`, `rollover_at`, `reason`; `today` is set to the live day so every existing
+downstream comparison keeps working unchanged.
+
+**Scope decision — this is the important part.** The ask was "everywhere a today is computed"
+(~35 sites). Applied only to paths that decide _which game day is displayed_: `/api/mlb/live`,
+`/api/mlb/live/game/:gamePk`, and the client's Live tab (date nav, status line, games heading).
+Deliberately NOT applied to anything that _stamps_ a date into the database:
+
+- `computeSwapEffectiveDatesServer` / `fetchStartedTeamsToday` — worked example: Monday has
+  games, Tuesday's first pitch is 1:05pm so rollover is 11:05am. A swap at 10am Tuesday for a
+  player whose team did not play Monday would see "team not started" against Monday's slate and
+  get stamped `add_date = Monday`, retroactively inserting him into completed, already-scored
+  games. The calendar date correctly stamps Tuesday.
+- The Google-Sheets `syncDate`, the roster/weekly backfills, the swap date-range validators,
+  `ensureFreshPlayoffOdds`' odds stamp date, and the Slack post's `yesterdayET` daily high/low
+  (semantically "the completed day"; a manual 3pm post would regress to a partial day).
+
+Roster windows in the Live view _are_ evaluated as of the live day, so a swap stamped for the new
+calendar date does not retroactively rewrite last night's still-on-screen scores; the new roster
+takes over at the rollover.
+
+**Invariant check.** Ran `/api/mlb/live` on `main` vs the branch against an identical stubbed MLB
+slate. Control (previous day has no games, so live day == calendar date): full response
+byte-identical minus the new fields. Hold-over case, at the real clock time of 00:15 ET Jul 29:
+`main` reported `today=2026-07-29` with every manager at 0.00 daily (reproducing the report);
+branch reported `2026-07-28` with real daily points, and `branch.total − main.total` equalled
+`branch.daily` exactly for all four managers — the certified base is untouched.
+
+**Note.** `resolveLiveDay` lives in `server.js` only, so per the testing convention it has no
+committed unit test. It was verified with a scratch harness that extracted the real function
+source and drove it through 17 cases (midnight, the 2h lead, the noon cap, early getaway games,
+empty previous/current days, MLB down, and an EST/DST date). Not extracted to `js/` because the
+server cannot import the ESM modules — that would mean a 4th hand-synced duplicate pair, which
+the project already flags as a maintenance burden, and the client has no need for the logic.
