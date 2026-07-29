@@ -10298,6 +10298,7 @@ app.get('/api/mlb/live', async (req, res) => {
     const asOf = today;
     const managerBatters = {}; // manager -> string[]
     const managerPitchers = {}; // manager -> string[]
+    const rosterWindowByPlayer = {}; // lowercased player -> { add, drop } for this week's period
     const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
     for (const manager of allManagerNames) {
       // Build add/drop history first so we can filter both the stored arrays and the
@@ -10332,19 +10333,29 @@ app.get('/api/mlb/live', async (req, res) => {
       }
       // In a new period (periodStart set), a player must have a current-period add to be rostered;
       // a PP1 holdover with no drop has no latestAdd entry after period scoping and is excluded.
-      const isCurrentlyRostered = (p) => {
+      //
+      // drop_date is INCLUSIVE — the last day the player is rostered and still scores. That is the
+      // whole point of the effective-tomorrow swap shape (`drop_date = today, add_date = tomorrow`):
+      // the outgoing player's team already played today, so he keeps today's points. A player whose
+      // drop lands ON the day being shown is therefore still rostered FOR that day, even though he
+      // is gone "as of now" — so `latestDrop[p] >= asOf` keeps him in the list, and the per-date
+      // guard (isDateEligibleForPlayer, applied below once the manager resolves) does the day-level
+      // gating it already exists for. Without this the manager's live daily silently dropped the
+      // outgoing player's points the moment an evening swap was submitted.
+      const isRosteredForDay = (p) => {
         if (!latestAdd[p]) return !periodStart && !latestDrop[p];
-        return !latestDrop[p] || latestAdd[p] > latestDrop[p];
+        if (!latestDrop[p] || latestAdd[p] > latestDrop[p]) return true;
+        return !!asOf && latestDrop[p] >= asOf;
       };
 
-      // Seed from stored arrays, but strip any player whose drop date is ≥ their add date.
+      // Seed from stored arrays, but strip any player dropped before the day being shown.
       const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
-      const bats = (stored.batters || []).filter(isCurrentlyRostered);
-      const pits = (stored.pitchers || []).filter(isCurrentlyRostered);
+      const bats = (stored.batters || []).filter(isRosteredForDay);
+      const pits = (stored.pitchers || []).filter(isRosteredForDay);
 
       // Add players known only from roster_dates (not already present via stored arrays).
       for (const p of Object.keys(latestAdd)) {
-        if (!isCurrentlyRostered(p)) continue;
+        if (!isRosteredForDay(p)) continue;
         const inBat = batPool.has(p);
         const inPit = pitPool.has(p);
         if (inBat && !inPit) {
@@ -10358,6 +10369,9 @@ app.get('/api/mlb/live', async (req, res) => {
       if (bats.length || pits.length) {
         managerBatters[manager] = bats;
         managerPitchers[manager] = pits;
+        for (const p of [...bats, ...pits]) {
+          rosterWindowByPlayer[p.toLowerCase()] = { add: latestAdd[p] || null, drop: latestDrop[p] || null };
+        }
       }
     }
 
@@ -10373,6 +10387,18 @@ app.get('/api/mlb/live', async (req, res) => {
       for (const n of names) weekManagerByPlayer[`${n.toLowerCase()}::pitching`] = m;
     }
 
+    // Games that fall inside a player's own roster window, both bounds inclusive (add_date is the
+    // first day he scores, drop_date the last). Scoring off the window rather than player_dates
+    // matters here: player_dates is written by syncPlayerDatesFromRosterDates during a sync, and
+    // this read-only endpoint never runs that — so on a season whose entries are absent or stale,
+    // isDateEligibleForPlayer falls back to the whole week and would credit a dropped player for
+    // days he was not on the roster. The windows are the invariant's source of truth anyway.
+    const gamesInRosterWindow = (name, games) => {
+      const w = rosterWindowByPlayer[name.toLowerCase()];
+      if (!w) return games;
+      return games.filter((g) => (!w.add || g.date >= w.add) && (!w.drop || g.date <= w.drop));
+    };
+
     // Resolve manager + team for each player and compute running scores.
     // Only include rostered players in the live view — unrostered names are noise here.
     const playerRows = [];
@@ -10387,16 +10413,24 @@ app.get('/api/mlb/live', async (req, res) => {
       // object — they are excluded from the certified total, so they must not appear here either.
       if (wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, start)) continue;
       const teamMap = agg.type === 'batting' ? sd.batters_team : sd.pitchers_team;
-      const score = agg.type === 'batting' ? calculateBattingScore(agg.stats) : calculatePitchingScore(agg.stats);
-      const hasLive = agg.games.some((g) => g.state === 'Live');
-      const hasFinal = agg.games.some((g) => g.state === 'Final');
+      // Score only the games inside this player's roster window. A mid-week add or drop must not
+      // be credited for days outside it, and the week's running total has to agree with the daily.
+      const ownGames = gamesInRosterWindow(name, agg.games);
+      const windowStats = {};
+      for (const g of ownGames) {
+        for (const k of Object.keys(g.stats || {})) windowStats[k] = (windowStats[k] || 0) + (g.stats[k] || 0);
+      }
+      const score = agg.type === 'batting' ? calculateBattingScore(windowStats) : calculatePitchingScore(windowStats);
+      const hasLive = ownGames.some((g) => g.state === 'Live');
+      const hasFinal = ownGames.some((g) => g.state === 'Final');
       // today_score = sum of just today's game contributions, so the standings can show
-      // both this week's total and what a manager added in the current day.
-      // Respect player_dates: a player dropped before today or not yet effective today
-      // is still in the roster object (auto-advance carry-forward) but must not be credited.
+      // both this week's total and what a manager added in the current day. A player whose
+      // drop_date IS today still counts today — drop_date is his last rostered day — while one
+      // dropped earlier, or not yet effective, contributes nothing because the window excludes it.
+      // player_dates still applies on top as the commissioner's manual per-date override.
       const eligibleToday = isDateEligibleForPlayer(sd, name, agg.type, weekRound, weekName, today);
       const todayScore = eligibleToday
-        ? agg.games.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0)
+        ? ownGames.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0)
         : 0;
       playerRows.push({
         name,
@@ -10405,11 +10439,14 @@ app.get('/api/mlb/live', async (req, res) => {
         type: agg.type,
         running_score: Math.round(score * 100) / 100,
         today_score: Math.round(todayScore * 100) / 100,
-        stats: agg.stats,
-        games_played: agg.games.length,
+        // Windowed, not raw: the client re-filters `games` by date to build the per-manager
+        // "today" panel, so shipping games from outside the roster window would let the panel
+        // show stats the totals above deliberately exclude.
+        stats: windowStats,
+        games_played: ownGames.length,
         any_live: hasLive,
         any_final: hasFinal,
-        games: agg.games.sort((a, b) => a.date.localeCompare(b.date)),
+        games: ownGames.sort((a, b) => a.date.localeCompare(b.date)),
       });
     }
     playerRows.sort((a, b) => b.running_score - a.running_score);
