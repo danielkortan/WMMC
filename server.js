@@ -10925,6 +10925,13 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   const config = db.google_sheets_config || {};
   const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
 
+  // Same guard as the 7am auto-post: without season data the post renders as a pool-play
+  // "Current Period: Season / No scores recorded yet" shell. Fail loudly instead of
+  // pushing that to the league channel.
+  if (!hasScoreboardData((db.seasons || {})[year])) {
+    return res.status(409).json({ error: `Season ${year} has no schedule or scores to post` });
+  }
+
   try {
     await postScoreboardSlack(db, year);
     addAuditEntry(db, 'slack_scoreboard_post', { year }, userEmail);
@@ -11001,6 +11008,10 @@ app.post('/api/slack/command', (req, res) => {
 
       // Support optional year argument: /wmmc 2024
       const requestedYear = /^\d{4}$/.test(text) ? text : year;
+
+      if (!hasScoreboardData((db.seasons || {})[requestedYear])) {
+        return res.json({ response_type: 'ephemeral', text: `No scoreboard data for ${requestedYear} yet.` });
+      }
 
       const { blocks, text: fallback } = buildScoreboardBlocks(db, requestedYear);
 
@@ -13252,6 +13263,24 @@ function scoreboardAutoPostPlan(sd, todayISO) {
   return todayISO >= tuesdayOnOrAfterISO(current.start) ? {} : null;
 }
 
+// Does this season have enough state for a scoreboard post to mean anything?
+//
+// A process whose db.json has no season data still renders a *syntactically valid* but
+// completely wrong scoreboard: `detectCurrentRound` finds no schedule and no scored rounds,
+// so the post falls back to "Current Period: *Season*" with pool-play frames and
+// "_No scores recorded yet._" — the pool-play layout, in the middle of the playoffs.
+// That state is always a deployment artifact, never real: the staging service (ephemeral
+// filesystem, reseeds from managers_seed.json on every deploy) or a mid-deploy production
+// instance that came up before its disk/Upstash restore. The 7am `last_scoreboard_post_date`
+// claim can't dedupe it either, because that guard lives in the very db.json that is empty.
+// So check the data itself before posting, and stay silent when there is nothing to report.
+function hasScoreboardData(sd) {
+  if (!sd) return false;
+  const hasSchedule = Array.isArray(sd.schedule_dates) && sd.schedule_dates.some((d) => d && d.start && d.end);
+  const hasScores = (sd.weekly_batting || []).length > 0 || (sd.weekly_pitching || []).length > 0;
+  return hasSchedule || hasScores;
+}
+
 let scoreboardTimer = null;
 
 function scheduleScoreboardPost() {
@@ -13274,23 +13303,39 @@ function scheduleScoreboardPost() {
     // data loaded yet). Re-reading fresh and writing the claim first keeps the race window
     // as small as possible.
     const db = readDB();
+    const config = db.google_sheets_config || {};
+    const season = config.season || now.getFullYear().toString();
+    const sd = (db.seasons || {})[season];
+
     if (db.last_scoreboard_post_date === todayET) {
       console.log(`[Scoreboard] Already posted today (${todayET}) — skipping duplicate run`);
+    } else if (!hasScoreboardData(sd)) {
+      // Checked BEFORE claiming today's date: this process has nothing to report, so it must
+      // not consume the day's post slot either. Whichever instance holds the real data still
+      // posts. See hasScoreboardData for why this state happens at all.
+      console.error(
+        `[Scoreboard] Skipping — season ${season} has no schedule or scores in this process's db.json. ` +
+          'Refusing to post an empty scoreboard (unrestored/ephemeral instance?).'
+      );
     } else {
       db.last_scoreboard_post_date = todayET;
       writeDB(db);
 
       console.log(`[Scoreboard] Posting daily scoreboard at ${now.toISOString()}`);
-      const config = db.google_sheets_config || {};
-      const season = config.season || now.getFullYear().toString();
-      const sd = (db.seasons || {})[season];
       const plan = scoreboardAutoPostPlan(sd, todayET);
 
       if (!plan) {
         console.log(
           `[Scoreboard] Skipping — no post scheduled for ${todayET} (between rounds, or playoff round not started)`
         );
-      } else if (isWithinSyncWindow(sd)) {
+      } else if (plan.summaryRound || isWithinSyncWindow(sd)) {
+        // End-of-round recaps bypass the sync window. That window closes the day AFTER the
+        // Finals' last day, but a recap posts the MONDAY after a round ends — those coincide
+        // only because every round currently ends on a Sunday. Move the Finals' last day to
+        // any other weekday and the championship recap would be silently swallowed by a gate
+        // about whether STATS should still be synced, not whether a summary should be posted.
+        // A recap is only ever produced on the one Monday scoreboardAutoPostPlan names for a
+        // round that just ended, so this can't post past the end of the season.
         // Backstop for the 4am compute (e.g. server restarted in between): make
         // sure today's playoff odds exist before posting, then post from a fresh
         // db read so the new odds are included. Odds failures never block the post.

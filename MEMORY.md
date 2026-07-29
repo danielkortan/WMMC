@@ -1876,3 +1876,52 @@ verification drove the real endpoint over HTTP against a stubbed upstream that c
 build, 8 concurrent warm reads (zero upstream), Finals never re-fetched across a refresh cycle,
 a game going Final re-fetching exactly that boxscore, and an all-Final slate costing nothing.
 Per the testing convention these live in `server.js` and so have no committed unit test.
+
+## Duplicate 7am Slack post showing "Current Period: Season" (2026-07-29)
+
+**Symptom (commissioner screenshot, QF Week 2):** two 7:00 AM scoreboard posts in the channel.
+The first was the pool-play layout — `Current Period: *Season*`, `🏆 Overall Standings`,
+`_No scores recorded yet._`; the second was the correct `Quarterfinals - Week 2` bracket post.
+
+**Diagnosis:** not a playoff-layout bug — `buildScoreboardBlocks` already drops the pool-play
+frames for QF/SF/Finals (see 2026-07-15 entry). The bad post came from a process whose
+`db.json` had no season data: `detectCurrentRound` finds no schedule and no scored rounds →
+`currentRound = null` → label falls back to `'Season'`, `isPlayoffRound` false → pool-play
+layout. Everything downstream of it agreed to post: `scoreboardAutoPostPlan` returns `{}` for
+empty `schedule_dates` (documented always-post fallback) and `isWithinSyncWindow` returns true
+with no dates. `last_scoreboard_post_date` can't dedupe across processes — the claim lives in
+the very `db.json` that is empty. Candidate producers: the staging service (`render.yaml`:
+ephemeral filesystem, reseeds from `managers_seed.json` each deploy) if a `SLACK_SCOREBOARD_
+WEBHOOK_URL` was ever set on it in the Render dashboard, or a mid-deploy prod instance up
+before its disk restore.
+
+**Fix (`server.js`, display/gating only — no scoring, roster, or schedule writes):**
+`hasScoreboardData(sd)` — true when the season has at least one usable `schedule_dates` entry
+OR any `weekly_batting`/`weekly_pitching` row. Checked in the 7am run **before** the
+`last_scoreboard_post_date` claim, so a blank instance neither posts nor burns the day's slot
+and the instance holding real data still posts; `console.error` on skip. Same guard on manual
+`POST /api/slack/scoreboard` (409) and `/wmmc` (ephemeral reply). OR, not AND, so opening day
+(schedule set, no games played) and historical seasons (scores, no stored schedule) still post.
+
+**Verified:** scratch harness over `hasScoreboardData` — 8/8 (missing season, `{}`,
+seeded-but-blank, malformed date rows → false; opening day, mid-playoffs, pitching-only,
+historical-no-schedule → true). 178/178 tests, lint + format clean. Per the testing convention
+this lives in `server.js` and so has no committed unit test.
+
+**Still to check outside the code:** whether the staging Render service has a scoreboard
+webhook set in its dashboard — if so, unset it; the guard silences the post either way.
+
+**Follow-up same session — end-of-round recaps were gated by the sync window.** Auditing the
+four recap posts the commissioner expects (end of pool play, QF, SF, end of season) surfaced a
+latent bug: the 7am runtime gate is `plan && isWithinSyncWindow(sd)`, and `isWithinSyncWindow`
+closes the day AFTER the Finals' last day, while a recap posts the MONDAY after a round ends.
+Those coincide only because every round currently ends on a Sunday (Finals end 8/30 → recap
+8/31 → sync window closes 8/31, passing by exactly one day). With the Finals ending any other
+weekday the championship recap is silently swallowed. Fixed by letting recaps bypass the sync
+window (`plan.summaryRound || isWithinSyncWindow(sd)`) — a recap is only produced on the single
+Monday `scoreboardAutoPostPlan` names for a just-ended round, so it can't post past the season.
+**Verified:** day-by-day calendar sim (2026-04-01 → 09-15) on the real 2026 dates — daily posts
+5/05→7/13 incl. the PP2 recap, silent ASB 7/14–7/20, QF daily from 7/21, recaps on 7/13 PP2 /
+8/03 QF / 8/17 SF / 8/31 Finals, nothing after 8/31 — re-run with the Finals ending Saturday and
+with 5-day weeks (all rounds ending Friday): all four recaps fire in every shape, post count
+112/111/102. Before the fix the Saturday variant produced only three recaps.
