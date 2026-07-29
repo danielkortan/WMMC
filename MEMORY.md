@@ -1,5 +1,37 @@
 # WMMC — Decisions Log
 
+## Eliminated managers' stale playoff rosters blocked the swap pool (2026-07-29)
+
+**Symptom (commissioner).** Tarik Skubal was on no surviving manager's roster but never appeared in
+the swap form's "Player In (available)" search — while the commissioner's roster-management lookup
+(which only excludes the editing manager's own roster) listed him normally.
+
+**Root cause.** `isCurrentlyTaken` in the swap form asked each manager "do you hold this player",
+answering from period-scoped `roster_dates` first and falling back to the manager's LATEST week
+roster array when the player had no date events in the period. The fallback had **no period
+scoping**: `orderedWks.filter((wk) => mgrRoster[wk]).pop()`. A manager eliminated in the QF still
+has their `QF|Week 2` array on file, so a player on it read as rostered forever — the same
+period-leak family as the 2026-06-08 carry-forward bugs, in the one place the array fallback was
+never scoped. Compounding it, the form derived its period with a local "latest STARTED round" loop
+while `getCurrentScheduleRound` (and the server's `currentScheduleRound`, which stamps the swap's
+round) return the current **or upcoming** round — so in a between-rounds gap (QF over, SF lineups
+going in) availability was judged against the round that just ended.
+
+**Fix.** New canonical `periodWeekKeys` + `rosterStatusForManager` in `js/eligibility.js` (built on
+`rosterStatusAsOf`); `app.js`'s two inline helpers now call it, the array fallback is limited to the
+current period's week keys, and the period comes from `getCurrentScheduleRound`. Status is read
+**as of today**, so a scheduled swap no longer applies early in either control: the outgoing player
+stays in Player Out until their drop date, the incoming one reads `scheduled` (still counted as
+taken, so nobody else can claim them) until their add date. Managers for the "is anyone holding
+this" sweep now come from `getManagers()` (db.managers) unioned with roster-data keys, per the
+invariant.
+
+**Score-neutral by construction** — availability is a render-time read; no scoring, `roster_dates`,
+or `swaps` path is touched, so no total can move. Verified in the running app on a fabricated
+SF-in-progress season with a QF-eliminated manager: before, "tar" returned only Pintaro/Alcantara
+(exactly the reported screenshot); after, Tarik Skubal is listed, while players on a live SF roster
+stay out of the pool. PR #377.
+
 ## Managers can edit/cancel their OWN swap until it takes effect (2026-07-28)
 
 **What (commissioner request).** A manager who schedules a swap should be able to change or cancel

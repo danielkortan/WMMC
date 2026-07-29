@@ -5,6 +5,8 @@ import {
   isPlayerActiveAsOfWeekEnd,
   isGameDateEligible,
   rosterStatusAsOf,
+  periodWeekKeys,
+  rosterStatusForManager,
 } from '../js/eligibility.js';
 
 // A compact schedule spanning a period boundary (PP1 → PP2), with a gap, to exercise the rules.
@@ -188,5 +190,127 @@ describe('isGameDateEligible', () => {
   it('a drop_date override replaces the end bound (no scoring after the drop)', () => {
     assert.equal(isGameDateEligible('2026-05-09', { ...week, dropDate: '2026-05-08' }), false);
     assert.equal(isGameDateEligible('2026-05-08', { ...week, dropDate: '2026-05-08' }), true); // inclusive
+  });
+});
+
+describe('periodWeekKeys', () => {
+  it("returns only the round's own week keys, in schedule order", () => {
+    assert.deepEqual(periodWeekKeys('PP1', schedule), ['PP1|Week 1', 'PP1|Week 2']);
+    assert.deepEqual(periodWeekKeys('PP2', schedule), ['PP2|Week 1']);
+  });
+  it('returns an empty list for an unknown round or a missing schedule', () => {
+    assert.deepEqual(periodWeekKeys('QF', schedule), []);
+    assert.deepEqual(periodWeekKeys(null, schedule), []);
+    assert.deepEqual(periodWeekKeys('PP1', null), []);
+  });
+});
+
+// The playoff shape that produced the bug: a manager eliminated in the QF keeps their QF roster
+// array and QF roster_dates, while the surviving managers are playing the SF.
+describe('rosterStatusForManager', () => {
+  const playoffSchedule = [
+    { round: 'QF', week: 'Week 1' },
+    { round: 'QF', week: 'Week 2' },
+    { round: 'SF', week: 'Week 1' },
+    { round: 'SF', week: 'Week 2' },
+  ];
+  const sfWeeks = periodWeekKeys('SF', playoffSchedule);
+  const sfStart = '2026-07-20';
+  const today = '2026-07-29';
+
+  const eliminated = {
+    rosterDates: { 'QF|Week 1': { Skubal: { add_date: '2026-07-06' } } },
+    rosters: {
+      'QF|Week 1': { batters: [], pitchers: ['Skubal'] },
+      'QF|Week 2': { batters: [], pitchers: ['Skubal'] },
+    },
+  };
+
+  it('an eliminated manager does not hold a player into the next period (date windows)', () => {
+    assert.equal(
+      rosterStatusForManager('Skubal', {
+        ...eliminated,
+        periodStart: sfStart,
+        asOf: today,
+        weekKeys: sfWeeks,
+      }),
+      'none'
+    );
+  });
+
+  it("an eliminated manager's stale roster array is not read as a live roster", () => {
+    // Same manager, but with no roster_dates at all — the array fallback is the only signal, and
+    // it must stay inside the current period's weeks.
+    const arraysOnly = { rosterDates: {}, rosters: eliminated.rosters };
+    assert.equal(
+      rosterStatusForManager('Skubal', { ...arraysOnly, periodStart: sfStart, asOf: today, weekKeys: sfWeeks }),
+      'none'
+    );
+    // ...while the QF itself still reads him as rostered.
+    assert.equal(
+      rosterStatusForManager('Skubal', {
+        ...arraysOnly,
+        periodStart: null,
+        asOf: '2026-07-10',
+        weekKeys: periodWeekKeys('QF', playoffSchedule),
+      }),
+      'active'
+    );
+  });
+
+  it('a manager who submitted the player for THIS period still holds him', () => {
+    const surviving = {
+      rosterDates: { 'SF|Week 1': { Skubal: { add_date: sfStart } } },
+      rosters: { 'SF|Week 1': { batters: [], pitchers: ['Skubal'] } },
+    };
+    assert.equal(
+      rosterStatusForManager('Skubal', { ...surviving, periodStart: sfStart, asOf: today, weekKeys: sfWeeks }),
+      'active'
+    );
+  });
+
+  it('falls back to this period’s roster array when the player has no date entries', () => {
+    const noDates = {
+      rosterDates: { 'SF|Week 1': { Someone: { add_date: sfStart } } },
+      rosters: { 'SF|Week 1': { batters: ['Judge'], pitchers: [] } },
+    };
+    assert.equal(
+      rosterStatusForManager('Judge', { ...noDates, periodStart: sfStart, asOf: today, weekKeys: sfWeeks }),
+      'active'
+    );
+    assert.equal(
+      rosterStatusForManager('Ohtani', { ...noDates, periodStart: sfStart, asOf: today, weekKeys: sfWeeks }),
+      'none'
+    );
+  });
+
+  it('a player dropped within the period is released even if the arrays still list him', () => {
+    const dropped = {
+      rosterDates: { 'SF|Week 1': { Skubal: { add_date: sfStart, drop_date: '2026-07-27' } } },
+      rosters: { 'SF|Week 1': { batters: [], pitchers: ['Skubal'] } },
+    };
+    assert.equal(
+      rosterStatusForManager('Skubal', { ...dropped, periodStart: sfStart, asOf: today, weekKeys: sfWeeks }),
+      'dropped'
+    );
+  });
+
+  it('a scheduled swap does not move either player before its effective date', () => {
+    const scheduled = {
+      rosterDates: {
+        'SF|Week 1': {
+          Skubal: { add_date: sfStart, drop_date: '2026-07-31' }, // still on the roster today
+          Wheeler: { add_date: '2026-08-01' }, // claimed, but not rostered yet
+        },
+      },
+      rosters: { 'SF|Week 1': { batters: [], pitchers: ['Wheeler'] } },
+    };
+    const opts = { ...scheduled, periodStart: sfStart, asOf: today, weekKeys: sfWeeks };
+    assert.equal(rosterStatusForManager('Skubal', opts), 'active');
+    assert.equal(rosterStatusForManager('Wheeler', opts), 'scheduled');
+  });
+
+  it('handles a manager with no roster data at all', () => {
+    assert.equal(rosterStatusForManager('Skubal', { periodStart: sfStart, asOf: today, weekKeys: sfWeeks }), 'none');
   });
 });

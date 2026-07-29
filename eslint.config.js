@@ -39,6 +39,8 @@ const projectGlobals = {
   orderWithSwapChains: 'readonly',
   checkSwapLimit: 'readonly',
   rosterStatusAsOf: 'readonly',
+  rosterStatusForManager: 'readonly',
+  periodWeekKeys: 'readonly',
 };
 
 const projectRules = {

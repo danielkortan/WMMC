@@ -100,6 +100,41 @@ export function rosterStatusAsOf(entries, { periodStart = null, asOf = null } = 
   return 'none';
 }
 
+// Week keys ("<round>|<week>") belonging to the SAME period as `round`, in schedule order.
+// The per-week roster ARRAYS are a derived cache, so any code that falls back to them must limit
+// itself to these keys: a manager eliminated in an earlier round still has that round's roster
+// array on file, and reading it as a live roster is what the period scoping exists to prevent.
+export function periodWeekKeys(round, schedule) {
+  if (!round || !Array.isArray(schedule)) return [];
+  return schedule.filter((s) => s.round === round).map((s) => `${s.round}|${s.week}`);
+}
+
+// Roster status of `player` for ONE manager, as of `asOf`, scoped to a single period — the
+// question every "who holds this player right now" view asks (swap form Player Out / available
+// pool). Returns the same four states as rosterStatusAsOf.
+//
+// `rosterDates` is that manager's roster_dates ({ weekKey: { player: {add_date, drop_date} } })
+// and is the SOURCE OF TRUTH. `rosters` (that manager's { weekKey: {batters, pitchers} }) is a
+// derived cache and is consulted ONLY when the player has no date events inside the period, and
+// only for `weekKeys` — the period's own weeks. Without that restriction the fallback reaches
+// back into a prior period: a manager knocked out in the QF keeps their QF roster array, so every
+// player on it reads as still-held and can never be swapped in by the managers still playing.
+export function rosterStatusForManager(
+  player,
+  { rosterDates = null, rosters = null, periodStart = null, asOf = null, weekKeys = null } = {}
+) {
+  const entries = [];
+  for (const weekDates of Object.values(rosterDates || {})) {
+    if (weekDates && weekDates[player]) entries.push(weekDates[player]);
+  }
+  const status = rosterStatusAsOf(entries, { periodStart, asOf });
+  if (status !== 'none') return status;
+  const latest = (weekKeys || []).filter((wk) => (rosters || {})[wk]).pop();
+  if (!latest) return 'none';
+  const wr = rosters[latest] || {};
+  return (wr.batters || []).includes(player) || (wr.pitchers || []).includes(player) ? 'active' : 'none';
+}
+
 // Whether a single game on `gameDate` falls within a player's effective scoring window for a week,
 // honoring an optional per-player add/drop override and the week's calendar [weekStart, weekEnd].
 // Mirrors isDateEligibleForPlayer / computeEffective* in server.js: an add/drop override replaces
