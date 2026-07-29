@@ -9299,102 +9299,63 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const roster = getAllRosteredPlayers(seasonData, managerName);
 
     // Build available (non-rostered) players from pool.
-    // Uses roster_dates add/drop dates as the primary signal: a player is currently
-    // taken by a manager when their most recent date event was an add (not a drop).
-    // Falls back to latest-week roster array for players with no date entries.
+    // roster_dates add/drop windows are the source of truth (rosterStatusForManager); the per-week
+    // roster arrays are a derived cache and are only a fallback, scoped to this period's weeks.
     // backfillRosterDatesFromSwaps is called before this so old approved swaps
     // also get their drop_dates populated.
-    const orderedWks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
+    const swapTodayET = isoDateET(new Date());
 
-    // Current scoring period start — a new submission period (PP2/QF/SF/Finals) starts fresh from
-    // its own submission, so "currently rostered" must only consider this period's adds/drops.
-    // Without this, a prior period's holdover (an old add with no drop) reads as still-rostered and
-    // wrongly appears in Player Out / out of the available pool. null for PP1 leaves it unchanged.
-    const swapTodayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    const swapSchedDates = seasonData.schedule_dates || [];
-    let swapCurRound = null;
-    for (let i = 0; i < SEASON_SCHEDULE.length && i < swapSchedDates.length; i++) {
-      if (swapSchedDates[i] && swapSchedDates[i].start && swapSchedDates[i].start <= swapTodayET) {
-        swapCurRound = SEASON_SCHEDULE[i].round;
-      }
-    }
+    // The period the swap belongs to. Uses the same round detection as the rest of the swap form
+    // (and as the server, which stamps the round on submission) so that in a gap between rounds —
+    // e.g. after the QF has ended while SF lineups are going in — availability is judged against
+    // the round the swap is actually charged to, not the one that just finished.
+    const swapCurRound = getCurrentScheduleRound(seasonData).round;
+
+    // A new submission period (PP2/QF/SF/Finals) starts fresh from its own submission, so
+    // "currently rostered" must only consider this period's adds/drops; null for PP1 leaves that
+    // period unchanged. The array fallback is period-scoped for the same reason: a manager
+    // eliminated in an earlier round still has that round's roster array on file, and reading it
+    // would keep their old players out of the available pool for everyone still playing.
     const curPeriodStart = periodStartForRound(seasonData, swapCurRound);
+    const curPeriodWks = periodWeekKeys(swapCurRound, SEASON_SCHEDULE);
 
-    // Returns true if `player` is currently on THIS manager's active roster
-    // (most recent roster_dates action was an add, or no dates but in latest week).
-    const isStillActiveForMgr = (player) => {
-      const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[managerName]) || {};
-      let latestAdd = null;
-      let latestDrop = null;
-      for (const weekDates of Object.values(mgrDates)) {
-        const entry = weekDates[player];
-        if (!entry) continue;
-        if (
-          entry.add_date &&
-          (!curPeriodStart || entry.add_date >= curPeriodStart) &&
-          (!latestAdd || entry.add_date > latestAdd)
-        ) {
-          latestAdd = entry.add_date;
-        }
-        if (
-          entry.drop_date &&
-          (!curPeriodStart || entry.drop_date >= curPeriodStart) &&
-          (!latestDrop || entry.drop_date > latestDrop)
-        ) {
-          latestDrop = entry.drop_date;
-        }
-      }
-      if (latestAdd || latestDrop) {
-        return !latestDrop || (latestAdd && latestAdd > latestDrop);
-      }
-      const mgrRoster = (seasonData.rosters && seasonData.rosters[managerName]) || {};
-      const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
-      if (!latest) return false;
-      const wr = mgrRoster[latest];
-      return (wr.batters || []).includes(player) || (wr.pitchers || []).includes(player);
-    };
+    const swapRosterStatus = (mgr, player) =>
+      rosterStatusForManager(player, {
+        rosterDates: (seasonData.roster_dates || {})[mgr],
+        rosters: (seasonData.rosters || {})[mgr],
+        periodStart: curPeriodStart,
+        asOf: swapTodayET,
+        weekKeys: curPeriodWks,
+      });
+
+    // Returns true if `player` is on THIS manager's roster TODAY. Evaluating as of today keeps a
+    // scheduled swap from taking effect early in this list: the outgoing player stays selectable
+    // until their drop date, and an incoming player isn't offered until their add date lands.
+    const isStillActiveForMgr = (player) => swapRosterStatus(managerName, player) === 'active';
 
     // Filter to currently active players only so previously dropped players
     // don't appear in the Player Out list.
     const currentBatters = roster.batters.filter(isStillActiveForMgr);
     const currentPitchers = roster.pitchers.filter(isStillActiveForMgr);
 
-    const isCurrentlyTaken = (player) => {
-      for (const [mgr, mgrRoster] of Object.entries(seasonData.rosters || {})) {
-        const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[mgr]) || {};
-        let latestAdd = null;
-        let latestDrop = null;
-        for (const weekDates of Object.values(mgrDates)) {
-          const entry = weekDates[player];
-          if (!entry) continue;
-          if (
-            entry.add_date &&
-            (!curPeriodStart || entry.add_date >= curPeriodStart) &&
-            (!latestAdd || entry.add_date > latestAdd)
-          ) {
-            latestAdd = entry.add_date;
-          }
-          if (
-            entry.drop_date &&
-            (!curPeriodStart || entry.drop_date >= curPeriodStart) &&
-            (!latestDrop || entry.drop_date > latestDrop)
-          ) {
-            latestDrop = entry.drop_date;
-          }
-        }
-        if (latestAdd || latestDrop) {
-          // Dates available: active only when most recent action was an add
-          if (!latestDrop || (latestAdd && latestAdd > latestDrop)) return true;
-        } else {
-          // No date entries: fall back to the manager's latest week roster array
-          const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
-          if (!latest) continue;
-          const wr = mgrRoster[latest];
-          if ((wr.batters || []).includes(player) || (wr.pitchers || []).includes(player)) return true;
-        }
-      }
-      return false;
-    };
+    // Managers come from the canonical commissioner list (db.managers); roster-data keys are
+    // unioned in so a name present only in rosters/roster_dates can still hold a player.
+    const swapMgrNames = Array.from(
+      new Set([
+        ...getManagers().map((m) => m.name),
+        ...Object.keys(seasonData.rosters || {}),
+        ...Object.keys(seasonData.roster_dates || {}),
+      ])
+    );
+
+    // A player is unavailable only while some manager holds them RIGHT NOW: on a roster today
+    // ('active'), or already claimed by a scheduled swap whose add date hasn't landed yet
+    // ('scheduled') — taking them would collide when that swap takes effect.
+    const isCurrentlyTaken = (player) =>
+      swapMgrNames.some((mgr) => {
+        const st = swapRosterStatus(mgr, player);
+        return st === 'active' || st === 'scheduled';
+      });
     const availBatters = (seasonData.batters_pool || []).filter((b) => !isCurrentlyTaken(b)).sort();
     const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !isCurrentlyTaken(p)).sort();
 
