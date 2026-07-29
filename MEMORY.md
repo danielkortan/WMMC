@@ -1877,6 +1877,94 @@ build, 8 concurrent warm reads (zero upstream), Finals never re-fetched across a
 a game going Final re-fetching exactly that boxscore, and an all-Final slate costing nothing.
 Per the testing convention these live in `server.js` and so have no committed unit test.
 
+## Duplicate 7am Slack post showing "Current Period: Season" (2026-07-29)
+
+**Symptom (commissioner screenshot, QF Week 2):** two 7:00 AM scoreboard posts in the channel.
+The first was the pool-play layout — `Current Period: *Season*`, `🏆 Overall Standings`,
+`_No scores recorded yet._`; the second was the correct `Quarterfinals - Week 2` bracket post.
+
+**Diagnosis:** not a playoff-layout bug — `buildScoreboardBlocks` already drops the pool-play
+frames for QF/SF/Finals (see 2026-07-15 entry). The bad post came from a process whose
+`db.json` had no season data: `detectCurrentRound` finds no schedule and no scored rounds →
+`currentRound = null` → label falls back to `'Season'`, `isPlayoffRound` false → pool-play
+layout. Everything downstream of it agreed to post: `scoreboardAutoPostPlan` returns `{}` for
+empty `schedule_dates` (documented always-post fallback) and `isWithinSyncWindow` returns true
+with no dates. `last_scoreboard_post_date` can't dedupe across processes — the claim lives in
+the very `db.json` that is empty. Candidate producers: the staging service (`render.yaml`:
+ephemeral filesystem, reseeds from `managers_seed.json` each deploy) if a `SLACK_SCOREBOARD_
+WEBHOOK_URL` was ever set on it in the Render dashboard, or a mid-deploy prod instance up
+before its disk restore.
+
+**Fix (`server.js`, display/gating only — no scoring, roster, or schedule writes):**
+`hasScoreboardData(sd)` — true when the season has at least one usable `schedule_dates` entry
+OR any `weekly_batting`/`weekly_pitching` row. Checked in the 7am run **before** the
+`last_scoreboard_post_date` claim, so a blank instance neither posts nor burns the day's slot
+and the instance holding real data still posts; `console.error` on skip. Same guard on manual
+`POST /api/slack/scoreboard` (409) and `/wmmc` (ephemeral reply). OR, not AND, so opening day
+(schedule set, no games played) and historical seasons (scores, no stored schedule) still post.
+
+**Verified:** scratch harness over `hasScoreboardData` — 8/8 (missing season, `{}`,
+seeded-but-blank, malformed date rows → false; opening day, mid-playoffs, pitching-only,
+historical-no-schedule → true). 178/178 tests, lint + format clean. Per the testing convention
+this lives in `server.js` and so has no committed unit test.
+
+**Still to check outside the code:** whether the staging Render service has a scoreboard
+webhook set in its dashboard — if so, unset it; the guard silences the post either way.
+
+**Follow-up same session — end-of-round recaps were gated by the sync window.** Auditing the
+four recap posts the commissioner expects (end of pool play, QF, SF, end of season) surfaced a
+latent bug: the 7am runtime gate is `plan && isWithinSyncWindow(sd)`, and `isWithinSyncWindow`
+closes the day AFTER the Finals' last day, while a recap posts the MONDAY after a round ends.
+Those coincide only because every round currently ends on a Sunday (Finals end 8/30 → recap
+8/31 → sync window closes 8/31, passing by exactly one day). With the Finals ending any other
+weekday the championship recap is silently swallowed. Fixed by letting recaps bypass the sync
+window (`plan.summaryRound || isWithinSyncWindow(sd)`) — a recap is only produced on the single
+Monday `scoreboardAutoPostPlan` names for a just-ended round, so it can't post past the season.
+**Verified:** day-by-day calendar sim (2026-04-01 → 09-15) on the real 2026 dates — daily posts
+5/05→7/13 incl. the PP2 recap, silent ASB 7/14–7/20, QF daily from 7/21, recaps on 7/13 PP2 /
+8/03 QF / 8/17 SF / 8/31 Finals, nothing after 8/31 — re-run with the Finals ending Saturday and
+with 5-day weeks (all rounds ending Friday): all four recaps fire in every shape, post count
+112/111/102. Before the fix the Saturday variant produced only three recaps.
+
+## Season-opening welcome post + confirming the round cadence (2026-07-29)
+
+**Commissioner review of the post cadence.** Walked the four requirements against the code:
+
+1. _No post on day 1 (nobody has played)._ Already true, but incidentally: `isWithinSyncWindow`
+   opens the day AFTER PP1 starts, so the season's first day was silent as a side effect of a
+   stats-sync gate, not by intent. Now explicit (see below).
+2. _Daily posts run through the Monday after each round ends._ Already correct.
+3. _Commissioner "End Round" creates the round summary post._ Already built and untouched —
+   `finalizeRound('PP')` (playoff field + QF matchups + a roast per non-qualifier),
+   `dumpPlayoffLosers('QF'|'SF')` (eliminations + roasts), `crownChampionAndRoastFinals()`
+   (podium + roasts). **Decision:** keep the auto 7am Monday wrap-up too. The two cover
+   different things — the auto post is final scores/bracket (✅/❌, advancing footer), the
+   commissioner post is who's out plus roasts. Two posts that Monday is intended, not a bug.
+4. _Auto posts end the Monday after the season's last day._ Already correct (the Finals recap).
+
+**Built: the season-opening welcome post.** Fires at 7am on the season's first day in place of
+the old accidental silence. `scoreboardAutoPostPlan` returns `{ welcome: true }` when
+`todayISO` equals the earliest round-window start; the 7am run posts it and skips both the
+odds compute and `isWithinSyncWindow` (that window does not open until day 2 — exactly why day
+1 was silent). `buildDraftFacts(db, sd)` reads `sd.initial_submissions` (canonical origin of
+PP1 roster membership) and derives league-wide facts: consensus picks, biggest single-team
+stack (≥3), most-similar roster pair (≥3 shared), most solo picks, field size. Unapproved
+submissions count — at 7am on opening day nothing may be approved yet and this post has zero
+scoring consequence. Returns null with <2 drafted rosters, and the post is then skipped.
+`generateWelcomeRoastWithClaude` sends only those computed facts (explicitly told not to invent
+players/stats) with `fallbackWelcomeRoast` as the static safety net, same convention as
+`fallbackRoast`. **League-wide by commissioner's choice, NOT one roast per manager** — the
+per-manager format belongs to eliminations, and a full slate on day 1 gets collapsed by Slack.
+
+**Verified:** draft-facts harness 13/13 on a 12-manager fixture (consensus pick across all 12,
+a 4-deep NYY stack, a 5-player twin-roster pair, an outright contrarian, plus guards: no
+managers / one manager / nobody drafted → null, missing team map → no stack claim, and
+determinism on re-run). Ties break by name so the same draft always renders the same post.
+Calendar sim re-run: WELCOME on 5/04, daily 5/05→7/13, recaps 7/13 PP2 / 8/03 QF / 8/17 SF /
+8/31 Finals, silent ASB and after 8/31 — 113 posts, and unchanged with the Finals ending
+Saturday. 178/178 tests, lint + format clean. Server-only (Slack-post concern, like
+`buildPlayoffMatchupsSlackText`), so no committed unit test per the testing convention.
+
 ## 2026-07-29 — A mid-week trade erased the outgoing manager's drop-day points
 
 **Symptom (commissioner).** The 7am QF matchup post disagreed with the app: Daniel Kortan 416.4
