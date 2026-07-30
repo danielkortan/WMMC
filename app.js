@@ -7434,8 +7434,10 @@ function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKe
 }
 
 // Map of `${round}|${week}` -> week start date, used by the drop-eligibility checks.
-function buildWeekKeyToStart() {
-  const scheduleDates = getScheduleDates();
+// Defaults to the season the user is viewing; pass a season explicitly when computing for a
+// DIFFERENT season than SELECTED_SEASON (the Hall of Fame does this — it walks every season).
+function buildWeekKeyToStart(seasonData) {
+  const scheduleDates = seasonData ? seasonData.schedule_dates || null : getScheduleDates();
   const map = {};
   SEASON_SCHEDULE.forEach((s, i) => {
     if (scheduleDates && scheduleDates[i]) map[`${s.round}|${s.week}`] = scheduleDates[i].start;
@@ -15869,103 +15871,82 @@ const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
 // Per-manager season overrides for managers who didn't play every historical season
 const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 2, 'Joey Auclair': 7, 'Edgar Rivas': 6 };
 
-// Compute full 1-12 standings from a live season's data.
-// Returns { champion, runnerUp, third, standings: { 'Name': position } } or null if not enough data.
-function computeFullStandings(sd, mgrs) {
-  const bat = sd.weekly_batting || [],
-    pit = sd.weekly_pitching || [];
-  function rs(mgr, round) {
-    return (
-      bat.filter((b) => b.manager === mgr && b.round === round).reduce((s, b) => s + (b.weekly_score || 0), 0) +
-      pit.filter((p) => p.manager === mgr && p.round === round).reduce((s, p) => s + (p.weekly_score || 0), 0)
-    );
-  }
+// Human labels for the round a season is currently playing.
+const HOF_ROUND_LABELS = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
 
-  const activeMgrs = mgrs.filter((m) => m.active !== false);
-  const pools = {};
-  activeMgrs.forEach((m) => {
-    if (m.pool) {
-      if (!pools[m.pool]) pools[m.pool] = [];
-      pools[m.pool].push(m.name);
-    }
-  });
+// Every manager's finishing status for a season — settled placings for the eliminated, a
+// live "current round" status for anyone still alive. Returns the shape described in
+// js/playoffStatus.js (entries / standings / currentRound / complete / podium), or null when
+// the league has no managers.
+//
+// Scoring invariant: managers come from the commissioner page (getManagers) and nowhere else;
+// who qualified and who advanced come from the canonical bracket helpers (getSeeding /
+// getSFParticipants / getFinalsParticipants), and every round total comes from roundBreakdown
+// — i.e. the date-windowed, period-scoped rosters, never the sticky `manager` field on a stat
+// row. That's the same source the Playoff Bracket card reads, so the Hall of Fame can't
+// disagree with the bracket about a result. Nothing here writes to seasonData.
+function hofPlayoffStatuses(sd) {
+  if (!sd) return null;
+  const managerNames = getManagers()
+    .filter((m) => m.active !== false)
+    .map((m) => m.name);
+  if (managerNames.length === 0) return null;
 
+  const finalized = sd.finalized_rounds || [];
+  const seeding = getSeeding(sd);
+  const qualifiers = (seeding && seeding.qualifierNames) || [];
+
+  // Pool-play totals order the non-qualifiers. Computed live even when a confirmed seeding
+  // snapshot exists — the snapshot fixes WHO qualified, not what anyone scored.
   const ppTotals = {};
-  activeMgrs.forEach((m) => {
-    ppTotals[m.name] = rs(m.name, 'PP1') + rs(m.name, 'PP2');
-  });
+  const poolPlay = computePoolPlaySeeding(sd);
+  if (poolPlay) Object.values(poolPlay.byManager).forEach((s) => (ppTotals[s.manager] = s.total));
 
-  // Pool winners seeded first, then remaining by total PP
-  const ppWinners = new Set();
-  Object.values(pools).forEach((members) => {
-    const byPP1 = members.slice().sort((a, b) => rs(b, 'PP1') - rs(a, 'PP1'));
-    const byPP2 = members.slice().sort((a, b) => rs(b, 'PP2') - rs(a, 'PP2'));
-    if (byPP1[0]) ppWinners.add(byPP1[0]);
-    if (byPP2[0]) ppWinners.add(byPP2[0]);
-  });
-
-  const allNames = activeMgrs.map((m) => m.name);
-  const seeded = [
-    ...[...ppWinners].sort((a, b) => ppTotals[b] - ppTotals[a]),
-    ...allNames.filter((n) => !ppWinners.has(n)).sort((a, b) => ppTotals[b] - ppTotals[a]),
-  ].slice(0, 8);
-
-  if (seeded.length < 8) return null;
-
-  const nonPlayoff = allNames.filter((n) => !seeded.includes(n)).sort((a, b) => ppTotals[b] - ppTotals[a]);
-
-  // QF: 1v8, 4v5, 3v6, 2v7
-  const qfL = [];
-  const qfW = [
-    [seeded[0], seeded[7]],
-    [seeded[3], seeded[4]],
-    [seeded[2], seeded[5]],
-    [seeded[1], seeded[6]],
-  ].map(([a, b]) => {
-    const winner = rs(a, 'QF') >= rs(b, 'QF') ? a : b;
-    qfL.push(winner === a ? b : a);
-    return winner;
-  });
-
-  // SF
-  const sfW = [],
-    sfL = [];
-  [
-    [qfW[0], qfW[1]],
-    [qfW[2], qfW[3]],
-  ].forEach(([a, b]) => {
-    const winner = rs(a, 'SF') >= rs(b, 'SF') ? a : b;
-    sfW.push(winner);
-    sfL.push(winner === a ? b : a);
-  });
-
-  if (!sfW[0] || !sfW[1]) return null;
-
-  // Finals + 3rd-place game (SF losers)
-  const champion = rs(sfW[0], 'Finals') >= rs(sfW[1], 'Finals') ? sfW[0] : sfW[1];
-  const runnerUp = champion === sfW[0] ? sfW[1] : sfW[0];
-  const third = sfL.length === 2 ? (rs(sfL[0], 'Finals') >= rs(sfL[1], 'Finals') ? sfL[0] : sfL[1]) : null;
-  const fourth = third ? (third === sfL[0] ? sfL[1] : sfL[0]) : null;
-
-  const standings = {};
-  standings[champion] = 1;
-  if (runnerUp) standings[runnerUp] = 2;
-  if (third) standings[third] = 3;
-  if (fourth) standings[fourth] = 4;
-
-  // QF losers: 5th–8th by QF score descending (highest = 5th)
-  qfL
-    .sort((a, b) => rs(b, 'QF') - rs(a, 'QF'))
-    .forEach((n, i) => {
-      standings[n] = 5 + i;
+  // Round totals are only needed for rounds already in the books: they order the managers
+  // eliminated in that round and decide the Finals / 3rd-place games.
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart(sd);
+  const roundTotals = {};
+  ['QF', 'SF', 'Finals'].forEach((round) => {
+    if (!finalized.includes(round)) return;
+    const totals = {};
+    qualifiers.forEach((n) => {
+      totals[n] = roundBreakdown(sd, n, round, rosterLookup, weekKeyToStart).total;
     });
-
-  // Non-playoff: 9th–12th by total PP score descending (highest = 9th)
-  nonPlayoff.forEach((n, i) => {
-    standings[n] = 9 + i;
+    roundTotals[round] = totals;
   });
 
-  return { champion, runnerUp, third, standings };
+  return computePlayoffStatuses({
+    managers: managerNames,
+    qualifiers,
+    sfParticipants: getSFParticipants(sd),
+    finalsParticipants: getFinalsParticipants(sd),
+    finalized,
+    ppTotals,
+    roundTotals,
+  });
+}
+
+// The season currently in progress, as a Hall of Fame row. Null until pool play is finalized
+// (before that nobody has been eliminated and the field is only a projection) and again once
+// the Finals are in the books (from then on it's a finished result like any other, and
+// getHofAllResults picks it up). It never wins the reigning-champion banner, and it feeds the
+// all-time records only through its settled finishes — see hofRecordResults.
+function getHofLiveResult() {
+  const lastHistoricalYear = Math.max(...WMMC_HISTORICAL_RESULTS.map((r) => Number(r.year)));
+  const seasons = getSeasons();
+  const years = Object.keys(seasons)
+    .filter((y) => Number(y) > lastHistoricalYear && seasons[y] && seasons[y].status === 'active')
+    .sort((a, b) => Number(b) - Number(a));
+
+  for (const year of years) {
+    const sd = seasons[year];
+    const finalized = sd.finalized_rounds || [];
+    if (!finalized.includes('PP') || finalized.includes('Finals')) continue;
+    const statuses = hofPlayoffStatuses(sd);
+    if (statuses && statuses.entries.length) return { year, ...statuses };
+  }
+  return null;
 }
 
 function buildHofRecords(results) {
@@ -16097,7 +16078,6 @@ function getHofAllResults() {
   // Only auto-compute results for seasons AFTER the last historical year.
   const lastHistoricalYear = Math.max(...WMMC_HISTORICAL_RESULTS.map((r) => Number(r.year)));
   const seasons = getSeasons();
-  const mgrs = getManagers();
   const computed = [];
 
   Object.entries(seasons)
@@ -16122,10 +16102,13 @@ function getHofAllResults() {
         if (champion) result = { year, champion, runnerUp, third };
       }
 
-      // Active season with finalized Finals — compute full 1-12 standings
+      // Finalized Finals — resolve the full 1-12 standings from the bracket
       if (!result && sd.finalized_rounds && sd.finalized_rounds.includes('Finals')) {
-        const full = computeFullStandings(sd, mgrs);
-        if (full) result = { year, ...full };
+        const full = hofPlayoffStatuses(sd);
+        if (full && full.complete) {
+          const { champion, runnerUp, third, standings } = full;
+          result = { year, champion, runnerUp, third, standings };
+        }
       }
 
       if (result) computed.push(result);
@@ -16134,13 +16117,66 @@ function getHofAllResults() {
   return [...WMMC_HISTORICAL_RESULTS, ...computed].sort((a, b) => Number(a.year) - Number(b.year));
 }
 
+// The two <tr>s for the season in progress: a summary line for the year, plus the expandable
+// per-manager standing. Eliminated managers hold the round they went out in and their settled
+// placing; managers still alive carry the round they're playing right now, marked live and
+// ranked by seed above the field they've already knocked out. Returns '' when no season is
+// mid-playoffs.
+function hofLiveSeasonRowsHtml(live) {
+  if (!live) return '';
+
+  const key = `live-${live.year}`;
+  const roundLabel = HOF_ROUND_LABELS[live.currentRound] || live.currentRound || '';
+  const aliveCount = live.entries.filter((e) => e.live).length;
+  const summary =
+    live.currentRound === 'PP'
+      ? 'Pool play under way — the playoff field isn’t set yet'
+      : `${roundLabel} under way · ${aliveCount} manager${aliveCount === 1 ? '' : 's'} still alive`;
+
+  const rows = live.entries
+    .map((e) => {
+      const posLabel = e.position != null ? e.position : '—';
+      const seedBadge = e.seed ? `<span class="hof-seed" title="#${e.seed} seed">${e.seed}</span>` : '';
+      const status = e.live
+        ? `<span class="hof-status-live">${esc(e.status)}</span>`
+        : `<span class="hof-status-out">${esc(e.status)}</span>`;
+      return `<tr><td class="num">${posLabel}</td><td>${seedBadge}${esc(e.name)}</td><td>${status}</td></tr>`;
+    })
+    .join('');
+
+  return `<tr class="hof-live-row">
+      <td><strong>${esc(live.year)}</strong> <span class="hof-live-badge">In Progress</span></td>
+      <td colspan="3" class="text-muted">${summary}</td>
+      <td><button class="btn btn-sm btn-secondary" onclick="toggleHofStandings('${key}')" id="hof-toggle-btn-${key}">Full &#9650;</button></td>
+    </tr>
+    <tr id="hof-standings-${key}"><td colspan="5" style="padding:0 0.5rem 0.5rem;">
+      <table class="data-table" style="margin:0;">
+        <thead><tr><th>#</th><th>Manager</th><th>Round</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </td></tr>`;
+}
+
+// What the All-Time Records table counts. Finished seasons contribute everything; a season in
+// progress contributes only the finishes that are already SETTLED — a manager's placing is
+// locked the moment the round that knocked them out ends (seeded within that round by its
+// score: the lowest pool-play total is 12th, the lowest quarterfinal score 8th, and so on), so
+// it counts from then on. Managers still alive contribute nothing until their round finishes,
+// and the in-progress season awards no title until the Finals are in the books.
+function hofRecordResults(allResults, live) {
+  if (!live || !live.standings || Object.keys(live.standings).length === 0) return allResults;
+  return [...allResults, { year: live.year, standings: live.standings, inProgress: true }];
+}
+
 function renderHallOfFame() {
   const container = document.getElementById('hall-of-fame-content');
   if (!container) return;
 
   const allResults = getHofAllResults();
-  const records = buildHofRecords(allResults);
-  const hasAvg = allResults.some((r) => r.standings);
+  const live = getHofLiveResult();
+  const recordResults = hofRecordResults(allResults, live);
+  const records = buildHofRecords(recordResults);
+  const hasAvg = recordResults.some((r) => r.standings);
   const sorted = hofSortedManagers(records, 'wins', false);
   const lastResult = allResults[allResults.length - 1];
 
@@ -16167,6 +16203,11 @@ function renderHallOfFame() {
   html += '<div class="table-wrapper"><table class="data-table">';
   html +=
     '<thead><tr><th>Year</th><th>&#127942; Champion</th><th>2nd Place</th><th>3rd Place</th><th></th></tr></thead><tbody>';
+
+  // The season in progress sits on top, expanded by default — it's the row people are
+  // actually watching. Its placings fill in round by round as managers are eliminated.
+  html += hofLiveSeasonRowsHtml(live);
+
   [...allResults].reverse().forEach((r) => {
     const hasStandings = !!r.standings;
     const toggleBtn = `<button class="btn btn-sm btn-secondary" onclick="toggleHofStandings('${r.year}')" id="hof-toggle-btn-${r.year}">${hasStandings ? 'Full &#9660;' : ''}</button>`;
@@ -16182,12 +16223,7 @@ function renderHallOfFame() {
         .sort((a, b) => a[1] - b[1])
         .map(([name, pos]) => {
           const posLabel = pos === 1 ? '&#127942;' : pos <= 3 ? `<strong>${pos}</strong>` : pos;
-          let round;
-          if (pos <= 2) round = 'Finals';
-          else if (pos <= 4) round = 'Consolation';
-          else if (pos <= 8) round = 'Quarterfinals';
-          else round = 'Did Not Qualify';
-          return `<tr><td class="num">${posLabel}</td><td>${name}</td><td>${round}</td></tr>`;
+          return `<tr><td class="num">${posLabel}</td><td>${esc(name)}</td><td>${playoffStatusLabel(statusKeyForPosition(pos))}</td></tr>`;
         })
         .join('');
       html += `<tr id="hof-standings-${r.year}" style="display:none;"><td colspan="5" style="padding:0 0.5rem 0.5rem;">
@@ -16202,8 +16238,7 @@ function renderHallOfFame() {
 
   // All-time records table — shows all 12 finishing positions
   html += '<div class="card" style="margin-top:1rem;"><h2>All-Time Records</h2>';
-  html +=
-    '<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Click a column header to sort. Position counts based on seasons with full standings data.</p>';
+  html += `<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Click a column header to sort. Position counts based on seasons with full standings data${live ? ', including the finishes already settled in the season in progress' : ''}.</p>`;
   html += '<div class="table-wrapper"><table class="data-table hof-records-table" id="hof-table"><thead><tr>';
   html += '<th>#</th><th>Manager</th>';
   for (let p = 1; p <= 12; p++) {
@@ -16219,6 +16254,8 @@ function renderHallOfFame() {
 
   container.innerHTML = html;
   container._hasAvg = hasAvg;
+  // Cached so a column re-sort doesn't recompute the whole season's bracket math.
+  container._recordResults = recordResults;
 }
 
 function positionSuffix(n) {
@@ -16234,7 +16271,10 @@ function ordinal(n) {
 window.toggleHofStandings = function (year) {
   const row = document.getElementById('hof-standings-' + year);
   if (!row) return;
-  row.style.display = row.style.display === 'none' ? '' : 'none';
+  const opening = row.style.display === 'none';
+  row.style.display = opening ? '' : 'none';
+  const btn = document.getElementById('hof-toggle-btn-' + year);
+  if (btn) btn.innerHTML = opening ? 'Full &#9650;' : 'Full &#9660;';
 };
 
 let _hofSortCol = 'wins';
@@ -16255,7 +16295,9 @@ window.sortHOF = function (col) {
 
   const container = document.getElementById('hall-of-fame-content');
   const hasAvg = container ? container._hasAvg : false;
-  const records = buildHofRecords(getHofAllResults());
+  const records = buildHofRecords(
+    (container && container._recordResults) || hofRecordResults(getHofAllResults(), getHofLiveResult())
+  );
   const sorted = hofSortedManagers(records, _hofSortCol, _hofSortAsc);
   tbody.innerHTML = sorted.map((m, i) => hofManagerRowHtml(m, i, hasAvg)).join('');
 };

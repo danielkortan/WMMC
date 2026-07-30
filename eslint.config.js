@@ -41,6 +41,9 @@ const projectGlobals = {
   rosterStatusAsOf: 'readonly',
   rosterStatusForManager: 'readonly',
   periodWeekKeys: 'readonly',
+  computePlayoffStatuses: 'readonly',
+  playoffStatusLabel: 'readonly',
+  statusKeyForPosition: 'readonly',
 };
 
 const projectRules = {
