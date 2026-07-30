@@ -4966,7 +4966,10 @@ body::before {
   text-align: left;
 }
 
-============================================================ */ #hall-of-fame-content .data-table thead th[onclick] {
+/* ============================================================
+   Hall of Fame
+   ============================================================ */
+#hall-of-fame-content .data-table thead th[onclick] {
   user-select: none;
   color: var(--accent);
 }
@@ -4991,6 +4994,62 @@ body::before {
 .hof-records-table th:nth-child(2),
 .hof-records-table td:nth-child(2) {
   min-width: 7rem;
+}
+
+/* Season in progress — the live row sitting above the finished seasons */
+.hof-live-row td {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.hof-live-badge {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* Still alive: the round they're playing right now, not where they finished. */
+.hof-status-live {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.hof-status-live::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.hof-status-out {
+  color: var(--text-light);
+}
+
+.hof-seed {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 @media (max-width: 768px) {

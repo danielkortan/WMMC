@@ -32,6 +32,7 @@ import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
 import { checkSwapLimit, FREE_SWAP_REASON, PLAYOFF_LIMITED_REASONS } from './swaps.js';
 import { rosterStatusAsOf, rosterStatusForManager, periodWeekKeys } from './eligibility.js';
+import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
 Object.assign(window, {
@@ -62,4 +63,7 @@ Object.assign(window, {
   rosterStatusAsOf,
   rosterStatusForManager,
   periodWeekKeys,
+  computePlayoffStatuses,
+  playoffStatusLabel,
+  statusKeyForPosition,
 });
