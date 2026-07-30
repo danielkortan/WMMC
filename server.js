@@ -4113,9 +4113,19 @@ function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
   const mgrDates = (sd.roster_dates || {})[manager] || {};
   const latestAdd = {};
   const latestDrop = {};
+  // Players whose add lands AFTER this week. An effective-tomorrow swap submitted on a week's final
+  // day stamps add_date = the NEXT week's first day, and files the entry under the week it was
+  // submitted in — so the date is out of range for latestAdd below while sitting in this week's
+  // bucket, and the incoming player is already in this week's roster array. That date is positive
+  // evidence he was not yet rostered here (the certified path reads it directly and scores him 0),
+  // so he must not reach the roster-array fallback and be credited a week he never played.
+  const joinedAfterWeek = new Set();
   for (const players of Object.values(mgrDates)) {
     for (const [p, d] of Object.entries(players || {})) {
       if (!d) continue;
+      if (d.add_date && (!periodStart || d.add_date >= periodStart) && d.add_date > weekEnd) {
+        joinedAfterWeek.add(p);
+      }
       if (
         d.add_date &&
         (!periodStart || d.add_date >= periodStart) &&
@@ -4150,7 +4160,9 @@ function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
 
   const arr = ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {};
   for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
-    if (!windows[p] && !latestAdd[p] && !latestDrop[p]) windows[p] = { start: weekStart, end: weekEnd };
+    if (!windows[p] && !latestAdd[p] && !latestDrop[p] && !joinedAfterWeek.has(p)) {
+      windows[p] = { start: weekStart, end: weekEnd };
+    }
   }
   return windows;
 }
@@ -4260,8 +4272,9 @@ function buildRollupDriftSlackText(findings, year) {
     `:mag: *Scoring drift detected (${year})* — the certified totals disagree with the stats they are ` +
     `derived from. The posted scoreboard is using the certified numbers, so they are wrong until this ` +
     `is resolved.\n${lines.join('\n')}${more}\n` +
-    `_Re-run Sync Now to recompile from the daily rows; if it persists, the roster windows are the ` +
-    `next thing to check._`
+    `_Rebuild Totals recompiles the rollups from the stored daily rows — Sync Now only touches the ` +
+    `current week, so it cannot fix a finished one. If it persists, check the named player's ` +
+    `add/drop dates against that week's start and end._`
   );
 }
 
