@@ -2064,3 +2064,45 @@ project already carries enough hand-synced duplicate pairs.
 certified number self-healing for exactly the class of player that broke here: any player whose
 roster window covers only part of a week is now scored from the daily rows rather than from the
 stored rollup, so a bad rollup score for him can no longer reach a total.
+
+## 2026-07-30 — The pool-play scoreboard shell came back, because the guard checked a proxy
+
+**Incident.** The duplicate 7am post PR #383 was supposed to stop showed up again during QF Week 2:
+the real Quarterfinal bracket post, plus a second one reading "Current Period: _Season_" with the
+pool-play "Overall Standings — _No scores recorded yet._" section. PR #383's `hasScoreboardData`
+was deployed at the time.
+
+**Why the guard missed it.** It tested two _proxies_ for "can this post mean anything" — does the
+season have any `schedule_dates` entry with start+end, OR any `weekly_batting`/`weekly_pitching`
+row — while the thing that actually decides the post's shape is whether a **round** resolves.
+Those are not the same question, and at least three states satisfy the proxies while still
+resolving to no round:
+
+- a schedule whose weeks are all still in the future (`detectCurrentRound` matches neither "contains
+  today" nor "most recently completed", so it returns null) with no scores yet;
+- `weekly_pitching` rows restored but not `weekly_batting` — the in-builder round fallback read the
+  batting table only;
+- and the inverse hazard: `schedule_dates` wiped (a known failure mode here — see the boot audit)
+  with only pool-play rows left, which resolves to PP2 and reinstates the pool-play frames
+  mid-playoffs rather than falling back to "Season".
+
+**Fix: ask the real question, once, in one place.** New `resolveScoreboardRound(sd)` is now the only
+answer to "which period does a scoreboard post for this season cover":
+schedule → latest round with stat rows in _either_ table → null. It also returns null when the
+bracket is locked (`confirmed_seeding.qualifierNames`) and pool play is all this process can see —
+pool play is over and we cannot name the playoff round, so silence beats stale framing. An explicit
+`opts.summaryRound` wrap-up bypasses it and still renders its pool-play frames.
+
+`buildScoreboardBlocks` frames the post from it and returns the resolved `round`;
+`hasScoreboardData` is now a one-line delegation to it, so the pre-flight check and the post that
+goes out cannot disagree. And the guard moved to the send-time chokepoint: **`postScoreboardSlack`
+throws on a null round**, so the 7am auto-post, the manual commissioner post, `/wmmc`, and any
+future caller all inherit it — the upstream checks now only exist to produce a better error (409 /
+ephemeral) and to avoid consuming the day's `last_scoreboard_post_date` slot.
+
+**Verified.** The eight-state table (healthy QF, blank instance, blank season, all-future schedule,
+pitching-only, bracket-locked-pool-play-only, historical season with scores and no schedule, opening
+day) resolves as intended — the three new states are the ones that changed, the healthy/opening-day/
+historical ones are untouched. Before/after render of the real `/api/slack/command` path against
+`tests/fixtures/staging-seed.json` is byte-identical. No scoring path is touched: this only gates
+and frames the Slack post, and reads no managers, roster windows, or swaps.

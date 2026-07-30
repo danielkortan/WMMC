@@ -59,9 +59,21 @@ async function postSlack(text, blocks) {
   });
 }
 
+// The one place a scoreboard reaches the league channel. Every caller — the 7am auto-post, the
+// commissioner's manual post, anything added later — inherits the guard below, so an
+// unrestored/ephemeral instance cannot push a pool-play-shaped post mid-playoffs no matter which
+// path it takes. The upstream hasScoreboardData checks exist to give better errors and to avoid
+// consuming the day's post slot; this one is the backstop that cannot be bypassed.
 async function postScoreboardSlack(db, year, opts) {
   if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
-  const { blocks, text } = buildScoreboardBlocks(db, year, opts);
+  const { blocks, text, round } = buildScoreboardBlocks(db, year, opts);
+  if (!round) {
+    throw new Error(
+      `Refusing to post the ${year} scoreboard: no current round could be determined from this ` +
+        `process's db.json (schedule_dates and the weekly stat rows are both unusable), so the post ` +
+        `would render as the "Current Period: Season" pool-play shell.`
+    );
+  }
   await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -3765,6 +3777,55 @@ function detectCurrentRound(scheduleDates) {
   return null;
 }
 
+// Which round a Slack scoreboard post for this season covers, or null when this process
+// cannot tell. THE single source of truth for that question: `buildScoreboardBlocks` frames
+// the post from it, and `hasScoreboardData` / `postScoreboardSlack` gate on it, so the
+// pre-flight check and the post that actually goes out can never disagree.
+//
+// Returning null is the "say nothing" signal. Every caller must treat it that way, because
+// a null round is exactly the state that renders the pool-play shell — "Current Period:
+// *Season*", the Overall Standings + pool columns, "_No scores recorded yet._" — which is
+// never right, and is at its most wrong in the middle of the playoffs.
+function resolveScoreboardRound(sd) {
+  if (!sd) return null;
+
+  // The calendar is the real answer whenever it is readable: today's week, else the most
+  // recently completed one.
+  const fromSchedule = detectCurrentRound(sd.schedule_dates || []);
+  if (fromSchedule) return fromSchedule;
+
+  // No usable schedule_dates. Fall back to the latest round this season has any stat rows
+  // for — that covers the gsheets-era historical seasons, which carry scores but no stored
+  // schedule. Both stat tables count: a batting-only fallback left a season whose pitching
+  // rows restored first with no round at all, i.e. the shell.
+  const roundsWithData = new Set([
+    ...(sd.weekly_batting || []).map((r) => r.round),
+    ...(sd.weekly_pitching || []).map((r) => r.round),
+  ]);
+  let fromData = null;
+  for (let i = ROUND_ORDER.length - 1; i >= 0; i--) {
+    if (roundsWithData.has(ROUND_ORDER[i])) {
+      fromData = ROUND_ORDER[i];
+      break;
+    }
+  }
+  if (!fromData) return null;
+
+  // ...but not if the bracket is already locked and pool play is all this process can see.
+  // Pool play is over, so the pool-play frames would be reporting a finished phase as if it
+  // were live; and with no calendar we cannot say which playoff round we are actually in.
+  // Report nothing rather than the wrong thing. (An explicit PP2 wrap-up post is unaffected:
+  // `opts.summaryRound` names the round directly and never comes through here.)
+  const bracketLocked = !!(
+    sd.confirmed_seeding &&
+    Array.isArray(sd.confirmed_seeding.qualifierNames) &&
+    sd.confirmed_seeding.qualifierNames.length > 0
+  );
+  if (bracketLocked && (fromData === 'PP1' || fromData === 'PP2')) return null;
+
+  return fromData;
+}
+
 // Per-week subtotal for one manager. Mirrors app.js' managerWeekSubtotal
 // exactly so the Slack scoreboard and Live tab totals reconcile to the
 // in-app My Roster page (wasDroppedBefore filter -> eligibility set ->
@@ -5563,20 +5624,11 @@ function buildScoreboardBlocks(db, year, opts = {}) {
     });
   }
 
-  // Determine current round
+  // Determine current round. null means this process cannot say which period the post covers
+  // — see resolveScoreboardRound. The label below degrades to 'Season' in that case, but
+  // postScoreboardSlack refuses to send such a post, so it never reaches the channel.
   const scheduleDates = seasonData.schedule_dates || [];
-  let currentRound = detectCurrentRound(scheduleDates);
-
-  // If still no round from dates, use the latest round present in data
-  if (!currentRound) {
-    const roundsWithData = new Set((seasonData.weekly_batting || []).map((b) => b.round));
-    for (let i = ROUND_ORDER.length - 1; i >= 0; i--) {
-      if (roundsWithData.has(ROUND_ORDER[i])) {
-        currentRound = ROUND_ORDER[i];
-        break;
-      }
-    }
-  }
+  let currentRound = resolveScoreboardRound(seasonData);
 
   // Monday wrap-up posts report the round that just ENDED, even when the next round's
   // window already contains today (e.g. SF Week 1 starts the Monday after QF ends).
@@ -6024,6 +6076,9 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   return {
     blocks,
     text: `⚾ WMMC Scoreboard (${year}) — ${currentRoundLabel}${summaryRound ? ' Final' : ''} | wmmc.live`,
+    // The period this post is framed for — null when it could not be determined and the
+    // blocks above are therefore the pool-play shell. Callers gate on it before sending.
+    round: currentRound || null,
   };
 }
 
@@ -11344,11 +11399,13 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   const config = db.google_sheets_config || {};
   const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
 
-  // Same guard as the 7am auto-post: without season data the post renders as a pool-play
+  // Same guard as the 7am auto-post: without usable season data the post renders as a pool-play
   // "Current Period: Season / No scores recorded yet" shell. Fail loudly instead of
   // pushing that to the league channel.
   if (!hasScoreboardData((db.seasons || {})[year])) {
-    return res.status(409).json({ error: `Season ${year} has no schedule or scores to post` });
+    return res
+      .status(409)
+      .json({ error: `Season ${year} has no usable schedule or scores — cannot tell which round to post` });
   }
 
   try {
@@ -13690,20 +13747,23 @@ function scoreboardAutoPostPlan(sd, todayISO) {
 
 // Does this season have enough state for a scoreboard post to mean anything?
 //
-// A process whose db.json has no season data still renders a *syntactically valid* but
-// completely wrong scoreboard: `detectCurrentRound` finds no schedule and no scored rounds,
-// so the post falls back to "Current Period: *Season*" with pool-play frames and
-// "_No scores recorded yet._" — the pool-play layout, in the middle of the playoffs.
+// A process whose db.json has no usable season data still renders a *syntactically valid* but
+// completely wrong scoreboard: no round can be resolved, so the post falls back to
+// "Current Period: *Season*" with pool-play frames and "_No scores recorded yet._" — the
+// pool-play layout, in the middle of the playoffs.
 // That state is always a deployment artifact, never real: the staging service (ephemeral
 // filesystem, reseeds from managers_seed.json on every deploy) or a mid-deploy production
 // instance that came up before its disk/Upstash restore. The 7am `last_scoreboard_post_date`
 // claim can't dedupe it either, because that guard lives in the very db.json that is empty.
 // So check the data itself before posting, and stay silent when there is nothing to report.
+//
+// "Enough state" is asked as exactly the question the post itself answers — can we name the
+// period this post covers? — by delegating to resolveScoreboardRound. Checking proxies for it
+// instead (any schedule entry OR any stat row) let two states through that still rendered the
+// shell: a schedule whose weeks are all still in the future, and stat rows in a table the old
+// round fallback did not read.
 function hasScoreboardData(sd) {
-  if (!sd) return false;
-  const hasSchedule = Array.isArray(sd.schedule_dates) && sd.schedule_dates.some((d) => d && d.start && d.end);
-  const hasScores = (sd.weekly_batting || []).length > 0 || (sd.weekly_pitching || []).length > 0;
-  return hasSchedule || hasScores;
+  return resolveScoreboardRound(sd) !== null;
 }
 
 // ============================================================
@@ -13967,8 +14027,9 @@ function scheduleScoreboardPost() {
       // not consume the day's post slot either. Whichever instance holds the real data still
       // posts. See hasScoreboardData for why this state happens at all.
       console.error(
-        `[Scoreboard] Skipping — season ${season} has no schedule or scores in this process's db.json. ` +
-          'Refusing to post an empty scoreboard (unrestored/ephemeral instance?).'
+        `[Scoreboard] Skipping — season ${season} has no usable schedule or scores in this process's ` +
+          "db.json, so there is no round to report. Refusing to post the pool-play 'Current Period: " +
+          "Season' shell (unrestored/ephemeral instance?)."
       );
     } else {
       db.last_scoreboard_post_date = todayET;
