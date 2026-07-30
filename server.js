@@ -6546,6 +6546,121 @@ function findManagerForPlayerWeek(sd, playerName, type, round, week) {
   return null;
 }
 
+// Derive every manager's roster for one schedule week, as of a given day, from the date windows.
+//
+// This is the roster answer the live views must use. The findManagerForPlayer* helpers above read
+// the sd.rosters ARRAYS, which are a derived cache: findManagerForPlayerWeek only sees the current
+// week key (usually empty on this league, since rosters are tracked via roster_dates), and
+// findManagerForPlayer scans EVERY week of the season — so during the playoffs it happily
+// attributes a player to a manager who was eliminated two rounds ago. Deriving from roster_dates
+// scoped to the period (periodStartForRound) is the invariant's source of truth and drops
+// eliminated managers naturally: they have no add inside the current period.
+//
+// asOf must be the live day, not the week's end — a SCHEDULED (future-dated) swap is recorded the
+// moment it's submitted, so bounding by the week end applies it early, dropping a player who is
+// still rostered and still scoring. Mirrors rebuildRosterArraysFromDates and managerWeekSubtotal's
+// eligibility, so the live views agree with the Scoreboard.
+//
+// Returns { managerBatters, managerPitchers, managerByPlayer, rosterWindowByPlayer }, where
+// managerByPlayer is keyed `${lowercasedName}::${'batting'|'pitching'}` (so a two-way player
+// resolves per role) and rosterWindowByPlayer is keyed by lowercased name.
+function buildWeekRostersFromDates(sd, round, week, asOf) {
+  const managerBatters = {}; // manager -> string[]
+  const managerPitchers = {}; // manager -> string[]
+  const managerByPlayer = {};
+  const rosterWindowByPlayer = {};
+  if (!round || !week) return { managerBatters, managerPitchers, managerByPlayer, rosterWindowByPlayer };
+
+  const weekKey = `${round}|${week}`;
+  const batPool = new Set(sd.batters_pool || []);
+  const pitPool = new Set(sd.pitchers_pool || []);
+  // Scope carry-forward to the current period: PP2/QF/SF/Finals each start fresh from their own
+  // submission, so a PP1 holdover with no drop must not appear here. null = PP1 (no bound).
+  const periodStart = periodStartForRound(sd, round);
+  const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
+
+  for (const manager of allManagerNames) {
+    // Build add/drop history first so we can filter both the stored arrays and the roster_dates
+    // additions with the same drop logic. Without this, stored roster arrays from earlier carries
+    // included dropped players. Constrain to the current period so prior-period adds don't leak.
+    const mgrDates = (sd.roster_dates || {})[manager];
+    const latestAdd = {};
+    const latestDrop = {};
+    if (mgrDates && typeof mgrDates === 'object') {
+      for (const players of Object.values(mgrDates)) {
+        if (!players || typeof players !== 'object') continue;
+        for (const [p, d] of Object.entries(players)) {
+          if (
+            d.add_date &&
+            (!periodStart || d.add_date >= periodStart) &&
+            (!asOf || d.add_date <= asOf) &&
+            (!latestAdd[p] || d.add_date > latestAdd[p])
+          ) {
+            latestAdd[p] = d.add_date;
+          }
+          if (
+            d.drop_date &&
+            (!periodStart || d.drop_date >= periodStart) &&
+            (!asOf || d.drop_date <= asOf) &&
+            (!latestDrop[p] || d.drop_date > latestDrop[p])
+          ) {
+            latestDrop[p] = d.drop_date;
+          }
+        }
+      }
+    }
+    // In a new period (periodStart set), a player must have a current-period add to be rostered;
+    // a PP1 holdover with no drop has no latestAdd entry after period scoping and is excluded.
+    //
+    // drop_date is INCLUSIVE — the last day the player is rostered and still scores. That is the
+    // whole point of the effective-tomorrow swap shape (`drop_date = today, add_date = tomorrow`):
+    // the outgoing player's team already played today, so he keeps today's points. A player whose
+    // drop lands ON the day being shown is therefore still rostered FOR that day, even though he is
+    // gone "as of now" — so `latestDrop[p] >= asOf` keeps him in the list, and the per-date guard
+    // (isDateEligibleForPlayer) does the day-level gating it already exists for.
+    const isRosteredForDay = (p) => {
+      if (!latestAdd[p]) return !periodStart && !latestDrop[p];
+      if (!latestDrop[p] || latestAdd[p] > latestDrop[p]) return true;
+      return !!asOf && latestDrop[p] >= asOf;
+    };
+
+    // Seed from stored arrays, but strip any player dropped before the day being shown.
+    const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
+    const bats = (stored.batters || []).filter(isRosteredForDay);
+    const pits = (stored.pitchers || []).filter(isRosteredForDay);
+
+    // Add players known only from roster_dates (not already present via stored arrays).
+    for (const p of Object.keys(latestAdd)) {
+      if (!isRosteredForDay(p)) continue;
+      const inBat = batPool.has(p);
+      const inPit = pitPool.has(p);
+      if (inBat && !inPit) {
+        if (!bats.includes(p)) bats.push(p);
+      } else if (inPit && !inBat) {
+        if (!pits.includes(p)) pits.push(p);
+      }
+      // both/neither pool: can't classify confidently — rely on the stored arrays.
+    }
+
+    if (bats.length || pits.length) {
+      managerBatters[manager] = bats;
+      managerPitchers[manager] = pits;
+      for (const p of [...bats, ...pits]) {
+        rosterWindowByPlayer[p.toLowerCase()] = { add: latestAdd[p] || null, drop: latestDrop[p] || null };
+      }
+    }
+  }
+
+  for (const [m, names] of Object.entries(managerBatters)) {
+    for (const n of names) managerByPlayer[`${n.toLowerCase()}::batting`] = m;
+  }
+  for (const [m, names] of Object.entries(managerPitchers)) {
+    for (const n of names) managerByPlayer[`${n.toLowerCase()}::pitching`] = m;
+  }
+
+  return { managerBatters, managerPitchers, managerByPlayer, rosterWindowByPlayer };
+}
+
 // Process batting rows from a sheet tab.
 // syncDate ('YYYY-MM-DD') is today's date; used to store a daily snapshot and compute the delta
 // from the previous sync so that mid-week add/drops only count rostered days.
@@ -10781,120 +10896,28 @@ app.get('/api/mlb/live', async (req, res) => {
       collect(pitching, 'pitching', calculatePitchingScore);
     }
 
-    // Build per-manager rosters for the active week. This league tracks rosters via roster_dates +
-    // submissions (carry-forward), so the sd.rosters arrays are usually empty — relying on them
-    // (as findManagerForPlayer* do) leaves both the standings and the per-player scoring blank.
-    // Derive each manager's active-week roster from roster_dates (most-recent add not superseded by
-    // a drop as of the week's end), classified by pool, unioned with any explicit stored arrays.
-    // Mirrors rebuildRosterArraysFromDates and managerWeekSubtotal's eligibility, so Live's roster
-    // view matches the Scoreboard's.
-    const weekKey = `${weekRound}|${weekName}`;
-    const batPool = new Set(sd.batters_pool || []);
-    const pitPool = new Set(sd.pitchers_pool || []);
-    // Scope carry-forward to the current period: PP2/QF/SF/Finals each start fresh from
-    // their own submission, so a PP1 holdover with no drop must not appear here.
-    // Mirrors managerWeekSubtotal and rebuildRosterArraysFromDates. null = PP1 (no bound).
-    const periodStart = periodStartForRound(sd, weekRound);
-    // Evaluate the windows AS OF THE LIVE DAY, not the week's end: a SCHEDULED (future-dated) swap
-    // is recorded the moment it is submitted, so bounding by the week end would apply it early —
-    // dropping a player who is still rostered (and still scoring) and adding one who isn't on yet.
-    // today is inside [start, end] by construction (that is how activeIdx was picked).
+    // Per-manager rosters for the active week, derived from the roster_dates windows scoped to this
+    // period (see buildWeekRostersFromDates). Shared with the per-game box score endpoint so both
+    // views attribute players to the same managers. Evaluated AS OF THE LIVE DAY, not the week's
+    // end: a SCHEDULED (future-dated) swap is recorded the moment it is submitted, so bounding by
+    // the week end would apply it early — dropping a player who is still rostered (and still
+    // scoring) and adding one who isn't on yet. today is inside [start, end] by construction (that
+    // is how activeIdx was picked).
     //
     // Using the live day rather than the calendar date also keeps the hold-over window internally
     // consistent: at 3am, a swap stamped add_date = the new calendar date must NOT retroactively
     // join last night's roster, and the player it replaced must keep the points he actually earned
     // in the games still on screen. The new roster takes over when the day does, at the rollover.
     const asOf = today;
-    const managerBatters = {}; // manager -> string[]
-    const managerPitchers = {}; // manager -> string[]
-    const rosterWindowByPlayer = {}; // lowercased player -> { add, drop } for this week's period
-    const allManagerNames = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
-    for (const manager of allManagerNames) {
-      // Build add/drop history first so we can filter both the stored arrays and the
-      // roster_dates additions with the same drop logic. Without this, stored roster
-      // arrays from earlier carries included dropped players in the live view.
-      // Constrain to the current period so prior-period adds don't leak forward.
-      const mgrDates = (sd.roster_dates || {})[manager];
-      const latestAdd = {};
-      const latestDrop = {};
-      if (mgrDates && typeof mgrDates === 'object') {
-        for (const players of Object.values(mgrDates)) {
-          if (!players || typeof players !== 'object') continue;
-          for (const [p, d] of Object.entries(players)) {
-            if (
-              d.add_date &&
-              (!periodStart || d.add_date >= periodStart) &&
-              (!asOf || d.add_date <= asOf) &&
-              (!latestAdd[p] || d.add_date > latestAdd[p])
-            ) {
-              latestAdd[p] = d.add_date;
-            }
-            if (
-              d.drop_date &&
-              (!periodStart || d.drop_date >= periodStart) &&
-              (!asOf || d.drop_date <= asOf) &&
-              (!latestDrop[p] || d.drop_date > latestDrop[p])
-            ) {
-              latestDrop[p] = d.drop_date;
-            }
-          }
-        }
-      }
-      // In a new period (periodStart set), a player must have a current-period add to be rostered;
-      // a PP1 holdover with no drop has no latestAdd entry after period scoping and is excluded.
-      //
-      // drop_date is INCLUSIVE — the last day the player is rostered and still scores. That is the
-      // whole point of the effective-tomorrow swap shape (`drop_date = today, add_date = tomorrow`):
-      // the outgoing player's team already played today, so he keeps today's points. A player whose
-      // drop lands ON the day being shown is therefore still rostered FOR that day, even though he
-      // is gone "as of now" — so `latestDrop[p] >= asOf` keeps him in the list, and the per-date
-      // guard (isDateEligibleForPlayer, applied below once the manager resolves) does the day-level
-      // gating it already exists for. Without this the manager's live daily silently dropped the
-      // outgoing player's points the moment an evening swap was submitted.
-      const isRosteredForDay = (p) => {
-        if (!latestAdd[p]) return !periodStart && !latestDrop[p];
-        if (!latestDrop[p] || latestAdd[p] > latestDrop[p]) return true;
-        return !!asOf && latestDrop[p] >= asOf;
-      };
-
-      // Seed from stored arrays, but strip any player dropped before the day being shown.
-      const stored = (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey]) || {};
-      const bats = (stored.batters || []).filter(isRosteredForDay);
-      const pits = (stored.pitchers || []).filter(isRosteredForDay);
-
-      // Add players known only from roster_dates (not already present via stored arrays).
-      for (const p of Object.keys(latestAdd)) {
-        if (!isRosteredForDay(p)) continue;
-        const inBat = batPool.has(p);
-        const inPit = pitPool.has(p);
-        if (inBat && !inPit) {
-          if (!bats.includes(p)) bats.push(p);
-        } else if (inPit && !inBat) {
-          if (!pits.includes(p)) pits.push(p);
-        }
-        // both/neither pool: can't classify confidently — rely on the stored arrays.
-      }
-
-      if (bats.length || pits.length) {
-        managerBatters[manager] = bats;
-        managerPitchers[manager] = pits;
-        for (const p of [...bats, ...pits]) {
-          rosterWindowByPlayer[p.toLowerCase()] = { add: latestAdd[p] || null, drop: latestDrop[p] || null };
-        }
-      }
-    }
-
-    // Reverse index for player→manager attribution this week, built from the carry-forward rosters
-    // above. findManagerForPlayer* read the empty sd.rosters arrays and would attribute nothing, so
-    // without this the per-player scoring (Daily/Weekly + the expand panels) stays at zero. Keyed by
-    // lowercased name + type so a two-way player resolves per role.
-    const weekManagerByPlayer = {};
-    for (const [m, names] of Object.entries(managerBatters)) {
-      for (const n of names) weekManagerByPlayer[`${n.toLowerCase()}::batting`] = m;
-    }
-    for (const [m, names] of Object.entries(managerPitchers)) {
-      for (const n of names) weekManagerByPlayer[`${n.toLowerCase()}::pitching`] = m;
-    }
+    const {
+      managerBatters,
+      managerPitchers,
+      // Reverse index for player→manager attribution this week. findManagerForPlayer* read the
+      // (usually empty) sd.rosters arrays and would attribute nothing, so without this the
+      // per-player scoring (Daily/Weekly + the expand panels) stays at zero.
+      managerByPlayer: weekManagerByPlayer,
+      rosterWindowByPlayer,
+    } = buildWeekRostersFromDates(sd, weekRound, weekName, asOf);
 
     // Games that fall inside a player's own roster window, both bounds inclusive (add_date is the
     // first day he scores, drop_date the last). Scoring off the window rather than player_dates
@@ -11316,8 +11339,8 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
   // Resolve the active week so we can flag each MLB player as rostered (or not)
-  // for the currently-running WMMC week. If the live day doesn't fall inside a week,
-  // we just leave week-specific lookups off and fall back to historical roster.
+  // for the currently-running WMMC week. If the live day doesn't fall inside a week
+  // there is no roster to flag against, so nobody gets tagged.
   // Use the live day (see resolveLiveDay), so a box opened at 1am for a game that started
   // last night resolves against the week — and the roster — that game actually belongs to.
   const today = (await resolveLiveDay()).live_day;
@@ -11333,6 +11356,12 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   const schedWeek = activeIdx >= 0 ? SEASON_SCHEDULE[activeIdx] : null;
   const weekRound = schedWeek?.round || null;
   const weekName = schedWeek?.week || null;
+
+  // Who actually holds each player right now, from the period-scoped date windows — the same
+  // index /api/mlb/live builds its standings from, so the box-score tags can never name a manager
+  // the Live tab isn't showing. This is what keeps eliminated managers off the box score: once the
+  // bracket moves on, they have no add inside the current period, so no player resolves to them.
+  const { managerByPlayer } = buildWeekRostersFromDates(sd, weekRound, weekName, today);
 
   try {
     const idToWmmcName = buildIdToWmmcName(sd);
@@ -11388,10 +11417,7 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 
         const bStats = batting[name];
         if (bStats) {
-          let manager =
-            (weekRound && findManagerForPlayerWeek(sd, name, 'batting', weekRound, weekName)) ||
-            findManagerForPlayer(sd, name, 'batting') ||
-            null;
+          let manager = managerByPlayer[`${name.toLowerCase()}::batting`] || null;
           // A player dropped in an earlier week but carried forward into this week's roster
           // object isn't really this manager's — don't flag them as rostered.
           if (
@@ -11414,10 +11440,7 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 
         const pStats = pitching[name];
         if (pStats) {
-          let manager =
-            (weekRound && findManagerForPlayerWeek(sd, name, 'pitching', weekRound, weekName)) ||
-            findManagerForPlayer(sd, name, 'pitching') ||
-            null;
+          let manager = managerByPlayer[`${name.toLowerCase()}::pitching`] || null;
           if (
             manager &&
             wasDroppedBeforeWeek(sd, manager, name, `${weekRound}|${weekName}`, scheduleDates[activeIdx]?.start)

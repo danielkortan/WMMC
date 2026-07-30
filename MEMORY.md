@@ -2156,3 +2156,36 @@ day) resolves as intended — the three new states are the ones that changed, th
 historical ones are untouched. Before/after render of the real `/api/slack/command` path against
 `tests/fixtures/staging-seed.json` is byte-identical. No scoring path is touched: this only gates
 and frames the Slack post, and reads no managers, roster windows, or swaps.
+
+## 2026-07-30 — Eliminated managers were still being tagged on Live box scores
+
+**Symptom.** With the bracket past the Quarterfinals, opening a game card on the Live tab showed
+the red manager pill next to players belonging to managers who were already out — Austin's name
+sitting on a Rangers batter in a round Austin isn't playing in. The Live standings above it
+(correctly) didn't list him at all, so the two halves of the same tab disagreed.
+
+**Cause.** The two halves resolved "who rosters this player" from different sources.
+`/api/mlb/live` derives rosters from the `roster_dates` windows scoped to the current period
+(`periodStartForRound`) — the invariant's source of truth. `/api/mlb/live/game/:gamePk` instead
+called `findManagerForPlayerWeek(...) || findManagerForPlayer(...)`, both of which read the
+`sd.rosters` ARRAYS. Those arrays are a derived cache, and `findManagerForPlayer` in particular
+scans **every week of the season**, so any player who was ever on an eliminated manager's roster
+kept resolving to them forever. `wasDroppedBeforeWeek` didn't catch it: the player was never
+_dropped_, his manager just stopped playing.
+
+**Fix.** Extracted the live endpoint's period-scoped derivation verbatim into
+`buildWeekRostersFromDates(sd, round, week, asOf)` and pointed the box score at it, deleting both
+array fallbacks there. Eliminated managers now fall out for the right structural reason rather than
+via a bracket-participant list: they have no add inside the current period, so no player resolves to
+them. Same helper on both sides means the box-score tag can never name a manager the standings
+aren't showing. When the live day falls outside any schedule week there is no roster to flag
+against, so nothing is tagged — which matches `/api/mlb/live` returning empty managers for that
+same state.
+
+**Verified.** The extraction is byte-identical to the block it replaced (comment/indent-insensitive
+diff of the pre-change block vs. the helper body), so `/api/mlb/live` — and every score it feeds —
+is untouched; no manager totals move. A synthetic SF-week fixture with an eliminated manager holding
+a QF roster in both `roster_dates` and `sd.rosters` confirms the three cases: the eliminated
+manager's player is untagged in SF, the active manager's player still tags, and asking for QF itself
+still returns the eliminated manager (history intact, only the current-round view changed).
+209 tests pass; lint and format clean.
