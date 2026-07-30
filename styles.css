@@ -4575,6 +4575,17 @@ body::before {
   white-space: nowrap;
 }
 
+/* "B: 321  P: 83.75" — the B/P labels sit a shade lighter than their numbers so
+   the points read first. The second label gets extra room so the two pairs
+   don't run together (each label is nbsp-joined to its own number). */
+.bracket-score-detail-label {
+  opacity: 0.7;
+}
+
+.bracket-score-detail-label:not(:first-child) {
+  margin-left: 0.25rem;
+}
+
 /* ---- Live tab: playoff matchup (bracket) view ----
    During QF/SF/Finals the Live tab's Running Standings table becomes these
    head-to-head matchup cards, visually matching the Playoff Bracket card. */
