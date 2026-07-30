@@ -2743,6 +2743,12 @@ function renderLiveContent(d) {
     const liveMatchups = ['QF', 'SF', 'Finals'].includes(aw.round)
       ? playoffRoundMatchups(getSeasons()[SELECTED_SEASON], aw.round)
       : null;
+    // Once the nightly sync has certified the day on screen, its points are already inside the
+    // certified scoreboard total, so Total stops adding them and the Daily figure is banked
+    // rather than pending. Label it — otherwise Total and Daily look like they disagree, which
+    // is exactly what a double-count would look like.
+    const dayBanked = !!d.live_day_certified;
+    const dayLabel = d.live_day_is_previous ? fmtShortDate(d.today) : 'today';
     if (liveMatchups) {
       const participantNames = new Set(liveMatchups.flatMap((mu) => mu.teams.map((t) => t.name)));
       for (const n of [..._liveExpandedManagers]) {
@@ -2750,13 +2756,16 @@ function renderLiveContent(d) {
       }
       const subline = (r) =>
         r
-          ? `${fmtSignedLive(r.today_score)} today &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+          ? `${fmtSignedLive(r.today_score)} ${escapeHtml(dayLabel)}${dayBanked ? ' (in total)' : ''} &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
           : 'No roster data yet';
+      const matchupNote = dayBanked
+        ? `Totals are the certified ${escapeHtml(aw.round)} scoreboard. ${escapeHtml(dayLabel)}&rsquo;s points are already certified into it, so these match the Scoreboard exactly.`
+        : `Totals are the certified ${escapeHtml(aw.round)} scoreboard plus ${escapeHtml(dayLabel)}&rsquo;s points not yet certified into it.`;
       managersEl.innerHTML = `
         <div class="card">
           <h3>Playoff Matchups</h3>
           ${renderLiveMatchupCards(liveMatchups, byName, renderTodayPanel, subline)}
-          <div class="live-matchup-note">Totals are the certified ${escapeHtml(aw.round)} scoreboard plus today&rsquo;s points. Tap a manager for today&rsquo;s player stats.</div>
+          <div class="live-matchup-note">${matchupNote} Tap a manager for ${escapeHtml(dayLabel)}&rsquo;s player stats.</div>
         </div>`;
     } else {
       // Drop any expanded managers that no longer appear in the response so the
@@ -2798,9 +2807,9 @@ function renderLiveContent(d) {
           <table class="data-table compact-table">
             <thead><tr>
               <th>#</th><th>Manager</th>
-              <th title="Certified ${escapeHtml(roundLabel)} scoreboard total + today's points (live weekly does not affect this until the next nightly sync)">Total</th>
-              <th title="Rank movement vs the certified scoreboard, given today's points">&Delta; Rank</th>
-              <th title="Points accumulated today only (added to the certified scoreboard total)">Daily</th>
+              <th title="Certified ${escapeHtml(roundLabel)} scoreboard total + any of ${escapeHtml(dayLabel)}'s points not yet certified into it (live weekly does not affect this until the next nightly sync)">Total</th>
+              <th title="Rank movement vs the certified scoreboard, given ${escapeHtml(dayLabel)}'s not-yet-certified points">&Delta; Rank</th>
+              <th title="${dayBanked ? `Points scored ${escapeHtml(dayLabel)} — already certified into Total` : `Points scored ${escapeHtml(dayLabel)}, added to the certified scoreboard total`}">Daily</th>
               <th title="Rostered players whose team has a live game today">Live</th>
               <th title="Rostered players whose team's games today are final">Done</th>
               <th title="Rostered players whose team has a game today that hasn't started">Left</th>
