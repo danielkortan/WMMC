@@ -5270,7 +5270,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     if (bd.total <= 0) return '<span class="bracket-score">-</span>';
     return `<span class="bracket-score-group">
       <span class="bracket-score">${fmt(bd.total)}</span>
-      <span class="bracket-score-detail">${fmt(bd.bat)}B / ${fmt(bd.pit)}P</span>
+      <span class="bracket-score-detail"><span class="bracket-score-detail-label">B:</span>&nbsp;${fmt(bd.bat)} <span class="bracket-score-detail-label">P:</span>&nbsp;${fmt(bd.pit)}</span>
     </span>`;
   }
 
