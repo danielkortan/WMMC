@@ -2993,6 +2993,28 @@ function computeEffectivePitchingScore(sd, pitcher, round, week) {
   return Math.round(eligible.reduce((sum, r) => sum + calculatePitchingScore(r.delta || {}), 0) * 100) / 100;
 }
 
+// Points a player has ALREADY been certified for on `date`, read from the stored daily rows
+// the nightly sync wrote. The weekly totals the Scoreboard shows are rebuilt from these rows
+// (see rebuildWeeklyFromDaily), so this is exactly the slice of a manager's certified total
+// that `date` contributes.
+//
+// The Live tab needs this to avoid double-counting: it adds the live MLB numbers for the day
+// on screen on top of the certified scoreboard, and once the 4am sync has folded that day in,
+// those points are in BOTH halves of the sum. Subtracting this leaves only the not-yet-certified
+// remainder, so Live == Scoreboard in the morning window between slates.
+function certifiedDailyScoreForDate(sd, playerName, playerType, round, week, date) {
+  const isBatting = playerType === 'batting';
+  const rows = ((isBatting ? sd.daily_batting : sd.daily_pitching) || []).filter(
+    (r) => r[isBatting ? 'batter' : 'pitcher'] === playerName && r.round === round && r.week === week && r.date === date
+  );
+  if (rows.length === 0) return 0;
+  const total = rows.reduce(
+    (sum, r) => sum + (isBatting ? calculateBattingScore(r.delta || {}) : calculatePitchingScore(r.delta || {})),
+    0
+  );
+  return Math.round(total * 100) / 100;
+}
+
 // Returns true if gameDate falls within a player's effective scoring window for the week.
 // Reads player_dates overrides first; falls back to the week's calendar start/end.
 // Used by the live tab and /api/mlb/daily to skip stats for dropped/future-add players
@@ -10919,6 +10941,12 @@ app.get('/api/mlb/live', async (req, res) => {
       const todayScore = eligibleToday
         ? ownGames.filter((g) => g.date === today).reduce((s, g) => s + (g.game_score || 0), 0)
         : 0;
+      // How much of todayScore the nightly sync has already folded into the certified
+      // scoreboard. Non-zero once the 4am sync has run for the day on screen — which is the
+      // normal state during the hold-over window, when Live still shows last night's slate.
+      const certifiedToday = eligibleToday
+        ? certifiedDailyScoreForDate(sd, name, agg.type, weekRound, weekName, today)
+        : 0;
       playerRows.push({
         name,
         manager,
@@ -10926,6 +10954,10 @@ app.get('/api/mlb/live', async (req, res) => {
         type: agg.type,
         running_score: Math.round(score * 100) / 100,
         today_score: Math.round(todayScore * 100) / 100,
+        // The slice of today_score not yet in the certified total. This — not today_score — is
+        // what gets added to the scoreboard total, so a synced day is never counted twice.
+        today_score_pending: Math.round((todayScore - certifiedToday) * 100) / 100,
+        today_score_certified: Math.round(certifiedToday * 100) / 100,
         // Windowed, not raw: the client re-filters `games` by date to build the per-manager
         // "today" panel, so shipping games from outside the roster window would let the panel
         // show stats the totals above deliberately exclude.
@@ -10975,6 +11007,8 @@ app.get('/api/mlb/live', async (req, res) => {
           name: m,
           running_score: 0, // sum of player running scores this week
           today_score: 0, // sum of player scores from today's games only
+          today_score_pending: 0, // the slice of today_score not yet in the certified scoreboard
+          today_score_certified: 0, // the slice the nightly sync has already folded in
           round_total: 0, // see below — fills in after we have running_score
           players_active: 0, // rostered players whose team has a Live game today
           players_finished: 0, // rostered players whose team's games today are Final-only
@@ -10989,6 +11023,8 @@ app.get('/api/mlb/live', async (req, res) => {
       const m = ensureMgr(row.manager);
       m.running_score = Math.round((m.running_score + row.running_score) * 100) / 100;
       m.today_score = Math.round((m.today_score + (row.today_score || 0)) * 100) / 100;
+      m.today_score_pending = Math.round((m.today_score_pending + (row.today_score_pending || 0)) * 100) / 100;
+      m.today_score_certified = Math.round((m.today_score_certified + (row.today_score_certified || 0)) * 100) / 100;
     }
 
     // Per-player today-state counts, derived from the rostered player's team's today-state.
@@ -11053,10 +11089,15 @@ app.get('/api/mlb/live', async (req, res) => {
         }, {});
 
     const baselineRanks = rankByTotals(certifiedTotals);
+    // Add only the PENDING slice of the day, not the whole thing. certifiedTotals is rebuilt
+    // from the stored daily rows, so any day the nightly sync has already folded in is present
+    // there too — adding today_score on top would count it twice. In the morning hold-over
+    // window (yesterday's slate still on screen, 4am sync done) the pending slice is 0, which
+    // is exactly right: Live's Total then equals the Scoreboard, as it should between slates.
     const liveTotalsMap = {};
     for (const m of Object.keys(certifiedTotals)) {
-      const today = (managerMap[m] && managerMap[m].today_score) || 0;
-      liveTotalsMap[m] = certifiedTotals[m] + today;
+      const pending = (managerMap[m] && managerMap[m].today_score_pending) || 0;
+      liveTotalsMap[m] = certifiedTotals[m] + pending;
     }
     const liveRanks = rankByTotals(liveTotalsMap);
 
@@ -11066,17 +11107,26 @@ app.get('/api/mlb/live', async (req, res) => {
       agg.baseline_rank = baseRank;
       agg.live_rank = liveRank;
       agg.rank_delta = baseRank != null && liveRank != null ? baseRank - liveRank : 0;
-      agg.round_total = Math.round(((certifiedTotals[m] || 0) + agg.today_score) * 100) / 100;
+      agg.certified_total = Math.round((certifiedTotals[m] || 0) * 100) / 100;
+      agg.round_total = Math.round(((certifiedTotals[m] || 0) + agg.today_score_pending) * 100) / 100;
       agg.is_active_today = agg.players_active > 0 || agg.players_remaining > 0;
     }
 
     const managers = Object.values(managerMap).sort((a, b) => b.round_total - a.round_total);
+
+    // True once the nightly sync has certified the day on screen, i.e. the Daily column is
+    // already baked into Total and the two views agree. Lets the UI label the day's points as
+    // banked rather than implying they're still being added on top.
+    const liveDayCertified = [...(sd.daily_batting || []), ...(sd.daily_pitching || [])].some(
+      (r) => r.date === today && r.round === weekRound && r.week === weekName
+    );
 
     res.json({
       season: year,
       active_week: { round: weekRound, week: weekName, start, end, week_index: activeIdx },
       today,
       ...liveDay,
+      live_day_certified: liveDayCertified,
       // fetched_at is when the MLB data behind this response was actually pulled, not when
       // the response was assembled — a cached snapshot must not claim to be current. age_ms
       // lets the UI say how old the numbers are instead of implying they are live to the second.
