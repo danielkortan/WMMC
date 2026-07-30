@@ -2065,6 +2065,56 @@ certified number self-healing for exactly the class of player that broke here: a
 roster window covers only part of a week is now scored from the daily rows rather than from the
 stored rollup, so a bad rollup score for him can no longer reach a total.
 
+## 2026-07-30 — The drift audit's first alert was a false positive (effective-tomorrow adds)
+
+**Alert.** `auditWeeklyRollupDrift` posted at 4am, one day after it shipped: Chris Bentivegna
+PP2|Week 4 certified 227.55 vs 298.55 (Michael Harris II -71) and Jamie Rogers PP2|Week 5 certified
+296.6 vs 316.7 (Tyler Phillips -20.1). Both still drifting on demand via
+`GET /api/diag/rollup-audit`, both attributing the whole gap to one player certified at exactly 0.
+
+**The scoreboard was right; the audit was wrong.** Each flagged player had a single `roster_dates`
+entry holding an `add_date` **one day after the end of the week key it was filed under** — Harris
+`PP2|Week 4` (ends 07-05) add 07-06, Phillips `PP2|Week 5` (ends 07-12) add 07-13. That is the
+effective-tomorrow swap submitted on a week's **final day**: the add takes effect the next week, the
+entry lands in the submission week's bucket, and `player_in` is already in that week's roster array.
+Bentivegna's roster history confirms it — Harris first appears in the `PP2|Week 4` array, absent from
+every earlier week. The stored `weekly_score` was 0 with `override: false`, so the compile agreed
+with the read path; only the audit dissented. Nobody was owed points and no data repair was needed.
+
+**Why only these two of twelve played weeks.** `managerWeekRosterWindows` collected the latest
+add/drop constrained to `add_date <= weekEnd`, so an add dated after the week was **discarded**,
+leaving the player with no date events at all — which dropped him into the roster-array fallback and
+credited him the **whole week** he never played. An add after `weekEnd` is not missing information;
+it is positive evidence of absence. Fixed by collecting those players into `joinedAfterWeek` in the
+same pass and excluding them from the fallback only (the in-range branches are untouched, so a
+player with any in-range add/drop is unaffected). Also corrected the alert's own remediation line:
+it told the commissioner to re-run **Sync Now**, which only touches the current week
+(`/api/mlb/sync-current` → `resolveWeeksForCatchUp`) and therefore cannot repair a finished one —
+**Rebuild Totals** (`/api/mlb/rebuild-weeklies`) is the button that recompiles past weeks.
+
+**Accepted tradeoff, decided deliberately.** If an `add_date` after a week's end is a _typo_ and the
+player really was rostered, the audit now stays silent where it used to fire. Certified already
+scores that player 0 either way, so the audit was reporting the downstream consequence of a bad
+roster date, not a rollup-vs-daily disagreement — and bad roster dates belong to `ghost-audit` /
+`roster-audit` / the swap log. Keeping the old behavior would mean every effective-tomorrow swap
+landing on a week boundary posts a false drift alert, which trains the commissioner to ignore the
+one alert that exists to be trusted.
+
+**Verified** with a harness that extracts the real functions out of both the patched and the
+committed `server.js` and runs them side by side: both live shapes flip firing → silent; the 7/29
+incident shape (in-range add, rollup lost the row) still fires at -30; a no-dates player with a
+zeroed rollup still fires (fallback preserved); a drop dated _after_ the week still fires; a
+`manual_fields` override stays silent; a mid-week add whose rollup matches stays silent; both seasons
+of `tests/fixtures/staging-seed.json` unchanged. Per-manager totals vet per the core invariant: all
+8 fixture managers byte-identical before and after (`managerWeekSubtotal` is not touched — the change
+is confined to detection-only code). 187 unit tests, lint, and format all pass.
+
+**Worth remembering for the next one of these.** `weekly_rows[].manager` in `/api/mlb/player-debug`
+is stamped from _current_ rosters by `rebuild-weeklies`, so a player shows his present manager on
+every historical week — it is NOT evidence he was rostered then, and it made both flagged players
+look like season-long holdings at first read. Ownership comes from `roster_dates` + the roster
+arrays, exactly as the core invariant says.
+
 ## 2026-07-30 — The pool-play scoreboard shell came back, because the guard checked a proxy
 
 **Incident.** The duplicate 7am post PR #383 was supposed to stop showed up again during QF Week 2:
