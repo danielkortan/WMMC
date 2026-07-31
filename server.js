@@ -33,9 +33,13 @@ const DB_BACKUP_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 // General notifications webhook (roster swaps, sync errors, etc.)
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
-// Scoreboard-specific webhook — can point to a different channel than notifications.
-// Falls back to SLACK_WEBHOOK_URL if not set.
-const SLACK_SCOREBOARD_WEBHOOK_URL = process.env.SLACK_SCOREBOARD_WEBHOOK_URL || SLACK_WEBHOOK_URL;
+// Scoreboard-specific webhook — points at the scoreboard channel, which is not the
+// notifications channel. Deliberately NO fallback to SLACK_WEBHOOK_URL: holding the
+// general webhook must never be enough to emit a scoreboard. The fallback meant any
+// process configured only for swap notifications silently became a scoreboard poster
+// (into the swaps channel, no less), which is both wrong output and one more way for a
+// stray instance to reach the league. Unset = the auto-post disables itself, loudly.
+const SLACK_SCOREBOARD_WEBHOOK_URL = process.env.SLACK_SCOREBOARD_WEBHOOK_URL || '';
 // Signing secret from your Slack app — used to verify slash command requests.
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 
@@ -14086,7 +14090,11 @@ function scheduleScoreboardPost() {
   if (scoreboardTimer) clearTimeout(scoreboardTimer);
 
   if (!SLACK_SCOREBOARD_WEBHOOK_URL) {
-    console.log('[Scoreboard] No Slack scoreboard webhook configured — auto-post disabled');
+    console.log(
+      '[Scoreboard] SLACK_SCOREBOARD_WEBHOOK_URL not set — auto-post disabled. ' +
+        'SLACK_WEBHOOK_URL is NOT a fallback for it: the scoreboard has its own channel, and a ' +
+        'process holding only the notifications webhook must not be able to post one.'
+    );
     return;
   }
 
