@@ -43,7 +43,19 @@ curl -X POST https://<host>/api/google-sheets/sync \
 curl https://<host>/api/google-sheets/sync-status
 ```
 
-To disable again, POST the same config endpoint with `"enabled": false`.
+To disable again, POST the same config endpoint with `"enabled": false`. That single flag is the
+whole off switch — `scheduleGSheetsSync` refuses to arm without `enabled` **and**
+`spreadsheet_id` **and** `api_key`, and nothing else in the server reaches Google Sheets on its
+own. The MLB cutover also clears the flag itself (`server.js:3622`), which is why a healthy boot
+logs `[GSheets] Auto-sync not configured or disabled`.
+
+> **Never delete the `google_sheets_config` object to "turn off Google Sheets."** Despite the
+> name, `google_sheets_config.season` is the **app-wide current-season pointer**, not a
+> GSheets-only setting. The daily scoreboard post, the 4am MLB sync, the `/wmmc` slash command,
+> the boot-time player-pool seed, and the auto-advance scheduler all read the active season from
+> it. Removing the object leaves every one of them falling back to `new Date().getFullYear()`,
+> which silently points the app at a season that may not exist. Disable with
+> `"enabled": false`; leave the object in place.
 
 The Google Sheet must have tabs named `Week 1 Batting`, `Week 1 Pitching`, etc. GSheets rows
 are tagged `source: 'gsheets'`; the MLB path tags `source: 'mlbapi'`. `dedupeWeeklyRows`

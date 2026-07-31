@@ -2240,3 +2240,26 @@ windows, swaps, or scoring — no totals move.
 inventory the webhooks — **including `apps/manage/custom-integrations`**, not just the app's page. A
 display name that does not match the app name is the tell that a legacy integration is in play. And
 treat a webhook URL as a credential: this one leaked far enough to outlive three fix attempts.
+
+**Amendment (same day) — the sender was never identified, and that is where this entry ends.**
+The webhook is revoked, so whatever it is now gets a 404 from Slack and reaches nobody; the hunt
+was stopped deliberately, not completed. Leads exhausted, so the next session does not re-run them:
+production (posts once, on the current build, holds real data), staging (no Slack env vars at all),
+the account-wide Render list (exactly two services, zero env groups), the commissioner's Windows
+laptop (no Node process, WSL not installed), Claude Code sandboxes (the agent proxy blocks
+`hooks.slack.com` outright — `CONNECT tunnel failed, 403` — so no web/phone session can post even
+holding the URL), Heroku (the account is empty, and free dynos were discontinued in Nov 2022, so a
+free app there has been off for years), and the Google Sheets Apps Script triggers (deleted as a
+precaution; the gsheets path is a dormant fallback the MLB API replaced).
+
+What is known about it: it ran `server.js` from a **7/05–7/28** checkout (the post carries the
+header link added 2026-07-05 but lacks the 7/29 guard), against an empty `db.json` (no seasons →
+`detectCurrentRound` → null), with **no** Upstash credentials (with them it would have restored real
+data and posted a correct scoreboard), on the same `getNextEasternHour(7)` timer, holding the
+legacy scoreboard webhook — i.e. production's own URL, copied out at some point. An equally good
+fit that was never ruled out: nothing was running the app at all, and a scheduled job somewhere was
+replaying one captured payload, which is indistinguishable from the Slack side because the shell
+post is byte-identical every morning.
+
+**If duplicates ever return, start from "find the sender", not from the code.** The scoreboard
+guards have now been verified correct twice.
