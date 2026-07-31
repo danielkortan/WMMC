@@ -2189,3 +2189,54 @@ a QF roster in both `roster_dates` and `sd.rosters` confirms the three cases: th
 manager's player is untagged in SF, the active manager's player still tags, and asking for QF itself
 still returns the eliminated manager (history intact, only the current-round view changed).
 209 tests pass; lint and format clean.
+
+## 2026-07-31 — The duplicate 7am post was never in the code; it was a second webhook holder
+
+**Symptom.** Third consecutive morning of two 7am posts: the pool-play shell ("Current Period:
+_Season_", "🏆 Overall Standings — _No scores recorded yet._") stacked above the real Quarterfinals
+post. Slack groups consecutive app messages under one 7:00 AM header, so it reads as one post with a
+duplicated intro — the commissioner reasonably reported it as a rendering bug. It is two messages.
+
+**The guards were right.** Extracted `resolveScoreboardRound` / `hasScoreboardData` from HEAD and ran
+them over every state that can render that frame — no season, `{}`, schedule wiped, blank date
+strings, bracket-locked-pool-only — all resolve null, and `postScoreboardSlack` throws on null. A
+process running current `main` **cannot** emit that post. So the sender was running something else.
+
+**Elimination, in order.** Prod: one `[Scoreboard] Daily scoreboard posted successfully` in the 7am
+logs, on the post-#392 build, with a disk and Upstash (so it holds real data and posts the correct
+QF layout). Staging: `origin/staging` is 118 commits behind (7/20, predates both guards) and so
+_could_ render the shell, but its Render env has no Slack vars at all — `scheduleScoreboardPost`
+returns at the webhook check. Render has exactly two services and zero env groups. Claude Code
+sandboxes: the agent proxy blocks `hooks.slack.com` outright (`CONNECT tunnel failed, 403`), so no
+web/phone session could post even holding the URL. The commissioner's Windows laptop: no Node
+process, and WSL is not installed.
+
+**What actually found it.** The posts render as "WMMC Scoreboard" while the Slack app is named
+"PlusPlus", and `postSlack` never sends a `username` — a modern app-managed webhook always posts
+under the app's own identity and cannot be renamed per-hook. Therefore the webhooks were **legacy
+Incoming WebHook custom integrations** (workspace-level, each with its own configurable name/icon),
+which is why the app's own Incoming Webhooks page read "Off" with no URLs. **Three sessions searched
+the wrong inventory.** The real list lives at
+`<workspace>.slack.com/apps/manage/custom-integrations`. It held exactly one webhook posting as
+"WMMC Scoreboard" — so the second sender was using **prod's own URL**, copied out at some point;
+nothing about it was discoverable from the code, and there was no third webhook to find.
+
+**Resolution (operational).** New from-scratch Slack app "WMMC" with two app-managed webhooks
+(`#greatelmotontine` scoreboard, `#wmmcnotis` swaps), `/wmmc` moved onto it (Socket Mode had to be
+turned off for the Request URL field to appear, and the old app's `/wmmc` had to be deleted first —
+slash command names are unique per workspace), new signing secret, all three env vars updated on
+Render, both legacy integrations revoked. Verified before revoking: `/wmmc` renders, and
+`POST /api/slack/scoreboard` (no UI button exists for it — call it from the console via `apiFetch`)
+posts to the scoreboard channel.
+
+**Code change (the only one this incident justified).** `SLACK_SCOREBOARD_WEBHOOK_URL` no longer
+falls back to `SLACK_WEBHOOK_URL`. That fallback meant a process configured only for swap
+notifications silently became a scoreboard poster into the swaps channel — wrong output, and one
+more way for a stray instance to reach the league. Unset now disables the auto-post with a log line
+that says why. Prod sets both explicitly, so nothing changes there. Touches no managers, roster
+windows, swaps, or scoring — no totals move.
+
+**For next time.** When a Slack post cannot be explained by any code path, stop reading code and
+inventory the webhooks — **including `apps/manage/custom-integrations`**, not just the app's page. A
+display name that does not match the app name is the tell that a legacy integration is in play. And
+treat a webhook URL as a credential: this one leaked far enough to outlive three fix attempts.
