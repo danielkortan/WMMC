@@ -5762,6 +5762,30 @@ body::before {
 .roast-context p:last-child {
   margin-bottom: 0;
 }
+/* Round section heading inside the roast context ("Pool Play", "Quarterfinals", "Day by
+   day"). Inline rather than its own block so a section stays one paragraph, with the label
+   reading as a lead-in to the sentence that follows it. */
+.roast-context-label {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #ff8c5a;
+  margin-right: 0.5rem;
+}
+.roast-context p + p {
+  margin-top: 0.7rem;
+}
+.roast-banner.roast-champion .roast-context-label {
+  color: #e5c158;
+}
+.roast-banner.roast-runner-up .roast-context-label {
+  color: #cdd3da;
+}
+.roast-banner.roast-third .roast-context-label {
+  color: #dd9a5c;
+}
 
 /* Finals-round podium roasts (champion, runner-up, 3rd-place-game winner) — same shape as
    the Hall of Shame banner, gold/silver/bronze tinted instead of the elimination orange so
