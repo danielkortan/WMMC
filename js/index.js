@@ -14,6 +14,8 @@ import {
   calculateBattingScore,
   calculatePitchingScore,
   enrichTeamWeekly,
+  roundShortLabel,
+  weekLabel,
 } from './scoring.js';
 import {
   esc,
@@ -42,6 +44,8 @@ Object.assign(window, {
   calculateBattingScore,
   calculatePitchingScore,
   enrichTeamWeekly,
+  roundShortLabel,
+  weekLabel,
   esc,
   jsStr,
   parseNum,

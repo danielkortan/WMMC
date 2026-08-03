@@ -4916,6 +4916,12 @@ body::before {
   min-width: 100%;
 }
 
+/* Round-qualified week label ("QF Week 1") — keep it on one line; the wrapper
+   scrolls horizontally when the table outgrows the card. */
+.pqv-week {
+  white-space: nowrap;
+}
+
 .pqv-totals td {
   background: var(--bg-alt, #f8f9fa);
   border-top: 2px solid var(--border) !important;
