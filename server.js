@@ -12576,6 +12576,14 @@ function roastRoundLabel(round) {
         : 'the Finals';
 }
 
+// Same label without the leading article, for the possessive positions the banks use:
+// "Casey Curve's Quarterfinals" reads, "Casey Curve's the Quarterfinals" does not. The
+// article stays in roastRoundLabel because the far more common "across/in ${roundLabel}"
+// phrasings need it — stripping it globally would break those instead.
+function roastRoundLabelBare(round) {
+  return round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals';
+}
+
 // Escalating "how much this should sting" per round — used both in the Claude prompt
 // (generateRoastWithClaude) and the static playoff-stakes paragraph in
 // buildRoastPageContext. A Pool Play exit stings least (nobody's played a single playoff
@@ -12619,7 +12627,7 @@ function fmtRoastShortDate(iso) {
     : null;
 }
 
-function fallbackRoast(manager, round, perf, matchup, narrative) {
+function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
   const worst = parseRoastEntry(perf.batters_ranked_worst_first[0]) ||
     parseRoastEntry(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
   const other =
@@ -12628,6 +12636,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
     worst;
   const best = parseRoastEntry(perf.best_batter) || parseRoastEntry(perf.best_pitcher);
   const roundLabel = roastRoundLabel(round);
+  const roundLabelBare = roastRoundLabelBare(round);
   const worstDayDate = perf.worst_day ? fmtRoastShortDate(perf.worst_day.date) : null;
   const bestDayDate = perf.best_day ? fmtRoastShortDate(perf.best_day.date) : null;
 
@@ -12649,7 +12658,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
     () =>
       `Good news: ${manager} no longer has to watch ${worst.name} (${worst.pts} pts across ${roundLabel}) every night. Bad news: the rest of us watched ${manager}'s team score ${perf.total} in ${roundLabel} and call it a season.`,
     () =>
-      `${manager}'s ${roundLabel} campaign: a ${perf.total}-point team total, ${worst.name} in witness protection at ${worst.pts} pts, and a roster that quit before the group chat did. Eliminated, emphatically.`,
+      `${manager}'s ${roundLabelBare} campaign: a ${perf.total}-point team total, ${worst.name} in witness protection at ${worst.pts} pts, and a roster that quit before the group chat did. Eliminated, emphatically.`,
     () =>
       `Legend says ${manager} is still waiting for ${worst.name} to heat up. ${worst.pts} points across all of ${roundLabel} later, the wait continues — from the couch, at a ${perf.total}-point team total. Brutal.`,
     () =>
@@ -12673,9 +12682,49 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
     () =>
       `The box score doesn't lie: ${worst.name} put up ${worst.pts} points for ${roundLabel}, ${manager}'s whole team put up ${perf.total}, and the round put both of them on a bus home.`,
     () =>
-      `${manager}'s ${roundLabel} eulogy, one line: here lies a ${perf.total}-point team, survived by ${worst.name}'s ${worst.pts}-point ${roundLabel} contribution and absolutely nothing else worth mentioning.`,
+      `${manager}'s ${roundLabelBare} eulogy, one line: here lies a ${perf.total}-point team, survived by ${worst.name}'s ${worst.pts}-point ${roundLabel} contribution and absolutely nothing else worth mentioning.`,
     () =>
       `Somebody page a doctor — ${worst.name}'s pulse across ${roundLabel} was ${worst.pts} points and barely detectable, and it still wasn't the sickest thing about ${manager}'s ${perf.total}-point team total.`,
+    () =>
+      `${manager} looked at ${worst.name}, saw ${worst.pts} points across ${roundLabel}, and thought "yeah, he's due." He was not due. Nobody was due. ${perf.total}-point team total, season over.`,
+    () =>
+      `Somebody should study ${manager}'s roster construction, purely as a warning. ${worst.name}: ${worst.pts} points across ${roundLabel}. Team: ${perf.total}. Science has a word for this and it's "avoidable."`,
+    () =>
+      `${worst.name} put up ${worst.pts} points across ${roundLabel} and ${manager} kept running him out there like a man feeding quarters into a broken machine. ${perf.total}-point team total. The machine won.`,
+    () =>
+      `Here's the thing about ${manager}'s ${perf.total}-point ${roundLabel}: it wasn't bad luck. ${worst.name} posted ${worst.pts} points and ${other.name} was right there with him. That's a choice, made repeatedly.`,
+    () =>
+      `${manager} spent ${roundLabel} waiting on ${worst.name} the way people wait on a bus that was cancelled years ago. ${worst.pts} points for the player, ${perf.total} for the team, zero for the plan.`,
+    () =>
+      `Fantasy baseball is a game of margins, and ${manager}'s margin was ${worst.name} contributing ${worst.pts} points across ${roundLabel}. The team scraped together ${perf.total} and got shown the door.`,
+    () =>
+      `If you ever wondered what ${perf.total} points looks like, it looks like ${manager} in ${roundLabel}, squinting at ${worst.name}'s ${worst.pts}-point line and insisting the sample size is small.`,
+    () =>
+      `${manager} could have started a folding chair in ${worst.name}'s spot and finished within rounding distance of ${worst.pts}. Instead: a ${perf.total}-point team total and a long, quiet drive home from ${roundLabel}.`,
+    () =>
+      `Roll call for ${manager}'s ${roundLabel}: ${worst.name}, ${worst.pts} points, present but not accounted for. ${other.name}, also here, also useless. Team total ${perf.total}. Class dismissed.`,
+    () =>
+      `${manager} entered ${roundLabel} with a plan and left it with a receipt: ${worst.name}, ${worst.pts} points, no refunds. ${perf.total}-point team total. The league appreciates the business.`,
+    () =>
+      `The scary part isn't that ${worst.name} posted ${worst.pts} points across ${roundLabel}. It's that ${manager} watched it happen in real time, every day, and did nothing. ${perf.total}-point team total.`,
+    () =>
+      `${manager}'s ${perf.total}-point ${roundLabel} team total is the kind of number that doesn't need a joke attached. But ${worst.name}'s ${worst.pts} points across the round is right there, so here we are.`,
+    () =>
+      `Somewhere in a parallel universe ${worst.name} is good and ${manager} is still playing. In this one, ${worst.pts} points across ${roundLabel} and a ${perf.total}-point team total sent him packing.`,
+    () =>
+      `${manager} treated ${roundLabel} like a group project and got matched with ${worst.name} (${worst.pts} pts) and ${other.name}. The grade — ${perf.total} points — is going on the permanent record.`,
+    () =>
+      `Nobody is saying ${manager} didn't try. We're saying ${worst.name} posted ${worst.pts} points across ${roundLabel}, the team managed ${perf.total}, and trying isn't a stat anybody tracks.`,
+    () =>
+      `${manager} needed a hero in ${roundLabel} and got ${worst.name} instead — ${worst.pts} points, no cape, no pulse. ${perf.total}-point team total, curtain down.`,
+    () =>
+      `The ${roundLabel} exit interview for ${manager} is one question long: why ${worst.name}? ${worst.pts} points across the round. ${perf.total} for the team. There is no acceptable answer.`,
+    () =>
+      `${manager} built a roster, ${worst.name} built a ${worst.pts}-point monument to doing nothing across ${roundLabel}, and the ${perf.total}-point team total built a bridge straight out of the tournament.`,
+    () =>
+      `Every league needs someone to lose to, and ${manager} volunteered with a ${perf.total}-point ${roundLabel} team total. ${worst.name} (${worst.pts} pts) seconded the motion. Unanimous.`,
+    () =>
+      `${manager} will tell you ${roundLabel} came down to a couple of unlucky breaks. It came down to ${worst.name} posting ${worst.pts} points and a ${perf.total}-point team total that never once looked like enough.`,
   ];
 
   // "Best player betrayal" bank: needs at least one standout performer to contrast with the
@@ -12693,7 +12742,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
         () =>
           `Even ${best.name}'s ${best.pts}-point ${roundLabel} highlight reel couldn't drag ${manager}'s team out of a hole dug by ${worst.name}'s ${worst.pts}. One man can't fix a group project this bad.`,
         () =>
-          `${manager}'s ${roundLabel}, summarized: ${best.name} shows up (${best.pts} pts), ${worst.name} no-shows (${worst.pts} pts), and the team total — ${perf.total} — reads like a group text nobody answered.`,
+          `${manager}'s ${roundLabelBare}, summarized: ${best.name} shows up (${best.pts} pts), ${worst.name} no-shows (${worst.pts} pts), and the team total — ${perf.total} — reads like a group text nobody answered.`,
         () =>
           `Give ${best.name} credit: ${best.pts} points across ${roundLabel} is actual effort. Give ${manager} nothing, because pairing that with ${worst.name}'s ${worst.pts} added up to a ${perf.total}-point team total and an eviction notice from ${roundLabel}.`,
         () =>
@@ -12711,9 +12760,39 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
         () =>
           `${manager} spent ${roundLabel} pointing at ${best.name}'s ${best.pts}-point line like it excused everything else. It did not. ${worst.name}'s ${worst.pts} made sure of that. ${perf.total}-point team total, case closed.`,
         () =>
-          `One-man band alert: ${best.name} put up ${best.pts} points across ${roundLabel} solo for ${manager}, while ${worst.name} sat in the audience posting ${worst.pts}. The team's ${roundLabel} show still got booed off stage at a ${perf.total} total.`,
+          `One-man band alert: ${best.name} put up ${best.pts} points across ${roundLabel} solo for ${manager}, while ${worst.name} sat in the audience posting ${worst.pts}. The team's ${roundLabelBare} show still got booed off stage at a ${perf.total} total.`,
         () =>
           `${manager} had the receipts to prove ${best.name} tried across ${roundLabel} (${best.pts} pts). Nobody asked for the receipts on ${worst.name} (${worst.pts} pts) — they were self-evident. ${perf.total}-point team total, ${roundLabel} over.`,
+        () =>
+          `${best.name} put up ${best.pts} points across ${roundLabel} and got absolutely nothing for it, because ${manager} paired him with ${worst.name}'s ${worst.pts}. A ${perf.total}-point team total is what betrayal looks like in a spreadsheet.`,
+        () =>
+          `Imagine being ${best.name}, going out and getting ${best.pts} points across ${roundLabel}, and finding out ${manager}'s team still finished at ${perf.total} because ${worst.name} managed ${worst.pts}. Somebody owes that man an apology.`,
+        () =>
+          `${manager}'s roster in ${roundLabel} was ${best.name} (${best.pts} pts) and seven guys in witness protection, chief among them ${worst.name} at ${worst.pts}. Team total: ${perf.total}. Manhunt ongoing.`,
+        () =>
+          `The tragedy of ${manager}'s ${roundLabel} isn't the ${perf.total}-point team total. It's that ${best.name} gave him ${best.pts} points of real production and ${worst.name} answered with ${worst.pts}.`,
+        () =>
+          `${best.name}: ${best.pts} points across ${roundLabel}, no notes. ${worst.name}: ${worst.pts} points, several notes. ${manager}: ${perf.total}-point team total and a flight to book.`,
+        () =>
+          `Somebody tell ${best.name} his ${best.pts}-point ${roundLabel} was wasted on ${manager}, whose ${perf.total}-point team total was busy being dragged under by ${worst.name}'s ${worst.pts}.`,
+        () =>
+          `${manager} won the lottery with ${best.name} (${best.pts} pts across ${roundLabel}) and then set the ticket on fire by starting ${worst.name} for ${worst.pts}. ${perf.total}-point team total. Astonishing work.`,
+        () =>
+          `In ${roundLabel}, ${best.name} scored ${best.pts} points and ${worst.name} scored ${worst.pts}. ${manager} rostered both and finished at ${perf.total}. One of those decisions was defensible.`,
+        () =>
+          `${best.name} carried what he could — ${best.pts} points across ${roundLabel} — but nobody carries ${worst.name}'s ${worst.pts} and a ${perf.total}-point team total up a hill this steep.`,
+        () =>
+          `The ${roundLabel} highlight package for ${manager} is ${best.name} at ${best.pts} points, followed by 40 minutes of ${worst.name} doing ${worst.pts} points' worth of nothing. ${perf.total}-point team total.`,
+        () =>
+          `${manager} had exactly one asset in ${roundLabel}: ${best.name}, ${best.pts} points. He also had ${worst.name} at ${worst.pts}, which is less an asset than a liability with a jersey. ${perf.total} total, goodbye.`,
+        () =>
+          `Somebody should check whether ${best.name} knows he played for ${manager} in ${roundLabel}. ${best.pts} points of effort, ${worst.name}'s ${worst.pts} points of company, and a ${perf.total}-point team total to show for it.`,
+        () =>
+          `${best.name} did ${best.pts} points of work across ${roundLabel}. ${worst.name} did ${worst.pts}. ${manager} did the math wrong all round and ended up at ${perf.total}. Class act, terrible team.`,
+        () =>
+          `You can build around a guy like ${best.name} (${best.pts} pts in ${roundLabel}). ${manager} instead built around the hope that ${worst.name} would stop posting numbers like ${worst.pts}. ${perf.total}-point team total.`,
+        () =>
+          `${manager}'s ${roundLabelBare} in two lines: ${best.name}, ${best.pts} points, thank you for your service. ${worst.name}, ${worst.pts} points, please return your equipment. Team total ${perf.total}.`,
       ]
     : [];
 
@@ -12726,15 +12805,15 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
     perf.best_day && perf.worst_day
       ? [
           () =>
-            `${manager}'s ${roundLabel} had exactly one good day — ${bestDayDate}, ${perf.best_day.score} pts — and enough bad ones that ${worstDayDate} (${perf.worst_day.score} pts) is the one everyone remembers. ${perf.total} points across the round, ${roundLabel} over.`,
+            `${manager}'s ${roundLabelBare} had exactly one good day — ${bestDayDate}, ${perf.best_day.score} pts — and enough bad ones that ${worstDayDate} (${perf.worst_day.score} pts) is the one everyone remembers. ${perf.total} points across the round, ${roundLabel} over.`,
           () =>
-            `Best day: ${bestDayDate} at ${perf.best_day.score} points. Worst day: ${worstDayDate} at ${perf.worst_day.score} points. Add up every day in between and ${manager}'s ${roundLabel} total was still just ${perf.total}.`,
+            `Best day: ${bestDayDate} at ${perf.best_day.score} points. Worst day: ${worstDayDate} at ${perf.worst_day.score} points. Add up every day in between and ${manager}'s ${roundLabelBare} total was still just ${perf.total}.`,
           () =>
             `On ${worstDayDate}, ${manager}'s roster combined for ${perf.worst_day.score} points — a number so bad it makes the ${perf.best_day.score}-point outlier on ${bestDayDate} look like a fluke. Because it was. ${perf.total} points for the round.`,
           () =>
             `SportsCenter's daily leaderboard had ${manager} at ${perf.worst_day.score} points on ${worstDayDate}. That's not a bad beat, that's a crime scene. Even the ${perf.best_day.score}-point day on ${bestDayDate} couldn't post bail. ${perf.total} points across ${roundLabel}.`,
           () =>
-            `${manager}'s ${roundLabel} is bookended by two numbers: a ${perf.best_day.score}-pt peak on ${bestDayDate} and a ${perf.worst_day.score}-pt crater on ${worstDayDate}. ${perf.total} points of whiplash across the round, and a ticket home either way.`,
+            `${manager}'s ${roundLabelBare} is bookended by two numbers: a ${perf.best_day.score}-pt peak on ${bestDayDate} and a ${perf.worst_day.score}-pt crater on ${worstDayDate}. ${perf.total} points of whiplash across the round, and a ticket home either way.`,
           () =>
             `The stand-up bit: "My fantasy team had a great day once." (${bestDayDate}, ${perf.best_day.score} pts.) "Once." Everyone laughs, because ${worstDayDate}'s ${perf.worst_day.score}-point disaster is right there in the box score. ${manager}, ${perf.total} points for the round, done in ${roundLabel}.`,
           () =>
@@ -12742,7 +12821,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
           () =>
             `Somewhere between the ${perf.best_day.score}-point high of ${bestDayDate} and the ${perf.worst_day.score}-point low of ${worstDayDate}, ${manager} never found a competitive roster. ${perf.total} points across the round says it all.`,
           () =>
-            `${manager}'s ${roundLabel} boils down to two numbers: ${perf.best_day.score} points on ${bestDayDate}, and ${perf.worst_day.score} on ${worstDayDate}. Neither one saved the other. Final total ${perf.total}. Cut to black.`,
+            `${manager}'s ${roundLabelBare} boils down to two numbers: ${perf.best_day.score} points on ${bestDayDate}, and ${perf.worst_day.score} on ${worstDayDate}. Neither one saved the other. Final total ${perf.total}. Cut to black.`,
           () =>
             `A ${perf.best_day.score}-point day on ${bestDayDate} is the kind of number that makes a manager feel like a genius. A ${perf.worst_day.score}-point face-plant on ${worstDayDate} is the kind that reminds everyone he isn't. ${perf.total} points for the round, roster retired.`,
           () =>
@@ -12750,53 +12829,143 @@ function fallbackRoast(manager, round, perf, matchup, narrative) {
           () =>
             `${manager}'s box score on ${worstDayDate} read ${perf.worst_day.score} points, which is the fantasy equivalent of forgetting to show up to your own game. ${bestDayDate}'s ${perf.best_day.score} wasn't enough of an alibi. ${perf.total} points for the round, ${roundLabel} closed the case.`,
           () =>
-            `Two dates sum up ${manager}'s ${roundLabel}: ${bestDayDate} (${perf.best_day.score} pts) and ${worstDayDate} (${perf.worst_day.score} pts). Neither explains the other, and together they still only add up to a ${perf.total}-point round.`,
+            `Two dates sum up ${manager}'s ${roundLabelBare}: ${bestDayDate} (${perf.best_day.score} pts) and ${worstDayDate} (${perf.worst_day.score} pts). Neither explains the other, and together they still only add up to a ${perf.total}-point round.`,
           () =>
-            `The line for ${manager}'s ${roundLabel} has exactly one blip: a ${perf.best_day.score}-point spike on ${bestDayDate}, next to a ${perf.worst_day.score}-point flatline on ${worstDayDate}. ${perf.total} points for the round. Time of death, ${roundLabel}.`,
+            `The line for ${manager}'s ${roundLabelBare} has exactly one blip: a ${perf.best_day.score}-point spike on ${bestDayDate}, next to a ${perf.worst_day.score}-point flatline on ${worstDayDate}. ${perf.total} points for the round. Time of death, ${roundLabel}.`,
           () =>
             `${manager} will bring up ${bestDayDate} (${perf.best_day.score} pts) at every draft party from now until forever. Nobody will let him forget ${worstDayDate} (${perf.worst_day.score} pts) either. ${perf.total} points across the round, ${roundLabel} in the books.`,
+          () =>
+            `${manager}'s ${roundLabelBare} came with a ceiling (${bestDayDate}, ${perf.best_day.score} pts) and a basement (${worstDayDate}, ${perf.worst_day.score} pts). He spent the round redecorating the basement. ${perf.total} points total.`,
+          () =>
+            `On ${bestDayDate}, ${manager} scored ${perf.best_day.score}. On ${worstDayDate}, ${perf.worst_day.score}. Averaging those tells you nothing; the ${perf.total}-point round total tells you everything.`,
+          () =>
+            `Best day ${perf.best_day.score} (${bestDayDate}), worst day ${perf.worst_day.score} (${worstDayDate}), and a ${perf.total}-point round in between. ${manager} found every way to lose except an interesting one.`,
+          () =>
+            `The gap between ${manager}'s ${perf.best_day.score}-point day on ${bestDayDate} and his ${perf.worst_day.score}-point day on ${worstDayDate} is wider than his margin for error ever was. ${perf.total} points, ${roundLabel} done.`,
+          () =>
+            `${manager} has one screenshot from ${roundLabel} worth keeping: ${bestDayDate}, ${perf.best_day.score} points. He has one he'll be shown forever: ${worstDayDate}, ${perf.worst_day.score}. Round total, ${perf.total}.`,
+          () =>
+            `A ${perf.worst_day.score}-point day like ${worstDayDate} isn't a slump, it's a statement. ${bestDayDate}'s ${perf.best_day.score} points doesn't retract it. ${manager} finished ${roundLabel} on ${perf.total}.`,
+          () =>
+            `${manager}'s ${roundLabelBare} produced exactly two memorable numbers — ${perf.best_day.score} on ${bestDayDate} and ${perf.worst_day.score} on ${worstDayDate} — and only one of them gets brought up in polite company. ${perf.total} points for the round.`,
+          () =>
+            `Fantasy managers dream about days like ${bestDayDate} (${perf.best_day.score} pts). ${manager} also lived through ${worstDayDate} (${perf.worst_day.score} pts), which is the part the ${perf.total}-point round total remembers.`,
+          () =>
+            `${manager} put ${perf.best_day.score} on the board on ${bestDayDate} and ${perf.worst_day.score} on ${worstDayDate}. One of those is a good day. Neither of them added up to more than ${perf.total} across ${roundLabel}.`,
+          () =>
+            `The volatility report on ${manager}'s ${roundLabelBare}: a ${perf.best_day.score}-point spike (${bestDayDate}) and a ${perf.worst_day.score}-point sinkhole (${worstDayDate}), for a grand total of ${perf.total} and a grand total of zero wins that mattered.`,
+          () =>
+            `${worstDayDate} produced ${perf.worst_day.score} points for ${manager}. ${bestDayDate} produced ${perf.best_day.score}. The ${perf.total}-point round total confirms which one was the outlier.`,
+          () =>
+            `If ${manager} could bottle ${bestDayDate} (${perf.best_day.score} pts) he'd still be playing. Instead he bottled ${worstDayDate} (${perf.worst_day.score} pts) and drank it all round. ${perf.total} points, ${roundLabel} over.`,
+          () =>
+            `${manager}'s ${roundLabelBare} in a single chart would be flat, with one bump on ${bestDayDate} (${perf.best_day.score} pts) and one hole on ${worstDayDate} (${perf.worst_day.score} pts). Area under the curve: ${perf.total}. Not enough.`,
+          () =>
+            `There's a version of ${roundLabel} where every day looks like ${bestDayDate}'s ${perf.best_day.score} points for ${manager}. There's the real one, where ${worstDayDate} put up ${perf.worst_day.score} and the round finished at ${perf.total}.`,
+          () =>
+            `${manager} scored ${perf.best_day.score} points on ${bestDayDate} and ${perf.worst_day.score} on ${worstDayDate}, which averages out to a ${perf.total}-point round and a very quiet group chat.`,
         ]
       : [];
 
   // Head-to-head bank: only drawn from on a playoff exit, where there is a named opponent and
   // a day-by-day story. A blown lead and a wire-to-wire beating are different humiliations, so
   // each gets its own lines rather than a generic "you lost" joke.
-  const h2h = [];
-  if (matchup) {
-    h2h.push(
-      () =>
-        `${manager} lost to ${matchup.opponent} ${matchup.myScore}–${matchup.opponentScore} in ${roundLabel}, a ${matchup.margin}-point gap that ${worst.name} (${worst.pts} pts) personally funded. Enjoy the offseason.`,
-      () =>
-        `${matchup.opponent} needed ${matchup.opponentScore} to end ${manager}'s ${roundLabel}. ${manager} answered with ${matchup.myScore} and ${worst.name}'s ${worst.pts}-point contribution. Not close enough, not by ${matchup.margin}.`
-    );
-    if (narrative && narrative.wireToWire) {
-      h2h.push(
+  // Split into four fixed sub-banks rather than one conditionally-appended array so a
+  // template's identity never shifts: h2h-wire:0 is the same joke for every manager, whereas
+  // a single array's index 2 would mean different things to a wire-to-wire loser and a
+  // blown-lead one. Stable ids are what the no-repeat rule below is built on.
+  const h2hBase = matchup
+    ? [
         () =>
-          `${manager} did not lead this ${roundLabel} matchup for a single day. Not one. ${matchup.opponent} led wire-to-wire, won ${matchup.opponentScore}–${matchup.myScore}, and ${worst.name}'s ${worst.pts} points made sure it never got interesting.`,
+          `${manager} lost to ${matchup.opponent} ${matchup.myScore}–${matchup.opponentScore} in ${roundLabel}, a ${matchup.margin}-point gap that ${worst.name} (${worst.pts} pts) personally funded. Enjoy the offseason.`,
         () =>
-          `Wire-to-wire. ${matchup.opponent} took the lead on day one of ${roundLabel} and never gave it back, because ${manager} trotted out ${worst.name} for ${worst.pts} points and called it a plan. ${matchup.opponentScore}–${matchup.myScore}.`
-      );
-    }
-    if (narrative && narrative.everLed && !narrative.wireToWire) {
-      h2h.push(
+          `${matchup.opponent} needed ${matchup.opponentScore} to end ${manager}'s ${roundLabelBare}. ${manager} answered with ${matchup.myScore} and ${worst.name}'s ${worst.pts}-point contribution. Not close enough, not by ${matchup.margin}.`,
         () =>
-          `${manager} was ahead by as much as ${narrative.biggestLead} points in this ${roundLabel} matchup and still found a way to lose it ${matchup.myScore}–${matchup.opponentScore}. ${worst.name} (${worst.pts} pts) held the door open for ${matchup.opponent}.`,
+          `Final tally in ${roundLabel}: ${matchup.opponent} ${matchup.opponentScore}, ${manager} ${matchup.myScore}. ${worst.name} contributed ${worst.pts} points to that ${matchup.margin}-point hole and not one ounce of shame.`,
         () =>
-          `Blowing a ${narrative.biggestLead}-point lead to ${matchup.opponent} takes real commitment, and ${manager} was committed. ${worst.name} chipped in ${worst.pts} points toward the collapse. ${roundLabel} over, ${matchup.opponentScore}–${matchup.myScore}.`
-      );
-    }
-    if (matchup.margin <= 25) {
-      h2h.push(
+          `${manager} brought ${matchup.myScore} points to a ${matchup.opponentScore}-point fight. ${matchup.opponent} barely broke a sweat, and ${worst.name}'s ${worst.pts}-point ${roundLabel} was the white flag.`,
         () =>
-          `${matchup.margin} points. That is what separated ${manager} from surviving ${roundLabel}. ${worst.name} posted ${worst.pts}. Do that math slowly, and then think about it every night until next season.`
-      );
-    }
-  }
+          `The scoreboard says ${matchup.opponent} ${matchup.opponentScore}, ${manager} ${matchup.myScore}. The box score says ${worst.name}, ${worst.pts} points. Both say the same thing: ${roundLabel} is over for ${manager}.`,
+        () =>
+          `${matchup.margin} points is the distance between ${manager} and ${matchup.opponent} in ${roundLabel}. ${worst.name} (${worst.pts} pts) covered roughly none of it. Pack it up.`,
+      ]
+    : [];
 
-  const bank = [...core, ...betrayal, ...dayBank, ...h2h];
+  const h2hWire =
+    matchup && narrative && narrative.wireToWire
+      ? [
+          () =>
+            `${manager} did not lead this ${roundLabel} matchup for a single day. Not one. ${matchup.opponent} led wire-to-wire, won ${matchup.opponentScore}–${matchup.myScore}, and ${worst.name}'s ${worst.pts} points made sure it never got interesting.`,
+          () =>
+            `Wire-to-wire. ${matchup.opponent} took the lead on day one of ${roundLabel} and never gave it back, because ${manager} trotted out ${worst.name} for ${worst.pts} points and called it a plan. ${matchup.opponentScore}–${matchup.myScore}.`,
+          () =>
+            `Across all ${narrative.scoredDays} scored days of ${roundLabel}, ${manager} was in front for exactly zero of them. ${matchup.opponent} won ${matchup.opponentScore}–${matchup.myScore}. ${worst.name}'s ${worst.pts} points never even threatened to make it a matchup.`,
+          () =>
+            `You cannot blow a lead you never had. ${manager} trailed ${matchup.opponent} every single day of ${roundLabel} on the way to ${matchup.opponentScore}–${matchup.myScore}, with ${worst.name} chipping in ${worst.pts} points of pure ballast.`,
+        ]
+      : [];
+
+  const h2hLead =
+    matchup && narrative && narrative.everLed && !narrative.wireToWire
+      ? [
+          () =>
+            `${manager} was ahead by as much as ${narrative.biggestLead} points in this ${roundLabel} matchup and still found a way to lose it ${matchup.myScore}–${matchup.opponentScore}. ${worst.name} (${worst.pts} pts) held the door open for ${matchup.opponent}.`,
+          () =>
+            `Blowing a ${narrative.biggestLead}-point lead to ${matchup.opponent} takes real commitment, and ${manager} was committed. ${worst.name} chipped in ${worst.pts} points toward the collapse. ${roundLabel} over, ${matchup.opponentScore}–${matchup.myScore}.`,
+          () =>
+            `${manager} led this thing. Actually led it, by ${narrative.biggestLead} points. Then ${matchup.opponent} remembered they were playing and won ${matchup.opponentScore}–${matchup.myScore}, while ${worst.name} watched from ${worst.pts} points away.`,
+          () =>
+            `There is losing, and there is having a ${narrative.biggestLead}-point lead in ${roundLabel} and handing it to ${matchup.opponent} anyway. ${manager} chose the second one. ${worst.name}'s ${worst.pts} points helped enormously.`,
+        ]
+      : [];
+
+  const h2hClose =
+    matchup && matchup.margin <= 25
+      ? [
+          () =>
+            `${matchup.margin} points. That is what separated ${manager} from surviving ${roundLabel}. ${worst.name} posted ${worst.pts}. Do that math slowly, and then think about it every night until next season.`,
+          () =>
+            `${manager} lost ${roundLabel} by ${matchup.margin}. One decent night from ${worst.name} — who managed ${worst.pts} points — and ${matchup.opponent} is the one writing this eulogy instead.`,
+          () =>
+            `Losing by ${matchup.margin} to ${matchup.opponent} is the cruellest possible way to end ${roundLabel}, and ${manager} earned every inch of it by starting ${worst.name} for ${worst.pts} points.`,
+        ]
+      : [];
+
+  // Each template carries a stable id (sub-bank + index) so callers can exclude the ones
+  // already used this period, and the one before it, without the banks having to know
+  // anything about who else got roasted.
+  const withIds = (name, fns) => fns.map((fn, i) => ({ id: `${name}:${i}`, fn }));
+  const bank = [
+    ...withIds('core', core),
+    ...withIds('betrayal', betrayal),
+    ...withIds('day', dayBank),
+    ...withIds('h2h-base', h2hBase),
+    ...withIds('h2h-wire', h2hWire),
+    ...withIds('h2h-lead', h2hLead),
+    ...withIds('h2h-close', h2hClose),
+  ];
+
+  // Seed the choice on manager+round, then walk forward from that slot to the first template
+  // not already used nearby. Probing from the natural slot (rather than picking out of a
+  // filtered array) matters: filtering renumbers every index, so one manager's stored roast
+  // would silently reshuffle everybody else's. This way a manager keeps the same joke run
+  // after run, and only an actual collision moves them — to the very next free slot.
+  //
+  // If every template is excluded (a tiny bank in a very crowded round), fall back to the
+  // natural pick: a repeat beats no roast at all.
+  const excluded = excludeIds instanceof Set ? excludeIds : new Set();
   let seed = 0;
   for (const c of `${manager}|${round}`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
-  return bank[seed % bank.length]();
+  const startAt = seed % bank.length;
+  let pick = bank[startAt];
+  for (let step = 0; step < bank.length; step++) {
+    const candidate = bank[(startAt + step) % bank.length];
+    if (!excluded.has(candidate.id)) {
+      pick = candidate;
+      break;
+    }
+  }
+  return { templateId: pick.id, text: pick.fn() };
 }
 
 // Static fallback for the season CHAMPION (Finals winner) — used when ANTHROPIC_API_KEY is
@@ -13122,14 +13291,40 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
 // Fallback text for any outcome, used both when ANTHROPIC_API_KEY is unset and as the
 // safety net after a failed/empty Claude call — one place that knows which static bank
 // belongs to which outcome so generateRoastWithClaude never has to duplicate the mapping.
-function fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative) {
-  if (outcome === 'champion') return fallbackChampionRoast(manager, perf);
-  if (outcome === 'third') return fallbackThirdPlaceRoast(manager, perf, matchup);
-  return fallbackRoast(manager, round, perf, matchup, narrative);
+// Returns { text, templateId }. templateId identifies the elimination-bank template that was
+// used, so callers can persist it and keep the same joke from landing twice in a period (see
+// recentFallbackTemplateIds). Champion/third-place roasts are one-per-season, so they have
+// nothing to collide with and report a null id.
+function fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds) {
+  if (outcome === 'champion') return { text: fallbackChampionRoast(manager, perf), templateId: null };
+  if (outcome === 'third') return { text: fallbackThirdPlaceRoast(manager, perf, matchup), templateId: null };
+  return fallbackRoast(manager, round, perf, matchup, narrative, excludeIds);
 }
 
-async function generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative) {
-  if (!ANTHROPIC_API_KEY) return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative);
+// Rounds in bracket order, used to find "the period before this one".
+const ROAST_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
+
+// Fallback-template ids already used in this period or the one immediately before it. Feeding
+// this to the bank is what stops two managers eliminated in the same round — or in back-to-back
+// rounds — from being handed word-for-word the same joke. Reads the stored roasts, so it works
+// even though each manager's roast is generated in its own request.
+//
+// On a regenerate the current round's stored ids are about to be replaced, so they are not
+// excluded (otherwise a re-roll would be forced away from every joke it just legitimately used).
+function recentFallbackTemplateIds(sd, round, { includeCurrentRound = true } = {}) {
+  const idx = ROAST_ROUND_ORDER.indexOf(round);
+  const neighbours = new Set(
+    [includeCurrentRound ? round : null, idx > 0 ? ROAST_ROUND_ORDER[idx - 1] : null].filter(Boolean)
+  );
+  const used = new Set();
+  for (const r of Object.values((sd && sd.roasts) || {})) {
+    if (r && r.template_id && neighbours.has(r.round)) used.add(r.template_id);
+  }
+  return used;
+}
+
+async function generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative, excludeIds) {
+  if (!ANTHROPIC_API_KEY) return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
 
   const roundLabel =
     round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
@@ -13209,14 +13404,14 @@ Write the roast now. No preamble, no labels — just the roast.`;
 
   if (!resp.ok) {
     console.error('Anthropic API error:', resp.status, await resp.text());
-    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative);
+    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
   }
 
   const data = await resp.json();
-  return (
-    (data.content && data.content[0] && data.content[0].text) ||
-    fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative)
-  );
+  const text = data.content && data.content[0] && data.content[0].text;
+  // A Claude-written roast has no template id — there is nothing to de-duplicate.
+  if (text) return { text, templateId: null };
+  return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
 }
 
 // POST /api/seasons/:year/generate-roast — generate and store an elimination roast (commissioner only)
@@ -13245,11 +13440,12 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
     const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, manager) : null;
     const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, manager, round) : null;
     const narrative = matchup ? computeMatchupNarrativeForRoast(sd, round, manager, matchup.opponent) : null;
-    const roastText = withCaptainReminder(
-      await generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative),
-      manager,
-      outcome
-    );
+    // Exclude this manager's own stored id so a re-roll can move off the joke it already had.
+    const exclude = recentFallbackTemplateIds(sd, round);
+    const ownId = ((sd.roasts || {})[manager] || {}).template_id;
+    if (ownId) exclude.delete(ownId);
+    const generated = await generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative, exclude);
+    const roastText = withCaptainReminder(generated.text, manager, outcome);
     const pageContext = buildRoastPageContext(manager, round, perf, standings, matchup, journey);
 
     if (!sd.roasts) sd.roasts = {};
@@ -13258,6 +13454,7 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
       outcome,
       text: roastText,
       page_context: pageContext,
+      template_id: generated.templateId || null,
       generated_at: new Date().toISOString(),
     };
 
@@ -13464,6 +13661,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   if (['QF', 'SF', 'Finals'].includes(round)) {
     for (const m of toRoast) matchupByManager[m] = playoffMatchupResultForRoast(sd, round, m);
   }
+  // Live no-repeat set: seeded from what's already stored nearby, then grown as this loop
+  // picks templates, because those picks aren't persisted until after the loop finishes.
+  const usedTemplateIds = recentFallbackTemplateIds(sd, round, { includeCurrentRound: !regenerate });
   const managerOrder = [...toRoast].sort((a, b) => {
     const ma = matchupByManager[a];
     const mb = matchupByManager[b];
@@ -13486,10 +13686,20 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
       const matchup = matchupByManager[m] || null;
       const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, m, round) : null;
       const narrative = matchup ? computeMatchupNarrativeForRoast(sd, round, m, matchup.opponent) : null;
-      const text = await generateRoastWithClaude(m, round, perf, 'eliminated', matchup, narrative);
+      const generated = await generateRoastWithClaude(
+        m,
+        round,
+        perf,
+        'eliminated',
+        matchup,
+        narrative,
+        usedTemplateIds
+      );
+      if (generated.templateId) usedTemplateIds.add(generated.templateId);
+      const text = generated.text;
       const pageContext = buildRoastPageContext(m, round, perf, standings, matchup, journey);
       roastByManager[m] = text;
-      freshTexts[m] = { text, pageContext, outcome: 'eliminated' };
+      freshTexts[m] = { text, pageContext, outcome: 'eliminated', templateId: generated.templateId };
     } catch (e) {
       console.error('Roast generation failed for', m, '-', e.message);
       if (existing && existing.text) roastByManager[m] = existing.text;
@@ -13511,10 +13721,11 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
       const perf = buildManagerPerformanceForRoast(sd, m, round);
       const matchup = playoffMatchupResultForRoast(sd, round, m);
       const journey = pastRoundJourneyForRoast(db, sd, m, round);
-      const text = withCaptainReminder(await generateRoastWithClaude(m, round, perf, w.outcome, matchup), m, w.outcome);
+      const generated = await generateRoastWithClaude(m, round, perf, w.outcome, matchup, null, usedTemplateIds);
+      const text = withCaptainReminder(generated.text, m, w.outcome);
       const pageContext = buildRoastPageContext(m, round, perf, null, matchup, journey);
       podiumRoastByManager[m] = text;
-      freshTexts[m] = { text, pageContext, outcome: w.outcome };
+      freshTexts[m] = { text, pageContext, outcome: w.outcome, templateId: generated.templateId };
     } catch (e) {
       console.error('Podium roast generation failed for', m, '-', e.message);
       if (existing && existing.text) podiumRoastByManager[m] = existing.text;
@@ -13527,8 +13738,15 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     if (sd2) {
       if (!sd2.roasts) sd2.roasts = {};
       const now = new Date().toISOString();
-      for (const [m, { text, pageContext, outcome }] of Object.entries(freshTexts)) {
-        sd2.roasts[m] = { round, outcome, text, page_context: pageContext, generated_at: now };
+      for (const [m, { text, pageContext, outcome, templateId }] of Object.entries(freshTexts)) {
+        sd2.roasts[m] = {
+          round,
+          outcome,
+          text,
+          page_context: pageContext,
+          template_id: templateId || null,
+          generated_at: now,
+        };
       }
       db2.seasons[year] = sd2;
       writeDB(db2);

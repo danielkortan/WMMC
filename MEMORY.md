@@ -2372,3 +2372,44 @@ July 22). Per-manager totals unchanged.
 both return null without `sd.confirmed_seeding`, which is written by "End Pool Play" in the UI —
 a hand-built fixture that only sets `finalized_rounds: ['PP']` silently degrades to the old
 alphabetical, matchup-less post. Drive End Pool Play through the UI rather than faking it.
+
+## Fallback roast bank: doubled, no-repeat within/across periods, article fix (2026-08-03)
+
+Follow-up to the round-end post rebuild, same PR (#396).
+
+**Grammar.** `roastRoundLabel` returns the round WITH its article (`'the Quarterfinals'`) because
+43 of its 54 uses read `across/in/of ${roundLabel}`. But 11 templates put a possessive right
+before it — `${manager}'s ${roundLabel}` — producing "Casey Curve's the Quarterfinals". Fixed with
+a second `roastRoundLabelBare()` used only in those 11 positions; stripping the article globally
+would have broken the 43 correct ones instead.
+
+**Doubled the banks.** core 20→40, betrayal 15→30, dayBank 15→30, head-to-head 7→17 (max bank
+57→110). The dayBank additions respect that bank's standing rule: `best_day`/`worst_day` are
+picked independently by score, NOT by date, so no template may imply chronology
+(no then/before/after/rally).
+
+**No repeated joke in a period, or across back-to-back periods.** Every template now carries a
+stable id (`sub-bank:index`), persisted as `sd.roasts[mgr].template_id`.
+`recentFallbackTemplateIds(sd, round)` collects ids used in this round and the previous one; the
+`/roasts/slack` loop seeds a live set from it and grows it as it picks, because the batch isn't
+written until after the loop.
+
+Two design points that mattered:
+
+- **h2h is four fixed sub-banks** (`h2h-base/-wire/-lead/-close`), not one conditionally-appended
+  array. With one array, index 2 means a different joke to a wire-to-wire loser than to a
+  blown-lead one — ids must be stable across managers or the exclusion is meaningless.
+- **Probe forward from the natural slot; do NOT pick out of a filtered array.** The first version
+  did `bank.filter(...)` then `seed % pool.length`, which renumbers every index — so storing one
+  manager's roast silently reshuffled everyone else's, and picks changed on every regenerate even
+  with zero collisions. Now: seed → natural slot → walk forward to the first non-excluded id. A
+  manager keeps the same joke run after run, and only a real collision moves them, by one slot.
+
+**Return-shape change:** `fallbackRoast`/`fallbackRoastForOutcome`/`generateRoastWithClaude` now
+return `{ text, templateId }` (templateId null when Claude wrote it, and for champion/third, which
+are one-per-season and can't collide). Three call sites updated.
+
+**Verified** with no `ANTHROPIC_API_KEY` so every roast came from the bank: 4 QF managers got 4
+distinct ids; two identical regenerate runs produced byte-identical assignments (stability); and
+planting `core:6` on a Pool Play roast moved Drew Dinger — whose natural QF pick is `core:6` — to
+`core:7` while leaving the other three untouched (minimal displacement, cross-period exclusion).
