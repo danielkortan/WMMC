@@ -5783,6 +5783,69 @@ body::before {
 .roast-context p + p {
   margin-top: 0.7rem;
 }
+/* Per-round summary tables (scoring days, top performers, bottom performers). Three across
+   on desktop, wrapping to one column on narrow screens — auto-fit rather than a fixed
+   3-column grid so a round with only two tables still fills the row. */
+.roast-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.9rem;
+}
+.roast-table {
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 105, 53, 0.18);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem 0.5rem;
+  min-width: 0;
+  overflow-x: auto;
+}
+.roast-table-title {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ff8c5a;
+  margin-bottom: 0.3rem;
+}
+.roast-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+  color: #d8b8a5;
+}
+.roast-table th {
+  text-align: right;
+  font-weight: 600;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a8887a;
+  padding: 0.1rem 0.3rem 0.2rem;
+  border-bottom: 1px solid rgba(255, 105, 53, 0.18);
+  white-space: nowrap;
+}
+.roast-table td {
+  text-align: right;
+  padding: 0.16rem 0.3rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* First column is the day or the player — left-aligned, and the only cell allowed to be
+   the one that shrinks when the table is tight. */
+.roast-table th:first-child,
+.roast-table .roast-table-name {
+  text-align: left;
+  white-space: normal;
+  width: 99%;
+}
+.roast-table tbody tr + tr td {
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+/* Rows on the wrong side of the ledger — the worst days, the bottom performers. */
+.roast-table-low td {
+  color: #b98d7d;
+}
 .roast-banner.roast-champion .roast-context-label {
   color: #e5c158;
 }

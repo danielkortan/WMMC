@@ -2518,3 +2518,148 @@ Consequence: the entire matchup-aware prompt work (PR #396) is dormant in produc
 is only reached when the key exists. The fallback bank's own head-to-head templates DO fire, but
 only when the seeded pick lands in `h2h-*`, which is 17 of 110 slots. Setting the key in the Render
 dashboard is the single lever that turns the feature on.
+
+## Roast repair buttons generalized to every round (2026-08-03)
+
+**Gap.** "Regenerate Roasts" and "Regenerate & Repost Roasts to Slack" existed only on the Pool
+Play block (`i === 9`). Once QF/SF/Finals were dumped the admin panel showed a static "loser
+rosters dumped" line and nothing else — no way to refresh roasts after the bank or the
+page-context builder changed, short of a browser-console API call. The PP buttons exist for
+exactly that scenario, so the fix is generalization, not new capability.
+
+`regeneratePoolPlayRoastsOnly` / `repostPoolPlayRoasts` → `regenerateRoundRoasts(round)` /
+`repostRoundRoasts(round)`, plus `roastRepairToolsHtml(round)` rendered under PP (when
+finalized) and under QF/SF/Finals (when dumped).
+
+**The design decision worth keeping: read who was eliminated from stored state, not from the
+bracket.** The PP versions recomputed non-qualifiers via `getQFQualifiers`. A repair action must
+not do that — by the time you're reposting, the round is long finalized and `sd.eliminated` may
+carry commissioner corrections the recomputed bracket would silently overwrite. `eliminatedInRound`
+reads `sd.eliminated` (authoritative; every finalize/dump path writes it) and folds in stored
+roasts as a fallback for the window where a dump wrote roasts but the eliminated map didn't land.
+
+**Finals podium round-trips through `roast.outcome`.** `podiumRolesFromRoasts` reads champion /
+runner_up / third back off the stored roasts rather than re-deriving the bracket winner, so a
+repost can never crown someone different from the original post. Verified: seeding the four Finals
+roasts and reading back gives podium = [champion, runner_up, third] and Hall of Shame = [4th]
+only — the same split `crownChampionAndRoastFinals` produces.
+
+Regeneration stays **sequential** — each `generate-roast` is a read-modify-write of `db.json`.
+
+**Verified** by driving the real admin panel with Playwright against a fixture with PP+QF
+finalized and dumped: both button pairs render with the right round bound, `regenerateRoundRoasts('QF')`
+rewrote exactly the 4 QF-eliminated managers with the new sectioned page context and correct
+round/outcome, and `repostRoundRoasts('QF')` failed gracefully ("Slack webhook not configured")
+rather than throwing.
+
+## Day-by-day tally replaced with a per-round summary (2026-08-03)
+
+**Why.** The "Day by day" section counted how often the manager finished top-3/bottom-3 leaguewide
+across the round. Two problems: it was a bare tally with no dates or scores attached, and it existed
+only for the elimination round because the leaguewide sweep was too expensive to run per round.
+
+**Replaced with, in EVERY round section:** the manager's own three best and three worst scoring days
+(date + score), and a top-3/bottom-3 leaderboard per position carrying each player's round total,
+league rank among same-role players, and how many days they were the best on that roster at that
+position.
+
+**The perf win that made it possible.** Everything above derives from this manager's own weekly and
+daily rows, which `buildManagerPerformanceForRoast` already walks. The old tally needed
+`computeDailyHighLow` per date — a leaguewide sweep — which is why it was gated behind
+`skipDayExtremes` for earlier rounds. Deleting `computeRoundDayExtremesForRoast` removed the only
+caller of `computeDailyHighLow` in the roast path entirely: the roast context is now both richer
+and cheaper, and `skipDayExtremes` is gone. `computeDailyHighLow`'s `bottomPlayersByScore` field
+existed solely for that tally and had no other consumer, so it went too.
+
+**Three things that only showed up in real output:**
+
+- `days_led` is printed for the top-3 only. On a five-hitter roster over thirty days everybody leads
+  sometimes, so "best on 6 days" sitting next to a name filed under `Worst:` reads as praise and
+  muddles the contrast.
+- The two lists overlap on short rosters (top 3 and bottom 3 of five players share the middle one).
+  The bottom list drops any name already in the top list rather than printing it twice — which is
+  why a five-man roster shows three best and two worst, not three and three.
+- Same for days: with ≤5 scored days the best and worst lists are the same days in opposite order,
+  so the worst list is suppressed.
+
+**Formatting.** With top-3 AND bottom-3 per position, a round section became a wall of text. Section
+bits are now joined with `\n` (blank line still separates sections), and the roster page renders
+single newlines as `<br>` — result, split, days, hitters, pitchers each get their own line.
+`rosterSentence` was deleted: it named one player per role, which the leaderboard now supersedes,
+and keeping both printed the same names twice.
+
+The prompt gets the new signal too — `roastPromptRankLines` now carries days-led per player and the
+best/worst scoring days, so the joke can tell "carried the team" from "had one loud afternoon".
+
+**Verified** end to end through the real endpoint on a synthetic season (QF exit, PP exit, Finals
+champion), plus screenshots at 1280px and 390px.
+
+## Round summary became three tables; roasts are now server-authoritative on save (2026-08-03)
+
+**Change.** The per-round best/worst summary was two dense prose sentences. Replaced with three
+tables per round section, laid out side by side: **Scoring days** (the manager's own best 3 and
+worst 3, with each day's rank among all managers that date), **Top performers** (top 3 hitters +
+top 3 pitchers, with rank among same-role players and days-led), and **Bottom performers** (bottom
+3 of each). Every number carries a rank.
+
+**Day ranks needed a leaguewide sweep back — but a cheap one.** Ranking a day against all managers
+needs every manager's total for that date. Rather than reinstate `computeDailyHighLow` per date,
+`computeRoleRanksForRoast` now also emits `dayRanks`, built from the daily rows in the same pass,
+with the **same ownership rule and correction guard** as the per-manager totals it already
+computes. That matters: reusing `computeDailyHighLow` would have ranked a day using a different
+attribution path than the score printed next to it. And because the rank table is memoized per
+round in the request cache, it is built once per round for the whole combined post, not once per
+manager.
+
+**Structured payload, not HTML in a string.** `buildRoastPageContext` now returns
+`{ text, tables }`; `tables` is keyed by the same `[[Section label]]` the text uses, and is stored
+as `roast.page_tables`. The roster page builds the DOM and escapes every cell, so a player name out
+of the MLB feed can never inject markup. Roasts stored before this render text-only — tables are
+additive, never required.
+
+**The save bug this surfaced.** `sd.roasts` was union-merged on the full-season save: the server's
+copy filled in only managers the incoming payload did not mention. But the client **never writes**
+`sd.roasts` — three read sites in app.js, zero writes — so a roast in a payload is always a stale
+echo of something the server wrote. The union-merge therefore let a full-season save carrying a
+pre-regeneration roast silently roll that manager back: same manager, older text, and any field
+added since (`page_tables`) quietly dropped. Now the server's copy always wins per manager. This is
+the exact class of bug CLAUDE.md's "never wipe a server-authoritative field from a client payload"
+warns about, and it was live before tables made it visible.
+
+**Layout.** `.roast-tables` is `repeat(auto-fit, minmax(210px, 1fr))` rather than a fixed 3-column
+grid, so a round with only two tables (a roster too short to have distinct bottom performers) still
+fills the row instead of leaving a hole. Verified stacking cleanly at 390px with no horizontal
+overflow.
+
+## Round sections became three narrative lines over the tables (2026-08-03)
+
+**Shape.** Each round section is now exactly three prose lines, then its three tables: **(1) what
+happened** — the result or where they finished, tiered by margin; **(2) how it played out** — the
+day-by-day story; **(3) where the points came from and who to blame**. The tables stopped being a
+summary of the prose and became the data view under it.
+
+**Line 2 needed a per-round matchup narrative, which used to be elimination-round only.**
+`computeMatchupNarrativeForRoast` walked the round's dates calling `computeDailyHighLow` per date —
+the sweep that made it too expensive to run for every round. Rewrote it to read the `dayRanks`
+table `computeRoleRanksForRoast` already builds (every manager's total for every date, same
+ownership rule, same correction guard). Signature changed from `(sd, round, manager, opponent)` to
+`(dayRanks, manager, opponent)`. Now every round the manager played gets its own story — blown
+lead, wire-to-wire, lead changed N times — and it costs one table build per round for a whole
+combined post. That is the third `computeDailyHighLow` caller removed from the roast path.
+
+Pool Play has no single opponent, so line 2 there is the shape of the round instead, counted off
+the same table: how often this roster was the league's best or worst team on a day.
+
+**Two overstatements the fixture caught, both worth keeping in mind for future template work:**
+
+- "A roster with two settings and no dial between them" fired on 3-best/3-worst out of 30 days,
+  which is not two settings, it is mediocrity. The day-shape line now branches on the _ratio_
+  (best≫worst, worst≫best, neither, all-zero) and only uses the two-settings framing when the
+  counts really are comparable and non-zero.
+- "X did the opposite" fired on a roster whose weakest link was 15th of 27 leaguewide — middling,
+  not catastrophic. Now gated on `rank > of * 0.5`, with a "nobody was a disaster" bank for strong
+  rosters. Overstating a number the reader can check in the table underneath is the fastest way to
+  make the whole section untrustworthy.
+
+Repeated phrasings ("carried what there was to carry", "did the opposite") are now seeded banks via
+the existing `pick`, so adjacent sections and adjacent managers don't read as a form letter.
