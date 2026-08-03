@@ -4888,11 +4888,6 @@ function computeDailyHighLow(sd, date) {
     bottomManagers: bottomManagersList,
     topPlayers: allPlayers.slice(0, 3),
     bottomPlayers: worstPlayers,
-    // Plain bottom-3 by raw score (symmetric to topPlayers) — unlike bottomPlayers above,
-    // not filtered to the "bad day" criteria. Used by the elimination-roast day-extremes
-    // tally (computeRoundDayExtremesForRoast), which needs a simple top/bottom rank per
-    // day, not the Slack post's stricter "worst players" bar.
-    bottomPlayersByScore: [...allPlayers].reverse().slice(0, 3),
     worstPlayerOverall,
     // Every manager's date-windowed total for this day, unsliced. The top/bottom lists above
     // are cut to 3, so a head-to-head narrative (computeMatchupNarrativeForRoast) can't be
@@ -12238,57 +12233,6 @@ function computeRoleRanksForRoast(sd, managerNames, round) {
   };
 }
 
-// For every calendar day in the round, rank ALL managers by day total and ALL rostered
-// players by individual day score — the same signal the daily Slack "Yesterday's Best &
-// Worst" post surfaces (computeDailyHighLow), tallied across the whole round for one
-// manager: how many top-3/bottom-3 days did they have, and which of their own players kept
-// showing up on the league's daily best/worst lists (3+ times). Reuses computeDailyHighLow
-// per date so this can never disagree with what the daily Slack post actually said that day.
-function computeRoundDayExtremesForRoast(sd, manager, round) {
-  const rounds = ROAST_ROUND_KEYS[round] || [round];
-  const dates = new Set();
-  (sd.daily_batting || []).forEach((r) => {
-    if (rounds.includes(r.round)) dates.add(r.date);
-  });
-  (sd.daily_pitching || []).forEach((r) => {
-    if (rounds.includes(r.round)) dates.add(r.date);
-  });
-
-  let managerTopDays = 0;
-  let managerBottomDays = 0;
-  let scoredDays = 0;
-  const playerTopDays = {};
-  const playerBottomDays = {};
-
-  for (const date of dates) {
-    const hl = computeDailyHighLow(sd, date);
-    if (!hl) continue;
-    scoredDays++;
-    if (hl.topManagers.some((m) => m.manager === manager)) managerTopDays++;
-    if (hl.bottomManagers.some((m) => m.manager === manager)) managerBottomDays++;
-    hl.topPlayers.forEach((p) => {
-      if (p.manager === manager) playerTopDays[p.name] = (playerTopDays[p.name] || 0) + 1;
-    });
-    hl.bottomPlayersByScore.forEach((p) => {
-      if (p.manager === manager) playerBottomDays[p.name] = (playerBottomDays[p.name] || 0) + 1;
-    });
-  }
-
-  const standout = (tally) =>
-    Object.entries(tally)
-      .filter(([, count]) => count >= 3)
-      .sort((a, b) => b[1] - a[1])
-      .map(([name, count]) => ({ name, count }));
-
-  return {
-    managerTopDays,
-    managerBottomDays,
-    totalDays: scoredDays,
-    standoutTopPlayers: standout(playerTopDays),
-    standoutBottomPlayers: standout(playerBottomDays),
-  };
-}
-
 // Day-by-day story of a head-to-head playoff matchup, written from `manager`'s side (the
 // eliminated one). A final score alone can't tell a wire-to-wire beatdown apart from a lead
 // blown on the last Sunday, and those deserve very different roasts — this supplies the
@@ -12383,22 +12327,23 @@ function computeMatchupNarrativeForRoast(sd, round, manager, opponent) {
   };
 }
 
-// Build a plain-text performance summary for the given manager in the given round.
-// Alongside the worst-ranked batters/pitchers (used since the original roast), this also
-// surfaces the manager's best batter/pitcher, single best/worst day, and day-by-day
-// top-3/bottom-3 tallies in the round — the specific "receipts" the expanded roast bank
-// below draws on. Ownership mirrors the original rule exactly: sd.rosters[manager][round|
-// week] arrays, scoped per row's own round+week (a derived cache, but the same one this
-// function has always used).
+// Build a plain-text performance summary for the given manager in the given round: the
+// worst-ranked batters/pitchers (used since the original roast), the top 3 and bottom 3 at
+// each position, the manager's own three best and three worst scoring days, and the standout
+// individual games — the specific "receipts" the roast bank and the page context draw on.
+// Ownership mirrors the original rule exactly: sd.rosters[manager][round|week] arrays, scoped
+// per row's own round+week (a derived cache, but the same one this function has always used).
 //
-// opts.ranks — a computeRoleRanksForRoast result for the same round. When supplied, the
-// best/worst hitter and pitcher come back as structured `*_ranked` objects carrying their
-// league-wide rank among same-role players, and the manager's own batting/pitching ranks for
-// the round are attached. opts.skipDayExtremes skips the (comparatively expensive) per-date
-// computeDailyHighLow sweep — used for the earlier rounds in a round-by-round breakdown,
-// which only need totals, not the day-by-day tally.
+// Everything here is derived from this manager's own weekly and daily rows, which is what
+// lets the page context afford a full summary for EVERY round the manager played rather than
+// just the one they went out in. (The previous version's league-wide day-by-day tally needed
+// a computeDailyHighLow sweep per date, which was too expensive to run per round.)
+//
+// opts.ranks — a computeRoleRanksForRoast result for the same round. When supplied, every
+// player comes back carrying their league-wide rank among same-role players, and the
+// manager's own batting/pitching ranks for the round are attached.
 function buildManagerPerformanceForRoast(sd, manager, round, opts = {}) {
-  const { ranks = null, skipDayExtremes = false } = opts;
+  const { ranks = null } = opts;
   const rounds = ROAST_ROUND_KEYS[round] || [round];
   const rosters = sd.rosters && sd.rosters[manager];
 
@@ -12472,9 +12417,27 @@ function buildManagerPerformanceForRoast(sd, manager, round, opts = {}) {
   const worstSingleGame = sortedGames.length ? sortedGames[0] : null;
   const bestSingleGame = sortedGames.length ? sortedGames[sortedGames.length - 1] : null;
 
+  // How many days each player was the best on this roster at their own position, and their
+  // biggest single game. "Top hitter on 5 of 14 days" is what separates a player who was
+  // steadily useful from one who had a single loud afternoon and hid for the rest of the
+  // round — a round total alone cannot tell those apart. Ties on a day credit everyone tied.
+  const daysLed = { Batter: {}, Pitcher: {} };
+  const bestGame = {};
+  const byDateRole = {};
+  for (const g of playerGames) {
+    const key = `${g.date}|${g.type}`;
+    (byDateRole[key] = byDateRole[key] || []).push(g);
+    if (!bestGame[g.name] || g.score > bestGame[g.name].score) bestGame[g.name] = { score: g.score, date: g.date };
+  }
+  for (const games of Object.values(byDateRole)) {
+    const top = Math.max(...games.map((g) => g.score));
+    for (const g of games) if (g.score === top) daysLed[g.type][g.name] = (daysLed[g.type][g.name] || 0) + 1;
+  }
+
   // Attach the league-wide rank for a (manager, player) slot, so the page context can say
-  // "6th-best hitter in the round" next to the points. Returns null when no rank table was
-  // supplied or the player has no slot in it (a season with no rosters cache, say).
+  // "6th-best hitter in the round" next to the points, plus the day-level colour above.
+  // Returns null when no rank table was supplied or the player has no slot in it (a season
+  // with no rosters cache, say).
   const ranked = (entry, role) => {
     if (!entry) return null;
     const [name, pts] = entry;
@@ -12484,9 +12447,20 @@ function buildManagerPerformanceForRoast(sd, manager, round, opts = {}) {
       pts: Math.round(pts * 100) / 100,
       rank: r ? r.rank : null,
       of: r ? r.of : null,
+      days_led: daysLed[role === 'batters' ? 'Batter' : 'Pitcher'][name] || 0,
+      best_game: bestGame[name] || null,
     };
   };
   const lastOf = (arr) => (arr.length ? arr[arr.length - 1] : null);
+  // Top 3 and bottom 3 at each position. sortedXAsc is worst-first, so the last three
+  // reversed are the best three. A roster with fewer than six at a position will overlap
+  // between the two lists — the page context de-duplicates rather than printing a name twice.
+  const topThree = (sortedAsc, role) =>
+    sortedAsc
+      .slice(-3)
+      .reverse()
+      .map((e) => ranked(e, role));
+  const bottomThree = (sortedAsc, role) => sortedAsc.slice(0, 3).map((e) => ranked(e, role));
 
   return {
     manager,
@@ -12508,12 +12482,20 @@ function buildManagerPerformanceForRoast(sd, manager, round, opts = {}) {
     pitching_rank: ranks && ranks.managerPitching ? ranks.managerPitching[manager] || null : null,
     batter_count: sortedBattersAsc.length,
     pitcher_count: sortedPitchersAsc.length,
+    // Top 3 / bottom 3 at each position, each carrying rank, days-led and best game.
+    top_batters: topThree(sortedBattersAsc, 'batters'),
+    bottom_batters: bottomThree(sortedBattersAsc, 'batters'),
+    top_pitchers: topThree(sortedPitchersAsc, 'pitchers'),
+    bottom_pitchers: bottomThree(sortedPitchersAsc, 'pitchers'),
     worst_day: worstDay,
     best_day: bestDay,
     scored_days: dayEntries.length,
+    // The manager's own three highest- and three lowest-scoring days in the round, best
+    // first / worst first. dayEntries is ascending, so the tail reversed is the top three.
+    top_days: dayEntries.slice(-3).reverse(),
+    bottom_days: dayEntries.slice(0, 3),
     worst_single_game: worstSingleGame,
     best_single_game: bestSingleGame,
-    day_extremes: skipDayExtremes ? null : computeRoundDayExtremesForRoast(sd, manager, round),
   };
 }
 
@@ -13241,7 +13223,6 @@ function buildRoundBreakdownsForRoast(db, sd, manager, round, finalPerf, finalMa
         ? finalPerf
         : buildManagerPerformanceForRoast(sd, manager, r, {
             ranks: roastRoundRanks(db, sd, r, cache),
-            skipDayExtremes: true,
           });
     // A round this manager never played (eliminated before it, or no rows yet) has nothing to
     // narrate — skip it rather than printing a 0-point section.
@@ -13313,7 +13294,6 @@ function collectRoastInputs(db, sd, manager, round, cache = {}, opts = {}) {
 // gets a shorter — but still valid — context, never "undefined".
 function buildRoastPageContext(manager, round, perf, standings, matchup, journey, opts = {}) {
   const { breakdown = null, outcome = 'eliminated' } = opts;
-  const roundLabel = roastRoundLabel(round);
   const ordinal = roastOrdinal;
   // The podium roasts (champion, 3rd-place-game winner) are ribbing, not a eulogy — the
   // "and it was all for nothing" framing every other section can use is simply false for them.
@@ -13329,14 +13309,6 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
   };
 
   // ---- shared sentence builders -------------------------------------------------
-  // "8th of 42 hitters" — a point total with nothing to compare it against is the thing that
-  // made these read as trivia. Falls back to bare points when no rank table was available.
-  const playerTag = (p, roleWord) => {
-    if (!p) return null;
-    return p.rank && p.of
-      ? `${p.name} (${p.pts} pts, ${ordinal(p.rank)} of ${p.of} ${roleWord})`
-      : `${p.name} (${p.pts} pts)`;
-  };
 
   // Where the points came from, and whether that was any good league-wide. `withTotal` is
   // off when the sentence before this one already stated the round score.
@@ -13354,45 +13326,52 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
     return `${base}, ranking ${batTag || pitTag} in the league for ${batTag ? 'hitting' : 'pitching'}.`;
   };
 
-  // Best and worst on the roster, by role, each ranked against every other same-role player
-  // in the round — "the 6th-best hitter couldn't cover the 28th" is the entire point of
-  // ranking them rather than listing point totals. `survived` is true for a round the manager
-  // came through: the accusatory framing ("undoing it", "closer to the truth") is only honest
-  // about a round that actually ended badly.
-  const rosterSentence = (p, offset, survived) => {
-    const bB = p.best_batter_ranked;
-    const wB = p.worst_batter_ranked && p.worst_batter_ranked.name !== (bB && bB.name) ? p.worst_batter_ranked : null;
-    const bP = p.best_pitcher_ranked;
-    const wP =
-      p.worst_pitcher_ranked && p.worst_pitcher_ranked.name !== (bP && bP.name) ? p.worst_pitcher_ranked : null;
-    const carried = [playerTag(bB, 'hitters'), playerTag(bP, 'pitchers')].filter(Boolean);
-    const sank = [playerTag(wB, 'hitters'), playerTag(wP, 'pitchers')].filter(Boolean);
-    if (!carried.length && !sank.length) return '';
-    if (!sank.length) return ` Best of the bunch: ${carried.join(' and ')}.`;
-    if (!carried.length) return ` Bringing up the rear: ${sank.join(' and ')}.`;
-    const bank = survived
-      ? [
-          () => ` Doing the lifting: ${carried.join(' and ')}. Along for the ride: ${sank.join(' and ')}.`,
-          () => ` ${carried.join(' and ')} earned it; ${sank.join(' and ')} came along anyway.`,
-          () => ` Credit to ${carried.join(' and ')}. No credit whatsoever to ${sank.join(' and ')}.`,
-          () => ` Top of the roster: ${carried.join(' and ')}. Bottom of it: ${sank.join(' and ')}.`,
-        ]
-      : [
-          () => ` Carrying it: ${carried.join(' and ')}. Undoing it: ${sank.join(' and ')}.`,
-          () => ` ${carried.join(' and ')} did the work; ${sank.join(' and ')} undid it.`,
-          () => ` The good news was ${carried.join(' and ')}. The bad news, which won, was ${sank.join(' and ')}.`,
-          () =>
-            ` Top of the roster: ${carried.join(' and ')}. Bottom of it, and closer to the truth: ${sank.join(' and ')}.`,
-        ];
-    return pick(bank, offset);
-  };
-
   // The weakest link on the roster by points, for the "one game from him flips it" math.
   const weakestLink = (p) => {
     const wB = p.worst_batter_ranked;
     const wP = p.worst_pitcher_ranked;
     if (wB && wP) return wB.pts <= wP.pts ? wB : wP;
     return wB || wP || null;
+  };
+
+  // The manager's own three best and three worst scoring days in the round. Dates and scores
+  // beat the old league-wide "top-3 on 7 days" tally: you can see the shape of the round —
+  // one loud afternoon propping up a flat fortnight, or a genuinely steady team.
+  const scoringDaysSentence = (p) => {
+    const fmtDay = (d) => `${fmtRoastShortDate(d.date)} (${d.score})`;
+    if (!p.top_days || p.top_days.length === 0) return '';
+    const best = p.top_days.map(fmtDay).join(', ');
+    // With five or fewer scored days the two lists overlap; printing both is just the same
+    // days twice in opposite order, so collapse to the best.
+    if (!p.bottom_days || p.bottom_days.length === 0 || p.scored_days <= 5) {
+      return ` Best days of the round: ${best}.`;
+    }
+    return ` Best days of the round: ${best}. Worst: ${p.bottom_days.map(fmtDay).join(', ')}.`;
+  };
+
+  // Top 3 and bottom 3 at a position. The top list carries how many days each player was the
+  // best on this roster at that position — a "who carried it" signal. The bottom list gets
+  // points and rank only: on a five-man roster everybody leads on some day, so "best on 6
+  // days" next to a name filed under `Worst` reads as praise and muddles the point. Names
+  // already in the top list are dropped from the bottom one, so a short roster never prints
+  // the same player twice.
+  const leaderboardLines = (p) => {
+    const tag = (x, withDays) => {
+      const bits = [`${x.pts} pts`];
+      if (x.rank && x.of) bits.push(`${ordinal(x.rank)} of ${x.of}`);
+      if (withDays && x.days_led > 0) bits.push(`best on ${x.days_led} day${x.days_led === 1 ? '' : 's'}`);
+      return `${x.name} (${bits.join(', ')})`;
+    };
+    const line = (label, top, bottom) => {
+      const tops = (top || []).filter(Boolean);
+      if (!tops.length) return null;
+      const seen = new Set(tops.map((x) => x.name));
+      const bots = (bottom || []).filter((x) => x && !seen.has(x.name));
+      let out = `${label} — best: ${tops.map((x) => tag(x, true)).join(', ')}.`;
+      if (bots.length) out += ` Worst: ${bots.map((x) => tag(x, false)).join(', ')}.`;
+      return out;
+    };
+    return [line('Hitters', p.top_batters, p.bottom_batters), line('Pitchers', p.top_pitchers, p.bottom_pitchers)];
   };
 
   // ---- how they qualified -------------------------------------------------------
@@ -13485,10 +13464,14 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
         } else {
           bits.push(`${manager} finished ${place}.${otherGapsSentence}`);
         }
-        bits.push(`${splitSentence(p, true)}${rosterSentence(p, idx * 3, false)}`);
+        bits.push(splitSentence(p, true), scoringDaysSentence(p), ...leaderboardLines(p));
       } else {
         // They qualified, so Pool Play is a round they came through.
-        bits.push(`Across the two Pool Play periods, ${splitSentence(p, true)}${rosterSentence(p, idx * 3, true)}`);
+        bits.push(
+          `Across the two Pool Play periods, ${splitSentence(p, true)}`,
+          scoringDaysSentence(p),
+          ...leaderboardLines(p)
+        );
       }
     } else if (m) {
       // A playoff round. Result first, escalated by margin, then the numbers behind it.
@@ -13520,7 +13503,7 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
           `${manager} ran ${m.opponent} off the field ${m.myScore}–${m.opponentScore}, by ${m.margin}. Briefly, this looked like a manager who knew what he was doing.`,
       };
       bits.push((m.won ? winBank : lossBank)[tier]());
-      bits.push(`${splitSentence(p, false)}${rosterSentence(p, idx * 3, !!m.won)}`);
+      bits.push(splitSentence(p, false), scoringDaysSentence(p), ...leaderboardLines(p));
 
       // The cruellest arithmetic available: how little it would have taken. Only worth
       // saying on a loss tight enough for it to be true.
@@ -13535,7 +13518,7 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
     } else {
       // A playoff round with no head-to-head on file (shouldn't normally happen, but the
       // numbers are still worth printing rather than dropping the section entirely).
-      bits.push(`${splitSentence(p, true)}${rosterSentence(p, idx * 3, !stage.isFinal)}`);
+      bits.push(splitSentence(p, true), scoringDaysSentence(p), ...leaderboardLines(p));
     }
 
     // Standout individual games belong to the round the roast is actually about.
@@ -13553,46 +13536,8 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
       bits.push(pick(gameBank, idx * 7));
     }
 
-    section(stage.label, bits.filter(Boolean).join(' '));
+    section(stage.label, bits.filter(Boolean).join('\n'));
   });
-
-  // ---- day-by-day, elimination round only ----------------------------------------
-  // Rewritten from the old "top 3 managers 7 times and the bottom 3 4 times" phrasing, where
-  // two unrelated numbers collided with nothing between them. Lead with how many scored days
-  // there were, then give each count its own clause against that denominator.
-  const de = perf.day_extremes;
-  if (de && de.totalDays > 0) {
-    const dayLines = [];
-    const top = de.managerTopDays;
-    const bottom = de.managerBottomDays;
-    const roundTitle = `${roundLabel.charAt(0).toUpperCase()}${roundLabel.slice(1)}`;
-    if (top > 0 && bottom > 0) {
-      dayLines.push(
-        `${roundTitle} ran ${de.totalDays} scored days. ${manager} posted a top-3 score in the league on ${top} of them, and a bottom-3 score on ${bottom}.`
-      );
-    } else if (top > 0) {
-      dayLines.push(
-        `${roundTitle} ran ${de.totalDays} scored days. ${manager} posted a top-3 score in the league on ${top} of them, and never once landed in the bottom 3.`
-      );
-    } else if (bottom > 0) {
-      dayLines.push(
-        `${roundTitle} ran ${de.totalDays} scored days. ${manager} landed in the league's bottom 3 on ${bottom} of them, and cracked the top 3 exactly zero times.`
-      );
-    } else {
-      dayLines.push(
-        `${roundTitle} ran ${de.totalDays} scored days, and ${manager} finished none of them in the league's top 3 or bottom 3. Anonymous throughout.`
-      );
-    }
-    if (de.standoutTopPlayers.length) {
-      const names = de.standoutTopPlayers.map((p) => `${p.name} (${p.count} days)`).join(', ');
-      dayLines.push(`Regulars on the league's daily best-players list: ${names}.`);
-    }
-    if (de.standoutBottomPlayers.length) {
-      const names = de.standoutBottomPlayers.map((p) => `${p.name} (${p.count} days)`).join(', ');
-      dayLines.push(`Regulars on the league's daily worst-players list: ${names}.`);
-    }
-    section('Day by day', dayLines.join(' '));
-  }
 
   return parts.join('\n\n');
 }
@@ -13637,9 +13582,16 @@ function recentFallbackTemplateIds(sd, round, { includeCurrentRound = true } = {
 function roastPromptRankLines(perf) {
   const line = (label, p, roleWord) => {
     if (!p || !p.rank || !p.of) return null;
-    return `${label}: ${p.name} — ${p.pts} pts, ${roastOrdinal(p.rank)} of ${p.of} ${roleWord} rostered in this round`;
+    // days_led says whether a good total was earned steadily or in one loud afternoon —
+    // the difference between "carried the team" and "had a game once".
+    const days =
+      p.days_led > 0 ? `, was this roster's best ${roleWord.slice(0, -1)} on ${p.days_led} separate days` : '';
+    return `${label}: ${p.name} — ${p.pts} pts, ${roastOrdinal(p.rank)} of ${p.of} ${roleWord} rostered in this round${days}`;
   };
   const rankTag = (r) => (r && r.rank && r.of ? `${roastOrdinal(r.rank)} of ${r.of} managers` : null);
+  const dayList = (days) => (days || []).map((d) => `${fmtRoastShortDate(d.date)} (${d.score})`).join(', ') || null;
+  const bestDays = dayList(perf.top_days);
+  const worstDays = perf.scored_days > 5 ? dayList(perf.bottom_days) : null;
   const lines = [
     perf.batting_rank || perf.pitching_rank
       ? `League rank for this round: hitting ${rankTag(perf.batting_rank) || 'n/a'}, pitching ${rankTag(perf.pitching_rank) || 'n/a'}`
@@ -13648,6 +13600,8 @@ function roastPromptRankLines(perf) {
     line('Worst hitter', perf.worst_batter_ranked, 'hitters'),
     line('Best pitcher', perf.best_pitcher_ranked, 'pitchers'),
     line('Worst pitcher', perf.worst_pitcher_ranked, 'pitchers'),
+    bestDays ? `Their best scoring days this round: ${bestDays}` : null,
+    worstDays ? `Their worst: ${worstDays}` : null,
   ].filter(Boolean);
   if (!lines.length) return '';
   return `${lines.join('\n')}\n(Ranks are league-wide against every other player at the same position this round — use them, a bare point total says nothing about whether it was any good.)\n`;

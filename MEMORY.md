@@ -2551,3 +2551,45 @@ finalized and dumped: both button pairs render with the right round bound, `rege
 rewrote exactly the 4 QF-eliminated managers with the new sectioned page context and correct
 round/outcome, and `repostRoundRoasts('QF')` failed gracefully ("Slack webhook not configured")
 rather than throwing.
+
+## Day-by-day tally replaced with a per-round summary (2026-08-03)
+
+**Why.** The "Day by day" section counted how often the manager finished top-3/bottom-3 leaguewide
+across the round. Two problems: it was a bare tally with no dates or scores attached, and it existed
+only for the elimination round because the leaguewide sweep was too expensive to run per round.
+
+**Replaced with, in EVERY round section:** the manager's own three best and three worst scoring days
+(date + score), and a top-3/bottom-3 leaderboard per position carrying each player's round total,
+league rank among same-role players, and how many days they were the best on that roster at that
+position.
+
+**The perf win that made it possible.** Everything above derives from this manager's own weekly and
+daily rows, which `buildManagerPerformanceForRoast` already walks. The old tally needed
+`computeDailyHighLow` per date — a leaguewide sweep — which is why it was gated behind
+`skipDayExtremes` for earlier rounds. Deleting `computeRoundDayExtremesForRoast` removed the only
+caller of `computeDailyHighLow` in the roast path entirely: the roast context is now both richer
+and cheaper, and `skipDayExtremes` is gone. `computeDailyHighLow`'s `bottomPlayersByScore` field
+existed solely for that tally and had no other consumer, so it went too.
+
+**Three things that only showed up in real output:**
+
+- `days_led` is printed for the top-3 only. On a five-hitter roster over thirty days everybody leads
+  sometimes, so "best on 6 days" sitting next to a name filed under `Worst:` reads as praise and
+  muddles the contrast.
+- The two lists overlap on short rosters (top 3 and bottom 3 of five players share the middle one).
+  The bottom list drops any name already in the top list rather than printing it twice — which is
+  why a five-man roster shows three best and two worst, not three and three.
+- Same for days: with ≤5 scored days the best and worst lists are the same days in opposite order,
+  so the worst list is suppressed.
+
+**Formatting.** With top-3 AND bottom-3 per position, a round section became a wall of text. Section
+bits are now joined with `\n` (blank line still separates sections), and the roster page renders
+single newlines as `<br>` — result, split, days, hitters, pitchers each get their own line.
+`rosterSentence` was deleted: it named one player per role, which the leaderboard now supersedes,
+and keeping both printed the same names twice.
+
+The prompt gets the new signal too — `roastPromptRankLines` now carries days-led per player and the
+best/worst scoring days, so the joke can tell "carried the team" from "had one loud afternoon".
+
+**Verified** end to end through the real endpoint on a synthetic season (QF exit, PP exit, Finals
+champion), plus screenshots at 1280px and 390px.

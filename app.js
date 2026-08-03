@@ -8085,16 +8085,21 @@ function renderRosterData(managerName, isCommissioner) {
     // highlights) added alongside the punchy joke that also goes to Slack — Slack keeps
     // just roast.text since the combined post already stacks one roast per manager.
     // Paragraphs are joined with a blank line server-side; render each as its own <p>.
-    // A paragraph may open with a `[[Section label]]` marker (buildRoastPageContext emits one
-    // per round the manager played — Pool Play, Quarterfinals, Day by day…); pull it out and
-    // render it as a heading chip. Paragraphs without a marker — including every roast stored
-    // before sectioning existed — render exactly as they always did.
+    // Blank lines separate sections; single newlines separate the lines WITHIN one (the
+    // result, the hitting/pitching split, the scoring days, the hitter and pitcher
+    // leaderboards). A section may open with a `[[Section label]]` marker
+    // (buildRoastPageContext emits one per round the manager played — Pool Play,
+    // Quarterfinals…); pull it out and render it as a heading chip. Sections without a marker
+    // — including every roast stored before sectioning existed — render exactly as before.
+    const asLines = (s) => esc(s).replace(/\n/g, '<br>');
     const contextHtml = roast.page_context
       ? `<div class="roast-context">${roast.page_context
           .split('\n\n')
           .map((p) => {
             const m = p.match(/^\[\[([^\]]+)\]\]\s*([\s\S]*)$/);
-            return m ? `<p><span class="roast-context-label">${esc(m[1])}</span>${esc(m[2])}</p>` : `<p>${esc(p)}</p>`;
+            return m
+              ? `<p><span class="roast-context-label">${esc(m[1])}</span>${asLines(m[2])}</p>`
+              : `<p>${asLines(p)}</p>`;
           })
           .join('')}</div>`
       : '';
