@@ -2263,3 +2263,58 @@ post is byte-identical every morning.
 
 **If duplicates ever return, start from "find the sender", not from the code.** The scoreboard
 guards have now been verified correct twice.
+
+## "End Quarterfinals" 409'd, didn't stick, and carried rosters into SF Week 1 (2026-08-03)
+
+**Symptom (commissioner, live).** Clicking **End Quarterfinals** raised the "Your view was out of
+date, so that change was not saved" alert and reloaded; the button stayed active. A Slack
+`:no_entry: Blocked a destructive season save (2026)` fired listing six managers with
+`SF|Week 1 roster shrank (B 4→0, P 3→0)`. No round-end Slack post with roasts, and the commissioner
+submission panel still read **Semifinals — pending finalization**.
+
+**Root cause (one click, two full-season saves built from two different snapshots).**
+`finalizeRound()` took its own `getSeasons()` deep copy, then called `advancePlayers()`, which took
+a **second independent copy**, mutated it and saved it — after which `finalizeRound` saved its own
+now-stale first copy on top. The second payload lacked the SF Week 1 rosters the first had just
+written, so it rewound the local cache and hit the server as a destructive/stale save. Because
+`finalized_rounds` rode on that rejected payload, **QF was never finalized** — which is the single
+cause of all three reported symptoms: `getSFParticipants()` returns null without `finalized_rounds`
+including `'QF'` (→ "pending finalization"), and the follow-up **"Advance SF Winners & Dump QF Loser
+Rosters"** button — the thing that generates QF roasts and posts the round-end Slack — only renders
+once QF is finalized. (The roasts visible on eliminated managers' pages were the older Pool Play
+ones.)
+
+**Second bug, same click.** Advancing into SF Week 1 (index 12) is a **period boundary**, where the
+CORE SCORING INVARIANT forbids carry-forward — the new period is owned by its submissions. It wrote
+prior-round rosters, unbacked by `roster_dates`, for every manager holding a QF Week 2 roster,
+QF losers included. `finalizeRound` did this for QF→SF (12) and SF→Finals (14); the PP→QF (10) call
+was already dead code behind an early `return`.
+
+**Third bug, the very next step.** `dumpPlayoffLosers()` removed the losers' next-round submissions
+by mutating `sd.period_submissions` and saving the season — but the per-year save treats
+`initial_submissions`/`period_submissions` as **server-authoritative** and unconditionally restores
+the stored copy, so every "dump" left the losers' SF/Finals submissions intact. Now goes through
+`removeSubmissionRemote()` (the atomic DELETE endpoint), then re-reads before saving `eliminated`/
+`losers_dumped`.
+
+**Fix (app.js only).** `advancePlayers` split into pure mutator `applyAdvancePlayers(sd, weekIndex)`
+
+- a thin `window.advancePlayers` wrapper — **the caller owns the save**, so one click writes exactly
+  one payload. `applyAdvancePlayers` refuses period-boundary weeks (new client-side
+  `isPeriodBoundaryWeek`, mirror of the server's), and the Advance Players button is replaced on those
+  weeks by a note explaining the round comes from submissions. `finalizeRound` is now `async`, mutates
+  one snapshot, does one awaited save, and only re-renders once the save is confirmed — a rejected
+  save leaves the button live instead of showing a finalization the server refused. Its unused
+  `weekIndex` param is gone (all four call sites updated).
+
+**Verified E2E** (Playwright, synthetic 8-manager season re-dated so QF Week 2 ended yesterday).
+_Before the fix_ the drive reproduced production exactly: two POSTs (`200` then `409`), the verbatim
+"out of date" alert, QF unfinalized, no dump button, and 8 unbacked `SF|Week 1` rosters + 64
+zero-stat rows. _After_: single `POST -> 200`, zero alerts, `finalized_rounds ["PP","QF"]`,
+`advanced_weeks []`, zero SF rosters/rows, dump button present and issuing real submission DELETEs,
+and **all 8 per-manager totals unchanged (delta 0)** — the §7 invariant vetting.
+
+**Repair for a season already polluted:** `POST /api/seasons/:year/purge-orphan-boundary-rosters`
+(dry-run first) clears boundary-week rosters not backed by a submission. Validated against the
+damaged fixture: cleared 8, `moved_totals: []`. A leftover `advanced_weeks: [12]` is cosmetic once
+the button is hidden at boundaries. Re-clicking End Quarterfinals afterwards then succeeds cleanly.
