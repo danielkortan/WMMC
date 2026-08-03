@@ -14560,6 +14560,55 @@ function findManagerForPlayer(seasonData, playerName, type) {
   return null;
 }
 
+// Bracket-stage labels for the roast repair actions. Distinct from the `ROUND_LABELS` in
+// js/scoring.js, which is keyed by SCORING round (PP1/PP2 separately) — roasts are keyed by
+// bracket stage, where Pool Play is one thing.
+const ROUND_LABELS_FOR_ROAST = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+
+// The two commissioner roast-repair buttons, for any round that has already been roasted.
+// Both exist for the same reason: the roast bank and the page-context builder change over
+// time, and a round that was roasted under the old code has no other way back. Regenerate
+// touches only the stored roasts (roster pages); repost also sends the combined message.
+function roastRepairToolsHtml(round) {
+  const label = ROUND_LABELS_FOR_ROAST[round] || round;
+  const repostWhat =
+    round === 'PP'
+      ? 'reposts the combined playoff-field + Hall of Shame message'
+      : 'reposts the combined results + Hall of Shame message';
+  return `<div style="margin-top:0.5rem;">
+      <button class="btn btn-sm btn-secondary" onclick="regenerateRoundRoasts('${round}')">Regenerate Roasts (No Slack Post)</button>
+      <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every ${esc(label)} roast in place. Does NOT post to Slack &mdash; roasts just update on managers' roster pages.</span>
+    </div>
+    <div style="margin-top:0.5rem;">
+      <button class="btn btn-sm btn-secondary" onclick="repostRoundRoasts('${round}')">Regenerate &amp; Repost Roasts to Slack</button>
+      <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every ${esc(label)} roast and ${repostWhat} to the scoreboard channel.</span>
+    </div>`;
+}
+
+// Who this round's Hall of Shame is. `sd.eliminated` is the authoritative record — every
+// finalize/dump path writes it, and it reflects any commissioner correction made since —
+// so a repair action reads it rather than recomputing the bracket, which could disagree.
+// Stored roasts are folded in as a fallback for the window where a dump wrote roasts but
+// the eliminated map didn't land; podium finishers are excluded (they have their own set).
+function eliminatedInRound(sd, round) {
+  const set = new Set();
+  for (const [m, r] of Object.entries((sd && sd.eliminated) || {})) if (r === round) set.add(m);
+  for (const [m, r] of Object.entries((sd && sd.roasts) || {})) {
+    if (r && r.round === round && (r.outcome || 'eliminated') === 'eliminated') set.add(m);
+  }
+  return [...set].sort();
+}
+
+// Finals only: the three podium finishers (next year's pool-selection captains), read back
+// from their stored roast `outcome` so a repost can never reshuffle who was crowned.
+const PODIUM_ORDER = { champion: 0, runner_up: 1, third: 2 };
+function podiumRolesFromRoasts(sd) {
+  return Object.entries((sd && sd.roasts) || {})
+    .filter(([, r]) => r && r.round === 'Finals' && PODIUM_ORDER[r.outcome] !== undefined)
+    .map(([manager, r]) => ({ manager, outcome: r.outcome }))
+    .sort((a, b) => PODIUM_ORDER[a.outcome] - PODIUM_ORDER[b.outcome]);
+}
+
 function renderWeeklyUploadSections() {
   const container = document.getElementById('weekly-upload-sections');
   const seasons = getSeasons();
@@ -14680,16 +14729,7 @@ function renderWeeklyUploadSections() {
         </button>
         ${ppFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Pool Play finalized. Managers advanced to Quarterfinals.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize pool play and advance managers to playoffs.</span>'}
       </div>`;
-      if (ppFinalized) {
-        html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-secondary" onclick="regeneratePoolPlayRoastsOnly()">Regenerate Roasts (No Slack Post)</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast in place. Does NOT post to Slack — roasts just update on managers' roster pages.</span>
-        </div>
-        <div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-secondary" onclick="repostPoolPlayRoasts()">Regenerate &amp; Repost Roasts to Slack</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast and reposts the combined playoff-field + Hall of Shame message to the scoreboard channel.</span>
-        </div>`;
-      }
+      if (ppFinalized) html += roastRepairToolsHtml('PP');
     } else if (i === 11) {
       // Week 12 (QF Week 2) - End Quarterfinals
       const qfFinalized = finalized.includes('QF');
@@ -14707,6 +14747,7 @@ function renderWeeklyUploadSections() {
         </div>`;
       } else if (qfDumped) {
         html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">QF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
+        html += roastRepairToolsHtml('QF');
       }
     } else if (i === 13) {
       // Week 14 (SF Week 2) - End Semifinals
@@ -14725,6 +14766,7 @@ function renderWeeklyUploadSections() {
         </div>`;
       } else if (sfDumped) {
         html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
+        html += roastRepairToolsHtml('SF');
       }
     } else if (i === 15) {
       // Week 16 (Finals Week 2) - End Finals
@@ -14743,6 +14785,7 @@ function renderWeeklyUploadSections() {
         </div>`;
       } else if (finalsDumped) {
         html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Champion crowned. Runner-up/4th roasted.</span></div>`;
+        html += roastRepairToolsHtml('Finals');
       }
     }
 
@@ -15276,45 +15319,65 @@ async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenera
   }
 }
 
-// Commissioner action: re-roll every Pool Play roast server-side WITHOUT posting to Slack —
-// for touching up stored roasts (e.g. after the roast template bank changes) without sending
-// a second "Pool Play is over" message to the channel. Reuses the same per-manager
-// generate-roast call the initial elimination dump uses; roasts update on roster pages via
-// the re-sync, no Slack webhook involved.
-window.regeneratePoolPlayRoastsOnly = async function () {
+// Commissioner repair action: re-roll every stored roast for a round server-side WITHOUT
+// posting to Slack — for refreshing roasts after the roast bank or the page-context builder
+// changes, without sending a second round-end message to the channel. Reuses the same
+// per-manager generate-roast call the elimination dump uses, and preserves each manager's
+// stored `outcome`, so a champion is re-roasted as a champion and not eliminated.
+window.regenerateRoundRoasts = async function (round) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
-  if (!confirm('Regenerate every Pool Play roast? This does NOT post anything to Slack.')) return;
 
-  const qualifiers = getQFQualifiers(sd) || [];
-  const nonQualifiers = getManagers()
-    .map((m) => m.name)
-    .filter((m) => !qualifiers.includes(m));
-  for (const m of nonQualifiers) {
-    await generateRoastForManager(m, 'PP');
+  const label = ROUND_LABELS_FOR_ROAST[round] || round;
+  const losers = eliminatedInRound(sd, round);
+  const podium = round === 'Finals' ? podiumRolesFromRoasts(sd) : [];
+  const total = losers.length + podium.length;
+  if (total === 0) {
+    alert(`No ${label} roasts on file to regenerate.`);
+    return;
   }
-  alert(
-    `Regenerated ${nonQualifiers.length} Pool Play roast${nonQualifiers.length === 1 ? '' : 's'}. Nothing was posted to Slack.`
-  );
+  if (!confirm(`Regenerate ${total} ${label} roast${total === 1 ? '' : 's'}? This does NOT post anything to Slack.`)) {
+    return;
+  }
+
+  // Sequential: each generate-roast is a read-modify-write of db.json, so concurrent calls
+  // would clobber each other's stored roast.
+  for (const m of losers) {
+    await generateRoastForManager(m, round);
+  }
+  for (const w of podium) {
+    await generateRoastForManager(w.manager, round, w.outcome);
+  }
+  alert(`Regenerated ${total} ${label} roast${total === 1 ? '' : 's'}. Nothing was posted to Slack.`);
   renderWeeklyUploadSections();
 };
 
-// Commissioner repair action: re-roll every Pool Play roast server-side and repost the
-// combined Slack message (playoff field + Hall of Shame). Covers the failure modes of the
-// original post — a roast lost to a stale save, or the whole batch coming from the static
-// fallback — without having to re-finalize anything.
-window.repostPoolPlayRoasts = async function () {
+// Commissioner repair action: re-roll every roast for a round server-side AND repost the
+// combined Slack message (playoff field or round results, then the Hall of Shame). Covers
+// the failure modes of the original post — a roast lost to a stale save, the whole batch
+// coming from the static fallback, or the roast build having changed since — without having
+// to re-finalize anything. Posts a NEW message; it cannot edit the original.
+window.repostRoundRoasts = async function (round) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
-  if (!confirm('Re-roll every Pool Play roast and repost the combined Slack message?')) return;
 
-  const qualifiers = getQFQualifiers(sd) || [];
-  const nonQualifiers = getManagers()
-    .map((m) => m.name)
-    .filter((m) => !qualifiers.includes(m));
-  const ok = await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers, true);
+  const label = ROUND_LABELS_FOR_ROAST[round] || round;
+  const losers = eliminatedInRound(sd, round);
+  const podium = round === 'Finals' ? podiumRolesFromRoasts(sd) : [];
+  if (losers.length + podium.length === 0) {
+    alert(`No ${label} roasts on file to repost.`);
+    return;
+  }
+  if (!confirm(`Re-roll every ${label} roast and post a NEW combined message to the scoreboard channel?`)) {
+    return;
+  }
+
+  // `qualifiers` only feeds the PP playoff-field summary; the server builds the playoff
+  // rounds' opener from the real matchup scores and ignores it.
+  const qualifiers = round === 'PP' ? getQFQualifiers(sd) || [] : null;
+  const ok = await postCombinedRoastsToSlack(round, qualifiers, losers, true, podium.length ? podium : undefined);
 
   // Re-sync so the regenerated roasts show on roster pages immediately.
   try {

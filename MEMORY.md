@@ -2484,3 +2484,36 @@ unaffected.
 `/api/seasons/:year/generate-roast` endpoint (no `ANTHROPIC_API_KEY`, so the bank wrote the jokes):
 QF exit, PP exit, Finals champion, and Finals runner-up all render correct sections; screenshotted
 the banner at 1280px and 390px.
+
+## Roast repair buttons generalized to every round (2026-08-03)
+
+**Gap.** "Regenerate Roasts" and "Regenerate & Repost Roasts to Slack" existed only on the Pool
+Play block (`i === 9`). Once QF/SF/Finals were dumped the admin panel showed a static "loser
+rosters dumped" line and nothing else — no way to refresh roasts after the bank or the
+page-context builder changed, short of a browser-console API call. The PP buttons exist for
+exactly that scenario, so the fix is generalization, not new capability.
+
+`regeneratePoolPlayRoastsOnly` / `repostPoolPlayRoasts` → `regenerateRoundRoasts(round)` /
+`repostRoundRoasts(round)`, plus `roastRepairToolsHtml(round)` rendered under PP (when
+finalized) and under QF/SF/Finals (when dumped).
+
+**The design decision worth keeping: read who was eliminated from stored state, not from the
+bracket.** The PP versions recomputed non-qualifiers via `getQFQualifiers`. A repair action must
+not do that — by the time you're reposting, the round is long finalized and `sd.eliminated` may
+carry commissioner corrections the recomputed bracket would silently overwrite. `eliminatedInRound`
+reads `sd.eliminated` (authoritative; every finalize/dump path writes it) and folds in stored
+roasts as a fallback for the window where a dump wrote roasts but the eliminated map didn't land.
+
+**Finals podium round-trips through `roast.outcome`.** `podiumRolesFromRoasts` reads champion /
+runner_up / third back off the stored roasts rather than re-deriving the bracket winner, so a
+repost can never crown someone different from the original post. Verified: seeding the four Finals
+roasts and reading back gives podium = [champion, runner_up, third] and Hall of Shame = [4th]
+only — the same split `crownChampionAndRoastFinals` produces.
+
+Regeneration stays **sequential** — each `generate-roast` is a read-modify-write of `db.json`.
+
+**Verified** by driving the real admin panel with Playwright against a fixture with PP+QF
+finalized and dumped: both button pairs render with the right round bound, `regenerateRoundRoasts('QF')`
+rewrote exactly the 4 QF-eliminated managers with the new sectioned page context and correct
+round/outcome, and `repostRoundRoasts('QF')` failed gracefully ("Slack webhook not configured")
+rather than throwing.
