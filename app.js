@@ -14620,8 +14620,11 @@ function renderWeeklyUploadSections() {
         </div>
         <div class="upload-week-body" id="upload-week-body-${i}" style="display:${isExpanded ? 'block' : 'none'};">`;
 
-    // Advance Players button (not for the first week)
-    if (hasPriorWeek) {
+    // Advance Players button (not for the first week, and never across a period boundary —
+    // PP2/QF/SF/Finals Week 1 is owned by that period's submissions, so carrying the previous
+    // round's rosters in would hand every manager, eliminated ones included, a roster they
+    // never submitted. See the CORE SCORING INVARIANT in CLAUDE.md.)
+    if (hasPriorWeek && !isPeriodBoundaryWeek(i)) {
       const alreadyAdvanced = (sd.advanced_weeks || []).includes(i);
       const autoAdvanced = (sd.auto_advanced_weeks || []).includes(i);
       const btnDisabled = alreadyAdvanced ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : '';
@@ -14634,6 +14637,10 @@ function renderWeeklyUploadSections() {
         <button class="btn btn-sm btn-secondary" onclick="advancePlayers(${i})" ${btnDisabled}>Advance Players</button>
         <span class="text-muted" style="font-size:0.78rem;">${statusText}</span>
         <span id="advance-status-${i}"></span>
+      </div>`;
+    } else if (hasPriorWeek) {
+      html += `<div style="margin:0.5rem 0;">
+        <span class="text-muted" style="font-size:0.78rem;">Starts a new submission period &mdash; rosters come from each manager's ${esc(s.round)} submission, not carried forward from ${SEASON_SCHEDULE[i - 1].label}.</span>
       </div>`;
     }
 
@@ -14661,7 +14668,7 @@ function renderWeeklyUploadSections() {
       // Week 10 (PP2 Week 5) - End Pool Play
       const ppFinalized = finalized.includes('PP');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${ppFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('PP', ${i})" ${ppFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${ppFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('PP')" ${ppFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${ppFinalized ? 'Pool Play Ended' : 'End Pool Play'}
         </button>
         ${ppFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Pool Play finalized. Managers advanced to Quarterfinals.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize pool play and advance managers to playoffs.</span>'}
@@ -14681,7 +14688,7 @@ function renderWeeklyUploadSections() {
       const qfFinalized = finalized.includes('QF');
       const qfDumped = (sd.losers_dumped || []).includes('QF');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${qfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('QF', ${i})" ${qfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${qfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('QF')" ${qfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${qfFinalized ? 'Quarterfinals Ended' : 'End Quarterfinals'}
         </button>
         ${qfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Quarterfinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize quarterfinals and advance winners to semifinals.</span>'}
@@ -14699,7 +14706,7 @@ function renderWeeklyUploadSections() {
       const sfFinalized = finalized.includes('SF');
       const sfDumped = (sd.losers_dumped || []).includes('SF');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF', ${i})" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF')" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${sfFinalized ? 'Semifinals Ended' : 'End Semifinals'}
         </button>
         ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to finals.</span>'}
@@ -14717,7 +14724,7 @@ function renderWeeklyUploadSections() {
       const finalsFinalized = finalized.includes('Finals');
       const finalsDumped = (sd.losers_dumped || []).includes('Finals');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals', ${i})" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals')" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${finalsFinalized ? 'Season Complete' : 'End Finals'}
         </button>
         ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
@@ -14825,22 +14832,38 @@ window.clearWeekData = async function (weekIndex) {
   }
 };
 
-// Advance Players: copy per-week rosters from prior week to current week for all managers.
-// Creates zero-stat records for all advanced players. Marks the week as advanced to prevent re-clicking.
-window.advancePlayers = function (weekIndex) {
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || weekIndex < 1) return;
+// True when week `i` is the first week of a new scoring period (PP2/QF/SF/Finals Week 1).
+// Mirror of server.js' isPeriodBoundaryWeek — keep the two in step.
+function isPeriodBoundaryWeek(i) {
+  return (
+    i > 0 && SEASON_SCHEDULE[i] && SEASON_SCHEDULE[i - 1] && SEASON_SCHEDULE[i].round !== SEASON_SCHEDULE[i - 1].round
+  );
+}
+
+// Copy per-week rosters from the prior week into `weekIndex` for all active managers and create
+// the zero-stat weekly rows those players need, marking the week advanced so it can't run twice.
+//
+// Pure mutator on the `sd` it is handed — the CALLER owns the save. That split is the fix for the
+// round-advance clobber: finalizeRound used to read its own getSeasons() snapshot, then call an
+// advancePlayers that read a SECOND independent snapshot, mutated it and saved it, after which
+// finalizeRound saved its now-stale first snapshot on top. Two full-season payloads from one
+// click, the later one missing the rosters the earlier one had just written — which rewound the
+// local cache, tripped the server's destructive-save guard ("roster shrank B 4→0"), and left
+// finalized_rounds unwritten. One snapshot, one save.
+//
+// Returns { ok, advanced, reason }; reason is 'boundary' | 'already' | 'invalid' when ok is false.
+function applyAdvancePlayers(sd, weekIndex) {
+  if (!sd || weekIndex < 1) return { ok: false, advanced: 0, reason: 'invalid' };
+
+  // CORE SCORING INVARIANT: a new submission period starts fresh from its own submission —
+  // players never carry across a period boundary. Advancing into PP2/QF/SF/Finals Week 1 would
+  // give every manager holding a prior-round roster (eliminated managers included) players they
+  // never submitted, which is exactly what purge-orphan-boundary-rosters exists to clean up.
+  if (isPeriodBoundaryWeek(weekIndex)) return { ok: false, advanced: 0, reason: 'boundary' };
 
   // Prevent double-click
   if (!sd.advanced_weeks) sd.advanced_weeks = [];
-  if (sd.advanced_weeks.includes(weekIndex)) {
-    const statusEl = document.getElementById(`advance-status-${weekIndex}`);
-    if (statusEl) {
-      statusEl.innerHTML = `<span class="text-muted" style="font-size:0.78rem;"> Players already advanced for this week.</span>`;
-    }
-    return;
-  }
+  if (sd.advanced_weeks.includes(weekIndex)) return { ok: false, advanced: 0, reason: 'already' };
 
   migrateRostersToWeekly(sd);
 
@@ -14961,20 +14984,56 @@ window.advancePlayers = function (weekIndex) {
 
   // Mark this week as advanced
   sd.advanced_weeks.push(weekIndex);
-  saveSeason(SELECTED_SEASON, sd);
+  return { ok: true, advanced, reason: null };
+}
 
-  const statusEl = document.getElementById(`advance-status-${weekIndex}`);
-  if (statusEl) {
-    statusEl.innerHTML =
-      advanced > 0
-        ? `<span class="success-text" style="font-size:0.78rem;"> Advanced ${advanced} manager roster${advanced > 1 ? 's' : ''}.</span>`
-        : `<span class="text-muted" style="font-size:0.78rem;"> All rosters already set for this week.</span>`;
+// Commissioner "Advance Players" button: read one snapshot, apply, save it, report.
+window.advancePlayers = async function (weekIndex) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const setStatus = (cls, txt) => {
+    const el = document.getElementById(`advance-status-${weekIndex}`);
+    if (el) el.innerHTML = `<span class="${cls}" style="font-size:0.78rem;"> ${txt}</span>`;
+  };
+
+  const result = applyAdvancePlayers(sd, weekIndex);
+  if (!result.ok) {
+    if (result.reason === 'already') setStatus('text-muted', 'Players already advanced for this week.');
+    else if (result.reason === 'boundary') {
+      setStatus(
+        'text-muted',
+        `${esc(SEASON_SCHEDULE[weekIndex].round)} starts a new submission period — rosters come from each manager's submission, not from the previous round.`
+      );
+    }
+    return;
   }
+
+  // saveSeason already alerts (and reloads) on a rejected save; leave the status line alone so a
+  // failure never reads as a success.
+  if (!(await saveSeason(SELECTED_SEASON, sd))) return;
+
+  setStatus(
+    result.advanced > 0 ? 'success-text' : 'text-muted',
+    result.advanced > 0
+      ? `Advanced ${result.advanced} manager roster${result.advanced > 1 ? 's' : ''}.`
+      : 'All rosters already set for this week.'
+  );
   renderWeeklyUploadSections();
 };
 
-// Finalize a round (End Pool Play, End QF, End SF, End Finals)
-window.finalizeRound = function (roundKey, weekIndex) {
+// Finalize a round (End Pool Play, End QF, End SF, End Finals).
+//
+// Every branch mutates ONE `sd` snapshot and writes it with ONE awaited save. Nothing re-renders
+// until that save is confirmed, so a rejected save leaves the button live and honest instead of
+// showing a finalized round the server never accepted.
+//
+// The next round is deliberately NOT roster-advanced here. QF/SF/Finals Week 1 each open a new
+// submission period, and players never carry across a period boundary (CORE SCORING INVARIANT) —
+// those rosters come from each manager's submission for the round. The follow-up "Advance
+// winners & dump loser rosters" button is what prunes the losers and posts the round-end Slack.
+window.finalizeRound = async function (roundKey) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
@@ -14987,49 +15046,37 @@ window.finalizeRound = function (roundKey, weekIndex) {
   // Lock in the playoff seeds at the moment pool play is confirmed. From here on the bracket
   // and qualification read this snapshot, so a later pool-play stat correction can't silently
   // reseed an in-progress playoff.
+  let qualifiers = [];
+  let nonQualifiers = [];
   if (roundKey === 'PP') {
     const snapshot = buildSeedingSnapshot(sd);
     if (snapshot) sd.confirmed_seeding = snapshot;
     // Mark pool-play non-qualifiers as eliminated and queue roasts
-    const qualifiers = getQFQualifiers(sd) || [];
+    qualifiers = getQFQualifiers(sd) || [];
     const allManagers = getManagers().map((m) => m.name);
-    const nonQualifiers = allManagers.filter((m) => !qualifiers.includes(m));
+    nonQualifiers = allManagers.filter((m) => !qualifiers.includes(m));
     if (!sd.eliminated) sd.eliminated = {};
     nonQualifiers.forEach((m) => {
       if (!sd.eliminated[m]) sd.eliminated[m] = 'PP';
     });
-    saveSeason(SELECTED_SEASON, sd);
-    renderWeeklyUploadSections();
-    init();
+  }
+
+  if (!(await saveSeason(SELECTED_SEASON, sd))) return; // saveSeason already alerted/reloaded
+
+  renderWeeklyUploadSections();
+  init();
+
+  if (roundKey === 'PP' && nonQualifiers.length > 0) {
     // Generate roasts in the background — sequentially, so concurrent generate-roast
     // read-modify-writes can't clobber each other's stored roast — then post ONE combined
     // Slack message (playoff field + QF matchups, then the roasts) to the scoreboard
     // channel and re-render so roasts appear. `qualifiers` is already seed-ordered.
-    (async () => {
-      for (const m of nonQualifiers) {
-        await generateRoastForManager(m, 'PP');
-      }
-      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers);
-      renderWeeklyUploadSections();
-    })();
-    return;
+    for (const m of nonQualifiers) {
+      await generateRoastForManager(m, 'PP');
+    }
+    await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers);
+    renderWeeklyUploadSections();
   }
-
-  // Auto-advance players to next round if applicable
-  if (roundKey === 'PP' && weekIndex < SEASON_SCHEDULE.length - 1) {
-    // Advance all managers to QF Week 1 (index 10)
-    window.advancePlayers(10);
-  } else if (roundKey === 'QF' && weekIndex < SEASON_SCHEDULE.length - 1) {
-    // Advance to SF Week 1 (index 12)
-    window.advancePlayers(12);
-  } else if (roundKey === 'SF' && weekIndex < SEASON_SCHEDULE.length - 1) {
-    // Advance to Finals Week 1 (index 14)
-    window.advancePlayers(14);
-  }
-
-  saveSeason(SELECTED_SEASON, sd);
-  renderWeeklyUploadSections();
-  init();
 };
 
 // Remove losing managers' next-round submissions, mark them eliminated, trigger roasts.
@@ -15039,30 +15086,18 @@ window.dumpPlayoffLosers = async function (round) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  if (!sd.eliminated) sd.eliminated = {};
-  if (!sd.period_submissions) sd.period_submissions = {};
+  const nextPeriod = round === 'QF' ? 'sf' : round === 'SF' ? 'finals' : null;
+  if (!nextPeriod) return;
 
-  let losers = [];
+  let losers;
   if (round === 'QF') {
     const qfQualifiers = getQFQualifiers(sd) || [];
     const sfParticipants = getSFParticipants(sd) || [];
     losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
-    const sfSubs = sd.period_submissions.sf || {};
-    losers.forEach((m) => {
-      delete sfSubs[m];
-      sd.eliminated[m] = 'QF';
-    });
-    sd.period_submissions.sf = sfSubs;
-  } else if (round === 'SF') {
+  } else {
     const sfParticipants = getSFParticipants(sd) || [];
     const finalsParticipants = getFinalsParticipants(sd) || [];
     losers = sfParticipants.filter((m) => !finalsParticipants.includes(m));
-    const finalsSubs = sd.period_submissions.finals || {};
-    losers.forEach((m) => {
-      delete finalsSubs[m];
-      sd.eliminated[m] = 'SF';
-    });
-    sd.period_submissions.finals = finalsSubs;
   }
 
   if (losers.length === 0) {
@@ -15070,10 +15105,29 @@ window.dumpPlayoffLosers = async function (round) {
     return;
   }
 
-  sd.losers_dumped = sd.losers_dumped || [];
-  sd.losers_dumped.push(round);
+  // Submissions are server-authoritative: the full-season save always keeps the server's copy of
+  // initial_submissions/period_submissions, so deleting them off a local `sd` and saving it was a
+  // no-op — the losers' next-round submissions survived every "dump". Remove them through the
+  // atomic endpoint instead, which is the only path that actually persists.
+  for (const m of losers) {
+    if (!(await removeSubmissionRemote(nextPeriod, m))) return; // already alerted
+  }
 
-  saveSeason(SELECTED_SEASON, sd);
+  // Re-read AFTER the deletions: removeSubmissionRemote rewrites the local cache and adopts a new
+  // _rev, so the pre-delete snapshot above is stale and would be rejected (or would re-mirror the
+  // submissions it just removed).
+  const fresh = getSeasons();
+  const freshSd = fresh[SELECTED_SEASON];
+  if (!freshSd) return;
+  if (!freshSd.eliminated) freshSd.eliminated = {};
+  losers.forEach((m) => {
+    freshSd.eliminated[m] = round;
+  });
+  freshSd.losers_dumped = freshSd.losers_dumped || [];
+  if (!freshSd.losers_dumped.includes(round)) freshSd.losers_dumped.push(round);
+
+  if (!(await saveSeason(SELECTED_SEASON, freshSd))) return; // saveSeason already alerted/reloaded
+
   for (const m of losers) {
     await generateRoastForManager(m, round);
   }
