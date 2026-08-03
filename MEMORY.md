@@ -2318,3 +2318,57 @@ and **all 8 per-manager totals unchanged (delta 0)** — the §7 invariant vetti
 (dry-run first) clears boundary-week rosters not backed by a submission. Validated against the
 damaged fixture: cleared 8, `moved_totals: []`. A leftover `advanced_weeks: [12]` is cosmetic once
 the button is hidden at boundaries. Re-clicking End Quarterfinals afterwards then succeeds cleanly.
+
+## Round-end Slack post rebuilt: results, margin ordering, matchup-aware roasts, Friday reminder (2026-08-03)
+
+Commissioner's verdict on the first working QF round-end post: "it worked, but it's not great."
+Five changes, all in `server.js` (Slack composition only — no scoring math touched).
+
+**1. Playoff rounds now open with the actual results.** The `summary` block was hardcoded
+PP-only, so a QF/SF post went straight into roasts and never said who won or who advanced.
+It now calls the existing `buildPlayoffMatchupsSlackText(sd, round, { final: true })` — the same
+builder the daily scoreboard uses, so the two posts can never disagree about a score. Renders
+every matchup with both totals, the B/P split, ✅/❌, and an "Advancing to the Semifinals: …"
+footer.
+
+**2. Eliminations are ordered by margin of defeat, narrowest first.** Alphabetical order buried
+the heartbreaker wherever the alphabet put it. Matchups are resolved ONCE into `matchupByManager`
+and reused for sorting, the per-manager line, and roast generation. PP (no head-to-head) and any
+unresolvable matchup fall back to alphabetical, sorted last.
+
+**3. Each roast carries its head-to-head line** — `lost to X 1,182.4–1,274.4 (by 92)`. Formatted
+with the same 1dp/thousands-separator formatter as the results block, so one number never appears
+twice in a message wearing two different faces.
+
+**4. Roasts can talk about the game.** The elimination prompt never mentioned the opponent, score,
+or margin — only a list of bad players. New `computeMatchupNarrativeForRoast(sd, round, manager,
+opponent)` walks the round's scored days accumulating both sides from `computeDailyHighLow`'s
+`managerTotals` (newly returned; the top/bottom lists are sliced to 3 and unusable for this), and
+derives lead changes, whether the loser ever led, their biggest lead, when they lost it for good,
+and wire-to-wire status. Fed to the prompt with explicit steers for the three interesting shapes
+(blown lead / never led / margin ≤ 25). `fallbackRoast` got a matching head-to-head bank for the
+no-API-key path. **Cross-check that matters:** the day-walk's final totals matched
+`playoffMatchupResultForRoast`'s weekly-rollup scores exactly for all four managers — two
+independent derivations agreeing.
+
+**5. Submission instructions moved to the Friday post.** A round ends Sunday and the next
+deadline is 8 days later, so the full walkthrough was read a week before it could be acted on.
+`buildNextRoundInstructions` (round-keyed) became `buildSubmissionInstructionsFor` (upcoming-round
+keyed) plus `buildSubmissionWindowBlock(sd, todayISO)`, which fires only when today is
+`roundStart − 3` (the same definition `getPeriodOpenDate` already uses for "window opens") and
+appends to the daily scoreboard blocks. The round-end post keeps only
+`buildDeadlineReminderLine` — one `:alarm_clock:` line with the Monday first pitch, rendered via
+the shared `periodLockLabel`, which now emits a real zone abbreviation (`8:00 PM EDT`) instead of
+a hardcoded `ET` that was wrong for half the season.
+
+**Verified E2E** with a Slack sink + Playwright on a synthetic season whose QF just ended, using
+daily rows and weekly rollups derived from the same deltas so they can't disagree. Confirmed:
+results block + advancement footer, margin order (92 → 133.1 → 196.45 → 562.85), head-to-head
+lines, the reminder line, the Friday block present on `start−3` and absent on every other day, and
+one narrative per manager including a genuine blown-lead case (led 2 of 14 days, up 28.1, lost it
+July 22). Per-manager totals unchanged.
+
+**Gotcha for the next fixture:** `buildPlayoffMatchupsSlackText` and `playoffMatchupResultForRoast`
+both return null without `sd.confirmed_seeding`, which is written by "End Pool Play" in the UI —
+a hand-built fixture that only sets `finalized_rounds: ['PP']` silently degrades to the old
+alphabetical, matchup-less post. Drive End Pool Play through the UI rather than faking it.

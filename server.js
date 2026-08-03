@@ -4874,6 +4874,10 @@ function computeDailyHighLow(sd, date) {
     // day, not the Slack post's stricter "worst players" bar.
     bottomPlayersByScore: [...allPlayers].reverse().slice(0, 3),
     worstPlayerOverall,
+    // Every manager's date-windowed total for this day, unsliced. The top/bottom lists above
+    // are cut to 3, so a head-to-head narrative (computeMatchupNarrativeForRoast) can't be
+    // built from them — it needs both sides of a matchup on every day, however they placed.
+    managerTotals,
   };
 }
 
@@ -6110,6 +6114,15 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         },
       ],
     });
+  }
+
+  // ---- Submission window (Friday before a playoff round's Monday first pitch only) ----
+  // Deliberately last: it is a call to action, so it reads after the scores rather than
+  // pushing them down. Empty string on every other day.
+  const submissionBlock = buildSubmissionWindowBlock(seasonData, todayISO);
+  if (submissionBlock) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: submissionBlock } });
   }
 
   return {
@@ -12152,6 +12165,101 @@ function computeRoundDayExtremesForRoast(sd, manager, round) {
   };
 }
 
+// Day-by-day story of a head-to-head playoff matchup, written from `manager`'s side (the
+// eliminated one). A final score alone can't tell a wire-to-wire beatdown apart from a lead
+// blown on the last Sunday, and those deserve very different roasts — this supplies the
+// difference.
+//
+// Walks the round's scored dates in order, accumulating each side's date-windowed daily
+// total from computeDailyHighLow's managerTotals, so attribution honours roster windows and
+// swaps exactly like every other score in the app. Returns null when there is no opponent or
+// the round has no scored days.
+function computeMatchupNarrativeForRoast(sd, round, manager, opponent) {
+  if (!manager || !opponent) return null;
+  const roundMap = { PP: ['PP1', 'PP2'], QF: ['QF'], SF: ['SF'], Finals: ['Finals'] };
+  const rounds = roundMap[round] || [round];
+  const dates = new Set();
+  (sd.daily_batting || []).forEach((r) => {
+    if (rounds.includes(r.round)) dates.add(r.date);
+  });
+  (sd.daily_pitching || []).forEach((r) => {
+    if (rounds.includes(r.round)) dates.add(r.date);
+  });
+  const ordered = [...dates].sort();
+  if (ordered.length === 0) return null;
+
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const dayTotal = (totals, name) => {
+    const t = totals[name] || {};
+    return (t.batting || 0) + (t.pitching || 0);
+  };
+
+  let mine = 0;
+  let theirs = 0;
+  let leader = null; // who was ahead after the previous scored day
+  let leadChanges = 0;
+  let myDaysLed = 0;
+  let theirDaysLed = 0;
+  let myBiggestLead = 0;
+  let lostLeadOn = null; // last day the lead flipped TO the opponent
+  let scoredDays = 0;
+
+  for (const date of ordered) {
+    const hl = computeDailyHighLow(sd, date);
+    if (!hl) continue;
+    scoredDays++;
+    const totals = hl.managerTotals || {};
+    mine += dayTotal(totals, manager);
+    theirs += dayTotal(totals, opponent);
+
+    const nowLeader = mine > theirs ? manager : theirs > mine ? opponent : null;
+    if (nowLeader === manager) {
+      myDaysLed++;
+      myBiggestLead = Math.max(myBiggestLead, mine - theirs);
+    } else if (nowLeader === opponent) {
+      theirDaysLed++;
+    }
+    if (nowLeader && leader && nowLeader !== leader) {
+      leadChanges++;
+      if (nowLeader === opponent) lostLeadOn = date;
+    }
+    if (nowLeader) leader = nowLeader;
+  }
+  if (scoredDays === 0) return null;
+
+  const fmtDay = (iso) =>
+    new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' });
+
+  const everLed = myDaysLed > 0;
+  const wireToWire = !everLed && theirDaysLed > 0;
+  let summary;
+  if (wireToWire) {
+    summary = `${opponent} led wire-to-wire — ${manager} was never once in front across ${scoredDays} scored days.`;
+  } else if (leadChanges === 0) {
+    summary = `The lead never changed hands.`;
+  } else {
+    summary =
+      `The lead changed ${leadChanges} time${leadChanges === 1 ? '' : 's'}. ${manager} led on ${myDaysLed} of ` +
+      `${scoredDays} scored days and was ahead by as much as ${r2(myBiggestLead)} pts` +
+      (lostLeadOn ? `, then lost the lead for good on ${fmtDay(lostLeadOn)}.` : '.');
+  }
+
+  return {
+    scoredDays,
+    leadChanges,
+    everLed,
+    wireToWire,
+    daysLed: myDaysLed,
+    opponentDaysLed: theirDaysLed,
+    biggestLead: r2(myBiggestLead),
+    lostLeadOn,
+    lostLeadOnLabel: lostLeadOn ? fmtDay(lostLeadOn) : null,
+    finalScore: r2(mine),
+    opponentFinalScore: r2(theirs),
+    summary,
+  };
+}
+
 // Build a plain-text performance summary for the given manager in the given round.
 // Alongside the worst-ranked batters/pitchers (used since the original roast), this also
 // surfaces the manager's best batter/pitcher, single best/worst day, and day-by-day
@@ -12511,7 +12619,7 @@ function fmtRoastShortDate(iso) {
     : null;
 }
 
-function fallbackRoast(manager, round, perf) {
+function fallbackRoast(manager, round, perf, matchup, narrative) {
   const worst = parseRoastEntry(perf.batters_ranked_worst_first[0]) ||
     parseRoastEntry(perf.pitchers_ranked_worst_first[0]) || { name: 'their entire roster', pts: perf.total };
   const other =
@@ -12650,7 +12758,42 @@ function fallbackRoast(manager, round, perf) {
         ]
       : [];
 
-  const bank = [...core, ...betrayal, ...dayBank];
+  // Head-to-head bank: only drawn from on a playoff exit, where there is a named opponent and
+  // a day-by-day story. A blown lead and a wire-to-wire beating are different humiliations, so
+  // each gets its own lines rather than a generic "you lost" joke.
+  const h2h = [];
+  if (matchup) {
+    h2h.push(
+      () =>
+        `${manager} lost to ${matchup.opponent} ${matchup.myScore}–${matchup.opponentScore} in ${roundLabel}, a ${matchup.margin}-point gap that ${worst.name} (${worst.pts} pts) personally funded. Enjoy the offseason.`,
+      () =>
+        `${matchup.opponent} needed ${matchup.opponentScore} to end ${manager}'s ${roundLabel}. ${manager} answered with ${matchup.myScore} and ${worst.name}'s ${worst.pts}-point contribution. Not close enough, not by ${matchup.margin}.`
+    );
+    if (narrative && narrative.wireToWire) {
+      h2h.push(
+        () =>
+          `${manager} did not lead this ${roundLabel} matchup for a single day. Not one. ${matchup.opponent} led wire-to-wire, won ${matchup.opponentScore}–${matchup.myScore}, and ${worst.name}'s ${worst.pts} points made sure it never got interesting.`,
+        () =>
+          `Wire-to-wire. ${matchup.opponent} took the lead on day one of ${roundLabel} and never gave it back, because ${manager} trotted out ${worst.name} for ${worst.pts} points and called it a plan. ${matchup.opponentScore}–${matchup.myScore}.`
+      );
+    }
+    if (narrative && narrative.everLed && !narrative.wireToWire) {
+      h2h.push(
+        () =>
+          `${manager} was ahead by as much as ${narrative.biggestLead} points in this ${roundLabel} matchup and still found a way to lose it ${matchup.myScore}–${matchup.opponentScore}. ${worst.name} (${worst.pts} pts) held the door open for ${matchup.opponent}.`,
+        () =>
+          `Blowing a ${narrative.biggestLead}-point lead to ${matchup.opponent} takes real commitment, and ${manager} was committed. ${worst.name} chipped in ${worst.pts} points toward the collapse. ${roundLabel} over, ${matchup.opponentScore}–${matchup.myScore}.`
+      );
+    }
+    if (matchup.margin <= 25) {
+      h2h.push(
+        () =>
+          `${matchup.margin} points. That is what separated ${manager} from surviving ${roundLabel}. ${worst.name} posted ${worst.pts}. Do that math slowly, and then think about it every night until next season.`
+      );
+    }
+  }
+
+  const bank = [...core, ...betrayal, ...dayBank, ...h2h];
   let seed = 0;
   for (const c of `${manager}|${round}`) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
   return bank[seed % bank.length]();
@@ -12979,14 +13122,14 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
 // Fallback text for any outcome, used both when ANTHROPIC_API_KEY is unset and as the
 // safety net after a failed/empty Claude call — one place that knows which static bank
 // belongs to which outcome so generateRoastWithClaude never has to duplicate the mapping.
-function fallbackRoastForOutcome(manager, round, perf, outcome, matchup) {
+function fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative) {
   if (outcome === 'champion') return fallbackChampionRoast(manager, perf);
   if (outcome === 'third') return fallbackThirdPlaceRoast(manager, perf, matchup);
-  return fallbackRoast(manager, round, perf);
+  return fallbackRoast(manager, round, perf, matchup, narrative);
 }
 
-async function generateRoastWithClaude(manager, round, perf, outcome, matchup) {
-  if (!ANTHROPIC_API_KEY) return fallbackRoastForOutcome(manager, round, perf, outcome, matchup);
+async function generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative) {
+  if (!ANTHROPIC_API_KEY) return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative);
 
   const roundLabel =
     round === 'PP' ? 'Pool Play' : round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : round;
@@ -13014,12 +13157,36 @@ Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0
 
 Write the roast now. No preamble, no labels — just the roast.`;
   } else {
-    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. A manager just got eliminated and deserves a brutal, hilariously vulgar roast. Be savage, specific, and profane. Reference their worst-performing players by name. Keep it to 2-3 sentences max.
+    // Head-to-head context (playoff rounds only — a Pool Play exit has no single opponent).
+    // The matchup line and the day-by-day narrative are what let the roast be about the GAME
+    // — a blown lead, a wire-to-wire beating, a one-point heartbreaker — instead of a
+    // context-free list of bad players.
+    const matchupLines = matchup
+      ? [
+          `Matchup: lost to ${matchup.opponent} ${matchup.myScore} – ${matchup.opponentScore} (margin ${matchup.margin} pts)`,
+          narrative ? `How it played out: ${narrative.summary}` : null,
+          narrative && narrative.everLed && !narrative.wireToWire
+            ? `IMPORTANT: ${manager} actually LED this matchup at some point and blew it — lean on that, it is the funniest thing about their exit.`
+            : null,
+          narrative && narrative.wireToWire
+            ? `IMPORTANT: ${manager} never led for a single day — they were behind from the first pitch to the last.`
+            : null,
+          matchup.margin <= 25
+            ? `IMPORTANT: this was agonizingly close (${matchup.margin} pts) — one bad start or one lazy at-bat cost them the round.`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : '';
+
+    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. A manager just got eliminated and deserves a brutal, hilariously vulgar roast. Be savage, specific, and profane. Keep it to 2-3 sentences max.
+
+Make the roast about HOW THEY LOST, not just who was bad. Lead with the matchup story below when there is one — a blown lead, a wire-to-wire beating, or a margin so small it hurts — and use their worst players by name as the reason it happened.
 
 Manager eliminated: ${manager}
 Eliminated in: ${roundLabel} — this happened ${intensity.stakes}
 Roast intensity for this round: ${intensity.level} (the later the round, the more brutal and personal the roast should get — a Pool Play exit is a shrug, a Finals loss is a gut punch)
-Total score: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
+${matchupLines ? matchupLines + '\n' : ''}Total score: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
 Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 
@@ -13042,13 +13209,13 @@ Write the roast now. No preamble, no labels — just the roast.`;
 
   if (!resp.ok) {
     console.error('Anthropic API error:', resp.status, await resp.text());
-    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup);
+    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative);
   }
 
   const data = await resp.json();
   return (
     (data.content && data.content[0] && data.content[0].text) ||
-    fallbackRoastForOutcome(manager, round, perf, outcome, matchup)
+    fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative)
   );
 }
 
@@ -13077,8 +13244,9 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
     const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, manager) : null;
     const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, manager) : null;
     const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, manager, round) : null;
+    const narrative = matchup ? computeMatchupNarrativeForRoast(sd, round, manager, matchup.opponent) : null;
     const roastText = withCaptainReminder(
-      await generateRoastWithClaude(manager, round, perf, outcome, matchup),
+      await generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative),
       manager,
       outcome
     );
@@ -13104,21 +13272,70 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   }
 });
 
-// Slack section telling the surviving managers what happens next: when the next round
-// runs, when its fresh-roster submission window opens (3 days before Week 1, mirroring the
-// client's getPeriodOpenDate), and when rosters lock (5 minutes before the stored
-// first-pitch time in sd.period_deadlines, mirroring getPeriodDeadline). Every date comes
-// from the season's own schedule_dates; anything missing degrades to a generic line rather
-// than blocking the post. Empty string after Finals — there is no next round.
-function buildNextRoundInstructions(sd, round) {
-  const NEXT = {
-    PP: { round: 'QF', label: 'The Quarterfinals', period: 'qf' },
-    QF: { round: 'SF', label: 'The Semifinals', period: 'sf' },
-    SF: { round: 'Finals', label: 'The Finals / 3rd-place game', period: 'finals' },
-  };
-  const next = NEXT[round];
-  if (!next) return '';
+const NEXT_ROUND_BY_ROUND = {
+  PP: { round: 'QF', label: 'The Quarterfinals', period: 'qf' },
+  QF: { round: 'SF', label: 'The Semifinals', period: 'sf' },
+  SF: { round: 'Finals', label: 'The Finals / 3rd-place game', period: 'finals' },
+};
 
+// Roster lock time for a submission period, formatted for Slack: 5 minutes before the stored
+// first-pitch time in sd.period_deadlines (mirroring the client's getPeriodDeadline). The
+// zone abbreviation is rendered rather than hardcoded, so it reads EDT in summer and EST in
+// the shoulder weeks instead of being wrong for half the season.
+function periodLockLabel(sd, period) {
+  const firstGame = sd.period_deadlines && sd.period_deadlines[period];
+  if (!firstGame) return null;
+  const fg = new Date(firstGame);
+  if (Number.isNaN(fg.getTime())) return null;
+  return new Date(fg.getTime() - 5 * 60 * 1000).toLocaleString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'America/New_York',
+    timeZoneName: 'short',
+  });
+}
+
+// One-line deadline reminder for the ROUND-END post. The full submission-window walkthrough
+// is deliberately NOT here: a round ends Sunday night and the window doesn't close until the
+// following Monday, so instructions posted here are read a week before they can be acted on.
+// They now ride the Friday scoreboard post (buildSubmissionWindowBlock) instead, which lands
+// while managers can actually do something about it. This keeps only the hard deadline, which
+// is worth repeating in both places.
+function buildDeadlineReminderLine(sd, round) {
+  const next = NEXT_ROUND_BY_ROUND[round];
+  if (!next) return '';
+  const lock = periodLockLabel(sd, next.period);
+  const startIdx = SEASON_SCHEDULE.findIndex((s) => s.round === next.round && s.week === 'Week 1');
+  const dates = Array.isArray(sd.schedule_dates) ? sd.schedule_dates : [];
+  const startISO = startIdx >= 0 && dates[startIdx] ? dates[startIdx].start : null;
+
+  if (lock) {
+    return `:alarm_clock: *Reminder:* rosters for ${next.label} are due by ${lock} — 5 minutes before first pitch.`;
+  }
+  if (startISO) {
+    const day = new Date(startISO + 'T12:00:00Z').toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'UTC',
+    });
+    return `:alarm_clock: *Reminder:* rosters for ${next.label} are due 5 minutes before the first pitch on ${day}.`;
+  }
+  return `:alarm_clock: *Reminder:* ${next.label} need a fresh roster — rosters do NOT carry over.`;
+}
+
+// Slack section telling the surviving managers what happens next: when the round runs, when
+// its fresh-roster submission window opens (3 days before Week 1, mirroring the client's
+// getPeriodOpenDate), and when rosters lock (5 minutes before the stored first-pitch time in
+// sd.period_deadlines, mirroring getPeriodDeadline). Every date comes from the season's own
+// schedule_dates; anything missing degrades to a generic line rather than blocking the post.
+//
+// Keyed off the UPCOMING round descriptor rather than the one that just finished — the
+// Friday post knows what starts Monday, not what ended a week ago.
+function buildSubmissionInstructionsFor(sd, next) {
   const startIdx = SEASON_SCHEDULE.findIndex((s) => s.round === next.round && s.week === 'Week 1');
   let endIdx = -1;
   SEASON_SCHEDULE.forEach((s, i) => {
@@ -13145,22 +13362,7 @@ function buildNextRoundInstructions(sd, round) {
     openStr = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
   }
 
-  let deadlineStr = null;
-  const firstGame = sd.period_deadlines && sd.period_deadlines[next.period];
-  if (firstGame) {
-    const fg = new Date(firstGame);
-    if (!Number.isNaN(fg.getTime())) {
-      deadlineStr =
-        new Date(fg.getTime() - 5 * 60 * 1000).toLocaleString('en-US', {
-          weekday: 'long',
-          month: 'long',
-          day: 'numeric',
-          hour: 'numeric',
-          minute: '2-digit',
-          timeZone: 'America/New_York',
-        }) + ' ET';
-    }
-  }
+  const deadlineStr = periodLockLabel(sd, next.period);
 
   const lines = [':clipboard: *Playoff managers — what happens next:*'];
   if (startISO && endISO) lines.push(`• ${next.label} run ${fmtDay(startISO)} through ${fmtDay(endISO)}.`);
@@ -13172,6 +13374,31 @@ function buildNextRoundInstructions(sd, round) {
   if (deadlineStr) lines.push(`• Rosters lock ${deadlineStr} — 5 minutes before first pitch.`);
   else if (startISO) lines.push(`• Rosters lock 5 minutes before the first pitch on ${fmtDay(startISO)}.`);
   return lines.join('\n');
+}
+
+// Submission-window block for the FRIDAY daily scoreboard post, three days before a playoff
+// round's Monday first pitch. This is where the instructions actually earn their place: the
+// window is open, the deadline is the next thing on the calendar, and a manager reading it
+// can go submit. The same text used to ride the round-end post, where it landed a full week
+// early and was long forgotten by the time it mattered.
+//
+// Returns '' on every other day, so the caller can append unconditionally.
+function buildSubmissionWindowBlock(sd, todayISO) {
+  const dates = Array.isArray(sd.schedule_dates) ? sd.schedule_dates : [];
+  const upcoming = Object.values(NEXT_ROUND_BY_ROUND);
+  for (let i = 1; i < SEASON_SCHEDULE.length; i++) {
+    // Period boundaries only — the weeks that open a new submission window.
+    if (SEASON_SCHEDULE[i].round === SEASON_SCHEDULE[i - 1].round) continue;
+    const startISO = dates[i] && dates[i].start;
+    if (!startISO) continue;
+    const open = new Date(startISO + 'T12:00:00Z');
+    open.setUTCDate(open.getUTCDate() - 3); // Monday start → the Friday before
+    if (open.toISOString().slice(0, 10) !== todayISO) continue;
+    const next = upcoming.find((n) => n.round === SEASON_SCHEDULE[i].round);
+    if (!next) continue; // pool play has its own flow; playoff rounds only
+    return buildSubmissionInstructionsFor(sd, next);
+  }
+  return '';
 }
 
 // POST /api/seasons/:year/roasts/slack — post one combined Slack message that opens with
@@ -13228,7 +13455,23 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   // Texts are generated first against the read-only snapshot, then persisted through a
   // fresh read-modify-write so the slow Anthropic awaits can't clobber writes that landed
   // on other requests in the meantime.
-  const managerOrder = [...toRoast].sort((a, b) => a.localeCompare(b));
+  //
+  // Ordered by margin of defeat, narrowest first: the heartbreakers lead, the blowouts
+  // close it out. Alphabetical (the old order) buried the best story wherever the alphabet
+  // happened to put it. Pool Play has no head-to-head margin, so it stays alphabetical, as
+  // does any manager whose matchup can't be resolved (sorted last, then by name).
+  const matchupByManager = {};
+  if (['QF', 'SF', 'Finals'].includes(round)) {
+    for (const m of toRoast) matchupByManager[m] = playoffMatchupResultForRoast(sd, round, m);
+  }
+  const managerOrder = [...toRoast].sort((a, b) => {
+    const ma = matchupByManager[a];
+    const mb = matchupByManager[b];
+    if (ma && mb && ma.margin !== mb.margin) return ma.margin - mb.margin;
+    if (ma && !mb) return -1;
+    if (!ma && mb) return 1;
+    return a.localeCompare(b);
+  });
   const roastByManager = {};
   const freshTexts = {};
   for (const m of managerOrder) {
@@ -13240,9 +13483,10 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     try {
       const perf = buildManagerPerformanceForRoast(sd, m, round);
       const standings = round === 'PP' ? buildPoolPlayStandingsForRoast(db, sd, m) : null;
-      const matchup = ['QF', 'SF', 'Finals'].includes(round) ? playoffMatchupResultForRoast(sd, round, m) : null;
+      const matchup = matchupByManager[m] || null;
       const journey = ['QF', 'SF', 'Finals'].includes(round) ? pastRoundJourneyForRoast(db, sd, m, round) : null;
-      const text = await generateRoastWithClaude(m, round, perf, 'eliminated', matchup);
+      const narrative = matchup ? computeMatchupNarrativeForRoast(sd, round, m, matchup.opponent) : null;
+      const text = await generateRoastWithClaude(m, round, perf, 'eliminated', matchup, narrative);
       const pageContext = buildRoastPageContext(m, round, perf, standings, matchup, journey);
       roastByManager[m] = text;
       freshTexts[m] = { text, pageContext, outcome: 'eliminated' };
@@ -13291,7 +13535,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     }
   }
 
-  const entries = managerOrder.filter((m) => roastByManager[m]).map((m) => [m, { text: roastByManager[m] }]);
+  const entries = managerOrder
+    .filter((m) => roastByManager[m])
+    .map((m) => [m, { text: roastByManager[m], matchup: matchupByManager[m] || null }]);
   const podiumEntries = podiumList
     .filter((w) => podiumRoastByManager[w.manager])
     .map((w) => [w.manager, { text: podiumRoastByManager[w.manager], outcome: w.outcome }]);
@@ -13322,6 +13568,14 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
         .map((n, i) => `(${i + 1}) ${n}`)
         .join(', ')}\n\n`;
     }
+  } else {
+    // Playoff rounds: lead with the actual results — every matchup with both scores, the
+    // batting/pitching split, win/loss marks, and who advances. This is the same block the
+    // daily scoreboard posts, so Slack can never disagree with itself about who won. Until
+    // now a QF or SF round-end post opened straight into the roasts and never once said who
+    // had actually advanced.
+    const results = buildPlayoffMatchupsSlackText(sd, round, { final: true });
+    if (results) summary = `${results}\n\n`;
   }
 
   // Header intensity escalates with the round (ROAST_INTENSITY): a QF exit is a shrug, an
@@ -13337,8 +13591,21 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
           : round === 'SF'
             ? `:rotating_light: *Semifinals eliminations.* ${entries.length} manager${plural} came within one win of the championship and fell short — welcome to the Hall of Shame:`
             : `:skull: *The season is over.* ${entries.length} manager${plural} finished one game short of the Whit Merrifield Memorial Cup — welcome to the Hall of Shame:`;
-    // Slack mrkdwn: each roast as a bolded name plus a block-quoted body.
-    const sections = entries.map(([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`);
+    // Slack mrkdwn: each roast as a bolded name, the head-to-head result it came from, then
+    // a block-quoted body. The result line means a reader can see WHY someone is in here
+    // without scrolling back up to the matchup block. Scores are formatted exactly as the
+    // results block formats them (1dp, thousands separators, no trailing .0) so the same
+    // number never appears twice in one message wearing two different faces.
+    const fmtScore = (n) => {
+      const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      return s.endsWith('.0') ? s.slice(0, -2) : s;
+    };
+    const sections = entries.map(([manager, r]) => {
+      const head = r.matchup
+        ? `*${manager}* — _lost to ${r.matchup.opponent} ${fmtScore(r.matchup.myScore)}–${fmtScore(r.matchup.opponentScore)} (by ${fmtScore(r.matchup.margin)})_`
+        : `*${manager}*`;
+      return `${head}\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`;
+    });
     mainBlock = `${header}\n\n${sections.join('\n\n')}`;
   }
 
@@ -13355,8 +13622,10 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     podiumBlock = `${podiumHeader}\n\n${podiumSections.join('\n\n')}`;
   }
 
-  const instructions = buildNextRoundInstructions(sd, round);
-  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, instructions].filter(Boolean).join('\n\n');
+  // Only the hard deadline rides the round-end post now; the full submission walkthrough
+  // moved to the Friday scoreboard post (buildSubmissionWindowBlock), where it is actionable.
+  const reminder = buildDeadlineReminderLine(sd, round);
+  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, reminder].filter(Boolean).join('\n\n');
 
   try {
     await postScoreboardChannelSlack(messageBody);
