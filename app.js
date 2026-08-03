@@ -8085,20 +8085,41 @@ function renderRosterData(managerName, isCommissioner) {
     // highlights) added alongside the punchy joke that also goes to Slack — Slack keeps
     // just roast.text since the combined post already stacks one roast per manager.
     // Paragraphs are joined with a blank line server-side; render each as its own <p>.
-    // Blank lines separate sections; single newlines separate the lines WITHIN one (the
-    // result, the hitting/pitching split, the scoring days, the hitter and pitcher
-    // leaderboards). A section may open with a `[[Section label]]` marker
-    // (buildRoastPageContext emits one per round the manager played — Pool Play,
-    // Quarterfinals…); pull it out and render it as a heading chip. Sections without a marker
-    // — including every roast stored before sectioning existed — render exactly as before.
+    // Blank lines separate sections; single newlines separate the lines within one. A section
+    // may open with a `[[Section label]]` marker (buildRoastPageContext emits one per round
+    // the manager played — Pool Play, Quarterfinals…); pull it out and render it as a heading
+    // chip, then hang that round's tables (scoring days, top performers, bottom performers)
+    // underneath it from roast.page_tables, keyed by the same label.
+    //
+    // Sections without a marker, and roasts stored before page_tables existed, render exactly
+    // as they always did — the tables are additive, never required.
     const asLines = (s) => esc(s).replace(/\n/g, '<br>');
+    const roastTables = roast.page_tables && typeof roast.page_tables === 'object' ? roast.page_tables : {};
+    const tableHtml = (t) => {
+      // A column with an empty header still gets a <th> so the header row and the body stay
+      // aligned; it just renders blank (used for the H/P position tag).
+      const head = t.columns.map((c) => `<th>${esc(c)}</th>`).join('');
+      const body = t.rows
+        .map(
+          (r) =>
+            `<tr class="${r.low ? 'roast-table-low' : ''}">${r.cells
+              .map((c, i) => `<td${i === 0 ? ' class="roast-table-name"' : ''}>${esc(String(c ?? ''))}</td>`)
+              .join('')}</tr>`
+        )
+        .join('');
+      return `<div class="roast-table"><div class="roast-table-title">${esc(t.title)}</div><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    };
+    const tablesFor = (label) => {
+      const ts = roastTables[label];
+      return Array.isArray(ts) && ts.length ? `<div class="roast-tables">${ts.map(tableHtml).join('')}</div>` : '';
+    };
     const contextHtml = roast.page_context
       ? `<div class="roast-context">${roast.page_context
           .split('\n\n')
           .map((p) => {
             const m = p.match(/^\[\[([^\]]+)\]\]\s*([\s\S]*)$/);
             return m
-              ? `<p><span class="roast-context-label">${esc(m[1])}</span>${asLines(m[2])}</p>`
+              ? `<p><span class="roast-context-label">${esc(m[1])}</span>${asLines(m[2])}</p>${tablesFor(m[1])}`
               : `<p>${asLines(p)}</p>`;
           })
           .join('')}</div>`

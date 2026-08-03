@@ -2593,3 +2593,40 @@ best/worst scoring days, so the joke can tell "carried the team" from "had one l
 
 **Verified** end to end through the real endpoint on a synthetic season (QF exit, PP exit, Finals
 champion), plus screenshots at 1280px and 390px.
+
+## Round summary became three tables; roasts are now server-authoritative on save (2026-08-03)
+
+**Change.** The per-round best/worst summary was two dense prose sentences. Replaced with three
+tables per round section, laid out side by side: **Scoring days** (the manager's own best 3 and
+worst 3, with each day's rank among all managers that date), **Top performers** (top 3 hitters +
+top 3 pitchers, with rank among same-role players and days-led), and **Bottom performers** (bottom
+3 of each). Every number carries a rank.
+
+**Day ranks needed a leaguewide sweep back — but a cheap one.** Ranking a day against all managers
+needs every manager's total for that date. Rather than reinstate `computeDailyHighLow` per date,
+`computeRoleRanksForRoast` now also emits `dayRanks`, built from the daily rows in the same pass,
+with the **same ownership rule and correction guard** as the per-manager totals it already
+computes. That matters: reusing `computeDailyHighLow` would have ranked a day using a different
+attribution path than the score printed next to it. And because the rank table is memoized per
+round in the request cache, it is built once per round for the whole combined post, not once per
+manager.
+
+**Structured payload, not HTML in a string.** `buildRoastPageContext` now returns
+`{ text, tables }`; `tables` is keyed by the same `[[Section label]]` the text uses, and is stored
+as `roast.page_tables`. The roster page builds the DOM and escapes every cell, so a player name out
+of the MLB feed can never inject markup. Roasts stored before this render text-only — tables are
+additive, never required.
+
+**The save bug this surfaced.** `sd.roasts` was union-merged on the full-season save: the server's
+copy filled in only managers the incoming payload did not mention. But the client **never writes**
+`sd.roasts` — three read sites in app.js, zero writes — so a roast in a payload is always a stale
+echo of something the server wrote. The union-merge therefore let a full-season save carrying a
+pre-regeneration roast silently roll that manager back: same manager, older text, and any field
+added since (`page_tables`) quietly dropped. Now the server's copy always wins per manager. This is
+the exact class of bug CLAUDE.md's "never wipe a server-authoritative field from a client payload"
+warns about, and it was live before tables made it visible.
+
+**Layout.** `.roast-tables` is `repeat(auto-fit, minmax(210px, 1fr))` rather than a fixed 3-column
+grid, so a round with only two tables (a roster too short to have distinct bottom performers) still
+fills the row instead of leaving a hole. Verified stacking cleanly at 390px with no horizontal
+overflow.

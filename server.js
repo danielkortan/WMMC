@@ -1194,13 +1194,16 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // Elimination roasts are written server-side by /generate-roast while the client's
     // full-season save (fired at "End Pool Play") may still be in flight carrying a copy
     // that predates them — that save landing mid-generation is how a manager's roast
-    // vanished from the first live combined post. Union-merge: keep every server roast
-    // the incoming payload doesn't know about (there is no client path that deletes one).
+    // vanished from the first live combined post.
+    //
+    // The server's copy always wins, per manager. The client only ever READS sd.roasts
+    // (three read sites in app.js, no writes), so a roast in an incoming payload is by
+    // definition a stale echo of something the server wrote — never an edit. The previous
+    // union-merge only filled in managers the payload didn't mention, which meant a save
+    // carrying a pre-regeneration roast silently rolled that manager back: same manager,
+    // older text, and any field added since (page_tables) quietly dropped.
     if (existingSd.roasts && typeof existingSd.roasts === 'object') {
-      if (!sd.roasts || typeof sd.roasts !== 'object') sd.roasts = {};
-      for (const [mgr, roast] of Object.entries(existingSd.roasts)) {
-        if (!sd.roasts[mgr]) sd.roasts[mgr] = roast;
-      }
+      sd.roasts = { ...(sd.roasts && typeof sd.roasts === 'object' ? sd.roasts : {}), ...existingSd.roasts };
     }
   }
 
@@ -12219,6 +12222,28 @@ function computeRoleRanksForRoast(sd, managerNames, round) {
     return out;
   };
 
+  // Every manager's total for every scored date in the round, ranked per date — so a day on a
+  // manager's own best/worst list can say where it placed leaguewide ("87.6, 1st of 8"), which
+  // is the difference between a good day and a good day that everybody else also had.
+  //
+  // Built from the daily rows with the SAME ownership rule and the same correction guard as
+  // the per-manager totals above, rather than from computeDailyHighLow, so a day's rank can
+  // never disagree with the score printed next to it.
+  const dayTotals = {};
+  const creditDay = (row, role, playerKey, scorer) => {
+    if (!rounds.includes(row.round) || !row[playerKey] || !row.date) return;
+    if (!countsAsGameDelta(row.delta)) return;
+    const weekKey = `${row.round}|${row.week}`;
+    for (const m of names) {
+      if (!owns(m, weekKey, role, row[playerKey])) continue;
+      (dayTotals[row.date] = dayTotals[row.date] || {})[m] = (dayTotals[row.date][m] || 0) + scorer(row.delta || {});
+    }
+  };
+  (sd.daily_batting || []).forEach((r) => creditDay(r, 'batters', 'batter', calculateBattingScore));
+  (sd.daily_pitching || []).forEach((r) => creditDay(r, 'pitchers', 'pitcher', calculatePitchingScore));
+  const dayRanks = {};
+  for (const [date, totals] of Object.entries(dayTotals)) dayRanks[date] = rankMap(totals);
+
   // Managers who never fielded a roster in the round (eliminated earlier, or inactive) would
   // otherwise rank last at 0 and make everyone else's rank look better than it was.
   const played = (bucket) =>
@@ -12230,6 +12255,7 @@ function computeRoleRanksForRoast(sd, managerNames, round) {
     pitchers: rankMap(pitSlots),
     managerBatting: rankMap(played(mgrBat)),
     managerPitching: rankMap(played(mgrPit)),
+    dayRanks,
   };
 }
 
@@ -12461,6 +12487,11 @@ function buildManagerPerformanceForRoast(sd, manager, round, opts = {}) {
       .reverse()
       .map((e) => ranked(e, role));
   const bottomThree = (sortedAsc, role) => sortedAsc.slice(0, 3).map((e) => ranked(e, role));
+  // Where a day placed among all managers on that date.
+  const withDayRank = (d) => {
+    const r = ranks && ranks.dayRanks && ranks.dayRanks[d.date] ? ranks.dayRanks[d.date][manager] : null;
+    return { ...d, rank: r ? r.rank : null, of: r ? r.of : null };
+  };
 
   return {
     manager,
@@ -12491,9 +12522,10 @@ function buildManagerPerformanceForRoast(sd, manager, round, opts = {}) {
     best_day: bestDay,
     scored_days: dayEntries.length,
     // The manager's own three highest- and three lowest-scoring days in the round, best
-    // first / worst first. dayEntries is ascending, so the tail reversed is the top three.
-    top_days: dayEntries.slice(-3).reverse(),
-    bottom_days: dayEntries.slice(0, 3),
+    // first / worst first, each carrying where that day placed among all managers.
+    // dayEntries is ascending, so the tail reversed is the top three.
+    top_days: dayEntries.slice(-3).reverse().map(withDayRank),
+    bottom_days: dayEntries.slice(0, 3).map(withDayRank),
     worst_single_game: worstSingleGame,
     best_single_game: bestSingleGame,
   };
@@ -13304,8 +13336,15 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
   const pick = (arr, offset) => arr[(seed + offset) % arr.length]();
 
   const parts = [];
-  const section = (label, text) => {
-    if (text) parts.push(`[[${label}]] ${text}`);
+  // `tables` is keyed by the same section label the text uses, so the roster page can hang
+  // each round's tables under its own heading. Kept out of the text rather than encoded into
+  // it: the page needs real rows to lay out three tables side by side, and prose that gets
+  // parsed back into a table is a bug waiting to happen.
+  const tables = {};
+  const section = (label, text, rows) => {
+    if (!text && !(rows && rows.length)) return;
+    parts.push(`[[${label}]] ${text || ''}`.trimEnd());
+    if (rows && rows.length) tables[label] = rows;
   };
 
   // ---- shared sentence builders -------------------------------------------------
@@ -13334,44 +13373,61 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
     return wB || wP || null;
   };
 
-  // The manager's own three best and three worst scoring days in the round. Dates and scores
-  // beat the old league-wide "top-3 on 7 days" tally: you can see the shape of the round —
-  // one loud afternoon propping up a flat fortnight, or a genuinely steady team.
-  const scoringDaysSentence = (p) => {
-    const fmtDay = (d) => `${fmtRoastShortDate(d.date)} (${d.score})`;
-    if (!p.top_days || p.top_days.length === 0) return '';
-    const best = p.top_days.map(fmtDay).join(', ');
-    // With five or fewer scored days the two lists overlap; printing both is just the same
-    // days twice in opposite order, so collapse to the best.
-    if (!p.bottom_days || p.bottom_days.length === 0 || p.scored_days <= 5) {
-      return ` Best days of the round: ${best}.`;
-    }
-    return ` Best days of the round: ${best}. Worst: ${p.bottom_days.map(fmtDay).join(', ')}.`;
-  };
+  // The three tables that replace what used to be two dense prose sentences: the manager's
+  // own best and worst scoring days, their top performers, and their bottom performers. Every
+  // number carries a rank — days against all managers that date, players against every other
+  // player at the same position in the round — because a bare total says nothing about whether
+  // it was any good.
+  //
+  // Emitted as structured rows rather than HTML: the roster page builds the DOM and does its
+  // own escaping, so a player name out of the MLB feed can never inject markup.
+  const rankCell = (x) => (x && x.rank && x.of ? `${ordinal(x.rank)} of ${x.of}` : '—');
 
-  // Top 3 and bottom 3 at a position. The top list carries how many days each player was the
-  // best on this roster at that position — a "who carried it" signal. The bottom list gets
-  // points and rank only: on a five-man roster everybody leads on some day, so "best on 6
-  // days" next to a name filed under `Worst` reads as praise and muddles the point. Names
-  // already in the top list are dropped from the bottom one, so a short roster never prints
-  // the same player twice.
-  const leaderboardLines = (p) => {
-    const tag = (x, withDays) => {
-      const bits = [`${x.pts} pts`];
-      if (x.rank && x.of) bits.push(`${ordinal(x.rank)} of ${x.of}`);
-      if (withDays && x.days_led > 0) bits.push(`best on ${x.days_led} day${x.days_led === 1 ? '' : 's'}`);
-      return `${x.name} (${bits.join(', ')})`;
-    };
-    const line = (label, top, bottom) => {
-      const tops = (top || []).filter(Boolean);
-      if (!tops.length) return null;
-      const seen = new Set(tops.map((x) => x.name));
-      const bots = (bottom || []).filter((x) => x && !seen.has(x.name));
-      let out = `${label} — best: ${tops.map((x) => tag(x, true)).join(', ')}.`;
-      if (bots.length) out += ` Worst: ${bots.map((x) => tag(x, false)).join(', ')}.`;
+  const roundTables = (p) => {
+    const tables = [];
+
+    const dayRows = [];
+    for (const d of p.top_days || []) dayRows.push({ cells: [fmtRoastShortDate(d.date), d.score, rankCell(d)] });
+    // With five or fewer scored days the two lists are the same days in opposite order.
+    if (p.scored_days > 5) {
+      for (const d of p.bottom_days || []) {
+        dayRows.push({ cells: [fmtRoastShortDate(d.date), d.score, rankCell(d)], low: true });
+      }
+    }
+    if (dayRows.length) {
+      tables.push({ title: 'Scoring days', columns: ['Day', 'Pts', 'Rank'], rows: dayRows });
+    }
+
+    // Players already shown among the top performers are dropped from the bottom table, so a
+    // roster with fewer than six at a position never lists the same name in both. The "Best
+    // days" column is top-table only: on a five-hitter roster everybody leads on some day, so
+    // that number next to a bottom performer reads as praise and muddles the contrast.
+    const shown = new Set();
+    const playerRows = (list, role, best) => {
+      const out = [];
+      for (const x of list || []) {
+        if (!x) continue;
+        if (best) shown.add(`${role}|${x.name}`);
+        else if (shown.has(`${role}|${x.name}`)) continue;
+        const cells = [x.name, role === 'batters' ? 'H' : 'P', x.pts, rankCell(x)];
+        if (best) cells.push(x.days_led > 0 ? `${x.days_led}` : '');
+        out.push({ cells, low: !best });
+      }
       return out;
     };
-    return [line('Hitters', p.top_batters, p.bottom_batters), line('Pitchers', p.top_pitchers, p.bottom_pitchers)];
+
+    const topRows = [...playerRows(p.top_batters, 'batters', true), ...playerRows(p.top_pitchers, 'pitchers', true)];
+    if (topRows.length) {
+      tables.push({ title: 'Top performers', columns: ['Player', '', 'Pts', 'Rank', 'Best days'], rows: topRows });
+    }
+    const bottomRows = [
+      ...playerRows(p.bottom_batters, 'batters', false),
+      ...playerRows(p.bottom_pitchers, 'pitchers', false),
+    ];
+    if (bottomRows.length) {
+      tables.push({ title: 'Bottom performers', columns: ['Player', '', 'Pts', 'Rank'], rows: bottomRows });
+    }
+    return tables;
   };
 
   // ---- how they qualified -------------------------------------------------------
@@ -13464,14 +13520,10 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
         } else {
           bits.push(`${manager} finished ${place}.${otherGapsSentence}`);
         }
-        bits.push(splitSentence(p, true), scoringDaysSentence(p), ...leaderboardLines(p));
+        bits.push(splitSentence(p, true));
       } else {
         // They qualified, so Pool Play is a round they came through.
-        bits.push(
-          `Across the two Pool Play periods, ${splitSentence(p, true)}`,
-          scoringDaysSentence(p),
-          ...leaderboardLines(p)
-        );
+        bits.push(`Across the two Pool Play periods, ${splitSentence(p, true)}`);
       }
     } else if (m) {
       // A playoff round. Result first, escalated by margin, then the numbers behind it.
@@ -13503,7 +13555,7 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
           `${manager} ran ${m.opponent} off the field ${m.myScore}–${m.opponentScore}, by ${m.margin}. Briefly, this looked like a manager who knew what he was doing.`,
       };
       bits.push((m.won ? winBank : lossBank)[tier]());
-      bits.push(splitSentence(p, false), scoringDaysSentence(p), ...leaderboardLines(p));
+      bits.push(splitSentence(p, false));
 
       // The cruellest arithmetic available: how little it would have taken. Only worth
       // saying on a loss tight enough for it to be true.
@@ -13518,7 +13570,7 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
     } else {
       // A playoff round with no head-to-head on file (shouldn't normally happen, but the
       // numbers are still worth printing rather than dropping the section entirely).
-      bits.push(splitSentence(p, true), scoringDaysSentence(p), ...leaderboardLines(p));
+      bits.push(splitSentence(p, true));
     }
 
     // Standout individual games belong to the round the roast is actually about.
@@ -13536,10 +13588,10 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
       bits.push(pick(gameBank, idx * 7));
     }
 
-    section(stage.label, bits.filter(Boolean).join('\n'));
+    section(stage.label, bits.filter(Boolean).join('\n'), roundTables(p));
   });
 
-  return parts.join('\n\n');
+  return { text: parts.join('\n\n'), tables };
 }
 
 // Call the Anthropic Messages API to generate a vulgar, personalized roast.
@@ -13726,7 +13778,7 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
     if (ownId) exclude.delete(ownId);
     const generated = await generateRoastWithClaude(manager, round, perf, outcome, matchup, narrative, exclude);
     const roastText = withCaptainReminder(generated.text, manager, outcome);
-    const pageContext = buildRoastPageContext(manager, round, perf, standings, matchup, journey, {
+    const context = buildRoastPageContext(manager, round, perf, standings, matchup, journey, {
       breakdown,
       outcome,
     });
@@ -13736,7 +13788,10 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
       round,
       outcome,
       text: roastText,
-      page_context: pageContext,
+      page_context: context.text,
+      // Structured per-section tables (scoring days, top/bottom performers). Absent on roasts
+      // stored before tables existed; the roster page falls back to the text alone.
+      page_tables: context.tables,
       template_id: generated.templateId || null,
       generated_at: new Date().toISOString(),
     };
@@ -13745,7 +13800,7 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
     db.seasons[year] = sd;
     writeDB(db);
 
-    res.json({ roast: roastText, page_context: pageContext });
+    res.json({ roast: roastText, page_context: context.text, page_tables: context.tables });
   } catch (err) {
     console.error('Roast generation error:', err);
     res.status(500).json({ error: 'Failed to generate roast' });
@@ -13988,12 +14043,12 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
       );
       if (generated.templateId) usedTemplateIds.add(generated.templateId);
       const text = generated.text;
-      const pageContext = buildRoastPageContext(m, round, perf, standings, matchup, journey, {
+      const context = buildRoastPageContext(m, round, perf, standings, matchup, journey, {
         breakdown,
         outcome: 'eliminated',
       });
       roastByManager[m] = text;
-      freshTexts[m] = { text, pageContext, outcome: 'eliminated', templateId: generated.templateId };
+      freshTexts[m] = { text, context, outcome: 'eliminated', templateId: generated.templateId };
     } catch (e) {
       console.error('Roast generation failed for', m, '-', e.message);
       if (existing && existing.text) roastByManager[m] = existing.text;
@@ -14015,12 +14070,12 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
       const { perf, matchup, journey, breakdown } = collectRoastInputs(db, sd, m, round, roastCache);
       const generated = await generateRoastWithClaude(m, round, perf, w.outcome, matchup, null, usedTemplateIds);
       const text = withCaptainReminder(generated.text, m, w.outcome);
-      const pageContext = buildRoastPageContext(m, round, perf, null, matchup, journey, {
+      const context = buildRoastPageContext(m, round, perf, null, matchup, journey, {
         breakdown,
         outcome: w.outcome,
       });
       podiumRoastByManager[m] = text;
-      freshTexts[m] = { text, pageContext, outcome: w.outcome, templateId: generated.templateId };
+      freshTexts[m] = { text, context, outcome: w.outcome, templateId: generated.templateId };
     } catch (e) {
       console.error('Podium roast generation failed for', m, '-', e.message);
       if (existing && existing.text) podiumRoastByManager[m] = existing.text;
@@ -14033,12 +14088,13 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     if (sd2) {
       if (!sd2.roasts) sd2.roasts = {};
       const now = new Date().toISOString();
-      for (const [m, { text, pageContext, outcome, templateId }] of Object.entries(freshTexts)) {
+      for (const [m, { text, context, outcome, templateId }] of Object.entries(freshTexts)) {
         sd2.roasts[m] = {
           round,
           outcome,
           text,
-          page_context: pageContext,
+          page_context: context.text,
+          page_tables: context.tables,
           template_id: templateId || null,
           generated_at: now,
         };
