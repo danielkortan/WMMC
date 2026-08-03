@@ -2413,3 +2413,37 @@ are one-per-season and can't collide). Three call sites updated.
 distinct ids; two identical regenerate runs produced byte-identical assignments (stability); and
 planting `core:6` on a Pool Play roast moved Drew Dinger — whose natural QF pick is `core:6` — to
 `core:7` while leaving the other three untouched (minimal displacement, cross-period exclusion).
+
+## Article bug had a SECOND class, and production has no ANTHROPIC_API_KEY (2026-08-03)
+
+Ran the regenerate-only probe against live 2026 QF roasts. Two findings.
+
+**1. The possessive fix was incomplete.** `roastRoundLabelBare` covered `${manager}'s ${roundLabel}`,
+but `roundLabel` is also used **attributively** — modifying a following noun, or after a determiner —
+where the article is equally wrong:
+
+- `a ${perf.total}-point ${roundLabel} team total` → "a 442.75-point **the Quarterfinals** team total"
+- `this ${roundLabel} matchup` → "this **the Quarterfinals** matchup"
+- `The ${roundLabel} highlight package` → "**The the Quarterfinals** highlight package"
+
+17 more spots fixed (11 `-point`, 2 possessive, 2 `this…matchup`, 2 `The…`). Two of the possessive
+ones were **my own regression**: I ran the possessive swap first and then added 50 new templates,
+some of which reintroduced the pattern. Order of operations matters — do the mechanical fix LAST,
+or re-run it after adding content.
+
+**Classification rule for the next person:** article-free before a noun or after a determiner
+(`a 442-point Quarterfinals team total`, `this Quarterfinals matchup`); article kept after a
+preposition or verb (`across the Quarterfinals`, `spent the Quarterfinals waiting`, `Time of death:
+the Quarterfinals`). 96 usages read fine, 22 flagged by heuristic, 17 genuinely broken — the
+heuristic over-flags `surviving/end/same/you ${roundLabel}`, so classify by eye, don't bulk-replace.
+
+**2. Production is NOT using Claude for roasts.** All four live QF roasts came back verbatim from
+the static bank ("Breaking news out of the WMMC newsroom…" is `core:11`). So `ANTHROPIC_API_KEY`
+is unset (or failing) on the Render service — `render.yaml` declares it `sync: false`, i.e. set by
+hand in the dashboard, and it evidently never was. I had earlier asserted the live roasts "clearly
+read as Claude-written"; that was an assumption, and it was wrong.
+
+Consequence: the entire matchup-aware prompt work (PR #396) is dormant in production — the prompt
+is only reached when the key exists. The fallback bank's own head-to-head templates DO fire, but
+only when the seeded pick lands in `h2h-*`, which is 17 of 110 slots. Setting the key in the Render
+dashboard is the single lever that turns the feature on.

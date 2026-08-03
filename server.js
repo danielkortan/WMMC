@@ -12662,19 +12662,19 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     () =>
       `Legend says ${manager} is still waiting for ${worst.name} to heat up. ${worst.pts} points across all of ${roundLabel} later, the wait continues — from the couch, at a ${perf.total}-point team total. Brutal.`,
     () =>
-      `Breaking news out of the WMMC newsroom: local manager ${manager} discovers ${worst.name} is not, in fact, good at baseball. Discovery cost: a ${perf.total}-point ${roundLabel} team total and an early flight home. Film at 11.`,
+      `Breaking news out of the WMMC newsroom: local manager ${manager} discovers ${worst.name} is not, in fact, good at baseball. Discovery cost: a ${perf.total}-point ${roundLabelBare} team total and an early flight home. Film at 11.`,
     () =>
       `${manager} went with the "close your eyes and hope" strategy in ${roundLabel}. ${worst.name} posted ${worst.pts} pts for the round, the eyes stayed closed, and a ${perf.total}-point team total said "yeah, that tracks."`,
     () =>
       `Cue the highlight reel — there isn't one. ${manager}'s team put up ${perf.total} points in ${roundLabel} behind ${worst.name}'s ${worst.pts}-point disappearing act, and the round ended before the coffee got cold.`,
     () =>
-      `SportsCenter's Not Top 10, entry #1: ${manager}'s ${perf.total}-point ${roundLabel} team total, presented by ${worst.name}, who contributed ${worst.pts} of those points and a lifetime of regret.`,
+      `SportsCenter's Not Top 10, entry #1: ${manager}'s ${perf.total}-point ${roundLabelBare} team total, presented by ${worst.name}, who contributed ${worst.pts} of those points and a lifetime of regret.`,
     () =>
       `${manager} really said "trust the process," and the process said ${worst.pts} points across ${roundLabel} from ${worst.name}. Final team tally: ${perf.total}. The process has been fired.`,
     () =>
       `In today's edition of Numbers That Should Be Illegal: ${worst.name} posted ${worst.pts} points across ${roundLabel} for ${manager}, on a ${perf.total}-point team total. Somebody call the commissioner — oh wait, he already saw.`,
     () =>
-      `${manager} is the proud owner of a ${perf.total}-point ${roundLabel} team exit, sponsored by ${worst.name} (${worst.pts} pts for the round) and a whole lot of denial.`,
+      `${manager} is the proud owner of a ${perf.total}-point ${roundLabelBare} team exit, sponsored by ${worst.name} (${worst.pts} pts for the round) and a whole lot of denial.`,
     () =>
       `Stand-up bit writes itself: a guy walks into ${roundLabel} with ${worst.name} on his roster... he doesn't walk back out. ${manager}, a ${perf.total}-point team total, thanks for playing.`,
     () =>
@@ -12682,7 +12682,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     () =>
       `The box score doesn't lie: ${worst.name} put up ${worst.pts} points for ${roundLabel}, ${manager}'s whole team put up ${perf.total}, and the round put both of them on a bus home.`,
     () =>
-      `${manager}'s ${roundLabelBare} eulogy, one line: here lies a ${perf.total}-point team, survived by ${worst.name}'s ${worst.pts}-point ${roundLabel} contribution and absolutely nothing else worth mentioning.`,
+      `${manager}'s ${roundLabelBare} eulogy, one line: here lies a ${perf.total}-point team, survived by ${worst.name}'s ${worst.pts}-point ${roundLabelBare} contribution and absolutely nothing else worth mentioning.`,
     () =>
       `Somebody page a doctor — ${worst.name}'s pulse across ${roundLabel} was ${worst.pts} points and barely detectable, and it still wasn't the sickest thing about ${manager}'s ${perf.total}-point team total.`,
     () =>
@@ -12692,7 +12692,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     () =>
       `${worst.name} put up ${worst.pts} points across ${roundLabel} and ${manager} kept running him out there like a man feeding quarters into a broken machine. ${perf.total}-point team total. The machine won.`,
     () =>
-      `Here's the thing about ${manager}'s ${perf.total}-point ${roundLabel}: it wasn't bad luck. ${worst.name} posted ${worst.pts} points and ${other.name} was right there with him. That's a choice, made repeatedly.`,
+      `Here's the thing about ${manager}'s ${perf.total}-point ${roundLabelBare}: it wasn't bad luck. ${worst.name} posted ${worst.pts} points and ${other.name} was right there with him. That's a choice, made repeatedly.`,
     () =>
       `${manager} spent ${roundLabel} waiting on ${worst.name} the way people wait on a bus that was cancelled years ago. ${worst.pts} points for the player, ${perf.total} for the team, zero for the plan.`,
     () =>
@@ -12702,13 +12702,13 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     () =>
       `${manager} could have started a folding chair in ${worst.name}'s spot and finished within rounding distance of ${worst.pts}. Instead: a ${perf.total}-point team total and a long, quiet drive home from ${roundLabel}.`,
     () =>
-      `Roll call for ${manager}'s ${roundLabel}: ${worst.name}, ${worst.pts} points, present but not accounted for. ${other.name}, also here, also useless. Team total ${perf.total}. Class dismissed.`,
+      `Roll call for ${manager}'s ${roundLabelBare}: ${worst.name}, ${worst.pts} points, present but not accounted for. ${other.name}, also here, also useless. Team total ${perf.total}. Class dismissed.`,
     () =>
       `${manager} entered ${roundLabel} with a plan and left it with a receipt: ${worst.name}, ${worst.pts} points, no refunds. ${perf.total}-point team total. The league appreciates the business.`,
     () =>
       `The scary part isn't that ${worst.name} posted ${worst.pts} points across ${roundLabel}. It's that ${manager} watched it happen in real time, every day, and did nothing. ${perf.total}-point team total.`,
     () =>
-      `${manager}'s ${perf.total}-point ${roundLabel} team total is the kind of number that doesn't need a joke attached. But ${worst.name}'s ${worst.pts} points across the round is right there, so here we are.`,
+      `${manager}'s ${perf.total}-point ${roundLabelBare} team total is the kind of number that doesn't need a joke attached. But ${worst.name}'s ${worst.pts} points across the round is right there, so here we are.`,
     () =>
       `Somewhere in a parallel universe ${worst.name} is good and ${manager} is still playing. In this one, ${worst.pts} points across ${roundLabel} and a ${perf.total}-point team total sent him packing.`,
     () =>
@@ -12718,11 +12718,11 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     () =>
       `${manager} needed a hero in ${roundLabel} and got ${worst.name} instead — ${worst.pts} points, no cape, no pulse. ${perf.total}-point team total, curtain down.`,
     () =>
-      `The ${roundLabel} exit interview for ${manager} is one question long: why ${worst.name}? ${worst.pts} points across the round. ${perf.total} for the team. There is no acceptable answer.`,
+      `The ${roundLabelBare} exit interview for ${manager} is one question long: why ${worst.name}? ${worst.pts} points across the round. ${perf.total} for the team. There is no acceptable answer.`,
     () =>
       `${manager} built a roster, ${worst.name} built a ${worst.pts}-point monument to doing nothing across ${roundLabel}, and the ${perf.total}-point team total built a bridge straight out of the tournament.`,
     () =>
-      `Every league needs someone to lose to, and ${manager} volunteered with a ${perf.total}-point ${roundLabel} team total. ${worst.name} (${worst.pts} pts) seconded the motion. Unanimous.`,
+      `Every league needs someone to lose to, and ${manager} volunteered with a ${perf.total}-point ${roundLabelBare} team total. ${worst.name} (${worst.pts} pts) seconded the motion. Unanimous.`,
     () =>
       `${manager} will tell you ${roundLabel} came down to a couple of unlucky breaks. It came down to ${worst.name} posting ${worst.pts} points and a ${perf.total}-point team total that never once looked like enough.`,
   ];
@@ -12736,11 +12736,11 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
         () =>
           `${manager}'s best player across ${roundLabel} was ${best.name} (${best.pts} pts) — and it still wasn't enough to cover for ${worst.name}'s ${worst.pts}. Team total: ${perf.total}. That's not a roster, that's a hostage situation.`,
         () =>
-          `Somewhere ${best.name} is quietly proud of that ${best.pts}-point ${roundLabel} effort for ${manager}. Everyone else on the roster heard "carry me" and left the team at ${perf.total} total.`,
+          `Somewhere ${best.name} is quietly proud of that ${best.pts}-point ${roundLabelBare} effort for ${manager}. Everyone else on the roster heard "carry me" and left the team at ${perf.total} total.`,
         () =>
           `${manager} had ONE guy — ${best.name}, ${best.pts} pts across ${roundLabel} — and built an entire campaign hoping nobody would notice the rest. ${perf.total}-point team total. Everybody noticed.`,
         () =>
-          `Even ${best.name}'s ${best.pts}-point ${roundLabel} highlight reel couldn't drag ${manager}'s team out of a hole dug by ${worst.name}'s ${worst.pts}. One man can't fix a group project this bad.`,
+          `Even ${best.name}'s ${best.pts}-point ${roundLabelBare} highlight reel couldn't drag ${manager}'s team out of a hole dug by ${worst.name}'s ${worst.pts}. One man can't fix a group project this bad.`,
         () =>
           `${manager}'s ${roundLabelBare}, summarized: ${best.name} shows up (${best.pts} pts), ${worst.name} no-shows (${worst.pts} pts), and the team total — ${perf.total} — reads like a group text nobody answered.`,
         () =>
@@ -12770,11 +12770,11 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
         () =>
           `${manager}'s roster in ${roundLabel} was ${best.name} (${best.pts} pts) and seven guys in witness protection, chief among them ${worst.name} at ${worst.pts}. Team total: ${perf.total}. Manhunt ongoing.`,
         () =>
-          `The tragedy of ${manager}'s ${roundLabel} isn't the ${perf.total}-point team total. It's that ${best.name} gave him ${best.pts} points of real production and ${worst.name} answered with ${worst.pts}.`,
+          `The tragedy of ${manager}'s ${roundLabelBare} isn't the ${perf.total}-point team total. It's that ${best.name} gave him ${best.pts} points of real production and ${worst.name} answered with ${worst.pts}.`,
         () =>
           `${best.name}: ${best.pts} points across ${roundLabel}, no notes. ${worst.name}: ${worst.pts} points, several notes. ${manager}: ${perf.total}-point team total and a flight to book.`,
         () =>
-          `Somebody tell ${best.name} his ${best.pts}-point ${roundLabel} was wasted on ${manager}, whose ${perf.total}-point team total was busy being dragged under by ${worst.name}'s ${worst.pts}.`,
+          `Somebody tell ${best.name} his ${best.pts}-point ${roundLabelBare} was wasted on ${manager}, whose ${perf.total}-point team total was busy being dragged under by ${worst.name}'s ${worst.pts}.`,
         () =>
           `${manager} won the lottery with ${best.name} (${best.pts} pts across ${roundLabel}) and then set the ticket on fire by starting ${worst.name} for ${worst.pts}. ${perf.total}-point team total. Astonishing work.`,
         () =>
@@ -12782,7 +12782,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
         () =>
           `${best.name} carried what he could — ${best.pts} points across ${roundLabel} — but nobody carries ${worst.name}'s ${worst.pts} and a ${perf.total}-point team total up a hill this steep.`,
         () =>
-          `The ${roundLabel} highlight package for ${manager} is ${best.name} at ${best.pts} points, followed by 40 minutes of ${worst.name} doing ${worst.pts} points' worth of nothing. ${perf.total}-point team total.`,
+          `The ${roundLabelBare} highlight package for ${manager} is ${best.name} at ${best.pts} points, followed by 40 minutes of ${worst.name} doing ${worst.pts} points' worth of nothing. ${perf.total}-point team total.`,
         () =>
           `${manager} had exactly one asset in ${roundLabel}: ${best.name}, ${best.pts} points. He also had ${worst.name} at ${worst.pts}, which is less an asset than a liability with a jersey. ${perf.total} total, goodbye.`,
         () =>
@@ -12883,7 +12883,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
         () =>
           `Final tally in ${roundLabel}: ${matchup.opponent} ${matchup.opponentScore}, ${manager} ${matchup.myScore}. ${worst.name} contributed ${worst.pts} points to that ${matchup.margin}-point hole and not one ounce of shame.`,
         () =>
-          `${manager} brought ${matchup.myScore} points to a ${matchup.opponentScore}-point fight. ${matchup.opponent} barely broke a sweat, and ${worst.name}'s ${worst.pts}-point ${roundLabel} was the white flag.`,
+          `${manager} brought ${matchup.myScore} points to a ${matchup.opponentScore}-point fight. ${matchup.opponent} barely broke a sweat, and ${worst.name}'s ${worst.pts}-point ${roundLabelBare} was the white flag.`,
         () =>
           `The scoreboard says ${matchup.opponent} ${matchup.opponentScore}, ${manager} ${matchup.myScore}. The box score says ${worst.name}, ${worst.pts} points. Both say the same thing: ${roundLabel} is over for ${manager}.`,
         () =>
@@ -12895,7 +12895,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     matchup && narrative && narrative.wireToWire
       ? [
           () =>
-            `${manager} did not lead this ${roundLabel} matchup for a single day. Not one. ${matchup.opponent} led wire-to-wire, won ${matchup.opponentScore}–${matchup.myScore}, and ${worst.name}'s ${worst.pts} points made sure it never got interesting.`,
+            `${manager} did not lead this ${roundLabelBare} matchup for a single day. Not one. ${matchup.opponent} led wire-to-wire, won ${matchup.opponentScore}–${matchup.myScore}, and ${worst.name}'s ${worst.pts} points made sure it never got interesting.`,
           () =>
             `Wire-to-wire. ${matchup.opponent} took the lead on day one of ${roundLabel} and never gave it back, because ${manager} trotted out ${worst.name} for ${worst.pts} points and called it a plan. ${matchup.opponentScore}–${matchup.myScore}.`,
           () =>
@@ -12909,7 +12909,7 @@ function fallbackRoast(manager, round, perf, matchup, narrative, excludeIds) {
     matchup && narrative && narrative.everLed && !narrative.wireToWire
       ? [
           () =>
-            `${manager} was ahead by as much as ${narrative.biggestLead} points in this ${roundLabel} matchup and still found a way to lose it ${matchup.myScore}–${matchup.opponentScore}. ${worst.name} (${worst.pts} pts) held the door open for ${matchup.opponent}.`,
+            `${manager} was ahead by as much as ${narrative.biggestLead} points in this ${roundLabelBare} matchup and still found a way to lose it ${matchup.myScore}–${matchup.opponentScore}. ${worst.name} (${worst.pts} pts) held the door open for ${matchup.opponent}.`,
           () =>
             `Blowing a ${narrative.biggestLead}-point lead to ${matchup.opponent} takes real commitment, and ${manager} was committed. ${worst.name} chipped in ${worst.pts} points toward the collapse. ${roundLabel} over, ${matchup.opponentScore}–${matchup.myScore}.`,
           () =>
