@@ -8085,10 +8085,17 @@ function renderRosterData(managerName, isCommissioner) {
     // highlights) added alongside the punchy joke that also goes to Slack — Slack keeps
     // just roast.text since the combined post already stacks one roast per manager.
     // Paragraphs are joined with a blank line server-side; render each as its own <p>.
+    // A paragraph may open with a `[[Section label]]` marker (buildRoastPageContext emits one
+    // per round the manager played — Pool Play, Quarterfinals, Day by day…); pull it out and
+    // render it as a heading chip. Paragraphs without a marker — including every roast stored
+    // before sectioning existed — render exactly as they always did.
     const contextHtml = roast.page_context
       ? `<div class="roast-context">${roast.page_context
           .split('\n\n')
-          .map((p) => `<p>${esc(p)}</p>`)
+          .map((p) => {
+            const m = p.match(/^\[\[([^\]]+)\]\]\s*([\s\S]*)$/);
+            return m ? `<p><span class="roast-context-label">${esc(m[1])}</span>${esc(m[2])}</p>` : `<p>${esc(p)}</p>`;
+          })
           .join('')}</div>`
       : '';
     // outcome distinguishes the standard "you're out" roast from the Finals-round podium
