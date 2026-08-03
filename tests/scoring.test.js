@@ -4,6 +4,8 @@ import {
   SCORING,
   SEASON_SCHEDULE,
   ROUND_LABELS,
+  roundShortLabel,
+  weekLabel,
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
@@ -63,6 +65,64 @@ describe('ROUND_LABELS', () => {
     for (const { round } of SEASON_SCHEDULE) {
       assert.ok(ROUND_LABELS[round], `missing label for ${round}`);
     }
+  });
+});
+
+describe('roundShortLabel', () => {
+  it('covers every round used by SEASON_SCHEDULE', () => {
+    for (const { round } of SEASON_SCHEDULE) {
+      assert.ok(roundShortLabel(round), `missing short label for ${round}`);
+    }
+  });
+
+  it('collapses the historical batting/pitching round variants', () => {
+    assert.equal(roundShortLabel('PP1P'), 'PP1');
+    assert.equal(roundShortLabel('PP2P'), 'PP2');
+    assert.equal(roundShortLabel('QFP'), 'QF');
+    assert.equal(roundShortLabel('SFP'), 'SF');
+  });
+
+  it('maps the historical finals and 3rd-place round keys', () => {
+    assert.equal(roundShortLabel('F1'), 'Finals');
+    assert.equal(roundShortLabel('F2'), 'Finals');
+    assert.equal(roundShortLabel('FB'), 'Finals');
+    assert.equal(roundShortLabel('FP'), 'Finals');
+    assert.equal(roundShortLabel('3PWK1'), '3rd Place');
+    assert.equal(roundShortLabel('3B'), '3rd Place');
+    assert.equal(roundShortLabel('3P'), '3rd Place');
+  });
+
+  it('passes an unknown round through and returns empty for a blank one', () => {
+    assert.equal(roundShortLabel('WC'), 'WC');
+    assert.equal(roundShortLabel(''), '');
+    assert.equal(roundShortLabel(null), '');
+    assert.equal(roundShortLabel(undefined), '');
+  });
+});
+
+describe('weekLabel', () => {
+  it('qualifies a playoff week with its round', () => {
+    assert.equal(weekLabel('QF', 'Week 1'), 'QF Week 1');
+    assert.equal(weekLabel('QF', 'Week 2'), 'QF Week 2');
+    assert.equal(weekLabel('SF', 'Week 1'), 'SF Week 1');
+    assert.equal(weekLabel('Finals', 'Week 2'), 'Finals Week 2');
+  });
+
+  it('qualifies pool play weeks too, since PP1 and PP2 both start at Week 1', () => {
+    assert.equal(weekLabel('PP1', 'Week 1'), 'PP1 Week 1');
+    assert.equal(weekLabel('PP2', 'Week 1'), 'PP2 Week 1');
+  });
+
+  it('uses the collapsed round name for historical rows', () => {
+    assert.equal(weekLabel('QFP', 'Week 11'), 'QF Week 11');
+    assert.equal(weekLabel('3PWK2', 'Week 16'), '3rd Place Week 16');
+  });
+
+  it('falls back to whichever half is present', () => {
+    assert.equal(weekLabel(null, 'Week 3'), 'Week 3');
+    assert.equal(weekLabel('QF', null), 'QF');
+    assert.equal(weekLabel(null, null), '');
+    assert.equal(weekLabel('', ''), '');
   });
 });
 

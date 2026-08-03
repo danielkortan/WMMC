@@ -3971,7 +3971,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
         totBb += r.bb || 0;
         totPts += r.weekly_score || 0;
         return `<tr>
-        <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
+        <td class="pqv-week">${esc(weekLabel(r.round, r.week))}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
         <td class="num">${r.abs || 0}</td><td class="num">${r['1b'] || 0}</td>
         <td class="num">${r['2b'] || 0}</td><td class="num">${r['3b'] || 0}</td>
         <td class="num">${r.hr || 0}</td><td class="num">${r.r || 0}</td>
@@ -4030,7 +4030,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
         totK += r.k || 0;
         totPts += r.weekly_score || 0;
         return `<tr>
-        <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
+        <td class="pqv-week">${esc(weekLabel(r.round, r.week))}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
         <td class="num">${r.gs || 0}</td><td class="num">${r.w || 0}</td>
         <td class="num">${fmtDec(r.qs)}</td>
         <td class="num">${r.cg || 0}</td><td class="num">${r.cgso || 0}</td>
@@ -4673,7 +4673,7 @@ function renderPlayers() {
               const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
               return `
             <tr>
-              <td>${b.week || ''}</td>
+              <td>${esc(weekLabel(b.round, b.week))}</td>
               ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
               <td><strong>${esc(b.manager)}</strong></td>
               <td>${esc(b.batter)}</td>
@@ -4717,7 +4717,7 @@ function renderPlayers() {
               const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
               return `
             <tr>
-              <td>${p.week || ''}</td>
+              <td>${esc(weekLabel(p.round, p.week))}</td>
               ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
               <td><strong>${esc(p.manager)}</strong></td>
               <td>${esc(p.pitcher)}</td>
