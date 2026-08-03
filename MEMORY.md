@@ -2663,3 +2663,38 @@ the same table: how often this roster was the league's best or worst team on a d
 
 Repeated phrasings ("carried what there was to carry", "did the opposite") are now seeded banks via
 the existing `pick`, so adjacent sections and adjacent managers don't read as a form letter.
+
+## The roast API call could 500 instead of falling back (2026-08-03)
+
+**Symptom.** Regenerating live QF roasts, one manager came back `500 {"error":"Failed to generate
+roast"}` while the other seven succeeded. Same manager had succeeded minutes earlier in a different
+run, so it was transient, not data-dependent.
+
+**Cause.** `generateRoastWithClaude` handled `!resp.ok` — an HTTP error status falls back to the
+static bank — but the `fetch` itself was unguarded. A network-level rejection (socket reset, DNS
+blip, TLS failure) throws, and the throw goes straight past the fallback, out of the function, and
+into the route's `catch`, which returns 500 and stores nothing. `generateWelcomeRoast` two thousand
+lines down wraps the identical call in try/catch, so this was an inconsistency rather than a
+decision.
+
+**Why it mattered more than a one-off 500.** In the combined `/roasts/slack` loop the throw is
+caught per manager and falls back to **the existing stored roast**. So a blip mid-repost silently
+puts a manager's _previous_ roast into the new Slack post, and nothing surfaces it — you would only
+notice by reading all of them against what the console printed.
+
+**Fix.** `try`/`catch` around the fetch, plus `AbortSignal.timeout(ROAST_API_TIMEOUT_MS)` (30s) —
+the combined post generates sequentially because each call is a read-modify-write of `db.json`, so
+one hung connection stalls every manager behind it. Also guarded `resp.json()` (a truncated body is
+the same class of failure) and `resp.text()` in the error path.
+
+**Verified by before/after against a dead endpoint.** Pointed the call at `https://127.0.0.1:9`
+(discard port) in both `origin/main`'s server.js and the fixed one, with a dummy API key so the
+code path is reached:
+
+- before: `HTTP 500`, `{"error":"Failed to generate roast"}`, nothing stored.
+- after: `HTTP 200`, static-bank roast stored with `template_id=day:27`, `page_tables` intact, and
+  `Anthropic API call failed for Anton Capria - TypeError fetch failed` in the log.
+
+Note for future testing in this container: `/etc/hosts` already pins `api.anthropic.com`, and Node's
+fetch goes through the agent proxy regardless, so neither a hosts override nor `NO_PROXY` will
+simulate an unreachable API. Patching the URL is the reliable way.

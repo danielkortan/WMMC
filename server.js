@@ -52,6 +52,11 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 // Anthropic API — set ANTHROPIC_API_KEY to enable AI-generated elimination roasts.
 // If unset, roasts fall back to a static message.
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+// Per-call ceiling on the roast generation requests. Generous relative to a 300-token
+// completion, but bounded: the combined Slack post generates one manager at a time, so a
+// hung connection would otherwise hold up everyone behind it. On timeout the caller takes
+// the static bank, same as any other failure.
+const ROAST_API_TIMEOUT_MS = 30000;
 
 async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
@@ -13813,27 +13818,51 @@ Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0
 Write the roast now. No preamble, no labels — just the roast.`;
   }
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
-
-  if (!resp.ok) {
-    console.error('Anthropic API error:', resp.status, await resp.text());
+  // Every failure mode lands on the static bank. An HTTP error status was already handled;
+  // a network-level rejection (socket reset, DNS blip, TLS failure) was not — it threw past
+  // the fallback, out of here, and into the route's catch, which returned a 500 and stored
+  // nothing. That is how a manager ends up with no roast at all, and worse: the combined
+  // Slack loop catches the throw per manager and falls back to whatever was ALREADY stored,
+  // so a blip mid-repost silently puts a manager's previous roast into the new post.
+  //
+  // The timeout is part of the same guarantee. Without it a hung connection blocks until the
+  // platform's socket timeout, and because the combined post generates sequentially (each
+  // call is a read-modify-write of db.json), one hang stalls every manager behind it.
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
+    });
+  } catch (e) {
+    console.error('Anthropic API call failed for', manager, '-', e.name, e.message);
     return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
   }
 
-  const data = await resp.json();
-  const text = data.content && data.content[0] && data.content[0].text;
+  if (!resp.ok) {
+    console.error('Anthropic API error:', resp.status, await resp.text().catch(() => ''));
+    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
+  }
+
+  // A body that arrives truncated or malformed is the same class of failure as a bad status.
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    console.error('Anthropic API returned an unreadable body for', manager, '-', e.message);
+    return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
+  }
+  const text = data && data.content && data.content[0] && data.content[0].text;
   // A Claude-written roast has no template id — there is nothing to de-duplicate.
   if (text) return { text, templateId: null };
   return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
@@ -14958,9 +14987,12 @@ Write the roast now. No preamble, no labels — just the roast.`;
         max_tokens: 500,
         messages: [{ role: 'user', content: prompt }],
       }),
+      // Already wrapped in try/catch below, so a throw is handled — but without a deadline a
+      // hung connection holds the request open until the platform gives up.
+      signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
     });
     if (!resp.ok) {
-      console.error('[Welcome] Anthropic API error:', resp.status, await resp.text());
+      console.error('[Welcome] Anthropic API error:', resp.status, await resp.text().catch(() => ''));
       return fallbackWelcomeRoast(facts);
     }
     const data = await resp.json();
