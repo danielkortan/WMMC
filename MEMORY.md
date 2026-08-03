@@ -2630,3 +2630,36 @@ warns about, and it was live before tables made it visible.
 grid, so a round with only two tables (a roster too short to have distinct bottom performers) still
 fills the row instead of leaving a hole. Verified stacking cleanly at 390px with no horizontal
 overflow.
+
+## Round sections became three narrative lines over the tables (2026-08-03)
+
+**Shape.** Each round section is now exactly three prose lines, then its three tables: **(1) what
+happened** — the result or where they finished, tiered by margin; **(2) how it played out** — the
+day-by-day story; **(3) where the points came from and who to blame**. The tables stopped being a
+summary of the prose and became the data view under it.
+
+**Line 2 needed a per-round matchup narrative, which used to be elimination-round only.**
+`computeMatchupNarrativeForRoast` walked the round's dates calling `computeDailyHighLow` per date —
+the sweep that made it too expensive to run for every round. Rewrote it to read the `dayRanks`
+table `computeRoleRanksForRoast` already builds (every manager's total for every date, same
+ownership rule, same correction guard). Signature changed from `(sd, round, manager, opponent)` to
+`(dayRanks, manager, opponent)`. Now every round the manager played gets its own story — blown
+lead, wire-to-wire, lead changed N times — and it costs one table build per round for a whole
+combined post. That is the third `computeDailyHighLow` caller removed from the roast path.
+
+Pool Play has no single opponent, so line 2 there is the shape of the round instead, counted off
+the same table: how often this roster was the league's best or worst team on a day.
+
+**Two overstatements the fixture caught, both worth keeping in mind for future template work:**
+
+- "A roster with two settings and no dial between them" fired on 3-best/3-worst out of 30 days,
+  which is not two settings, it is mediocrity. The day-shape line now branches on the _ratio_
+  (best≫worst, worst≫best, neither, all-zero) and only uses the two-settings framing when the
+  counts really are comparable and non-zero.
+- "X did the opposite" fired on a roster whose weakest link was 15th of 27 leaguewide — middling,
+  not catastrophic. Now gated on `rank > of * 0.5`, with a "nobody was a disaster" bank for strong
+  rosters. Overstating a number the reader can check in the table underneath is the fastest way to
+  make the whole section untrustworthy.
+
+Repeated phrasings ("carried what there was to carry", "did the opposite") are now seeded banks via
+the existing `pick`, so adjacent sections and adjacent managers don't read as a form letter.

@@ -12264,28 +12264,18 @@ function computeRoleRanksForRoast(sd, managerNames, round) {
 // blown on the last Sunday, and those deserve very different roasts — this supplies the
 // difference.
 //
-// Walks the round's scored dates in order, accumulating each side's date-windowed daily
-// total from computeDailyHighLow's managerTotals, so attribution honours roster windows and
-// swaps exactly like every other score in the app. Returns null when there is no opponent or
-// the round has no scored days.
-function computeMatchupNarrativeForRoast(sd, round, manager, opponent) {
-  if (!manager || !opponent) return null;
-  const rounds = ROAST_ROUND_KEYS[round] || [round];
-  const dates = new Set();
-  (sd.daily_batting || []).forEach((r) => {
-    if (rounds.includes(r.round)) dates.add(r.date);
-  });
-  (sd.daily_pitching || []).forEach((r) => {
-    if (rounds.includes(r.round)) dates.add(r.date);
-  });
-  const ordered = [...dates].sort();
+// Walks the round's scored dates in order off the `dayRanks` table computeRoleRanksForRoast
+// already built — every manager's total for every date in the round, under the same ownership
+// rule and stat-correction guard as every other number in the roast. Taking it from there
+// rather than re-deriving per date means one build per round for a whole combined post, and
+// it can never disagree with the day scores the tables print. Returns null when there is no
+// opponent or the round has no scored days.
+function computeMatchupNarrativeForRoast(dayRanks, manager, opponent) {
+  if (!dayRanks || !manager || !opponent) return null;
+  const ordered = Object.keys(dayRanks).sort();
   if (ordered.length === 0) return null;
 
   const r2 = (n) => Math.round(n * 100) / 100;
-  const dayTotal = (totals, name) => {
-    const t = totals[name] || {};
-    return (t.batting || 0) + (t.pitching || 0);
-  };
 
   let mine = 0;
   let theirs = 0;
@@ -12298,12 +12288,11 @@ function computeMatchupNarrativeForRoast(sd, round, manager, opponent) {
   let scoredDays = 0;
 
   for (const date of ordered) {
-    const hl = computeDailyHighLow(sd, date);
-    if (!hl) continue;
+    const row = dayRanks[date] || {};
+    if (!row[manager] && !row[opponent]) continue;
     scoredDays++;
-    const totals = hl.managerTotals || {};
-    mine += dayTotal(totals, manager);
-    theirs += dayTotal(totals, opponent);
+    mine += row[manager] ? row[manager].pts : 0;
+    theirs += row[opponent] ? row[opponent].pts : 0;
 
     const nowLeader = mine > theirs ? manager : theirs > mine ? opponent : null;
     if (nowLeader === manager) {
@@ -13250,12 +13239,8 @@ function buildRoundBreakdownsForRoast(db, sd, manager, round, finalPerf, finalMa
   for (let i = 0; i <= endIdx; i++) {
     const r = ROAST_ROUND_ORDER[i];
     const isFinal = r === round;
-    const perf =
-      isFinal && finalPerf
-        ? finalPerf
-        : buildManagerPerformanceForRoast(sd, manager, r, {
-            ranks: roastRoundRanks(db, sd, r, cache),
-          });
+    const ranks = roastRoundRanks(db, sd, r, cache);
+    const perf = isFinal && finalPerf ? finalPerf : buildManagerPerformanceForRoast(sd, manager, r, { ranks });
     // A round this manager never played (eliminated before it, or no rows yet) has nothing to
     // narrate — skip it rather than printing a 0-point section.
     if (!perf || (perf.batter_count === 0 && perf.pitcher_count === 0)) continue;
@@ -13265,7 +13250,22 @@ function buildRoundBreakdownsForRoast(db, sd, manager, round, finalPerf, finalMa
         : isFinal && finalMatchup !== undefined
           ? finalMatchup
           : playoffMatchupResultForRoast(sd, r, manager);
-    stages.push({ key: r, label: roastRoundLabelBare(r), isFinal, perf, matchup });
+    // The day-by-day story of THIS round's matchup — a blown lead and a wire-to-wire
+    // beating are different humiliations, and every round the manager played deserves the
+    // distinction, not just the one they went out in.
+    const narrative = matchup ? computeMatchupNarrativeForRoast(ranks.dayRanks, manager, matchup.opponent) : null;
+    // Pool Play has no single opponent, so its story line is the shape of the round instead:
+    // how often this roster was the best or the worst team in the league on a given day.
+    // Counted off the same cached day-rank table, so it agrees with the Scoring days column.
+    const dayShape = { days: 0, best: 0, worst: 0 };
+    for (const row of Object.values(ranks.dayRanks || {})) {
+      const mine = row[manager];
+      if (!mine) continue;
+      dayShape.days++;
+      if (mine.rank === 1) dayShape.best++;
+      if (mine.of > 1 && mine.rank === mine.of) dayShape.worst++;
+    }
+    stages.push({ key: r, label: roastRoundLabelBare(r), isFinal, perf, matchup, narrative, dayShape });
   }
   return stages;
 }
@@ -13297,7 +13297,9 @@ function collectRoastInputs(db, sd, manager, round, cache = {}, opts = {}) {
       : playoffMatchupResultForRoast(sd, round, manager)
     : null;
   const journey = isPlayoffRound ? pastRoundJourneyForRoast(db, sd, manager, round) : null;
-  const narrative = matchup ? computeMatchupNarrativeForRoast(sd, round, manager, matchup.opponent) : null;
+  const narrative = matchup
+    ? computeMatchupNarrativeForRoast(roastRoundRanks(db, sd, round, cache).dayRanks, manager, matchup.opponent)
+    : null;
   const breakdown = buildRoundBreakdownsForRoast(db, sd, manager, round, perf, matchup, cache);
   return { perf, standings, matchup, journey, narrative, breakdown };
 }
@@ -13462,77 +13464,59 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
       ? breakdown
       : [{ key: round, label: roastRoundLabelBare(round), isFinal: true, perf, matchup: matchup || null }];
 
-  stages.forEach((stage, idx) => {
+  stages.forEach((stage) => {
     const p = stage.perf;
     const m = stage.matchup;
-    const bits = [];
+    const n = stage.narrative;
 
-    if (stage.key === 'PP') {
-      // Pool Play. When this IS the elimination round the full standings context is
-      // available — where they finished, the tightest race they lost, and the week-by-week
-      // story of losing it. When they qualified, the numbers speak for themselves.
-      if (standings) {
-        const poolLabel = `Pool ${standings.pool}`;
-        const closest = standings.closest;
-        const race = standings.race;
-        const raceClause = (() => {
-          if (!race) return '';
-          if (race.flippedInFinalWeek) {
-            return `${manager} actually led ${race.rival} in the cumulative race through ${race.ledThroughWeek}, before ${race.rival}'s final week flipped it`;
-          }
-          if (race.neverLed) {
-            return `${manager} never once led ${race.rival} — the gap was real from the first week on`;
-          }
-          if (race.ledThroughWeek) {
-            return `${manager} led ${race.rival} through ${race.ledThroughWeek}, then fell behind for good`;
-          }
-          return '';
-        })();
-        const raceSentence = raceClause ? ` ${raceClause.charAt(0).toUpperCase()}${raceClause.slice(1)}.` : '';
-
-        const otherGaps = [];
-        if ((!closest || closest.key !== 'pp1') && standings.pp1_leader && standings.pp1_gap >= 0) {
-          otherGaps.push(`${standings.pp1_gap} pts behind ${standings.pp1_leader} for the Pool Play 1 lead`);
-        }
-        if ((!closest || closest.key !== 'pp2') && standings.pp2_leader && standings.pp2_gap >= 0) {
-          otherGaps.push(`${standings.pp2_gap} pts behind ${standings.pp2_leader} for the Pool Play 2 lead`);
-        }
-        if ((!closest || closest.key !== 'wildcard') && standings.wildcard_rival && standings.wildcard_gap >= 0) {
-          otherGaps.push(`${standings.wildcard_gap} pts behind ${standings.wildcard_rival} for the wild card`);
-        }
-        const otherGapsSentence = otherGaps.length ? ` Also ${otherGaps.join(', and ')}.` : '';
-        const place = `${ordinal(standings.poolRank)} of ${standings.poolSize} in ${poolLabel}, ${ordinal(standings.overallRank)} of ${standings.totalManagers} overall`;
-
-        if (closest) {
-          const missBank = {
-            heartbreak: () =>
-              `${manager} finished ${place}, and missed ${closest.label} by ${closest.gap} points. Ten weeks of baseball, decided by less than one good afternoon.`,
-            close: () =>
-              `${place} — and ${closest.gap} points short of ${closest.label}, behind ${closest.rival}. That is a margin ${manager} gets to think about all winter.`,
-            competitive: () =>
-              `${manager} finished ${place}. The nearest miss was ${closest.label}, ${closest.gap} points behind ${closest.rival} — close enough to have been fixable, far enough that nobody had to sweat it.`,
-            clear: () =>
-              `${manager} finished ${place}, with ${closest.label} sitting ${closest.gap} points away behind ${closest.rival}. Not a near miss. A gap.`,
-            blowout: () =>
-              `${manager} finished ${place}. The closest thing to a race was ${closest.label}, and that one was ${closest.gap} points away. There was no race.`,
-          };
-          bits.push(`${missBank[roastMarginTier(closest.gap)]()}${raceSentence}${otherGapsSentence}`);
-        } else {
-          bits.push(`${manager} finished ${place}.${otherGapsSentence}`);
-        }
-        bits.push(splitSentence(p, true));
-      } else {
-        // They qualified, so Pool Play is a round they came through.
-        bits.push(`Across the two Pool Play periods, ${splitSentence(p, true)}`);
+    // ---- line 1: what happened -----------------------------------------------
+    let resultLine;
+    if (stage.key === 'PP' && standings) {
+      const closest = standings.closest;
+      const otherGaps = [];
+      if ((!closest || closest.key !== 'pp1') && standings.pp1_leader && standings.pp1_gap >= 0) {
+        otherGaps.push(`${standings.pp1_gap} behind ${standings.pp1_leader} for the Pool Play 1 lead`);
       }
+      if ((!closest || closest.key !== 'pp2') && standings.pp2_leader && standings.pp2_gap >= 0) {
+        otherGaps.push(`${standings.pp2_gap} behind ${standings.pp2_leader} for the Pool Play 2 lead`);
+      }
+      if ((!closest || closest.key !== 'wildcard') && standings.wildcard_rival && standings.wildcard_gap >= 0) {
+        otherGaps.push(`${standings.wildcard_gap} behind ${standings.wildcard_rival} for the wild card`);
+      }
+      const otherGapsSentence = otherGaps.length ? ` Also ${otherGaps.join(', and ')}.` : '';
+      const place = `${ordinal(standings.poolRank)} of ${standings.poolSize} in Pool ${standings.pool}, ${ordinal(standings.overallRank)} of ${standings.totalManagers} overall`;
+      if (closest) {
+        const missBank = {
+          heartbreak: () =>
+            `${manager} finished ${place}, and missed ${closest.label} by ${closest.gap} points. Ten weeks of baseball, decided by less than one good afternoon.`,
+          close: () =>
+            `${manager} finished ${place} — ${closest.gap} points short of ${closest.label}, behind ${closest.rival}. That is a margin he gets to think about all winter.`,
+          competitive: () =>
+            `${manager} finished ${place}. The nearest miss was ${closest.label}, ${closest.gap} points behind ${closest.rival} — close enough to have been fixable, far enough that nobody had to sweat it.`,
+          clear: () =>
+            `${manager} finished ${place}, with ${closest.label} sitting ${closest.gap} points away behind ${closest.rival}. Not a near miss. A gap.`,
+          blowout: () =>
+            `${manager} finished ${place}. The closest thing to a race was ${closest.label}, ${closest.gap} points off. There was no race.`,
+        };
+        resultLine = `${missBank[roastMarginTier(closest.gap)]()}${otherGapsSentence}`;
+      } else {
+        resultLine = `${manager} finished ${place}.${otherGapsSentence}`;
+      }
+    } else if (stage.key === 'PP') {
+      const seedClause =
+        journey && journey.seed
+          ? journey.wonPP1 || journey.wonPP2
+            ? ` Enough to win a pool outright and take the #${journey.seed} seed.`
+            : ` Enough for the #${journey.seed} wild card, and not a point more than that.`
+          : '';
+      resultLine = `${manager} came out of the two Pool Play periods with ${p.total} points.${seedClause}`;
     } else if (m) {
-      // A playoff round. Result first, escalated by margin, then the numbers behind it.
       const tier = roastMarginTier(m.margin);
       const prize = roastStakesOfWinning(stage.key, m.label);
       const art = roastArticle(m.margin);
       const lossBank = {
         heartbreak: () =>
-          `${m.opponent} ${m.opponentScore}, ${manager} ${m.myScore}. ${m.margin} points — that is the entire distance between ${prize} and going home, and it is smaller than one decent afternoon from anybody on the roster.`,
+          `${m.opponent} ${m.opponentScore}, ${manager} ${m.myScore}. ${m.margin} points — the entire distance between ${prize} and going home, and smaller than one decent afternoon from anybody on the roster.`,
         close: () =>
           `${m.opponent} took it ${m.opponentScore}–${m.myScore}, ${art} ${m.margin}-point margin. Close enough to replay every night until next season, nowhere near close enough to matter.`,
         competitive: () =>
@@ -13544,7 +13528,7 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
       };
       const winBank = {
         heartbreak: () =>
-          `${manager} survived ${m.opponent} ${m.myScore}–${m.opponentScore}, by ${m.margin} points. One ordinary night in the other direction and this section does not exist.`,
+          `${manager} survived ${m.opponent} ${m.myScore}–${m.opponentScore}, by ${m.margin} points. One ordinary night the other way and this section does not exist.`,
         close: () =>
           `${manager} edged ${m.opponent} ${m.myScore}–${m.opponentScore}, ${art} ${m.margin}-point win that was in doubt to the last day.`,
         competitive: () =>
@@ -13554,39 +13538,144 @@ function buildRoastPageContext(manager, round, perf, standings, matchup, journey
         blowout: () =>
           `${manager} ran ${m.opponent} off the field ${m.myScore}–${m.opponentScore}, by ${m.margin}. Briefly, this looked like a manager who knew what he was doing.`,
       };
-      bits.push((m.won ? winBank : lossBank)[tier]());
-      bits.push(splitSentence(p, false));
-
-      // The cruellest arithmetic available: how little it would have taken. Only worth
-      // saying on a loss tight enough for it to be true.
-      if (!m.won && (tier === 'heartbreak' || tier === 'close')) {
-        const w = weakestLink(p);
-        if (w) {
-          bits.push(
-            `One ${Math.ceil(m.margin)}-point game — one — out of ${w.name}, who managed ${w.pts} across the entire round, and ${manager} is still playing.`
-          );
-        }
-      }
+      resultLine = (m.won ? winBank : lossBank)[tier]();
     } else {
-      // A playoff round with no head-to-head on file (shouldn't normally happen, but the
-      // numbers are still worth printing rather than dropping the section entirely).
-      bits.push(splitSentence(p, true));
+      resultLine = `${manager} put up ${p.total} points across ${roastRoundLabel(stage.key)}.`;
     }
 
-    // Standout individual games belong to the round the roast is actually about.
-    if (stage.isFinal && p.best_single_game && p.worst_single_game) {
-      const bg = p.best_single_game;
-      const wg = p.worst_single_game;
-      const gameBank = [
-        () =>
-          `Single best game anyone on this roster turned in: ${bg.name}, ${bg.score} pts on ${fmtRoastShortDate(bg.date)}. Single worst: ${wg.name}, ${wg.score} on ${fmtRoastShortDate(wg.date)}.`,
-        () =>
-          `The high-water mark was ${bg.name}'s ${bg.score}-point game on ${fmtRoastShortDate(bg.date)}; the low was ${wg.name}'s ${wg.score} on ${fmtRoastShortDate(wg.date)}. Both count the same in the total.`,
-        () =>
-          `Two games worth framing for opposite reasons: ${bg.name} for ${bg.score} pts on ${fmtRoastShortDate(bg.date)}, and ${wg.name} for ${wg.score} on ${fmtRoastShortDate(wg.date)}.`,
-      ];
-      bits.push(pick(gameBank, idx * 7));
+    // ---- line 2: how it actually played out -----------------------------------
+    // A head-to-head gets the day-by-day story (a blown lead and a wire-to-wire beating are
+    // different humiliations). Pool Play has no single opponent, so it gets the shape of the
+    // round instead: how often this roster was the best or the worst in the league on a day.
+    let storyLine = '';
+    if (m && n) {
+      if (n.wireToWire) {
+        storyLine = `${m.opponent} was in front from the first day to the last — across ${n.scoredDays} scored days, ${manager} led on exactly none of them.`;
+      } else if (n.everLed && n.lostLeadOnLabel && !m.won) {
+        storyLine = `He did lead it, by as much as ${n.biggestLead} points, and handed it back for good on ${n.lostLeadOnLabel}. ${n.daysLed} of ${n.scoredDays} scored days in front, and none of the ones that counted.`;
+      } else if (n.everLed && m.won && n.leadChanges === 0) {
+        storyLine = `He led from the front the whole way — ahead on all ${n.daysLed} of ${n.scoredDays} scored days, by as much as ${n.biggestLead} points.`;
+      } else if (n.leadChanges > 0) {
+        storyLine = `The lead changed hands ${n.leadChanges} time${n.leadChanges === 1 ? '' : 's'} across ${n.scoredDays} scored days, with ${manager} in front for ${n.daysLed} of them and ahead by as much as ${n.biggestLead}.`;
+      } else {
+        storyLine = `The lead never changed hands once in ${n.scoredDays} scored days. Whatever this was, it was not a contest.`;
+      }
+    } else if (stage.dayShape && stage.dayShape.days > 0) {
+      const d = stage.dayShape;
+      const across = `Across ${d.days} scored days`;
+      // Which story the day counts tell depends on how lopsided they are: topping the league
+      // four times and bottoming it once is a good team having off nights; three and three is
+      // a coin flip; and neither is "two settings and no dial", which only fits a roster that
+      // really did live at both extremes.
+      let dayBank;
+      if (d.best === 0 && d.worst === 0) {
+        dayBank = [
+          () => `${across} he was never the league's best team and never its worst. Present, and nothing else.`,
+          () =>
+            `${across} he topped the league exactly zero times and propped it up zero times. Utterly, forgettably average.`,
+          () =>
+            `${across} he never once led the league for a day, and never once finished last. A flat line with a pulse.`,
+        ];
+      } else if (d.best > 0 && d.worst === 0) {
+        dayBank = [
+          () => `${across} he was the league's best team on ${d.best} and never finished a day last.`,
+          () =>
+            `${across} he led the league outright ${d.best} time${d.best === 1 ? '' : 's'} and never bottomed it once. Consistent, which makes the ending worse.`,
+        ];
+      } else if (d.worst > 0 && d.best === 0) {
+        dayBank = [
+          () => `${across} he was the league's worst team on ${d.worst} of them, and never once its best.`,
+          () =>
+            `${across} he hit the bottom of the league ${d.worst} time${d.worst === 1 ? '' : 's'} and the top never. That is not variance, that is a level.`,
+        ];
+      } else if (d.best >= d.worst * 2) {
+        dayBank = [
+          () =>
+            `${across} he was the league's best team on ${d.best} and its worst on only ${d.worst}. Mostly very good, occasionally absent.`,
+          () =>
+            `${across} he topped the league ${d.best} times against ${d.worst} at the bottom — a good team with the odd night off.`,
+        ];
+      } else if (d.worst >= d.best * 2) {
+        dayBank = [
+          () =>
+            `${across} he was the league's worst team on ${d.worst} and its best on just ${d.best}. The bad days were the pattern; the good ones were the exception.`,
+          () =>
+            `${across} he bottomed the league ${d.worst} times and topped it ${d.best}. The ratio is the whole story.`,
+        ];
+      } else {
+        dayBank = [
+          () =>
+            `${across} he was the league's best team on ${d.best} and its worst on ${d.worst} — a roster with two settings and no dial between them.`,
+          () =>
+            `${across} he led the league ${d.best} times and trailed it ${d.worst}. Whichever version showed up was nobody's decision, least of all his.`,
+        ];
+      }
+      storyLine = pick(dayBank, 5);
     }
+
+    // ---- line 3: where the points came from, and who to blame -------------------
+    const bestContributor = (() => {
+      const b = p.best_batter_ranked;
+      const pi = p.best_pitcher_ranked;
+      const score = (x) => (x && x.rank && x.of ? x.rank / x.of : 2);
+      if (b && pi) return score(b) <= score(pi) ? { x: b, role: 'hitters' } : { x: pi, role: 'pitchers' };
+      if (b) return { x: b, role: 'hitters' };
+      return pi ? { x: pi, role: 'pitchers' } : null;
+    })();
+    const weakest = weakestLink(p);
+    const creditBits = [splitSentence(p, stage.key === 'PP' && !standings ? false : true)];
+    if (bestContributor) {
+      const x = bestContributor.x;
+      const where =
+        x.rank && x.of ? `${x.pts} pts, ${ordinal(x.rank)} of ${x.of} ${bestContributor.role}` : `${x.pts} pts`;
+      const game = x.best_game
+        ? `, including ${x.best_game.score} in one game on ${fmtRoastShortDate(x.best_game.date)}`
+        : '';
+      creditBits.push(
+        pick(
+          [
+            () => `${x.name} carried what there was to carry — ${where}${game}.`,
+            () => `The one who showed up was ${x.name}: ${where}${game}.`,
+            () => `${x.name} did his part — ${where}${game}.`,
+            () => `Credit where it is owed: ${x.name}, ${where}${game}.`,
+          ],
+          13
+        )
+      );
+    }
+    if (weakest && (!bestContributor || weakest.name !== bestContributor.x.name)) {
+      const where =
+        weakest.rank && weakest.of
+          ? `${weakest.pts} pts, ${ordinal(weakest.rank)} of ${weakest.of}`
+          : `${weakest.pts} pts`;
+      // "Did the opposite" is only true when the weakest link was actually bad. On a strong
+      // roster the worst player can still be mid-table leaguewide, and calling that a
+      // catastrophe is the kind of overstatement that makes the whole section untrustworthy.
+      const reallyBad = !weakest.rank || !weakest.of || weakest.rank > weakest.of * 0.5;
+      const flip =
+        m && !m.won && m.margin <= 25
+          ? ` One ${Math.ceil(m.margin)}-point game out of him and ${manager} is still playing.`
+          : '';
+      creditBits.push(
+        pick(
+          reallyBad
+            ? [
+                () => `${weakest.name} did the opposite: ${where}.${flip}`,
+                () => `At the other end, ${weakest.name}: ${where}.${flip}`,
+                () => `${weakest.name} was the anchor, and not the useful kind — ${where}.${flip}`,
+                () => `Dragging the other way: ${weakest.name}, ${where}.${flip}`,
+              ]
+            : [
+                () => `Nobody was a disaster — the weakest link was ${weakest.name} at ${where}.${flip}`,
+                () => `Even the low end held up: ${weakest.name}, ${where}.${flip}`,
+              ],
+          17
+        )
+      );
+    }
+    const creditLine = creditBits.filter(Boolean).join(' ');
+
+    const bits = [resultLine, storyLine, creditLine];
 
     section(stage.label, bits.filter(Boolean).join('\n'), roundTables(p));
   });
