@@ -2413,3 +2413,74 @@ are one-per-season and can't collide). Three call sites updated.
 distinct ids; two identical regenerate runs produced byte-identical assignments (stability); and
 planting `core:6` on a Pool Play roast moved Drew Dinger — whose natural QF pick is `core:6` — to
 `core:7` while leaving the other three untouched (minimal displacement, cross-period exclusion).
+
+## Roster-page elimination roasts: round-by-round sections, league ranks, and a negative-points bug (2026-08-03)
+
+**What was wrong.** The page context under the Hall of Shame banner read as trivia, not a roast:
+
+- "Getting here" was one line (seed + pedigree) with no supporting numbers.
+- A playoff exit collapsed the whole tournament into a single head-to-head line — a Semifinals
+  loser got no Pool Play or Quarterfinals section at all.
+- Every point total was unanchored. "Rafael Devers shows up (123 pts)" says nothing about whether
+  123 was good.
+- Close losses read exactly like blowouts (`closeCall = margin <= 20` tweaked one QF template).
+- The day-by-day line collided two numbers with nothing between them: "the bottom 3 4 times".
+- **A batter was shown at -12.7 pts for a single game, which is arithmetically impossible.**
+
+**The negative-points bug (the real one).** Daily rows store `delta` = today's cumulative line
+minus the previous snapshot's. When MLB revises an earlier box score downward, the cumulative
+total drops and the difference lands on whatever date the correction happened to sync — producing
+a negative delta. Every batting weight in `SCORING` is positive (1B/2B/3B/HR/R/RBI/SB/BB), so a
+negative batting _game_ cannot exist; it is always a correction to an earlier one. Pitchers _can_
+legitimately go negative (H/ER/BB carry negative weights), so the guard is **the negative stat,
+not the negative score**: `isCorrectionDelta` = any component < 0.
+
+Fixed in `countsAsGameDelta` (= `hadGameDelta && !isCorrectionDelta`), used by both
+`computeDailyHighLow` (which only filtered all-zero deltas before, so the daily Slack "worst
+player" post had the same defect) and `buildManagerPerformanceForRoast`. All-zero deltas are
+excluded from day totals too, so a date on which nobody played stops registering as a 0-pt
+"worst day". **No score moves** — weekly and season totals are computed from the weekly rows, not
+from these filters. Verified on a synthetic QF: without the guard the worst "game" was
+`-22 pts {1b:-2, hr:-1, r:-1, rbi:-2}`; with it, a real 2-pt game (7 rows dropped, 1 correction +
+6 no-plays).
+
+**New: league-wide role ranks.** `computeRoleRanksForRoast(sd, managerNames, round)` ranks every
+(manager, player) roster SLOT by round total, split by role, using the same ownership rule and
+weekly rows as `buildManagerPerformanceForRoast`, so a rank can never disagree with the points the
+roast credits. Ties share a rank. It also ranks managers by batting and by pitching total for the
+round (managers with 0 in both are excluded, so an eliminated manager doesn't pad everyone's
+rank). This is what produces "6th of 45 hitters couldn't cover the 45th" and "2nd of 9 for
+pitching, 9th of 9 for hitting". Fed to the Claude prompt too (`roastPromptRankLines`).
+
+**New: one section per round played.** `buildRoundBreakdownsForRoast` walks `ROAST_ROUND_ORDER`
+up to the elimination round and emits a stage per round the manager actually played (skipping
+rounds with no rostered players). `buildRoastPageContext` renders each as its own paragraph with a
+`[[Label]]` marker; app.js pulls the marker into a `.roast-context-label` chip and renders
+unmarked paragraphs exactly as before, so roasts stored before this change still render.
+
+**Margin drives intensity in every round.** `roastMarginTier` (heartbreak ≤10, close ≤25,
+competitive ≤60, clear ≤150, blowout) selects the result sentence for each playoff section and the
+"missed it by" sentence for a Pool Play exit. Heartbreak/close losses additionally get the
+cruellest line available: "One 22-point game — one — out of X, who managed 13.4 across the entire
+round, and Joey is still playing."
+
+Two things that had to be threaded through: rounds the manager _won_ get their own roster-sentence
+bank (calling the Finals winner's #30 hitter "closer to the truth" is just false), and `outcome`
+now reaches `buildRoastPageContext` so champion/3rd-place pages don't get "and it was all for
+nothing" framing.
+
+**Perf.** `collectRoastInputs` gathers everything for one manager and takes a per-request cache;
+the combined `/roasts/slack` loop shares one, so each round's league rank table is built once
+rather than once per eliminated manager. Earlier stages skip the `computeDailyHighLow`-per-date
+sweep (`skipDayExtremes`) — only the elimination round shows a day-by-day tally.
+
+**Also fixed in the joke bank** (the text that goes to Slack): seven `dayBank` templates presented
+best/worst day numbers without saying which was which ("boils down to two numbers: 87.6 points on
+Jul 26, and 9 on Jul 22"), or were pure recitation with no joke at all. Rewritten to label both
+and land a beat. Template _ids_ are index-based and unchanged, so the no-repeat exclusion is
+unaffected.
+
+**Verified** end-to-end against a synthetic 9-manager season through the real
+`/api/seasons/:year/generate-roast` endpoint (no `ANTHROPIC_API_KEY`, so the bank wrote the jokes):
+QF exit, PP exit, Finals champion, and Finals runner-up all render correct sections; screenshotted
+the banner at 1280px and 390px.
