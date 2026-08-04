@@ -33,7 +33,16 @@ import { computeSeasonAccolades } from './accolades.js';
 import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
 import { checkSwapLimit, FREE_SWAP_REASON, PLAYOFF_LIMITED_REASONS } from './swaps.js';
-import { rosterStatusAsOf, rosterStatusForManager, periodWeekKeys } from './eligibility.js';
+import { rosterStatusAsOf, rosterStatusForManager, periodWeekKeys, managerWeekWindow } from './eligibility.js';
+import {
+  EMPTY_SCENARIO,
+  buildSnapshot,
+  buildScoringTable,
+  isEmptyScenario,
+  scoreScenario,
+  scoringDiff,
+  scoringKeys,
+} from './hypothetical.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
@@ -67,6 +76,14 @@ Object.assign(window, {
   rosterStatusAsOf,
   rosterStatusForManager,
   periodWeekKeys,
+  managerWeekWindow,
+  EMPTY_SCENARIO,
+  buildSnapshot,
+  buildScoringTable,
+  isEmptyScenario,
+  scoreScenario,
+  scoringDiff,
+  scoringKeys,
   computePlayoffStatuses,
   playoffStatusLabel,
   statusKeyForPosition,
