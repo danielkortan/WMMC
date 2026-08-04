@@ -47,7 +47,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
 - `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
-- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
 - `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
