@@ -10,6 +10,7 @@
 import {
   SCORING,
   SEASON_SCHEDULE,
+  ROUND_LABELS,
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
@@ -39,16 +40,22 @@ import {
   buildSnapshot,
   buildScoringTable,
   isEmptyScenario,
+  realRosterForRound,
+  rosterOverrides,
+  roundsPlayed,
   scoreScenario,
   scoringDiff,
   scoringKeys,
+  weeksInRound,
 } from './hypothetical.js';
+import { seedFromPeriodTotals } from './seeding.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
 Object.assign(window, {
   SCORING,
   SEASON_SCHEDULE,
+  ROUND_LABELS,
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
@@ -81,9 +88,14 @@ Object.assign(window, {
   buildSnapshot,
   buildScoringTable,
   isEmptyScenario,
+  realRosterForRound,
+  rosterOverrides,
+  roundsPlayed,
   scoreScenario,
   scoringDiff,
   scoringKeys,
+  weeksInRound,
+  seedFromPeriodTotals,
   computePlayoffStatuses,
   playoffStatusLabel,
   statusKeyForPosition,

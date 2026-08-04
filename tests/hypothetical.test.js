@@ -10,9 +10,13 @@ import {
   buildScoringTable,
   buildSnapshot,
   isEmptyScenario,
+  realRosterForRound,
+  rosterOverrides,
+  roundsPlayed,
   scoreScenario,
   scoringDiff,
   scoringKeys,
+  weeksInRound,
 } from '../js/hypothetical.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -376,5 +380,292 @@ describe('scoringKeys', () => {
     for (const k of [...keys.batting.unscored, ...keys.pitching.unscored]) {
       assert.ok(!(k in SCORING.batting) && !(k in SCORING.pitching), `${k} must not be a real scoring category`);
     }
+  });
+});
+
+// ============================================================
+// Roster Lab — replacing a period's roster, and building one for a round never played
+// ============================================================
+
+const ROSTER_SCHEDULE = [
+  { round: 'PP1', week: 'Week 1' },
+  { round: 'PP1', week: 'Week 2' },
+  { round: 'SF', week: 'Week 1' },
+  { round: 'SF', week: 'Week 2' },
+];
+const ROSTER_DATES = [
+  { start: '2026-03-26', end: '2026-04-01' },
+  { start: '2026-04-02', end: '2026-04-08' },
+  { start: '2026-04-09', end: '2026-04-15' },
+  { start: '2026-04-16', end: '2026-04-22' },
+];
+
+// Weekly rows for everyone, so a swapped-in or newly entered player has stats to score.
+const ROSTER_WEEKLY_BAT = [
+  { batter: 'Starter', round: 'PP1', week: 'Week 1', hr: 1, weekly_score: 10 },
+  { batter: 'Starter', round: 'PP1', week: 'Week 2', hr: 1, weekly_score: 10 },
+  { batter: 'Bench', round: 'PP1', week: 'Week 1', hr: 3, weekly_score: 30 },
+  { batter: 'Bench', round: 'PP1', week: 'Week 2', hr: 3, weekly_score: 30 },
+  { batter: 'SF Guy', round: 'SF', week: 'Week 1', hr: 2, weekly_score: 20 },
+  { batter: 'SF Guy', round: 'SF', week: 'Week 2', hr: 4, weekly_score: 40 },
+];
+
+function rosterSlot(manager, round, week, weekIdx, player, realScore) {
+  return { manager, round, week, weekIdx, player, type: 'batting', realScore, addDate: null, dropDate: null };
+}
+
+// "A" really rostered Starter through PP1 and was eliminated before the SF.
+function rosterSnapshot() {
+  return buildSnapshot({
+    slots: [rosterSlot('A', 'PP1', 'Week 1', 0, 'Starter', 10), rosterSlot('A', 'PP1', 'Week 2', 1, 'Starter', 10)],
+    weeklyBatting: ROSTER_WEEKLY_BAT,
+    scheduleDates: ROSTER_DATES,
+    schedule: ROSTER_SCHEDULE,
+    managers: ['A'],
+  });
+}
+
+describe('roster overrides', () => {
+  it('is not the identity once a roster is overridden, even with real scoring', () => {
+    const scenario = { rosters: { A: { PP1: { batters: ['Bench'], pitchers: [] } } } };
+    assert.equal(isEmptyScenario(scenario), false);
+    assert.equal(rosterOverrides(scenario).length, 1);
+  });
+
+  it('swaps a player for the whole period and scores the replacement', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { PP1: { batters: ['Bench'], pitchers: [] } } },
+    });
+    const a = result.standings[0];
+    assert.equal(a.real, 20, 'the real column must not move');
+    assert.equal(a.hypothetical, 60, 'Bench scored 30 in each of the two PP1 weeks');
+    assert.equal(a.delta, 40);
+  });
+
+  it('leaves the real column alone even when the whole roster is emptied', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { PP1: { batters: [], pitchers: [] } } },
+    });
+    assert.equal(result.standings[0].real, 20);
+    assert.equal(result.standings[0].hypothetical, 0);
+    assert.equal(result.standings[0].delta, -20);
+  });
+
+  it('marks a dropped player benched and a new player added', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { PP1: { batters: ['Bench'], pitchers: [] } } },
+    });
+    const starter = result.players.find((p) => p.player === 'Starter');
+    const bench = result.players.find((p) => p.player === 'Bench');
+    assert.equal(starter.benched, true);
+    assert.equal(starter.real, 20);
+    assert.equal(starter.hypothetical, 0);
+    assert.equal(bench.added, true);
+    assert.equal(bench.real, 0);
+    assert.equal(bench.hypothetical, 60);
+    assert.equal(result.rosterChanges.benched, 2, 'one benched slot per week');
+    assert.equal(result.rosterChanges.added, 1);
+  });
+
+  it('keeping the real roster explicitly changes nothing but the identity flag', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { PP1: { batters: ['Starter'], pitchers: [] } } },
+    });
+    assert.equal(result.standings[0].real, 20);
+    assert.equal(result.standings[0].hypothetical, 20);
+    assert.equal(result.standings[0].delta, 0);
+    assert.equal(result.rosterChanges.benched, 0);
+    assert.equal(result.rosterChanges.added, 0);
+  });
+
+  it('does not touch a period that was not overridden', () => {
+    const snapshot = buildSnapshot({
+      slots: [rosterSlot('A', 'PP1', 'Week 1', 0, 'Starter', 10), rosterSlot('A', 'SF', 'Week 1', 2, 'SF Guy', 20)],
+      weeklyBatting: ROSTER_WEEKLY_BAT,
+      scheduleDates: ROSTER_DATES,
+      schedule: ROSTER_SCHEDULE,
+      managers: ['A'],
+    });
+    const result = scoreScenario(snapshot, { rosters: { A: { PP1: { batters: [], pitchers: [] } } } });
+    const sf = result.standings[0].periods.find((p) => p.round === 'SF');
+    assert.equal(sf.real, 20);
+    assert.equal(sf.hypothetical, 20, 'the untouched SF period keeps its real score');
+  });
+
+  it('combines a roster override with a scoring change', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      scoring: { batting: { HR: 20 } },
+      rosters: { A: { PP1: { batters: ['Bench'], pitchers: [] } } },
+    });
+    // Bench: 3 HR per week at 20 pts = 60/week over two weeks.
+    assert.equal(result.standings[0].hypothetical, 120);
+  });
+});
+
+describe('counterfactual rounds', () => {
+  it('knows which rounds a manager actually played', () => {
+    const played = roundsPlayed(rosterSnapshot(), 'A');
+    assert.equal(played.has('PP1'), true);
+    assert.equal(played.has('SF'), false);
+  });
+
+  it('reports the real roster for a period as the lab starting point', () => {
+    assert.deepEqual(realRosterForRound(rosterSnapshot(), 'A', 'PP1'), {
+      batters: ['Starter'],
+      pitchers: [],
+    });
+    assert.deepEqual(realRosterForRound(rosterSnapshot(), 'A', 'SF'), { batters: [], pitchers: [] });
+  });
+
+  it('scores a roster entered for a round the manager never reached', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { SF: { batters: ['SF Guy'], pitchers: [] } } },
+    });
+    const a = result.standings[0];
+    assert.equal(a.real, 20, 'a round never played adds nothing to the real total');
+    // SF Guy really scored 20 then 40 across the two SF weeks.
+    assert.equal(a.hypothetical, 80);
+    const sf = a.periods.find((p) => p.round === 'SF');
+    assert.equal(sf.real, 0);
+    assert.equal(sf.hypothetical, 60);
+  });
+
+  it('counts every counterfactual slot as synthetic so the UI can label it', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { SF: { batters: ['SF Guy'], pitchers: [] } } },
+    });
+    assert.equal(result.fidelity.syntheticSlots, 2, 'one per SF week');
+    assert.equal(result.players.find((p) => p.player === 'SF Guy').added, true);
+  });
+
+  it('scores an entered player with no stats that round as zero, not an error', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { SF: { batters: ['Nobody At All'], pitchers: [] } } },
+    });
+    assert.equal(result.standings[0].hypothetical, 20);
+    assert.equal(result.fidelity.exact, true);
+  });
+
+  it('lists the weeks of a round for building a counterfactual roster', () => {
+    assert.deepEqual(weeksInRound(rosterSnapshot(), 'SF'), [
+      { week: 'Week 1', weekIdx: 2 },
+      { week: 'Week 2', weekIdx: 3 },
+    ]);
+  });
+});
+
+describe('playoff picture', () => {
+  // Two managers in one pool. B really outscores A in both periods and takes the pool.
+  const poolSnapshot = () =>
+    buildSnapshot({
+      slots: [rosterSlot('A', 'PP1', 'Week 1', 0, 'Starter', 10), rosterSlot('B', 'PP1', 'Week 1', 0, 'Bench', 30)],
+      weeklyBatting: ROSTER_WEEKLY_BAT,
+      scheduleDates: ROSTER_DATES,
+      schedule: ROSTER_SCHEDULE,
+      managers: ['A', 'B'],
+      pools: { A: 'Pool A', B: 'Pool A' },
+    });
+
+  it('reports the real qualifiers under the empty scenario and no change', () => {
+    const result = scoreScenario(poolSnapshot(), EMPTY_SCENARIO);
+    assert.deepEqual(result.playoffs.real, result.playoffs.hypothetical);
+    assert.equal(result.playoffs.changed, false);
+    assert.deepEqual(result.playoffs.in, []);
+    assert.deepEqual(result.playoffs.out, []);
+  });
+
+  it('flips the pool winner when a roster change overtakes the leader', () => {
+    const result = scoreScenario(poolSnapshot(), {
+      // A starts Bench (30/wk) instead of Starter (10/wk), overtaking B.
+      rosters: { A: { PP1: { batters: ['Bench'], pitchers: [] } } },
+    });
+    assert.equal(result.playoffs.hypothetical[0], 'A', 'A should now lead the pool');
+    assert.equal(result.playoffs.changed, true);
+  });
+
+  it('omits managers with no pool from the playoff picture', () => {
+    const snapshot = buildSnapshot({
+      slots: [rosterSlot('A', 'PP1', 'Week 1', 0, 'Starter', 10)],
+      weeklyBatting: ROSTER_WEEKLY_BAT,
+      scheduleDates: ROSTER_DATES,
+      schedule: ROSTER_SCHEDULE,
+      managers: ['A'],
+      pools: {},
+    });
+    assert.equal(scoreScenario(snapshot, EMPTY_SCENARIO).playoffs, null);
+  });
+});
+
+describe('per-round player breakdown (the side-by-side view)', () => {
+  const find = (rows, player) => rows.find((p) => p.player === player);
+
+  it('pairs each real player with what they would score under the scenario', () => {
+    const result = scoreScenario(rosterSnapshot(), { scoring: { batting: { HR: 20 } } });
+    const rows = result.playerRounds.filter((p) => p.manager === 'A' && p.round === 'PP1');
+    const starter = find(rows, 'Starter');
+    assert.equal(starter.real, 20, 'really scored 10 in each of two weeks');
+    assert.equal(starter.hypothetical, 40, 'at 20 pts a HR that doubles');
+    assert.equal(starter.delta, 20);
+  });
+
+  it('keeps a benched player visible with his real points and zero hypothetical', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { PP1: { batters: ['Bench'], pitchers: [] } } },
+    });
+    const rows = result.playerRounds.filter((p) => p.manager === 'A' && p.round === 'PP1');
+    const starter = find(rows, 'Starter');
+    assert.equal(starter.benched, true);
+    assert.equal(starter.real, 20, 'what he really scored stays on the actual side');
+    assert.equal(starter.hypothetical, 0);
+    const bench = find(rows, 'Bench');
+    assert.equal(bench.added, true);
+    assert.equal(bench.real, 0, 'he was never really rostered, so the actual side is empty');
+    assert.equal(bench.hypothetical, 60);
+  });
+
+  it('scopes to the round, so one period does not borrow another period points', () => {
+    const snapshot = buildSnapshot({
+      slots: [rosterSlot('A', 'PP1', 'Week 1', 0, 'Starter', 10), rosterSlot('A', 'SF', 'Week 1', 2, 'Starter', 99)],
+      weeklyBatting: ROSTER_WEEKLY_BAT,
+      scheduleDates: ROSTER_DATES,
+      schedule: ROSTER_SCHEDULE,
+      managers: ['A'],
+    });
+    const rows = scoreScenario(snapshot, EMPTY_SCENARIO).playerRounds.filter((p) => p.player === 'Starter');
+    assert.equal(
+      find(
+        rows.filter((r) => r.round === 'PP1'),
+        'Starter'
+      ).real,
+      10
+    );
+    assert.equal(
+      find(
+        rows.filter((r) => r.round === 'SF'),
+        'Starter'
+      ).real,
+      99
+    );
+  });
+
+  it('shows a counterfactual round with an empty actual side', () => {
+    const result = scoreScenario(rosterSnapshot(), {
+      rosters: { A: { SF: { batters: ['SF Guy'], pitchers: [] } } },
+    });
+    const rows = result.playerRounds.filter((p) => p.manager === 'A' && p.round === 'SF');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].real, 0, 'nothing was actually rostered in a round never played');
+    assert.equal(rows[0].hypothetical, 60);
+    assert.equal(rows[0].added, true);
+  });
+
+  it('sums the per-round rows back to the period total', () => {
+    const result = scoreScenario(rosterSnapshot(), { scoring: { batting: { HR: 20 } } });
+    const rows = result.playerRounds.filter((p) => p.manager === 'A' && p.round === 'PP1');
+    const period = result.standings[0].periods.find((p) => p.round === 'PP1');
+    const sumReal = rows.reduce((s, r) => s + r.real, 0);
+    const sumHypo = rows.reduce((s, r) => s + r.hypothetical, 0);
+    assert.equal(sumReal, period.real);
+    assert.equal(sumHypo, period.hypothetical);
   });
 });

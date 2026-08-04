@@ -300,19 +300,12 @@ function isPeriodWindowConfirmedOpen(sd, period) {
 function computePoolPlaySeeding(seasonData, bracketSize = 8) {
   const managers = getManagers().filter((m) => m.active !== false && m.pool);
   if (managers.length === 0) return null;
-  const poolGroups = {};
-  managers.forEach((m) => {
-    (poolGroups[m.pool] = poolGroups[m.pool] || []).push(m.name);
-  });
 
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
-  const r2 = (x) => Math.round(x * 100) / 100;
 
-  const sc = {};
-  managers.forEach((m) => {
-    sc[m.name] = { manager: m.name, pool: m.pool, pp1Bat: 0, pp1Pit: 0, pp2Bat: 0, pp2Pit: 0 };
-  });
+  const entries = managers.map((m) => ({ manager: m.name, pool: m.pool, pp1Bat: 0, pp1Pit: 0, pp2Bat: 0, pp2Pit: 0 }));
+  const byName = new Map(entries.map((e) => [e.manager, e]));
 
   // Sum per-period batting/pitching through managerWeekSubtotal (drop-aware eligibility,
   // identical to the scoreboard tables) so seeding scores match what managers see.
@@ -321,96 +314,20 @@ function computePoolPlaySeeding(seasonData, bracketSize = 8) {
     managers.forEach((m) => {
       const bat = managerWeekSubtotal(seasonData, m.name, schedWeek, idx, batting, 'batter', 'batters');
       const pit = managerWeekSubtotal(seasonData, m.name, schedWeek, idx, pitching, 'pitcher', 'pitchers');
+      const e = byName.get(m.name);
       if (schedWeek.round === 'PP1') {
-        sc[m.name].pp1Bat += bat;
-        sc[m.name].pp1Pit += pit;
+        e.pp1Bat += bat;
+        e.pp1Pit += pit;
       } else {
-        sc[m.name].pp2Bat += bat;
-        sc[m.name].pp2Pit += pit;
+        e.pp2Bat += bat;
+        e.pp2Pit += pit;
       }
     });
   });
 
-  Object.values(sc).forEach((s) => {
-    s.pp1 = r2(s.pp1Bat + s.pp1Pit);
-    s.pp2 = r2(s.pp2Bat + s.pp2Pit);
-    s.batting = r2(s.pp1Bat + s.pp2Bat);
-    s.pitching = r2(s.pp1Pit + s.pp2Pit);
-    s.total = r2(s.batting + s.pitching);
-    s.isPP1Leader = false;
-    s.isPP2Leader = false;
-    s.isWildcard = false;
-  });
-
-  const pp1Leaders = new Set();
-  const pp2Leaders = new Set();
-  Object.values(poolGroups).forEach((members) => {
-    let b1 = -Infinity,
-      w1 = null,
-      b2 = -Infinity,
-      w2 = null;
-    members.forEach((n) => {
-      const s = sc[n];
-      if (!s) return;
-      if (s.pp1 > b1) {
-        b1 = s.pp1;
-        w1 = n;
-      }
-      if (s.pp2 > b2) {
-        b2 = s.pp2;
-        w2 = n;
-      }
-    });
-    if (w1 && b1 > 0) {
-      pp1Leaders.add(w1);
-      sc[w1].isPP1Leader = true;
-    }
-    if (w2 && b2 > 0) {
-      pp2Leaders.add(w2);
-      sc[w2].isPP2Leader = true;
-    }
-  });
-  Object.values(sc).forEach((s) => {
-    s.periodsWon = (s.isPP1Leader ? 1 : 0) + (s.isPP2Leader ? 1 : 0);
-    s.isPoolWinner = s.periodsWon > 0;
-  });
-
-  // Primary = total (desc); tiebreaker = periods won -> batting -> pitching -> PP2 -> PP1.
-  const cmp = (a, b) =>
-    b.total - a.total ||
-    b.periodsWon - a.periodsWon ||
-    b.batting - a.batting ||
-    b.pitching - a.pitching ||
-    b.pp2 - a.pp2 ||
-    b.pp1 - a.pp1;
-
-  const winners = Object.values(sc)
-    .filter((s) => s.isPoolWinner)
-    .sort(cmp);
-  const wildcardsNeeded = Math.max(0, bracketSize - winners.length);
-  const wildcards = Object.values(sc)
-    .filter((s) => !s.isPoolWinner && s.total > 0)
-    .sort(cmp)
-    .slice(0, wildcardsNeeded);
-  wildcards.forEach((s) => {
-    s.isWildcard = true;
-  });
-
-  // Winners always seeded above wildcards; each group ordered by total (+ tiebreak).
-  const seeds = [...winners, ...wildcards].slice(0, bracketSize);
-  seeds.forEach((s, i) => {
-    s.seed = i + 1;
-  });
-
-  return {
-    seeds,
-    byManager: sc,
-    pp1Leaders,
-    pp2Leaders,
-    allLeaders: new Set([...pp1Leaders, ...pp2Leaders]),
-    wildcardSet: new Set(wildcards.map((s) => s.manager)),
-    qualifierNames: seeds.map((s) => s.manager),
-  };
+  // The seeding RULE itself lives in js/seeding.js so the What If bracket and the real bracket
+  // can never disagree about it (see CLAUDE.md: no duplicated logic between app.js and js/).
+  return seedFromPeriodTotals(entries, { bracketSize });
 }
 
 // Authoritative seeding for a season. Once pool play is finalized the commissioner-confirmed
@@ -2147,6 +2064,18 @@ function setupNav() {
       if (btn.dataset.tab === 'live') startLivePolling();
       else stopLivePolling();
     });
+  });
+
+  // A shared What If link (#whatif=<scenario>) opened while the app is ALREADY loaded is a
+  // same-document navigation — the page never reloads, so the boot-time hash handling in enterApp
+  // never runs and the link would silently do nothing. Clicking one from Slack while the tab is
+  // already open is the common case, so handle the hash change directly.
+  window.addEventListener('hashchange', () => {
+    const tab = (window.location.hash || '').replace(/^#/, '').split('=')[0];
+    const btn = tab && document.querySelector(`.nav-btn[data-tab="${tab}"]`);
+    if (!btn) return;
+    if (tab === 'whatif') loadHypoScenario();
+    btn.click();
   });
 }
 
@@ -16337,11 +16266,13 @@ function hofRecordResults(allResults, live) {
 // zero movement by construction. See js/hypothetical.js for the full rationale.
 
 const HYPO_STORAGE_KEY = 'wmmc_hypothetical';
-let HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} } };
+let HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} }, rosters: {} };
 let HYPO_SNAPSHOT = null;
 let HYPO_SNAPSHOT_KEY = null;
 let HYPO_RECOMPUTE_TIMER = null;
 let HYPO_EXPANDED = null; // manager whose player-level breakdown is open
+let HYPO_LAB_MANAGER = null; // Roster Lab: manager being edited
+let HYPO_LAB_ROUND = null; // Roster Lab: period being edited
 
 function loadHypoScenario() {
   // The URL wins over stored state so a shared link always opens the scenario it encodes.
@@ -16350,7 +16281,10 @@ function loadHypoScenario() {
     try {
       const parsed = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(fromHash[1])))));
       if (parsed && typeof parsed === 'object') {
-        HYPO_SCENARIO = { scoring: { batting: {}, pitching: {}, ...(parsed.scoring || {}) } };
+        HYPO_SCENARIO = {
+          scoring: { batting: {}, pitching: {}, ...(parsed.scoring || {}) },
+          rosters: parsed.rosters || {},
+        };
         return;
       }
     } catch (_) {
@@ -16361,7 +16295,10 @@ function loadHypoScenario() {
     const raw = localStorage.getItem(HYPO_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      HYPO_SCENARIO = { scoring: { batting: {}, pitching: {}, ...((parsed || {}).scoring || {}) } };
+      HYPO_SCENARIO = {
+        scoring: { batting: {}, pitching: {}, ...((parsed || {}).scoring || {}) },
+        rosters: (parsed || {}).rosters || {},
+      };
     }
   } catch (_) {
     /* a scenario is disposable — never let bad stored state break the tab */
@@ -16425,6 +16362,13 @@ function buildHypoSnapshot(year) {
     });
   });
 
+  // Pools drive the hypothetical playoff picture. Only pooled managers are seeded, exactly as in
+  // the real bracket.
+  const pools = {};
+  managers.forEach((m) => {
+    if (m.pool) pools[m.name] = m.pool;
+  });
+
   return buildSnapshot({
     slots,
     dailyBatting: (daily && daily.batting) || [],
@@ -16434,6 +16378,8 @@ function buildHypoSnapshot(year) {
     scheduleDates,
     playerDates: sd.player_dates || {},
     managers: managers.map((m) => m.name),
+    schedule: SEASON_SCHEDULE,
+    pools,
   });
 }
 
@@ -16467,19 +16413,28 @@ function setHypoScoringValue(side, key, raw) {
 }
 
 function resetHypoScenario() {
-  HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} } };
+  HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} }, rosters: {} };
   saveHypoScenario();
   renderWhatIf();
 }
 
 // Recompute is debounced so dragging through values doesn't rescore on every keystroke, and only
-// the results half is repainted — repainting the inputs would steal focus mid-edit.
+// the output halves are repainted — repainting the inputs would steal focus mid-edit.
 function scheduleHypoRecompute() {
   clearTimeout(HYPO_RECOMPUTE_TIMER);
   HYPO_RECOMPUTE_TIMER = setTimeout(() => {
-    renderHypoResults();
+    renderHypoOutputs();
     renderHypoBadges();
   }, 120);
+}
+
+// Score once, paint both output panels from the same result. The Roster Lab and the standings must
+// never disagree, which they could if each ran its own pass.
+function renderHypoOutputs() {
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const result = snapshot ? scoreScenario(snapshot, HYPO_SCENARIO) : null;
+  renderRosterLab(snapshot, result);
+  renderHypoResults(result);
 }
 
 function hypoShareLink() {
@@ -16554,28 +16509,44 @@ function renderHypoBadges() {
   }
 }
 
-function renderHypoResults() {
+function renderHypoResults(result) {
   const container = document.getElementById('whatif-results');
   if (!container) return;
 
-  const snapshot = hypoSnapshot(SELECTED_SEASON);
-  if (!snapshot) {
+  if (!result) {
     container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
     return;
   }
 
-  const result = scoreScenario(snapshot, HYPO_SCENARIO);
   const changes = scoringDiff(HYPO_SCENARIO.scoring);
+  const rosterCount = rosterOverrides(HYPO_SCENARIO).length;
 
   let html = '';
 
   if (result.identity) {
-    html += `<p class="upload-hint">These are the real standings. Change a point value above to see what would have happened.</p>`;
+    html += `<p class="upload-hint">These are the real standings. Change a point value or a roster above to see what would have happened.</p>`;
   } else {
     const moved = result.standings.filter((s) => s.rankDelta !== 0).length;
-    html += `<p class="upload-hint">${changes.length} scoring change${changes.length === 1 ? '' : 's'} &middot; ${
-      moved ? `${moved} manager${moved === 1 ? '' : 's'} change position` : 'nobody changes position'
-    }</p>`;
+    const bits = [];
+    if (changes.length) bits.push(`${changes.length} scoring change${changes.length === 1 ? '' : 's'}`);
+    if (rosterCount) bits.push(`${rosterCount} roster change${rosterCount === 1 ? '' : 's'}`);
+    bits.push(moved ? `${moved} manager${moved === 1 ? '' : 's'} change position` : 'nobody changes position');
+    html += `<p class="upload-hint">${bits.join(' &middot; ')}</p>`;
+  }
+
+  // Whether the change would have altered who made the playoffs — the question the Roster Lab
+  // exists to answer. Computed with the league's real seeding rule (js/seeding.js).
+  const po = result.playoffs;
+  if (po && !result.identity) {
+    if (po.changed) {
+      const parts = [];
+      if (po.in.length) parts.push(`<strong>In:</strong> ${po.in.map(esc).join(', ')}`);
+      if (po.out.length) parts.push(`<strong>Out:</strong> ${po.out.map(esc).join(', ')}`);
+      if (!parts.length) parts.push('the same managers qualify, but the seeding order changes');
+      html += `<p class="hypo-playoffs hypo-playoffs-changed">Playoff picture changes &mdash; ${parts.join(' &middot; ')}</p>`;
+    } else {
+      html += `<p class="hypo-playoffs">Same eight managers still make the playoffs.</p>`;
+    }
   }
 
   // An approximate slot is one scored from unclipped weekly totals for a player who was added or
@@ -16630,9 +16601,310 @@ function renderHypoResults() {
     row.addEventListener('click', () => {
       const name = row.dataset.manager;
       HYPO_EXPANDED = HYPO_EXPANDED === name ? null : name;
-      renderHypoResults();
+      renderHypoResults(result);
     });
   });
+}
+
+// ---- Roster Lab ----
+// Start a player who was really on the bench. Start a player who was never rostered at all. Build
+// a roster for a round you never reached. Every one of those is the same operation: replace a
+// manager's roster for one PERIOD, then rescore.
+//
+// The view is deliberately two columns — what they ACTUALLY had beside what the scenario gives
+// them — because the whole value of a hypothetical is the comparison. A single mutated list would
+// show the answer while hiding what it is an answer to.
+
+const HYPO_ROUNDS = () => [...new Set(SEASON_SCHEDULE.map((s) => s.round))];
+
+function hypoLabManager() {
+  const managers = getManagers().filter((m) => m.active !== false);
+  if (!managers.length) return null;
+  if (HYPO_LAB_MANAGER && managers.some((m) => m.name === HYPO_LAB_MANAGER)) return HYPO_LAB_MANAGER;
+  // Default to the signed-in manager — the person asking "what if" is usually asking about
+  // themselves.
+  const me = managers.find((m) => (m.email || '').toLowerCase() === (LOGGED_IN_EMAIL || '').toLowerCase());
+  return me ? me.name : managers[0].name;
+}
+
+function hypoLabRound() {
+  const rounds = HYPO_ROUNDS();
+  return HYPO_LAB_ROUND && rounds.includes(HYPO_LAB_ROUND) ? HYPO_LAB_ROUND : rounds[0];
+}
+
+// The roster the scenario is currently using for this period: the override if one exists,
+// otherwise the real roster (which is what the lab opens with).
+function hypoEffectiveRoster(snapshot, manager, round) {
+  const override = ((HYPO_SCENARIO.rosters || {})[manager] || {})[round];
+  if (override) return { batters: (override.batters || []).slice(), pitchers: (override.pitchers || []).slice() };
+  return realRosterForRound(snapshot, manager, round);
+}
+
+function setHypoRoster(manager, round, roster) {
+  if (!HYPO_SCENARIO.rosters) HYPO_SCENARIO.rosters = {};
+  if (!HYPO_SCENARIO.rosters[manager]) HYPO_SCENARIO.rosters[manager] = {};
+  HYPO_SCENARIO.rosters[manager][round] = { batters: roster.batters.slice(), pitchers: roster.pitchers.slice() };
+  saveHypoScenario();
+  renderHypoOutputs();
+}
+
+function clearHypoRoster(manager, round) {
+  if (((HYPO_SCENARIO.rosters || {})[manager] || {})[round]) {
+    delete HYPO_SCENARIO.rosters[manager][round];
+    if (Object.keys(HYPO_SCENARIO.rosters[manager]).length === 0) delete HYPO_SCENARIO.rosters[manager];
+    saveHypoScenario();
+  }
+  renderHypoOutputs();
+}
+
+function hypoRemovePlayer(manager, round, type, player) {
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const roster = hypoEffectiveRoster(snapshot, manager, round);
+  const key = type === 'batting' ? 'batters' : 'pitchers';
+  roster[key] = roster[key].filter((p) => p !== player);
+  setHypoRoster(manager, round, roster);
+}
+
+function hypoAddPlayer(manager, round, type, player) {
+  if (!player) return;
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const roster = hypoEffectiveRoster(snapshot, manager, round);
+  const key = type === 'batting' ? 'batters' : 'pitchers';
+  if (!roster[key].includes(player)) roster[key].push(player);
+  setHypoRoster(manager, round, roster);
+}
+
+// Candidates for the add box. The season's pools are seeded from MLB's active-player catalog, so
+// this is effectively "any player" — filtered to those who actually recorded a stat line in the
+// round being edited, because anyone else would silently score zero and look broken.
+function hypoPlayerOptions(snapshot, round, type, query) {
+  const sd = getSeasons()[SELECTED_SEASON] || {};
+  const rows = (type === 'batting' ? sd.weekly_batting : sd.weekly_pitching) || [];
+  const nameKey = type === 'batting' ? 'batter' : 'pitcher';
+  const q = (query || '').trim().toLowerCase();
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    if (row.round !== round) continue;
+    const name = row[nameKey];
+    if (!name || seen.has(name)) continue;
+    if (q && !name.toLowerCase().includes(q)) continue;
+    seen.add(name);
+    out.push(name);
+    if (out.length >= 400) break;
+  }
+  return out.sort();
+}
+
+function hypoRosterColumn(title, subtitle, rows, opts) {
+  const { removable = false, manager, round, empty } = opts || {};
+  const sd = getSeasons()[SELECTED_SEASON];
+  const section = (label, type) => {
+    const list = rows.filter((r) => r.type === type);
+    if (!list.length) return `<div class="hypo-roster-section"><h4>${label}</h4><p class="upload-hint">None</p></div>`;
+    return `<div class="hypo-roster-section"><h4>${label}</h4>
+      <table class="data-table compact-table hypo-roster-table"><tbody>
+      ${list
+        .map(
+          (r) => `<tr class="${r.muted ? 'hypo-roster-muted' : ''}${r.added ? ' hypo-roster-added' : ''}">
+            <td>${displayPlayer(r.player, sd)}${r.tag ? ` <span class="hypo-new-tag">${r.tag}</span>` : ''}</td>
+            <td class="hypo-num">${fmt(r.points)}</td>
+            ${
+              removable
+                ? `<td class="hypo-roster-action"><button class="hypo-x" data-remove="${esc(r.player)}" data-type="${type}" title="Remove from this hypothetical roster">&times;</button></td>`
+                : ''
+            }
+          </tr>`
+        )
+        .join('')}
+      </tbody></table></div>`;
+  };
+  const total = rows.reduce((s, r) => s + r.points, 0);
+  const body = rows.length
+    ? section('Batters', 'batting') + section('Pitchers', 'pitching')
+    : `<p class="upload-hint hypo-roster-empty">${empty || 'Nothing here.'}</p>`;
+  return `<div class="hypo-roster-col" data-manager="${esc(manager || '')}" data-round="${esc(round || '')}">
+    <div class="hypo-roster-head"><h3>${title}</h3><span class="upload-hint">${subtitle}</span></div>
+    ${body}
+    <div class="hypo-roster-total"><span>Total</span><strong>${fmt(Math.round(total * 100) / 100)}</strong></div>
+  </div>`;
+}
+
+function renderRosterLab(snapshot, result) {
+  const container = document.getElementById('whatif-roster-lab');
+  if (!container) return;
+  if (!snapshot || !result) {
+    container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
+    return;
+  }
+
+  const managers = getManagers().filter((m) => m.active !== false);
+  const manager = hypoLabManager();
+  const round = hypoLabRound();
+  if (!manager) {
+    container.innerHTML = '<p class="upload-hint">No managers configured.</p>';
+    return;
+  }
+
+  const played = roundsPlayed(snapshot, manager);
+  const realRoster = realRosterForRound(snapshot, manager, round);
+  const effective = hypoEffectiveRoster(snapshot, manager, round);
+  const hasOverride = !!((HYPO_SCENARIO.rosters || {})[manager] || {})[round];
+  const didPlay = played.has(round);
+
+  const prRows = result.playerRounds.filter((p) => p.manager === manager && p.round === round);
+  const prFor = (player, type) => prRows.find((p) => p.player === player && p.type === type);
+
+  // LEFT — what actually happened. Never edited, never reordered.
+  const actualRows = [];
+  for (const [type, list] of [
+    ['batting', realRoster.batters],
+    ['pitching', realRoster.pitchers],
+  ]) {
+    for (const player of list) {
+      const pr = prFor(player, type);
+      const dropped = !(type === 'batting' ? effective.batters : effective.pitchers).includes(player);
+      actualRows.push({
+        player,
+        type,
+        points: pr ? pr.real : 0,
+        muted: dropped,
+        tag: dropped ? 'benched' : '',
+      });
+    }
+  }
+
+  // RIGHT — what the scenario gives them. Ordered to follow the real roster, with genuinely new
+  // players appended: the two columns are meant to be read across, so a player who is on both
+  // sides should sit on the same line rather than jumping to the bottom when re-added.
+  const inRealOrder = (list, realList) => {
+    const kept = realList.filter((p) => list.includes(p));
+    return [...kept, ...list.filter((p) => !realList.includes(p))];
+  };
+  const hypoRows = [];
+  for (const [type, list] of [
+    ['batting', inRealOrder(effective.batters, realRoster.batters)],
+    ['pitching', inRealOrder(effective.pitchers, realRoster.pitchers)],
+  ]) {
+    for (const player of list) {
+      const pr = prFor(player, type);
+      const isNew = !(type === 'batting' ? realRoster.batters : realRoster.pitchers).includes(player);
+      hypoRows.push({
+        player,
+        type,
+        points: pr ? pr.hypothetical : 0,
+        added: isNew,
+        tag: isNew ? 'added' : '',
+      });
+    }
+  }
+
+  const actualTotal = actualRows.reduce((s, r) => s + r.points, 0);
+  const hypoTotal = hypoRows.reduce((s, r) => s + r.points, 0);
+  const diff = Math.round((hypoTotal - actualTotal) * 100) / 100;
+
+  let html = `<div class="hypo-lab-controls">
+    <label>Manager
+      <select id="hypo-lab-manager">
+        ${managers.map((m) => `<option value="${esc(m.name)}"${m.name === manager ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}
+      </select>
+    </label>
+    <div class="hypo-round-tabs">
+      ${HYPO_ROUNDS()
+        .map(
+          (r) =>
+            `<button class="hypo-round-tab${r === round ? ' active' : ''}${played.has(r) ? '' : ' hypo-round-unplayed'}" data-round="${esc(r)}">${esc(
+              ROUND_LABELS[r] || r
+            )}${played.has(r) ? '' : ' *'}</button>`
+        )
+        .join('')}
+    </div>
+    ${hasOverride ? `<button class="btn btn-sm btn-secondary" id="hypo-lab-reset-round">Restore real roster</button>` : ''}
+  </div>`;
+
+  if (!didPlay) {
+    html += `<p class="hypo-warning">${esc(manager)} never reached the ${esc(
+      ROUND_LABELS[round] || round
+    )} — there is no real roster to compare against. Add players below to score the round they didn't play. Those points are a projection of what those players did that period, not a record of anything that happened.</p>`;
+  }
+
+  html += `<div class="hypo-roster-grid">
+    ${hypoRosterColumn('Actually rostered', didPlay ? 'What really happened' : 'Did not play this round', actualRows, {
+      manager,
+      round,
+      empty: `${esc(manager)} had no roster for this round.`,
+    })}
+    ${hypoRosterColumn(
+      'What If roster',
+      hasOverride ? 'Your changes' : didPlay ? 'Same as real — edit to compare' : 'Nothing entered yet',
+      hypoRows,
+      {
+        removable: true,
+        manager,
+        round,
+        empty: 'Empty roster — nobody scores.',
+      }
+    )}
+  </div>`;
+
+  html += `<div class="hypo-roster-summary ${hypoDeltaClass(diff)}">
+    ${didPlay ? `Real ${fmt(Math.round(actualTotal * 100) / 100)} &rarr; ` : ''}What If ${fmt(
+      Math.round(hypoTotal * 100) / 100
+    )} <strong>(${hypoDelta(diff)})</strong> for the ${esc(ROUND_LABELS[round] || round)}
+  </div>`;
+
+  const batOptions = hypoPlayerOptions(snapshot, round, 'batting');
+  const pitOptions = hypoPlayerOptions(snapshot, round, 'pitching');
+
+  if (!batOptions.length && !pitOptions.length) {
+    // No stat rows exist for this round at all — usually a playoff round that hasn't been played
+    // yet. There is nothing to score anyone against, so offering a search box would be a dead end.
+    html += `<p class="upload-hint hypo-no-candidates">No stats have been recorded for the ${esc(
+      ROUND_LABELS[round] || round
+    )} yet, so there is nothing to score a roster against for this round.</p>`;
+  } else {
+    html += `<div class="hypo-add-row">
+      <label>Add a batter <input type="text" id="hypo-add-batting" list="hypo-list-batting" placeholder="Search players…"></label>
+      <datalist id="hypo-list-batting">${batOptions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+      <label>Add a pitcher <input type="text" id="hypo-add-pitching" list="hypo-list-pitching" placeholder="Search players…"></label>
+      <datalist id="hypo-list-pitching">${pitOptions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+
+  const mgrSelect = document.getElementById('hypo-lab-manager');
+  if (mgrSelect) {
+    mgrSelect.addEventListener('change', () => {
+      HYPO_LAB_MANAGER = mgrSelect.value;
+      renderHypoOutputs();
+    });
+  }
+  container.querySelectorAll('.hypo-round-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_LAB_ROUND = btn.dataset.round;
+      renderHypoOutputs();
+    });
+  });
+  const resetRound = document.getElementById('hypo-lab-reset-round');
+  if (resetRound) resetRound.addEventListener('click', () => clearHypoRoster(manager, round));
+  container.querySelectorAll('.hypo-x').forEach((btn) => {
+    btn.addEventListener('click', () => hypoRemovePlayer(manager, round, btn.dataset.type, btn.dataset.remove));
+  });
+  for (const type of ['batting', 'pitching']) {
+    const input = document.getElementById(`hypo-add-${type}`);
+    if (!input) continue;
+    const commit = () => {
+      const name = input.value.trim();
+      if (!name) return;
+      input.value = '';
+      hypoAddPlayer(manager, round, type, name);
+    };
+    input.addEventListener('change', commit);
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') commit();
+    });
+  }
 }
 
 function renderWhatIf() {
@@ -16674,6 +16946,18 @@ function renderWhatIf() {
     </div>
 
     <div class="card hypo-card">
+      <div class="hypo-toolbar">
+        <h2>Roster Lab</h2>
+      </div>
+      <p class="upload-hint">
+        Swap who you started for a whole period and see it against what you actually had. Rounds
+        marked <strong>*</strong> are ones that manager never reached &mdash; you can still enter a
+        roster there to see what it would have scored.
+      </p>
+      <div id="whatif-roster-lab"></div>
+    </div>
+
+    <div class="card hypo-card">
       <h2>What If Standings</h2>
       <div id="whatif-results"></div>
     </div>
@@ -16687,14 +16971,14 @@ function renderWhatIf() {
   const shareBtn = document.getElementById('hypo-share');
   if (shareBtn) shareBtn.addEventListener('click', copyHypoLink);
 
-  renderHypoResults();
+  renderHypoOutputs();
 
   // Daily rows make mid-week roster slots exact rather than estimated. They are fetched on demand
   // and cached (the Trends tab uses the same cache), so the tab paints immediately on weekly rows
   // and sharpens once they land.
   ensureDailyStats(SELECTED_SEASON, () => {
     HYPO_SNAPSHOT_KEY = null;
-    renderHypoResults();
+    renderHypoOutputs();
   });
 }
 

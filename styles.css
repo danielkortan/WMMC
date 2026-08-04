@@ -6253,3 +6253,207 @@ body::before {
   padding: 0 0.5rem 0.6rem;
   background: rgba(217, 164, 65, 0.05);
 }
+
+/* ---- Roster Lab: actual vs hypothetical, side by side ---- */
+
+.hypo-lab-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.hypo-lab-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-lab-controls select {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.hypo-round-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.hypo-round-tab {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text-light);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hypo-round-tab:hover {
+  border-color: #d9a441;
+}
+
+.hypo-round-tab.active {
+  background: #d9a441;
+  border-color: #d9a441;
+  color: #1c1c2e;
+}
+
+/* A round this manager never reached — still selectable, but visibly not a real roster. */
+.hypo-round-tab.hypo-round-unplayed {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.hypo-roster-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 700px) {
+  .hypo-roster-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hypo-roster-col {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem 0.5rem;
+  background: var(--card-bg);
+}
+
+/* The hypothetical column is the one being edited — give it the sandbox accent. */
+.hypo-roster-col + .hypo-roster-col {
+  border-color: #d9a441;
+  background: rgba(217, 164, 65, 0.05);
+}
+
+.hypo-roster-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.hypo-roster-head h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.hypo-roster-section h4 {
+  margin: 0.5rem 0 0.2rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.hypo-roster-table td {
+  padding: 0.25rem 0.3rem;
+  font-size: 0.82rem;
+}
+
+/* Benched: really rostered, but not in the hypothetical. Kept visible so the comparison is
+   complete — a player silently vanishing from the actual column would hide the trade-off. */
+.hypo-roster-muted td {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.hypo-roster-added td {
+  background: rgba(217, 164, 65, 0.12);
+}
+
+.hypo-roster-action {
+  width: 1.6rem;
+  text-align: right;
+}
+
+.hypo-x {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.15rem;
+}
+
+.hypo-x:hover {
+  color: var(--danger);
+}
+
+.hypo-roster-empty {
+  margin: 0.75rem 0;
+}
+
+.hypo-roster-total {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-roster-summary {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(217, 164, 65, 0.12);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.hypo-add-row label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-add-row input {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 12rem;
+}
+
+.hypo-playoffs {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(45, 124, 45, 0.12);
+  font-size: 0.82rem;
+}
+
+.hypo-playoffs-changed {
+  background: rgba(217, 164, 65, 0.18);
+  font-weight: 600;
+}
