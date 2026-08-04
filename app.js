@@ -16979,7 +16979,8 @@ function renderPlayerExplorer() {
   } by points. Start typing to search every player who recorded a stat.</p>`;
 
   if (!HYPO_EXPLORER_PLAYER) {
-    html += `<p class="upload-hint">Search for anyone who recorded a stat this season — they don't have to have been on a roster.</p>`;
+    // No extra prompt here — the card intro and the suggestion note above already say it, and on a
+    // phone three stacked paragraphs push the search box off the screen.
     container.innerHTML = html;
     wireExplorerControls(container, snapshot);
     return;
