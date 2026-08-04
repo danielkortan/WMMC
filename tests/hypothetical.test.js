@@ -17,7 +17,8 @@ import {
   scoringDiff,
   scoringKeys,
   weeksInRound,
-  searchPlayers,
+  topPlayers,
+  playerSuggestions,
   playerTypes,
   playerOwnership,
   playerGameLog,
@@ -707,37 +708,6 @@ function explorerSnapshot({ withDaily = true } = {}) {
   });
 }
 
-describe('searchPlayers', () => {
-  it('lists every player with stats, not just rostered ones', () => {
-    const names = searchPlayers(explorerSnapshot(), { type: 'batting' });
-    assert.deepEqual(names, ['Free Agent', 'Star Guy']);
-  });
-
-  it('filters case-insensitively on a substring', () => {
-    assert.deepEqual(searchPlayers(explorerSnapshot(), { type: 'batting', query: 'star' }), ['Star Guy']);
-    assert.deepEqual(searchPlayers(explorerSnapshot(), { type: 'batting', query: 'GUY' }), ['Star Guy']);
-  });
-
-  it('ranks prefix matches above mid-name matches', () => {
-    const snapshot = buildSnapshot({
-      weeklyBatting: [
-        { batter: 'Juan Soto', round: 'PP1', week: 'Week 1' },
-        { batter: 'Sotomayor Jones', round: 'PP1', week: 'Week 1' },
-      ],
-      schedule: ROSTER_SCHEDULE,
-    });
-    assert.deepEqual(searchPlayers(snapshot, { type: 'batting', query: 'soto' }), ['Sotomayor Jones', 'Juan Soto']);
-  });
-
-  it('honours the result limit', () => {
-    assert.equal(searchPlayers(explorerSnapshot(), { type: 'batting', limit: 1 }).length, 1);
-  });
-
-  it('searches pitchers separately from batters', () => {
-    assert.deepEqual(searchPlayers(explorerSnapshot(), { type: 'pitching' }), ['Some Arm']);
-  });
-});
-
 describe('playerTypes', () => {
   it('reports which side of the ball a player has rows for', () => {
     assert.deepEqual(playerTypes(explorerSnapshot(), 'Star Guy'), ['batting']);
@@ -868,5 +838,76 @@ describe('explainPlayer', () => {
     assert.equal(info.total.hypothetical, info.total.real);
     assert.equal(info.total.delta, 0);
     for (const r of info.rounds) assert.equal(r.delta, 0);
+  });
+});
+
+describe('search suggestions ranked by points', () => {
+  const ranked = () =>
+    buildSnapshot({
+      weeklyBatting: [
+        { batter: 'Superstar', round: 'PP1', week: 'Week 1', weekly_score: 500 },
+        { batter: 'Superstar', round: 'SF', week: 'Week 1', weekly_score: 100 },
+        { batter: 'Solid Guy', round: 'PP1', week: 'Week 1', weekly_score: 200 },
+        { batter: 'Scrub', round: 'PP1', week: 'Week 1', weekly_score: 5 },
+        { batter: 'Sofa King', round: 'SF', week: 'Week 1', weekly_score: 400 },
+      ],
+      schedule: ROSTER_SCHEDULE,
+    });
+
+  it('offers the highest scorers first when nothing is typed', () => {
+    assert.deepEqual(
+      topPlayers(ranked(), { type: 'batting' }).map((p) => p.name),
+      ['Superstar', 'Sofa King', 'Solid Guy', 'Scrub']
+    );
+  });
+
+  it('reports each suggestion with its point total', () => {
+    const top = topPlayers(ranked(), { type: 'batting', limit: 1 });
+    assert.deepEqual(top, [{ name: 'Superstar', points: 600 }]);
+  });
+
+  it('caps the list at the requested limit', () => {
+    assert.equal(topPlayers(ranked(), { type: 'batting', limit: 2 }).length, 2);
+    assert.equal(playerSuggestions(ranked(), { type: 'batting', limit: 2 }).length, 2);
+  });
+
+  it('scopes the ranking to one round when asked', () => {
+    assert.deepEqual(
+      topPlayers(ranked(), { type: 'batting', round: 'SF' }).map((p) => p.name),
+      ['Sofa King', 'Superstar']
+    );
+  });
+
+  it('defaults to the top scorers with an empty query', () => {
+    assert.deepEqual(
+      playerSuggestions(ranked(), { type: 'batting' }).map((p) => p.name),
+      ['Superstar', 'Sofa King', 'Solid Guy', 'Scrub']
+    );
+  });
+
+  it('searches the full league once a query is typed, not just the top scorers', () => {
+    const names = playerSuggestions(ranked(), { type: 'batting', query: 'scrub' }).map((p) => p.name);
+    assert.deepEqual(names, ['Scrub'], 'a low scorer is still reachable by name');
+  });
+
+  it('ranks prefix matches first, then by points', () => {
+    const names = playerSuggestions(ranked(), { type: 'batting', query: 'so' }).map((p) => p.name);
+    // All four start with S; "so" prefixes Sofa King and Solid Guy, and Sofa King outscores him.
+    assert.deepEqual(names.slice(0, 2), ['Sofa King', 'Solid Guy']);
+  });
+
+  it('is case-insensitive', () => {
+    assert.deepEqual(
+      playerSuggestions(ranked(), { type: 'batting', query: 'SUPERSTAR' }).map((p) => p.name),
+      ['Superstar']
+    );
+  });
+
+  it('returns nothing for a round with no stats', () => {
+    assert.deepEqual(topPlayers(ranked(), { type: 'batting', round: 'Finals' }), []);
+  });
+
+  it('returns nothing for a query that matches nobody', () => {
+    assert.deepEqual(playerSuggestions(ranked(), { type: 'batting', query: 'zzz' }), []);
   });
 });

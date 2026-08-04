@@ -16675,26 +16675,24 @@ function hypoAddPlayer(manager, round, type, player) {
   setHypoRoster(manager, round, roster);
 }
 
-// Candidates for the add box. The season's pools are seeded from MLB's active-player catalog, so
-// this is effectively "any player" — filtered to those who actually recorded a stat line in the
-// round being edited, because anyone else would silently score zero and look broken.
+// How many suggestions any player search offers at once. The pools are seeded from MLB's whole
+// active catalog, so an unranked list is ~1,300 names of mostly-irrelevant players — and rendering
+// that many <option> nodes is what makes a native datalist crawl. Showing the top scorers instead
+// covers essentially everyone a manager would consider, and typing still searches the full league.
+const HYPO_SUGGESTION_LIMIT = 50;
+
+// Candidates for a roster add box, ranked by points within the round being edited. Scoping to the
+// round matters: a player with no stat line that period would silently score zero and look broken.
 function hypoPlayerOptions(snapshot, round, type, query) {
-  const sd = getSeasons()[SELECTED_SEASON] || {};
-  const rows = (type === 'batting' ? sd.weekly_batting : sd.weekly_pitching) || [];
-  const nameKey = type === 'batting' ? 'batter' : 'pitcher';
-  const q = (query || '').trim().toLowerCase();
-  const seen = new Set();
-  const out = [];
-  for (const row of rows) {
-    if (row.round !== round) continue;
-    const name = row[nameKey];
-    if (!name || seen.has(name)) continue;
-    if (q && !name.toLowerCase().includes(q)) continue;
-    seen.add(name);
-    out.push(name);
-    if (out.length >= 400) break;
-  }
-  return out.sort();
+  return playerSuggestions(snapshot, { type, round, query, limit: HYPO_SUGGESTION_LIMIT });
+}
+
+// Replace a datalist's options in place. Called on every keystroke, so it keeps the node count at
+// the suggestion limit rather than growing a list the browser then has to filter itself.
+function hypoFillDatalist(id, suggestions) {
+  const list = document.getElementById(id);
+  if (!list) return;
+  list.innerHTML = suggestions.map((p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`).join('');
 }
 
 function hypoRosterColumn(title, subtitle, rows, opts) {
@@ -16856,6 +16854,7 @@ function renderRosterLab(snapshot, result) {
 
   const batOptions = hypoPlayerOptions(snapshot, round, 'batting');
   const pitOptions = hypoPlayerOptions(snapshot, round, 'pitching');
+  const opt = (p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`;
 
   if (!batOptions.length && !pitOptions.length) {
     // No stat rows exist for this round at all — usually a playoff round that hasn't been played
@@ -16865,11 +16864,12 @@ function renderRosterLab(snapshot, result) {
     )} yet, so there is nothing to score a roster against for this round.</p>`;
   } else {
     html += `<div class="hypo-add-row">
-      <label>Add a batter <input type="text" id="hypo-add-batting" list="hypo-list-batting" placeholder="Search players…"></label>
-      <datalist id="hypo-list-batting">${batOptions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-      <label>Add a pitcher <input type="text" id="hypo-add-pitching" list="hypo-list-pitching" placeholder="Search players…"></label>
-      <datalist id="hypo-list-pitching">${pitOptions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-    </div>`;
+      <label>Add a batter <input type="text" id="hypo-add-batting" list="hypo-list-batting" placeholder="Top scorers — or type a name"></label>
+      <datalist id="hypo-list-batting">${batOptions.map(opt).join('')}</datalist>
+      <label>Add a pitcher <input type="text" id="hypo-add-pitching" list="hypo-list-pitching" placeholder="Top scorers — or type a name"></label>
+      <datalist id="hypo-list-pitching">${pitOptions.map(opt).join('')}</datalist>
+    </div>
+    <p class="upload-hint">Showing this round's top ${HYPO_SUGGESTION_LIMIT} scorers. Start typing to search every player.</p>`;
   }
 
   container.innerHTML = html;
@@ -16904,6 +16904,11 @@ function renderRosterLab(snapshot, result) {
     input.addEventListener('change', commit);
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') commit();
+    });
+    // Re-rank the offered names against what has been typed so far, keeping the option list at the
+    // cap instead of handing the browser the whole league to filter.
+    input.addEventListener('input', () => {
+      hypoFillDatalist(`hypo-list-${type}`, hypoPlayerOptions(snapshot, round, type, input.value));
     });
   }
 }
@@ -16953,7 +16958,7 @@ function renderPlayerExplorer() {
 
   const type = HYPO_EXPLORER_TYPE;
   const sd = getSeasons()[SELECTED_SEASON];
-  const suggestions = searchPlayers(snapshot, { type, limit: 400 });
+  const suggestions = playerSuggestions(snapshot, { type, limit: HYPO_SUGGESTION_LIMIT });
 
   let html = `<div class="hypo-lab-controls">
     <div class="hypo-round-tabs">
@@ -16965,8 +16970,13 @@ function renderPlayerExplorer() {
         HYPO_EXPLORER_PLAYER || ''
       )}">
     </label>
-    <datalist id="hypo-explorer-list">${suggestions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-  </div>`;
+    <datalist id="hypo-explorer-list">${suggestions
+      .map((p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`)
+      .join('')}</datalist>
+  </div>
+  <p class="upload-hint hypo-suggest-note">Showing the season's top ${HYPO_SUGGESTION_LIMIT} ${
+    type === 'batting' ? 'batters' : 'pitchers'
+  } by points. Start typing to search every player who recorded a stat.</p>`;
 
   if (!HYPO_EXPLORER_PLAYER) {
     html += `<p class="upload-hint">Search for anyone who recorded a stat this season — they don't have to have been on a roster.</p>`;
@@ -17087,6 +17097,14 @@ function wireExplorerControls(container, snapshot) {
     search.addEventListener('change', commit);
     search.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') commit();
+    });
+    // Re-rank against the typed text without re-rendering the panel — the datalist stays capped,
+    // and a partially typed name never has to be matched against the whole league in the DOM.
+    search.addEventListener('input', () => {
+      hypoFillDatalist(
+        'hypo-explorer-list',
+        playerSuggestions(snapshot, { type: HYPO_EXPLORER_TYPE, query: search.value, limit: HYPO_SUGGESTION_LIMIT })
+      );
     });
   }
 

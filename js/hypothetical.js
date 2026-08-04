@@ -146,6 +146,41 @@ function indexByPlayer(rows, playerKey) {
   return idx;
 }
 
+// Season points per player, and the same again per round, from the stored weekly scores.
+//
+// This exists so a search box can offer the players anyone is actually likely to look up before it
+// offers the other ~1,300 men who took an at-bat. The pools are seeded from MLB's whole active
+// catalog, so an unranked list is mostly noise — and rendering it in full is what makes a native
+// datalist crawl. Ranking is by REAL points, computed once per snapshot rather than per keystroke:
+// stable, cheap, and "who was good this year" does not meaningfully change under a point-value
+// tweak anyway.
+function indexPoints(rows, playerKey) {
+  const season = new Map();
+  const byRound = new Map();
+  for (const row of rows || []) {
+    const name = row[playerKey];
+    if (!name) continue;
+    const pts = Number(row.weekly_score) || 0;
+    season.set(name, (season.get(name) || 0) + pts);
+    let round = byRound.get(row.round);
+    if (!round) {
+      round = new Map();
+      byRound.set(row.round, round);
+    }
+    round.set(name, (round.get(name) || 0) + pts);
+  }
+  const rank = (map) =>
+    [...map.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([name, points]) => ({
+        name,
+        points: Math.round(points * 100) / 100,
+      }));
+  const ranked = { season: rank(season), byRound: new Map() };
+  for (const [round, map] of byRound) ranked.byRound.set(round, rank(map));
+  return ranked;
+}
+
 // Build the immutable input the engine scores against.
 //
 // `slots` are the resolved roster slots from the real eligibility path:
@@ -187,6 +222,10 @@ export function buildSnapshot({
     weeklyByPlayer: {
       batting: indexByPlayer(weeklyBatting, 'batter'),
       pitching: indexByPlayer(weeklyPitching, 'pitcher'),
+    },
+    points: {
+      batting: indexPoints(weeklyBatting, 'batter'),
+      pitching: indexPoints(weeklyPitching, 'pitcher'),
     },
     hasDaily: (dailyBatting || []).length > 0 || (dailyPitching || []).length > 0,
   };
@@ -573,27 +612,41 @@ function playoffPicture(snapshot, standings) {
 // for every player who appeared in a final game. That makes "what if I'd started him" answerable
 // without building a scenario at all.
 
-// Every player name with a stat row, for the search box. Filtered by `query` (case-insensitive
-// substring) and capped, so typing stays responsive against a full-league name list.
-export function searchPlayers(snapshot, { type = 'batting', query = '', limit = 25 } = {}) {
+// The highest-scoring players, optionally within one round. This is the default offering for any
+// player search: the top 50 covers essentially everyone a manager would consider starting, and it
+// is a fixed-size list rather than the whole league.
+export function topPlayers(snapshot, { type = 'batting', round = null, limit = 50 } = {}) {
+  const idx = snapshot.points[type];
+  const ranked = round ? idx.byRound.get(round) || [] : idx.season;
+  return ranked.slice(0, limit);
+}
+
+// What a search box should offer right now.
+//
+// With no query: the top scorers, because that is what people look up. With a query: name matches
+// across the FULL league, so nobody is unreachable just because they had a quiet season — ranked
+// prefix-first, then by points, so "sot" surfaces the Soto who matters. Either way the result is
+// capped, which is what keeps the rendered option list small enough to stay responsive.
+export function playerSuggestions(snapshot, { type = 'batting', query = '', round = null, limit = 50 } = {}) {
   const q = String(query || '')
     .trim()
     .toLowerCase();
-  const names = [];
-  for (const name of snapshot.weeklyByPlayer[type].keys()) {
-    if (q && !name.toLowerCase().includes(q)) continue;
-    names.push(name);
+  if (!q) return topPlayers(snapshot, { type, round, limit });
+
+  const idx = snapshot.points[type];
+  const ranked = round ? idx.byRound.get(round) || [] : idx.season;
+  const matches = [];
+  for (const entry of ranked) {
+    if (!entry.name.toLowerCase().includes(q)) continue;
+    matches.push(entry);
   }
-  names.sort((a, b) => {
-    // Prefix matches first — typing "sot" should surface Soto above someone with "sot" mid-name.
-    if (q) {
-      const ap = a.toLowerCase().startsWith(q);
-      const bp = b.toLowerCase().startsWith(q);
-      if (ap !== bp) return ap ? -1 : 1;
-    }
-    return a.localeCompare(b);
+  matches.sort((a, b) => {
+    const ap = a.name.toLowerCase().startsWith(q);
+    const bp = b.name.toLowerCase().startsWith(q);
+    if (ap !== bp) return ap ? -1 : 1;
+    return b.points - a.points || a.name.localeCompare(b.name);
   });
-  return names.slice(0, limit);
+  return matches.slice(0, limit);
 }
 
 // Which type(s) a name has rows for, so the UI can resolve a search without asking the user
