@@ -1600,6 +1600,7 @@ function enterApp(mgr) {
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
+  loadHypoScenario();
 
   // Restore the tab the user was on before refreshing. The standalone Trends
   // tab merged into Season Stats (the old Weekly Scores tab) — map the legacy
@@ -1608,7 +1609,9 @@ function enterApp(mgr) {
   if (savedTab === 'trends') savedTab = 'weekly';
   // A #hash deep link naming a tab (e.g. wmmc.live/#swap-log from a Slack swap notification)
   // wins over the saved tab, so a link can land directly on that tab after login.
-  const hashTab = (window.location.hash || '').replace(/^#/, '');
+  // A shared What If link carries its scenario in the hash (#whatif=<encoded>), so the tab name
+  // is the part before the '='. No existing tab id contains one, so this is a no-op for the rest.
+  const hashTab = (window.location.hash || '').replace(/^#/, '').split('=')[0];
   if (hashTab && document.querySelector(`.nav-btn[data-tab="${hashTab}"]`)) savedTab = hashTab;
   if (savedTab) {
     const targetBtn = document.querySelector(`.nav-btn[data-tab="${savedTab}"]`);
@@ -1626,6 +1629,7 @@ function enterApp(mgr) {
   if (savedTab === 'weekly') renderTrends();
   if (savedTab === 'swap-log') renderSwapLog('swap-log-public', false);
   if (savedTab === 'hall-of-fame') renderHallOfFame();
+  if (savedTab === 'whatif') renderWhatIf();
   if (savedTab === 'live') startLivePolling();
 
   // Poll for changes every 45 seconds so logged-in users always see
@@ -2138,6 +2142,7 @@ function setupNav() {
       if (btn.dataset.tab === 'weekly') renderTrends();
       if (btn.dataset.tab === 'swap-log') renderSwapLog('swap-log-public', false);
       if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
+      if (btn.dataset.tab === 'whatif') renderWhatIf();
       // Live tab owns its own polling lifecycle — start when entering, stop on leaving.
       if (btn.dataset.tab === 'live') startLivePolling();
       else stopLivePolling();
@@ -16316,6 +16321,381 @@ function hofLiveSeasonRowsHtml(live) {
 function hofRecordResults(allResults, live) {
   if (!live || !live.standings || Object.keys(live.standings).length === 0) return allResults;
   return [...allResults, { year: live.year, standings: live.standings, inProgress: true }];
+}
+
+// ============================================================
+// HYPOTHETICAL ZONE ("What If")
+// ============================================================
+// A sandbox for the question managers keep asking: what would the standings look like if the
+// scoring were different? It is READ-ONLY BY CONSTRUCTION — no endpoint here writes, no season
+// object is mutated, nothing reaches db.json. The scenario lives in localStorage and in the URL.
+//
+// Reality is the baseline, never a recomputation of it: the engine takes the roster slots the REAL
+// scoring path produced (managerWeekSubtotal, which owns the roster-window invariant) together
+// with the score it credited, and derives only the DELTA a different point table would cause. So
+// the "Real" column is always the live scoreboard's own number, and an unmodified scenario shows
+// zero movement by construction. See js/hypothetical.js for the full rationale.
+
+const HYPO_STORAGE_KEY = 'wmmc_hypothetical';
+let HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} } };
+let HYPO_SNAPSHOT = null;
+let HYPO_SNAPSHOT_KEY = null;
+let HYPO_RECOMPUTE_TIMER = null;
+let HYPO_EXPANDED = null; // manager whose player-level breakdown is open
+
+function loadHypoScenario() {
+  // The URL wins over stored state so a shared link always opens the scenario it encodes.
+  const fromHash = /[#&]whatif=([^&]+)/.exec(window.location.hash || '');
+  if (fromHash) {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(fromHash[1])))));
+      if (parsed && typeof parsed === 'object') {
+        HYPO_SCENARIO = { scoring: { batting: {}, pitching: {}, ...(parsed.scoring || {}) } };
+        return;
+      }
+    } catch (_) {
+      // A corrupt link falls through to stored state rather than blanking the tab.
+    }
+  }
+  try {
+    const raw = localStorage.getItem(HYPO_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      HYPO_SCENARIO = { scoring: { batting: {}, pitching: {}, ...((parsed || {}).scoring || {}) } };
+    }
+  } catch (_) {
+    /* a scenario is disposable — never let bad stored state break the tab */
+  }
+}
+
+function saveHypoScenario() {
+  try {
+    localStorage.setItem(HYPO_STORAGE_KEY, JSON.stringify(HYPO_SCENARIO));
+  } catch (_) {
+    /* quota — the scenario just won't survive a reload */
+  }
+}
+
+// Resolve every manager's roster slots for the season through the REAL eligibility path, so the
+// sandbox inherits the roster-window invariant instead of restating it. Cached per season +
+// data revision: this is the same work the scoreboard does, and it must not re-run per keystroke.
+function buildHypoSnapshot(year) {
+  const seasons = getSeasons();
+  const sd = seasons[year];
+  if (!sd) return null;
+
+  const managers = getManagers().filter((m) => m.active !== false);
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const scheduleDates = sd.schedule_dates || [];
+  const daily = getDailyStatsCached(year);
+  const slots = [];
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const weekKey = `${schedWeek.round}|${schedWeek.week}`;
+    const wd = scheduleDates[idx] || null;
+    managers.forEach((m) => {
+      const mgrWeekDates = ((sd.roster_dates || {})[m.name] || {})[weekKey] || {};
+      [
+        ['batting', batting, 'batter', 'batters'],
+        ['pitching', pitching, 'pitcher', 'pitchers'],
+      ].forEach(([type, rows, playerKey, listKey]) => {
+        const detail = [];
+        managerWeekSubtotal(sd, m.name, schedWeek, idx, rows, playerKey, listKey, detail);
+        detail.forEach((d) => {
+          // This manager's own slice of the week — what splits a mid-week handover so each side
+          // is re-scored over only the days they actually held the player.
+          const win = managerWeekWindow(mgrWeekDates[d.player], {
+            weekStart: wd && wd.start,
+            weekEnd: wd && wd.end,
+          });
+          slots.push({
+            manager: m.name,
+            round: schedWeek.round,
+            week: schedWeek.week,
+            weekIdx: idx,
+            player: d.player,
+            type,
+            realScore: d.score,
+            addDate: (win && win.start) || null,
+            dropDate: (win && win.end) || null,
+          });
+        });
+      });
+    });
+  });
+
+  return buildSnapshot({
+    slots,
+    dailyBatting: (daily && daily.batting) || [],
+    dailyPitching: (daily && daily.pitching) || [],
+    weeklyBatting: batting,
+    weeklyPitching: pitching,
+    scheduleDates,
+    playerDates: sd.player_dates || {},
+    managers: managers.map((m) => m.name),
+  });
+}
+
+function hypoSnapshot(year) {
+  const sd = getSeasons()[year];
+  const key = `${year}|${(sd && sd._rev) || ''}|${getDailyStatsCached(year) ? 'daily' : 'weekly'}`;
+  if (!HYPO_SNAPSHOT || HYPO_SNAPSHOT_KEY !== key) {
+    HYPO_SNAPSHOT = buildHypoSnapshot(year);
+    HYPO_SNAPSHOT_KEY = key;
+  }
+  return HYPO_SNAPSHOT;
+}
+
+function hypoScoringValue(side, key) {
+  const override = (HYPO_SCENARIO.scoring || {})[side] || {};
+  if (key in override) return override[key];
+  return SCORING[side][key] != null ? SCORING[side][key] : 0;
+}
+
+function setHypoScoringValue(side, key, raw) {
+  if (!HYPO_SCENARIO.scoring[side]) HYPO_SCENARIO.scoring[side] = {};
+  const real = SCORING[side][key] != null ? SCORING[side][key] : 0;
+  const num = Number(raw);
+  const value = Number.isFinite(num) ? num : 0;
+  // Storing only genuine differences keeps "is this the identity scenario?" honest — a slider
+  // dragged back to its real value leaves no trace.
+  if (value === real) delete HYPO_SCENARIO.scoring[side][key];
+  else HYPO_SCENARIO.scoring[side][key] = value;
+  saveHypoScenario();
+  scheduleHypoRecompute();
+}
+
+function resetHypoScenario() {
+  HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} } };
+  saveHypoScenario();
+  renderWhatIf();
+}
+
+// Recompute is debounced so dragging through values doesn't rescore on every keystroke, and only
+// the results half is repainted — repainting the inputs would steal focus mid-edit.
+function scheduleHypoRecompute() {
+  clearTimeout(HYPO_RECOMPUTE_TIMER);
+  HYPO_RECOMPUTE_TIMER = setTimeout(() => {
+    renderHypoResults();
+    renderHypoBadges();
+  }, 120);
+}
+
+function hypoShareLink() {
+  const encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(HYPO_SCENARIO)))));
+  return `${window.location.origin}${window.location.pathname}#whatif=${encoded}`;
+}
+
+function copyHypoLink() {
+  const link = hypoShareLink();
+  const done = (ok) => {
+    const el = document.getElementById('whatif-share-status');
+    if (el) el.textContent = ok ? 'Link copied' : link;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(
+      () => done(true),
+      () => done(false)
+    );
+  } else {
+    done(false);
+  }
+}
+
+const hypoDelta = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
+const hypoDeltaClass = (n) => (n > 0 ? 'hypo-up' : n < 0 ? 'hypo-down' : 'hypo-flat');
+
+function hypoScoringInputs(side, keys, unscored) {
+  const cell = (key, isNew) => {
+    const value = hypoScoringValue(side, key);
+    const real = SCORING[side][key] != null ? SCORING[side][key] : 0;
+    const changed = value !== real;
+    return `<tr class="${changed ? 'hypo-row-changed' : ''}">
+      <td class="hypo-stat-key">${esc(key)}${isNew ? ' <span class="hypo-new-tag">unscored</span>' : ''}</td>
+      <td><input type="number" step="0.05" class="hypo-input" data-side="${side}" data-key="${esc(key)}" value="${value}" aria-label="${esc(key)} points"></td>
+      <td class="hypo-badge-cell" id="hypo-badge-${side}-${esc(key)}">${changed ? `<span class="hypo-badge">${fmt(real)} &rarr; ${fmt(value)}</span>` : ''}</td>
+    </tr>`;
+  };
+  return `<table class="data-table compact-table hypo-scoring-table">
+    <thead><tr><th>Stat</th><th>Points</th><th></th></tr></thead>
+    <tbody>
+      ${keys.map((k) => cell(k, false)).join('')}
+      ${unscored.map((k) => cell(k, true)).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderHypoBadges() {
+  for (const side of ['batting', 'pitching']) {
+    for (const key of Object.keys(SCORING[side])) {
+      const el = document.getElementById(`hypo-badge-${side}-${key}`);
+      if (!el) continue;
+      const value = hypoScoringValue(side, key);
+      const real = SCORING[side][key];
+      el.innerHTML = value !== real ? `<span class="hypo-badge">${fmt(real)} &rarr; ${fmt(value)}</span>` : '';
+      const row = el.closest('tr');
+      if (row) row.classList.toggle('hypo-row-changed', value !== real);
+    }
+  }
+  const keys = scoringKeys();
+  for (const [side, list] of [
+    ['batting', keys.batting.unscored],
+    ['pitching', keys.pitching.unscored],
+  ]) {
+    for (const key of list) {
+      const el = document.getElementById(`hypo-badge-${side}-${key}`);
+      if (!el) continue;
+      const value = hypoScoringValue(side, key);
+      el.innerHTML = value !== 0 ? `<span class="hypo-badge">0 &rarr; ${fmt(value)}</span>` : '';
+      const row = el.closest('tr');
+      if (row) row.classList.toggle('hypo-row-changed', value !== 0);
+    }
+  }
+}
+
+function renderHypoResults() {
+  const container = document.getElementById('whatif-results');
+  if (!container) return;
+
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  if (!snapshot) {
+    container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
+    return;
+  }
+
+  const result = scoreScenario(snapshot, HYPO_SCENARIO);
+  const changes = scoringDiff(HYPO_SCENARIO.scoring);
+
+  let html = '';
+
+  if (result.identity) {
+    html += `<p class="upload-hint">These are the real standings. Change a point value above to see what would have happened.</p>`;
+  } else {
+    const moved = result.standings.filter((s) => s.rankDelta !== 0).length;
+    html += `<p class="upload-hint">${changes.length} scoring change${changes.length === 1 ? '' : 's'} &middot; ${
+      moved ? `${moved} manager${moved === 1 ? '' : 's'} change position` : 'nobody changes position'
+    }</p>`;
+  }
+
+  // An approximate slot is one scored from unclipped weekly totals for a player who was added or
+  // dropped mid-week. Saying so is the point: a sandbox that hides its error bars is worse than
+  // one that has none.
+  if (!result.fidelity.exact) {
+    html += `<p class="hypo-warning">Estimated for ${result.fidelity.approximateSlots} mid-week roster slot${
+      result.fidelity.approximateSlots === 1 ? '' : 's'
+    } — daily stats are still loading, so those players are scored on their full week.</p>`;
+  }
+
+  html += `<div class="table-wrapper"><table class="data-table hypo-standings">
+    <thead><tr><th></th><th>Manager</th><th>Real</th><th>What If</th><th>&Delta;</th><th>Move</th></tr></thead>
+    <tbody>`;
+  result.standings.forEach((s) => {
+    const move = s.rankDelta > 0 ? `&uarr; ${s.rankDelta}` : s.rankDelta < 0 ? `&darr; ${-s.rankDelta}` : '&ndash;';
+    html += `<tr class="hypo-standings-row" data-manager="${esc(s.manager)}">
+      <td class="hypo-rank">${s.rank}</td>
+      <td>${esc(s.manager)}</td>
+      <td class="hypo-num">${fmt(s.real)}</td>
+      <td class="hypo-num hypo-strong">${fmt(s.hypothetical)}</td>
+      <td class="hypo-num ${hypoDeltaClass(s.delta)}">${hypoDelta(s.delta)}</td>
+      <td class="hypo-num ${hypoDeltaClass(s.rankDelta)}">${move}</td>
+    </tr>`;
+    if (HYPO_EXPANDED === s.manager) {
+      const movers = result.players.filter((p) => p.manager === s.manager && p.delta !== 0).slice(0, 15);
+      const rows = movers.length
+        ? movers
+            .map(
+              (p) =>
+                `<tr><td>${displayPlayer(p.player, getSeasons()[SELECTED_SEASON])}</td><td class="hypo-num">${fmt(
+                  p.real
+                )}</td><td class="hypo-num">${fmt(p.hypothetical)}</td><td class="hypo-num ${hypoDeltaClass(
+                  p.delta
+                )}">${hypoDelta(p.delta)}</td></tr>`
+            )
+            .join('')
+        : '<tr><td colspan="4" class="upload-hint">No player on this roster is affected by these changes.</td></tr>';
+      html += `<tr class="hypo-detail-row"><td colspan="6">
+        <table class="data-table compact-table">
+          <thead><tr><th>Player</th><th>Real</th><th>What If</th><th>&Delta;</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </td></tr>`;
+    }
+  });
+  html += '</tbody></table></div>';
+
+  container.innerHTML = html;
+
+  container.querySelectorAll('.hypo-standings-row').forEach((row) => {
+    row.addEventListener('click', () => {
+      const name = row.dataset.manager;
+      HYPO_EXPANDED = HYPO_EXPANDED === name ? null : name;
+      renderHypoResults();
+    });
+  });
+}
+
+function renderWhatIf() {
+  const container = document.getElementById('whatif-content');
+  if (!container) return;
+
+  const keys = scoringKeys();
+
+  container.innerHTML = `
+    <div class="hypo-banner">
+      <strong>Hypothetical Zone</strong>
+      <span>Nothing here touches league data. Change the numbers, see what would have happened.</span>
+    </div>
+
+    <div class="card hypo-card">
+      <div class="hypo-toolbar">
+        <h2>Scoring Lab</h2>
+        <div class="hypo-actions">
+          <button class="btn btn-secondary" id="hypo-reset">Reset to reality</button>
+          <button class="btn btn-secondary" id="hypo-share">Copy share link</button>
+          <span class="upload-hint" id="whatif-share-status"></span>
+        </div>
+      </div>
+      <p class="upload-hint">
+        Change what any stat is worth and the standings below rescore instantly. The three batting
+        stats and one pitching stat marked <em>unscored</em> are recorded in our data but worth
+        nothing today &mdash; set a value to see what would happen if they counted.
+      </p>
+      <div class="hypo-scoring-grid">
+        <div>
+          <h3>Batting</h3>
+          ${hypoScoringInputs('batting', keys.batting.scored, keys.batting.unscored)}
+        </div>
+        <div>
+          <h3>Pitching</h3>
+          ${hypoScoringInputs('pitching', keys.pitching.scored, keys.pitching.unscored)}
+        </div>
+      </div>
+    </div>
+
+    <div class="card hypo-card">
+      <h2>What If Standings</h2>
+      <div id="whatif-results"></div>
+    </div>
+  `;
+
+  container.querySelectorAll('.hypo-input').forEach((input) => {
+    input.addEventListener('input', () => setHypoScoringValue(input.dataset.side, input.dataset.key, input.value));
+  });
+  const resetBtn = document.getElementById('hypo-reset');
+  if (resetBtn) resetBtn.addEventListener('click', resetHypoScenario);
+  const shareBtn = document.getElementById('hypo-share');
+  if (shareBtn) shareBtn.addEventListener('click', copyHypoLink);
+
+  renderHypoResults();
+
+  // Daily rows make mid-week roster slots exact rather than estimated. They are fetched on demand
+  // and cached (the Trends tab uses the same cache), so the tab paints immediately on weekly rows
+  // and sharpens once they land.
+  ensureDailyStats(SELECTED_SEASON, () => {
+    HYPO_SNAPSHOT_KEY = null;
+    renderHypoResults();
+  });
 }
 
 function renderHallOfFame() {

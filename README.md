@@ -11,6 +11,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
 - **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
+- **Hypothetical Zone ("What If")** — A read-only sandbox for every manager: change what any stat is worth (including three batting stats and one pitching stat that are recorded but currently unscored) and the standings rescore instantly, showing Real / What If / Δ and any change in position. Runs entirely in the browser against a snapshot — it has no write path to league data, and an unmodified scenario reproduces the live scoreboard exactly. Scenarios are shareable by link
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
 - **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap log with undo (plus approvals for guard-flagged swaps), audit log
@@ -240,6 +241,7 @@ WMMC/
 │   └── pre-push           # Auto-stamps version.json with today's date
 ├── js/                    # New modular frontend (extracted from app.js — work in progress)
 │                          #   scoring.js, csv.js, utils.js — pure logic (unit-tested)
+│                          #   hypothetical.js — What If sandbox engine (pure, read-only)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
 └── tests/                 # Tests for pure js/ modules

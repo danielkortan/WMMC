@@ -6086,3 +6086,170 @@ body::before {
     font-size: 0.55rem;
   }
 }
+
+/* ===================================================================
+   Hypothetical Zone ("What If")
+   A sandbox tab. The striped banner and the amber accent exist to make
+   these numbers unmistakable at a glance — nothing in this tab is
+   league data, and it must never be screenshotted as if it were.
+   =================================================================== */
+
+.hypo-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #d9a441;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(217, 164, 65, 0.16),
+    rgba(217, 164, 65, 0.16) 10px,
+    rgba(217, 164, 65, 0.06) 10px,
+    rgba(217, 164, 65, 0.06) 20px
+  );
+  color: var(--text);
+}
+
+.hypo-banner strong {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+}
+
+.hypo-banner span {
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-card {
+  border-left: 3px solid #d9a441;
+}
+
+.hypo-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.hypo-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hypo-scoring-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.25rem;
+  margin-top: 0.75rem;
+}
+
+.hypo-scoring-grid h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-light);
+}
+
+.hypo-scoring-table .hypo-stat-key {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hypo-input {
+  width: 5.5rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.hypo-input:focus {
+  outline: 2px solid #d9a441;
+  outline-offset: -1px;
+}
+
+.hypo-row-changed {
+  background: rgba(217, 164, 65, 0.1);
+}
+
+.hypo-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(217, 164, 65, 0.22);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hypo-new-tag {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  border: 1px dashed var(--text-muted);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.hypo-warning {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(217, 164, 65, 0.14);
+  font-size: 0.78rem;
+  color: var(--text-light);
+}
+
+.hypo-standings-row {
+  cursor: pointer;
+}
+
+.hypo-standings-row:hover {
+  background: rgba(217, 164, 65, 0.08);
+}
+
+.hypo-rank {
+  width: 2rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hypo-strong {
+  font-weight: 700;
+}
+
+.hypo-up {
+  color: var(--success);
+}
+
+.hypo-down {
+  color: var(--danger);
+}
+
+.hypo-flat {
+  color: var(--text-muted);
+}
+
+.hypo-detail-row > td {
+  padding: 0 0.5rem 0.6rem;
+  background: rgba(217, 164, 65, 0.05);
+}

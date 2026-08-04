@@ -107,31 +107,59 @@ export function convertIP(rawIP) {
   return parseFloat(rawIP) || 0;
 }
 
-export function calculateBattingScore(stats) {
+// Stat field (as stored on daily/weekly rows) → SCORING key. Driving the calculators from these
+// maps is what lets the What If lab score a stat line against a MODIFIED point table without a
+// second scoring implementation: pass a table with different values, get different points.
+//
+// The trailing entries (ABS/SO/LOB, GS) have NO key in the real SCORING table, so they contribute
+// zero to every real score and the league's scoring is unchanged. They are listed because the
+// stat IS captured on our stored rows, which makes "what if strikeouts cost a point" a question
+// the sandbox can actually answer. Never add a key here that the stat rows don't carry — a
+// scoring slider for a stat we never recorded would silently score as zero.
+export const BATTING_STAT_KEYS = {
+  '1b': '1B',
+  '2b': '2B',
+  '3b': '3B',
+  hr: 'HR',
+  r: 'R',
+  rbi: 'RBI',
+  sb: 'SB',
+  bb: 'BB',
+  abs: 'ABS',
+  so: 'SO',
+  lob: 'LOB',
+};
+
+export const PITCHING_STAT_KEYS = {
+  w: 'W',
+  qs: 'QS',
+  cg: 'CG',
+  cgso: 'CGSO',
+  nh: 'NH',
+  ip: 'IP',
+  h: 'H',
+  er: 'ER',
+  bb: 'BB',
+  k: 'K',
+  gs: 'GS',
+};
+
+// `scoring` defaults to the league's real point table, so every existing caller is unchanged.
+export function calculateBattingScore(stats, scoring = SCORING) {
+  const table = (scoring && scoring.batting) || {};
   let score = 0;
-  score += (stats['1b'] || 0) * SCORING.batting['1B'];
-  score += (stats['2b'] || 0) * SCORING.batting['2B'];
-  score += (stats['3b'] || 0) * SCORING.batting['3B'];
-  score += (stats.hr || 0) * SCORING.batting['HR'];
-  score += (stats.r || 0) * SCORING.batting['R'];
-  score += (stats.rbi || 0) * SCORING.batting['RBI'];
-  score += (stats.sb || 0) * SCORING.batting['SB'];
-  score += (stats.bb || 0) * SCORING.batting['BB'];
+  for (const [field, key] of Object.entries(BATTING_STAT_KEYS)) {
+    score += (stats[field] || 0) * (table[key] || 0);
+  }
   return Math.round(score * 100) / 100;
 }
 
-export function calculatePitchingScore(stats) {
+export function calculatePitchingScore(stats, scoring = SCORING) {
+  const table = (scoring && scoring.pitching) || {};
   let score = 0;
-  score += (stats.w || 0) * SCORING.pitching['W'];
-  score += (stats.qs || 0) * SCORING.pitching['QS'];
-  score += (stats.cg || 0) * SCORING.pitching['CG'];
-  score += (stats.cgso || 0) * SCORING.pitching['CGSO'];
-  score += (stats.nh || 0) * SCORING.pitching['NH'];
-  score += (stats.ip || 0) * SCORING.pitching['IP'];
-  score += (stats.h || 0) * SCORING.pitching['H'];
-  score += (stats.er || 0) * SCORING.pitching['ER'];
-  score += (stats.bb || 0) * SCORING.pitching['BB'];
-  score += (stats.k || 0) * SCORING.pitching['K'];
+  for (const [field, key] of Object.entries(PITCHING_STAT_KEYS)) {
+    score += (stats[field] || 0) * (table[key] || 0);
+  }
   return Math.round(score * 100) / 100;
 }
 

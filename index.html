@@ -102,6 +102,7 @@
       <button class="nav-btn" data-tab="weekly">Season Stats</button>
       <button class="nav-btn" data-tab="league-info">League Info</button>
       <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
+      <button class="nav-btn" data-tab="whatif">What If</button>
       <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">
         Commissioner<span id="comm-pending-badge" style="display: none"></span>
       </button>
@@ -206,6 +207,11 @@
       <!-- Hall of Fame -->
       <section id="hall-of-fame" class="tab-content">
         <div id="hall-of-fame-content"></div>
+      </section>
+
+      <!-- Hypothetical Zone — sandbox only, never reads or writes league data -->
+      <section id="whatif" class="tab-content">
+        <div id="whatif-content"></div>
       </section>
 
       <!-- Rosters -->
