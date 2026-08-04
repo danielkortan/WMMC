@@ -17,6 +17,9 @@ import {
   scoringDiff,
   scoringKeys,
   weeksInRound,
+  lastKnownRoster,
+  scoreRosterForRound,
+  roundHasStats,
   topPlayers,
   playerSuggestions,
   playerTypes,
@@ -909,5 +912,92 @@ describe('search suggestions ranked by points', () => {
 
   it('returns nothing for a query that matches nobody', () => {
     assert.deepEqual(playerSuggestions(ranked(), { type: 'batting', query: 'zzz' }), []);
+  });
+});
+
+describe('carried-forward rosters', () => {
+  // "A" played PP1 only; "B" played PP1 and SF. Weeks: PP1 w1/w2, SF w1/w2.
+  // Own stat rows: 'Starter' has to have SEMIFINAL numbers for a carried roster to be worth
+  // anything there, and ROSTER_WEEKLY_BAT deliberately gives him none.
+  const CARRY_WEEKLY = [
+    ...ROSTER_WEEKLY_BAT,
+    { batter: 'Starter', round: 'SF', week: 'Week 1', hr: 1, weekly_score: 10 },
+    { batter: 'Bench', round: 'SF', week: 'Week 1', hr: 5, weekly_score: 50 },
+  ];
+
+  const carrySnapshot = () =>
+    buildSnapshot({
+      slots: [
+        rosterSlot('A', 'PP1', 'Week 1', 0, 'Starter', 10),
+        rosterSlot('A', 'PP1', 'Week 2', 1, 'Starter', 10),
+        rosterSlot('B', 'PP1', 'Week 1', 0, 'Bench', 30),
+        rosterSlot('B', 'SF', 'Week 1', 2, 'SF Guy', 20),
+      ],
+      weeklyBatting: CARRY_WEEKLY,
+      scheduleDates: ROSTER_DATES,
+      schedule: ROSTER_SCHEDULE,
+      managers: ['A', 'B'],
+    });
+
+  it('finds the most recent round a manager actually rostered someone', () => {
+    const last = lastKnownRoster(carrySnapshot(), 'A', 'SF');
+    assert.equal(last.round, 'PP1');
+    assert.deepEqual(last.batters, ['Starter']);
+  });
+
+  it('returns null for a manager who never rostered anyone', () => {
+    assert.equal(lastKnownRoster(carrySnapshot(), 'Nobody', 'SF'), null);
+  });
+
+  it('returns null when there is no earlier round to carry from', () => {
+    assert.equal(lastKnownRoster(carrySnapshot(), 'A', 'PP1'), null);
+  });
+
+  it('walks back past a round the manager missed', () => {
+    // B played PP1 and SF but not the intervening rounds; carrying into SF finds PP1.
+    const last = lastKnownRoster(carrySnapshot(), 'B', 'SF');
+    assert.equal(last.round, 'PP1');
+    assert.deepEqual(last.batters, ['Bench']);
+  });
+
+  it('prices a carried roster against the target round stats, not the old ones', () => {
+    // He scored 20 across PP1, but only 10 in the semifinal — the carried roster is priced on the
+    // round it is carried INTO, which is the whole point.
+    const score = scoreRosterForRound(carrySnapshot(), 'A', 'SF', { batters: ['Starter'], pitchers: [] });
+    assert.equal(score, 10);
+  });
+
+  it('prices a carried roster under the scenario scoring table', () => {
+    const score = scoreRosterForRound(
+      carrySnapshot(),
+      'A',
+      'SF',
+      { batters: ['Starter'], pitchers: [] },
+      { scoring: { batting: { HR: 20 } } }
+    );
+    assert.equal(score, 20, 'his one SF home run is now worth double');
+  });
+
+  it('scores zero for a carried roster whose players did nothing that round', () => {
+    assert.equal(scoreRosterForRound(carrySnapshot(), 'A', 'SF', { batters: ['Nobody'], pitchers: [] }), 0);
+  });
+});
+
+describe('rounds the league has not played', () => {
+  it('knows which rounds have recorded stats', () => {
+    const snapshot = buildSnapshot({
+      weeklyBatting: [{ batter: 'X', round: 'PP1', week: 'Week 1', weekly_score: 5 }],
+      schedule: ROSTER_SCHEDULE,
+    });
+    assert.equal(roundHasStats(snapshot, 'PP1'), true);
+    assert.equal(roundHasStats(snapshot, 'SF'), false);
+  });
+
+  it('counts a pitching-only round as played', () => {
+    const snapshot = buildSnapshot({
+      weeklyPitching: [{ pitcher: 'P', round: 'SF', week: 'Week 1', weekly_score: 5 }],
+      schedule: ROSTER_SCHEDULE,
+    });
+    assert.equal(roundHasStats(snapshot, 'SF'), true);
   });
 });

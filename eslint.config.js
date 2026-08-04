@@ -55,6 +55,8 @@ const projectGlobals = {
   rosterOverrides: 'readonly',
   roundsPlayed: 'readonly',
   weeksInRound: 'readonly',
+  lastKnownRoster: 'readonly',
+  scoreRosterForRound: 'readonly',
   seedFromPeriodTotals: 'readonly',
   resolveBracket: 'readonly',
   topPlayers: 'readonly',

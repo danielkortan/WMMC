@@ -16631,14 +16631,21 @@ function renderHypoPools(seeding, realSeeding) {
   return html;
 }
 
-function hypoMatchupSide(side) {
+function hypoMatchupSide(side, round, carriedBy) {
   if (!side) return '<span class="hypo-flat">TBD</span>';
   const score = side.score == null ? '<span class="hypo-flat">no roster</span>' : `<strong>${fmt(side.score)}</strong>`;
-  return `<span class="hypo-seed-chip">${side.seed}</span> ${esc(side.name)} &middot; ${score}`;
+  const carried = carriedBy.get(`${side.name}\u0000${round}`);
+  const tag = carried
+    ? ` <span class="hypo-new-tag" title="This manager never played this round. Their last real roster (${esc(
+        ROUND_LABELS[carried] || carried
+      )}) is assumed — change it in the Roster Lab.">${esc(roundShortLabel(carried))} roster</span>`
+    : '';
+  return `<span class="hypo-seed-chip">${side.seed}</span> ${esc(side.name)} &middot; ${score}${tag}`;
 }
 
-function renderHypoBracket(bracket) {
+function renderHypoBracket(bracket, carried, unplayedRounds) {
   if (!bracket) return '<p class="upload-hint">Not enough managers are seeded to build a bracket.</p>';
+  const carriedBy = new Map((carried || []).map((c) => [`${c.manager}\u0000${c.round}`, c.fromRound]));
 
   let html = '';
   for (const round of bracket.rounds) {
@@ -16648,10 +16655,14 @@ function renderHypoBracket(bracket) {
       html += `<div class="hypo-matchup${m.undecided ? ' hypo-matchup-open' : ''}">
         <div class="hypo-matchup-label">${esc(m.label)}</div>
         <div class="hypo-matchup-side${winner && m.a && winner === m.a.name ? ' hypo-matchup-winner' : ''}">${hypoMatchupSide(
-          m.a
+          m.a,
+          round.round,
+          carriedBy
         )}</div>
         <div class="hypo-matchup-side${winner && m.b && winner === m.b.name ? ' hypo-matchup-winner' : ''}">${hypoMatchupSide(
-          m.b
+          m.b,
+          round.round,
+          carriedBy
         )}</div>
       </div>`;
     }
@@ -16664,17 +16675,38 @@ function renderHypoBracket(bracket) {
     )}</strong>${bracket.thirdPlace ? ` &middot; 3rd place: ${esc(bracket.thirdPlace)}` : ''}</p>`;
   }
 
+  if (carriedBy.size) {
+    html += `<p class="upload-hint hypo-rule">A manager promoted into a round they never played is
+      assumed to have run back their last real roster, priced against that round's actual stats.
+      Those sides are tagged with the round the roster came from. It is an assumption, not a record
+      &mdash; change it in the Roster Lab and the bracket follows.</p>`;
+  }
+
   if (bracket.missing.length) {
-    // The one thing this tool must never do is invent a roster. Name who is missing one and where,
-    // so the gap reads as a next step rather than a glitch.
+    // Two different reasons a side can't be scored, and conflating them would be misleading: the
+    // ROUND hasn't been played by anyone yet, or this manager has no roster history to carry.
+    const unplayed = new Set(unplayedRounds || []);
     const byRound = {};
     for (const m of bracket.missing) (byRound[m.round] = byRound[m.round] || []).push(m.manager);
-    const parts = Object.entries(byRound).map(
-      ([round, names]) => `${[...new Set(names)].map(esc).join(', ')} in the ${esc(ROUND_LABELS[round] || round)}`
-    );
-    html += `<p class="hypo-warning">The bracket stops where a manager has no roster for the round: ${parts.join(
-      '; '
-    )}. They never played it, so there are no points to score them on — enter a roster for them in the Roster Lab above and the bracket will carry on.</p>`;
+
+    const notYet = Object.keys(byRound).filter((r) => unplayed.has(r));
+    const noRoster = Object.entries(byRound).filter(([r]) => !unplayed.has(r));
+
+    if (notYet.length) {
+      html += `<p class="hypo-warning">The bracket stops at the ${notYet
+        .map((r) => esc(ROUND_LABELS[r] || r))
+        .join(' and ')} — nobody has played ${
+        notYet.length > 1 ? 'those rounds' : 'that round'
+      } yet, so there are no stats to score it with under any scenario.</p>`;
+    }
+    if (noRoster.length) {
+      const parts = noRoster.map(
+        ([round, names]) => `${[...new Set(names)].map(esc).join(', ')} in the ${esc(ROUND_LABELS[round] || round)}`
+      );
+      html += `<p class="hypo-warning">No roster to score: ${parts.join(
+        '; '
+      )}. They have no earlier roster to carry forward either — add one in the Roster Lab above and the bracket will carry on.</p>`;
+    }
   }
 
   return html;
@@ -16837,7 +16869,7 @@ function renderHypoPlayoffs(result) {
   }
 
   html += renderHypoPools(po.seeding, po.realSeeding);
-  html += renderHypoBracket(po.bracket);
+  html += renderHypoBracket(po.bracket, po.carried, po.unplayedRounds);
   el.innerHTML = html;
 }
 
@@ -16872,7 +16904,12 @@ function hypoLabRound() {
 function hypoEffectiveRoster(snapshot, manager, round) {
   const override = ((HYPO_SCENARIO.rosters || {})[manager] || {})[round];
   if (override) return { batters: (override.batters || []).slice(), pitchers: (override.pitchers || []).slice() };
-  return realRosterForRound(snapshot, manager, round);
+  const real = realRosterForRound(snapshot, manager, round);
+  if (real.batters.length || real.pitchers.length) return real;
+  // A round they never played: start from the last roster they actually fielded, the same default
+  // the bracket uses, so the lab opens on something to edit rather than an empty column.
+  const carried = lastKnownRoster(snapshot, manager, round);
+  return carried ? { batters: carried.batters.slice(), pitchers: carried.pitchers.slice() } : real;
 }
 
 function setHypoRoster(manager, round, roster) {
