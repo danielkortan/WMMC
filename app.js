@@ -16273,6 +16273,7 @@ let HYPO_RECOMPUTE_TIMER = null;
 let HYPO_EXPANDED = null; // manager whose player-level breakdown is open
 let HYPO_LAB_MANAGER = null; // Roster Lab: manager being edited
 let HYPO_LAB_ROUND = null; // Roster Lab: period being edited
+let HYPO_SWAP_OPEN = null; // Roster Lab: { player, type } whose swap picker is open
 
 function loadHypoScenario() {
   // The URL wins over stored state so a shared link always opens the scenario it encodes.
@@ -16572,6 +16573,113 @@ function hypoAvailableScopes(result) {
   return HYPO_SCOPES.filter((sc) => !sc.rounds || sc.rounds.some((r) => rounds.has(r)));
 }
 
+// ---- Playoff Picture ----
+// Pool play is scored by POOL, and the field is filled by a specific rule. Showing a flat list of
+// totals hides both. This renders the pools the way the league actually decides them — each pool's
+// PP1 and PP2 leaders, then the wildcards that fill the rest — followed by the bracket those seeds
+// produce under the scenario.
+
+function hypoSeedBadges(entry, seeding) {
+  const badges = [];
+  if (entry.isPP1Leader) badges.push('<span class="hypo-badge hypo-badge-win">PP1 winner</span>');
+  if (entry.isPP2Leader) badges.push('<span class="hypo-badge hypo-badge-win">PP2 winner</span>');
+  if (seeding.wildcardSet.has(entry.manager)) badges.push('<span class="hypo-badge">Wild card</span>');
+  return badges.join(' ');
+}
+
+function renderHypoPools(seeding, realSeeding) {
+  const pools = {};
+  for (const entry of Object.values(seeding.byManager)) {
+    (pools[entry.pool] = pools[entry.pool] || []).push(entry);
+  }
+  const seedOf = new Map(seeding.qualifierNames.map((n, i) => [n, i + 1]));
+  const realSeedOf = new Map((realSeeding ? realSeeding.qualifierNames : []).map((n, i) => [n, i + 1]));
+
+  let html = `<p class="upload-hint hypo-rule">
+    <strong>How the field is decided.</strong> Each pool crowns a <strong>Pool Play 1 winner</strong>
+    (most PP1 points in that pool) and a <strong>Pool Play 2 winner</strong> (most PP2 points) — one
+    manager can be both. Every pool winner is seeded above every non-winner. The remaining spots go
+    to the highest-scoring managers who won neither period, as <strong>wild cards</strong>. Within
+    each group the order is total points, then periods won, then batting, pitching, PP2, PP1.
+  </p>`;
+
+  for (const pool of Object.keys(pools).sort()) {
+    const rows = pools[pool].slice().sort((a, b) => b.total - a.total);
+    html += `<h4 class="hypo-pool-title">${esc(formatPool(pool))}</h4>
+      <div class="table-wrapper"><table class="data-table compact-table hypo-pool-table">
+        <thead><tr><th>Manager</th><th>PP1</th><th>PP2</th><th>Total</th><th>Seed</th><th></th></tr></thead>
+        <tbody>`;
+    for (const e of rows) {
+      const seed = seedOf.get(e.manager);
+      const realSeed = realSeedOf.get(e.manager);
+      const moved = seed !== realSeed;
+      html += `<tr class="${seed ? 'hypo-qualified' : ''}">
+        <td>${esc(e.manager)}</td>
+        <td class="hypo-num${e.isPP1Leader ? ' hypo-strong' : ''}">${fmt(e.pp1)}</td>
+        <td class="hypo-num${e.isPP2Leader ? ' hypo-strong' : ''}">${fmt(e.pp2)}</td>
+        <td class="hypo-num hypo-strong">${fmt(e.total)}</td>
+        <td class="hypo-num">${
+          seed
+            ? `${seed}${moved ? ` <span class="${realSeed ? 'hypo-up' : 'hypo-up'}">(was ${realSeed || 'out'})</span>` : ''}`
+            : `<span class="hypo-flat">&ndash;${realSeed ? ` <span class="hypo-down">(was ${realSeed})</span>` : ''}</span>`
+        }</td>
+        <td>${hypoSeedBadges(e, seeding)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+function hypoMatchupSide(side) {
+  if (!side) return '<span class="hypo-flat">TBD</span>';
+  const score = side.score == null ? '<span class="hypo-flat">no roster</span>' : `<strong>${fmt(side.score)}</strong>`;
+  return `<span class="hypo-seed-chip">${side.seed}</span> ${esc(side.name)} &middot; ${score}`;
+}
+
+function renderHypoBracket(bracket) {
+  if (!bracket) return '<p class="upload-hint">Not enough managers are seeded to build a bracket.</p>';
+
+  let html = '';
+  for (const round of bracket.rounds) {
+    html += `<h4 class="hypo-pool-title">${esc(round.label)}</h4><div class="hypo-matchups">`;
+    for (const m of round.matchups) {
+      const winner = m.winner ? m.winner.name : null;
+      html += `<div class="hypo-matchup${m.undecided ? ' hypo-matchup-open' : ''}">
+        <div class="hypo-matchup-label">${esc(m.label)}</div>
+        <div class="hypo-matchup-side${winner && m.a && winner === m.a.name ? ' hypo-matchup-winner' : ''}">${hypoMatchupSide(
+          m.a
+        )}</div>
+        <div class="hypo-matchup-side${winner && m.b && winner === m.b.name ? ' hypo-matchup-winner' : ''}">${hypoMatchupSide(
+          m.b
+        )}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  if (bracket.champion) {
+    html += `<p class="hypo-playoffs hypo-playoffs-changed">Champion under this scenario: <strong>${esc(
+      bracket.champion
+    )}</strong>${bracket.thirdPlace ? ` &middot; 3rd place: ${esc(bracket.thirdPlace)}` : ''}</p>`;
+  }
+
+  if (bracket.missing.length) {
+    // The one thing this tool must never do is invent a roster. Name who is missing one and where,
+    // so the gap reads as a next step rather than a glitch.
+    const byRound = {};
+    for (const m of bracket.missing) (byRound[m.round] = byRound[m.round] || []).push(m.manager);
+    const parts = Object.entries(byRound).map(
+      ([round, names]) => `${[...new Set(names)].map(esc).join(', ')} in the ${esc(ROUND_LABELS[round] || round)}`
+    );
+    html += `<p class="hypo-warning">The bracket stops where a manager has no roster for the round: ${parts.join(
+      '; '
+    )}. They never played it, so there are no points to score them on — enter a roster for them in the Roster Lab above and the bracket will carry on.</p>`;
+  }
+
+  return html;
+}
+
 function renderHypoResults(result) {
   const container = document.getElementById('whatif-results');
   if (!container) return;
@@ -16606,21 +16714,6 @@ function renderHypoResults(result) {
         : `nobody changes position in the ${esc(scope.label.toLowerCase())}`
     );
     html += `<p class="upload-hint">${bits.join(' &middot; ')}</p>`;
-  }
-
-  // Whether the change would have altered who made the playoffs — the question the Roster Lab
-  // exists to answer. Computed with the league's real seeding rule (js/seeding.js).
-  const po = result.playoffs;
-  if (po && !result.identity) {
-    if (po.changed) {
-      const parts = [];
-      if (po.in.length) parts.push(`<strong>In:</strong> ${po.in.map(esc).join(', ')}`);
-      if (po.out.length) parts.push(`<strong>Out:</strong> ${po.out.map(esc).join(', ')}`);
-      if (!parts.length) parts.push('the same managers qualify, but the seeding order changes');
-      html += `<p class="hypo-playoffs hypo-playoffs-changed">Playoff picture changes &mdash; ${parts.join(' &middot; ')}</p>`;
-    } else {
-      html += `<p class="hypo-playoffs">Same eight managers still make the playoffs.</p>`;
-    }
   }
 
   // An approximate slot is one scored from unclipped weekly totals for a player who was added or
@@ -16719,6 +16812,33 @@ function renderHypoResults(result) {
       renderHypoResults(result);
     });
   });
+
+  renderHypoPlayoffs(result);
+}
+
+function renderHypoPlayoffs(result) {
+  const el = document.getElementById('whatif-playoffs');
+  if (!el) return;
+  const po = result && result.playoffs;
+  if (!po || !po.seeding) {
+    el.innerHTML = '<p class="upload-hint">Pools are not configured for this season, so there is no field to seed.</p>';
+    return;
+  }
+
+  let html = '';
+  if (po.changed) {
+    const parts = [];
+    if (po.in.length) parts.push(`<strong>In:</strong> ${po.in.map(esc).join(', ')}`);
+    if (po.out.length) parts.push(`<strong>Out:</strong> ${po.out.map(esc).join(', ')}`);
+    if (!parts.length) parts.push('the same managers qualify, but the seeding order changes');
+    html += `<p class="hypo-playoffs hypo-playoffs-changed">Playoff picture changes &mdash; ${parts.join(' &middot; ')}</p>`;
+  } else if (!result.identity) {
+    html += `<p class="hypo-playoffs">The same managers qualify, in the same order.</p>`;
+  }
+
+  html += renderHypoPools(po.seeding, po.realSeeding);
+  html += renderHypoBracket(po.bracket);
+  el.innerHTML = html;
 }
 
 // ---- Roster Lab ----
@@ -16780,6 +16900,26 @@ function hypoRemovePlayer(manager, round, type, player) {
   setHypoRoster(manager, round, roster);
 }
 
+// Replace one player with another IN PLACE, so the swapped-in name keeps the outgoing player's
+// position in the list and the two columns still line up row for row.
+function hypoSwapPlayer(manager, round, type, outPlayer, inPlayer) {
+  if (!inPlayer || inPlayer === outPlayer) {
+    HYPO_SWAP_OPEN = null;
+    renderHypoOutputs();
+    return;
+  }
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const roster = hypoEffectiveRoster(snapshot, manager, round);
+  const key = type === 'batting' ? 'batters' : 'pitchers';
+  const idx = roster[key].indexOf(outPlayer);
+  const already = roster[key].indexOf(inPlayer);
+  if (already !== -1) roster[key].splice(already, 1);
+  if (idx === -1) roster[key].push(inPlayer);
+  else roster[key][idx > already && already !== -1 ? idx - 1 : idx] = inPlayer;
+  HYPO_SWAP_OPEN = null;
+  setHypoRoster(manager, round, roster);
+}
+
 function hypoAddPlayer(manager, round, type, player) {
   if (!player) return;
   const snapshot = hypoSnapshot(SELECTED_SEASON);
@@ -16818,17 +16958,38 @@ function hypoRosterColumn(title, subtitle, rows, opts) {
     return `<div class="hypo-roster-section"><h4>${label}</h4>
       <table class="data-table compact-table hypo-roster-table"><tbody>
       ${list
-        .map(
-          (r) => `<tr class="${r.muted ? 'hypo-roster-muted' : ''}${r.added ? ' hypo-roster-added' : ''}">
-            <td>${displayPlayer(r.player, sd)}${r.tag ? ` <span class="hypo-new-tag">${r.tag}</span>` : ''}</td>
+        .map((r) => {
+          // In the editable column the NAME is the control: click it to swap this player out for
+          // someone else. A bare × only ever removed, which is not what a manager is actually
+          // asking — "who would I have started instead" is a replacement, not a deletion.
+          const nameCell = removable
+            ? `<button class="hypo-swap-name" data-swap="${esc(r.player)}" data-type="${type}" title="Click to swap this player out">${displayPlayer(
+                r.player,
+                sd
+              )}</button>`
+            : displayPlayer(r.player, sd);
+          const open = HYPO_SWAP_OPEN && HYPO_SWAP_OPEN.player === r.player && HYPO_SWAP_OPEN.type === type;
+          return `<tr class="${r.muted ? 'hypo-roster-muted' : ''}${r.added ? ' hypo-roster-added' : ''}${
+            open ? ' hypo-roster-swapping' : ''
+          }">
+            <td>${nameCell}${r.tag ? ` <span class="hypo-new-tag">${r.tag}</span>` : ''}</td>
             <td class="hypo-num">${fmt(r.points)}</td>
             ${
               removable
                 ? `<td class="hypo-roster-action"><button class="hypo-x" data-remove="${esc(r.player)}" data-type="${type}" title="Remove from this hypothetical roster">&times;</button></td>`
                 : ''
             }
-          </tr>`
-        )
+          </tr>${
+            open
+              ? `<tr class="hypo-swap-row"><td colspan="3">
+                  <label>Swap <strong>${esc(r.player)}</strong> for
+                    <input type="text" id="hypo-swap-input" list="hypo-list-${type}" placeholder="Top scorers — or type a name">
+                  </label>
+                  <button class="btn btn-sm btn-secondary" id="hypo-swap-cancel">Cancel</button>
+                </td></tr>`
+              : ''
+          }`;
+        })
         .join('')}
       </tbody></table></div>`;
   };
@@ -16887,17 +17048,14 @@ function renderRosterLab(snapshot, result) {
     }
   }
 
-  // RIGHT — what the scenario gives them. Ordered to follow the real roster, with genuinely new
-  // players appended: the two columns are meant to be read across, so a player who is on both
-  // sides should sit on the same line rather than jumping to the bottom when re-added.
-  const inRealOrder = (list, realList) => {
-    const kept = realList.filter((p) => list.includes(p));
-    return [...kept, ...list.filter((p) => !realList.includes(p))];
-  };
+  // RIGHT — what the scenario gives them, in the roster's own order. A swap writes the replacement
+  // into the outgoing player's slot (see hypoSwapPlayer), so the two columns still line up row for
+  // row and you can read a substitution straight across. Sorting added players to the bottom would
+  // undo exactly that.
   const hypoRows = [];
   for (const [type, list] of [
-    ['batting', inRealOrder(effective.batters, realRoster.batters)],
-    ['pitching', inRealOrder(effective.pitchers, realRoster.pitchers)],
+    ['batting', effective.batters],
+    ['pitching', effective.pitchers],
   ]) {
     for (const player of list) {
       const pr = prFor(player, type);
@@ -16992,20 +17150,60 @@ function renderRosterLab(snapshot, result) {
   if (mgrSelect) {
     mgrSelect.addEventListener('change', () => {
       HYPO_LAB_MANAGER = mgrSelect.value;
+      HYPO_SWAP_OPEN = null;
       renderHypoOutputs();
     });
   }
   container.querySelectorAll('.hypo-round-tab').forEach((btn) => {
     btn.addEventListener('click', () => {
       HYPO_LAB_ROUND = btn.dataset.round;
+      HYPO_SWAP_OPEN = null;
       renderHypoOutputs();
     });
   });
   const resetRound = document.getElementById('hypo-lab-reset-round');
   if (resetRound) resetRound.addEventListener('click', () => clearHypoRoster(manager, round));
   container.querySelectorAll('.hypo-x').forEach((btn) => {
-    btn.addEventListener('click', () => hypoRemovePlayer(manager, round, btn.dataset.type, btn.dataset.remove));
+    btn.addEventListener('click', () => {
+      HYPO_SWAP_OPEN = null;
+      hypoRemovePlayer(manager, round, btn.dataset.type, btn.dataset.remove);
+    });
   });
+
+  container.querySelectorAll('.hypo-swap-name').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const same =
+        HYPO_SWAP_OPEN && HYPO_SWAP_OPEN.player === btn.dataset.swap && HYPO_SWAP_OPEN.type === btn.dataset.type;
+      HYPO_SWAP_OPEN = same ? null : { player: btn.dataset.swap, type: btn.dataset.type };
+      renderHypoOutputs();
+      const input = document.getElementById('hypo-swap-input');
+      if (input) input.focus();
+    });
+  });
+
+  const swapInput = document.getElementById('hypo-swap-input');
+  if (swapInput && HYPO_SWAP_OPEN) {
+    const { player: outPlayer, type: swapType } = HYPO_SWAP_OPEN;
+    const commitSwap = () => hypoSwapPlayer(manager, round, swapType, outPlayer, swapInput.value.trim());
+    swapInput.addEventListener('change', commitSwap);
+    swapInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') commitSwap();
+      if (ev.key === 'Escape') {
+        HYPO_SWAP_OPEN = null;
+        renderHypoOutputs();
+      }
+    });
+    swapInput.addEventListener('input', () => {
+      hypoFillDatalist(`hypo-list-${swapType}`, hypoPlayerOptions(snapshot, round, swapType, swapInput.value));
+    });
+  }
+  const swapCancel = document.getElementById('hypo-swap-cancel');
+  if (swapCancel) {
+    swapCancel.addEventListener('click', () => {
+      HYPO_SWAP_OPEN = null;
+      renderHypoOutputs();
+    });
+  }
   for (const type of ['batting', 'pitching']) {
     const input = document.getElementById(`hypo-add-${type}`);
     if (!input) continue;
@@ -17298,6 +17496,15 @@ function renderWhatIf() {
     <div class="card hypo-card">
       <h2>What If Standings</h2>
       <div id="whatif-results"></div>
+    </div>
+
+    <div class="card hypo-card">
+      <h2>Playoff Picture</h2>
+      <p class="upload-hint">
+        How pool play would shake out under this scenario &mdash; by pool, with the period winners
+        and wild cards &mdash; and the bracket those seeds produce.
+      </p>
+      <div id="whatif-playoffs"></div>
     </div>
   `;
 

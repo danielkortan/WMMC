@@ -37,6 +37,7 @@ import {
   PITCHING_STAT_KEYS,
 } from './scoring.js';
 import { seedFromPeriodTotals } from './seeding.js';
+import { resolveBracket } from './bracket.js';
 
 // A scenario that changes nothing. Scoring the snapshot against this must return the real
 // standings, unchanged — that is the property tests/hypothetical.test.js pins down.
@@ -595,9 +596,25 @@ function playoffPicture(snapshot, standings) {
 
   const realSet = new Set(real.qualifierNames);
   const hypoSet = new Set(hypothetical.qualifierNames);
+
+  // Re-run the tournament on the new seeds. A manager the scenario promoted into a round they
+  // never played has no roster there, so their side scores null and the bracket stops rather than
+  // inventing a result — see js/bracket.js.
+  const hypoByManager = new Map(standings.map((s) => [s.manager, s]));
+  const scoreFor = (manager, round) => {
+    const entry = hypoByManager.get(manager);
+    if (!entry) return null;
+    const period = entry.periods.find((p) => p.round === round);
+    return period ? period.hypothetical : null;
+  };
+  const bracket = resolveBracket(hypothetical.qualifierNames, scoreFor);
+
   return {
     real: real.qualifierNames,
     hypothetical: hypothetical.qualifierNames,
+    realSeeding: real,
+    seeding: hypothetical,
+    bracket,
     in: hypothetical.qualifierNames.filter((n) => !realSet.has(n)),
     out: real.qualifierNames.filter((n) => !hypoSet.has(n)),
     changed: real.qualifierNames.join('|') !== hypothetical.qualifierNames.join('|'),

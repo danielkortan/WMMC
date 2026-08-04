@@ -56,6 +56,7 @@ const projectGlobals = {
   roundsPlayed: 'readonly',
   weeksInRound: 'readonly',
   seedFromPeriodTotals: 'readonly',
+  resolveBracket: 'readonly',
   topPlayers: 'readonly',
   playerSuggestions: 'readonly',
   playerTypes: 'readonly',
