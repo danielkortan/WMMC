@@ -16434,6 +16434,7 @@ function renderHypoOutputs() {
   const snapshot = hypoSnapshot(SELECTED_SEASON);
   const result = snapshot ? scoreScenario(snapshot, HYPO_SCENARIO) : null;
   renderRosterLab(snapshot, result);
+  renderPlayerExplorer();
   renderHypoResults(result);
 }
 
@@ -16674,26 +16675,24 @@ function hypoAddPlayer(manager, round, type, player) {
   setHypoRoster(manager, round, roster);
 }
 
-// Candidates for the add box. The season's pools are seeded from MLB's active-player catalog, so
-// this is effectively "any player" — filtered to those who actually recorded a stat line in the
-// round being edited, because anyone else would silently score zero and look broken.
+// How many suggestions any player search offers at once. The pools are seeded from MLB's whole
+// active catalog, so an unranked list is ~1,300 names of mostly-irrelevant players — and rendering
+// that many <option> nodes is what makes a native datalist crawl. Showing the top scorers instead
+// covers essentially everyone a manager would consider, and typing still searches the full league.
+const HYPO_SUGGESTION_LIMIT = 50;
+
+// Candidates for a roster add box, ranked by points within the round being edited. Scoping to the
+// round matters: a player with no stat line that period would silently score zero and look broken.
 function hypoPlayerOptions(snapshot, round, type, query) {
-  const sd = getSeasons()[SELECTED_SEASON] || {};
-  const rows = (type === 'batting' ? sd.weekly_batting : sd.weekly_pitching) || [];
-  const nameKey = type === 'batting' ? 'batter' : 'pitcher';
-  const q = (query || '').trim().toLowerCase();
-  const seen = new Set();
-  const out = [];
-  for (const row of rows) {
-    if (row.round !== round) continue;
-    const name = row[nameKey];
-    if (!name || seen.has(name)) continue;
-    if (q && !name.toLowerCase().includes(q)) continue;
-    seen.add(name);
-    out.push(name);
-    if (out.length >= 400) break;
-  }
-  return out.sort();
+  return playerSuggestions(snapshot, { type, round, query, limit: HYPO_SUGGESTION_LIMIT });
+}
+
+// Replace a datalist's options in place. Called on every keystroke, so it keeps the node count at
+// the suggestion limit rather than growing a list the browser then has to filter itself.
+function hypoFillDatalist(id, suggestions) {
+  const list = document.getElementById(id);
+  if (!list) return;
+  list.innerHTML = suggestions.map((p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`).join('');
 }
 
 function hypoRosterColumn(title, subtitle, rows, opts) {
@@ -16836,7 +16835,7 @@ function renderRosterLab(snapshot, result) {
     })}
     ${hypoRosterColumn(
       'What If roster',
-      hasOverride ? 'Your changes' : didPlay ? 'Same as real — edit to compare' : 'Nothing entered yet',
+      hasOverride ? 'Your changes' : didPlay ? 'Same roster as real — edit to compare' : 'Nothing entered yet',
       hypoRows,
       {
         removable: true,
@@ -16855,6 +16854,7 @@ function renderRosterLab(snapshot, result) {
 
   const batOptions = hypoPlayerOptions(snapshot, round, 'batting');
   const pitOptions = hypoPlayerOptions(snapshot, round, 'pitching');
+  const opt = (p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`;
 
   if (!batOptions.length && !pitOptions.length) {
     // No stat rows exist for this round at all — usually a playoff round that hasn't been played
@@ -16864,11 +16864,12 @@ function renderRosterLab(snapshot, result) {
     )} yet, so there is nothing to score a roster against for this round.</p>`;
   } else {
     html += `<div class="hypo-add-row">
-      <label>Add a batter <input type="text" id="hypo-add-batting" list="hypo-list-batting" placeholder="Search players…"></label>
-      <datalist id="hypo-list-batting">${batOptions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-      <label>Add a pitcher <input type="text" id="hypo-add-pitching" list="hypo-list-pitching" placeholder="Search players…"></label>
-      <datalist id="hypo-list-pitching">${pitOptions.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
-    </div>`;
+      <label>Add a batter <input type="text" id="hypo-add-batting" list="hypo-list-batting" placeholder="Top scorers — or type a name"></label>
+      <datalist id="hypo-list-batting">${batOptions.map(opt).join('')}</datalist>
+      <label>Add a pitcher <input type="text" id="hypo-add-pitching" list="hypo-list-pitching" placeholder="Top scorers — or type a name"></label>
+      <datalist id="hypo-list-pitching">${pitOptions.map(opt).join('')}</datalist>
+    </div>
+    <p class="upload-hint">Showing this round's top ${HYPO_SUGGESTION_LIMIT} scorers. Start typing to search every player.</p>`;
   }
 
   container.innerHTML = html;
@@ -16904,7 +16905,217 @@ function renderRosterLab(snapshot, result) {
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') commit();
     });
+    // Re-rank the offered names against what has been typed so far, keeping the option list at the
+    // cap instead of handing the browser the whole league to filter.
+    input.addEventListener('input', () => {
+      hypoFillDatalist(`hypo-list-${type}`, hypoPlayerOptions(snapshot, round, type, input.value));
+    });
   }
+}
+
+// ---- Player Explorer ----
+// Look up ANY player with recorded stats — rostered or not — and see what he actually did, what he
+// was worth under the real rubric, and what he'd be worth under the current scenario. This is the
+// panel that answers "what if I'd started him" without building a scenario at all.
+
+let HYPO_EXPLORER_TYPE = 'batting';
+let HYPO_EXPLORER_PLAYER = null;
+
+// The stat columns worth showing per side. Deliberately a subset — a game log is for reading, and
+// every stored field would make it a spreadsheet.
+const EXPLORER_COLUMNS = {
+  batting: [
+    ['1b', '1B'],
+    ['2b', '2B'],
+    ['3b', '3B'],
+    ['hr', 'HR'],
+    ['r', 'R'],
+    ['rbi', 'RBI'],
+    ['sb', 'SB'],
+    ['bb', 'BB'],
+  ],
+  pitching: [
+    ['ip', 'IP'],
+    ['h', 'H'],
+    ['er', 'ER'],
+    ['bb', 'BB'],
+    ['k', 'K'],
+    ['w', 'W'],
+    ['qs', 'QS'],
+  ],
+};
+
+function renderPlayerExplorer() {
+  const container = document.getElementById('whatif-explorer');
+  if (!container) return;
+  // Always read the CURRENT snapshot rather than one captured when a handler was bound: the daily
+  // stats land asynchronously, and a stale closure would keep showing "no game log" after they do.
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  if (!snapshot) {
+    container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
+    return;
+  }
+
+  const type = HYPO_EXPLORER_TYPE;
+  const sd = getSeasons()[SELECTED_SEASON];
+  const suggestions = playerSuggestions(snapshot, { type, limit: HYPO_SUGGESTION_LIMIT });
+
+  let html = `<div class="hypo-lab-controls">
+    <div class="hypo-round-tabs">
+      <button class="hypo-round-tab${type === 'batting' ? ' active' : ''}" data-xtype="batting">Batters</button>
+      <button class="hypo-round-tab${type === 'pitching' ? ' active' : ''}" data-xtype="pitching">Pitchers</button>
+    </div>
+    <label>Player
+      <input type="text" id="hypo-explorer-search" list="hypo-explorer-list" placeholder="Search any player…" value="${esc(
+        HYPO_EXPLORER_PLAYER || ''
+      )}">
+    </label>
+    <datalist id="hypo-explorer-list">${suggestions
+      .map((p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`)
+      .join('')}</datalist>
+  </div>
+  <p class="upload-hint hypo-suggest-note">Showing the season's top ${HYPO_SUGGESTION_LIMIT} ${
+    type === 'batting' ? 'batters' : 'pitchers'
+  } by points. Start typing to search every player who recorded a stat.</p>`;
+
+  if (!HYPO_EXPLORER_PLAYER) {
+    html += `<p class="upload-hint">Search for anyone who recorded a stat this season — they don't have to have been on a roster.</p>`;
+    container.innerHTML = html;
+    wireExplorerControls(container, snapshot);
+    return;
+  }
+
+  const info = explainPlayer(snapshot, HYPO_EXPLORER_PLAYER, type, HYPO_SCENARIO);
+
+  if (!info.rounds.length) {
+    html += `<p class="hypo-warning">No ${type === 'batting' ? 'batting' : 'pitching'} stats recorded for “${esc(
+      HYPO_EXPLORER_PLAYER
+    )}” this season.${
+      playerTypes(snapshot, HYPO_EXPLORER_PLAYER).length
+        ? ' Try the other tab — he has stats on the other side of the ball.'
+        : ''
+    }</p>`;
+    container.innerHTML = html;
+    wireExplorerControls(container, snapshot);
+    return;
+  }
+
+  const owners = info.owners.length
+    ? info.owners
+        .map((o) => `${esc(o.manager)} <span class="upload-hint">(${o.rounds.map(roundShortLabel).join(', ')})</span>`)
+        .join(' &middot; ')
+    : '<span class="upload-hint">Never rostered by anyone — a free agent all season.</span>';
+
+  html += `<div class="hypo-explorer-head">
+    <div>
+      <h3>${displayPlayer(info.player, sd)}</h3>
+      <div class="hypo-explorer-owners">Rostered by: ${owners}</div>
+    </div>
+    <div class="hypo-explorer-totals">
+      <div><span>Worth (real)</span><strong>${fmt(info.total.real)}</strong></div>
+      <div><span>Worth (What If)</span><strong>${fmt(info.total.hypothetical)}</strong></div>
+      <div class="${hypoDeltaClass(info.total.delta)}"><span>&Delta;</span><strong>${hypoDelta(info.total.delta)}</strong></div>
+    </div>
+  </div>`;
+
+  // "Worth" is what his own stat line is worth; "Credited" is what a manager was actually given for
+  // him. They differ whenever he was held for only part of a period — keeping the two apart is what
+  // stops this table from implying a free agent scored for somebody.
+  const labMgr = hypoLabManager();
+  html += `<div class="table-wrapper"><table class="data-table compact-table hypo-explorer-table">
+    <thead><tr><th>Round</th><th>Wks</th><th>Worth (real)</th><th>Worth (What If)</th><th>&Delta;</th><th>Credited</th><th></th></tr></thead>
+    <tbody>`;
+  for (const r of info.rounds) {
+    html += `<tr>
+      <td>${esc(ROUND_LABELS[r.round] || r.round)}</td>
+      <td class="hypo-num">${r.weeks}</td>
+      <td class="hypo-num">${fmt(r.real)}</td>
+      <td class="hypo-num hypo-strong">${fmt(r.hypothetical)}</td>
+      <td class="hypo-num ${hypoDeltaClass(r.delta)}">${hypoDelta(r.delta)}</td>
+      <td class="hypo-num">${r.credited ? fmt(r.credited) : '&ndash;'}</td>
+      <td><button class="btn btn-sm btn-secondary hypo-try" data-round="${esc(r.round)}">Try in ${esc(
+        roundShortLabel(r.round)
+      )}</button></td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>
+    <p class="upload-hint">“Worth” is what this player's own stat line is worth. “Credited” is what a manager was actually given for him — lower when he was only rostered for part of the period. <strong>Try in…</strong> puts him on ${esc(
+      labMgr || 'the selected manager'
+    )}'s Roster Lab roster for that round.</p>`;
+
+  if (info.hasGameLog) {
+    const cols = EXPLORER_COLUMNS[type];
+    html += `<h4 class="hypo-log-title">Game log</h4>
+      <div class="table-wrapper"><table class="data-table compact-table hypo-explorer-table">
+      <thead><tr><th>Date</th><th>Week</th>${cols
+        .map(([, label]) => `<th class="hypo-num">${label}</th>`)
+        .join('')}<th class="hypo-num">Real</th><th class="hypo-num">What If</th></tr></thead><tbody>`;
+    for (const g of info.log) {
+      html += `<tr>
+        <td>${esc(g.date)}</td>
+        <td>${esc(weekLabel(g.round, g.week))}</td>
+        ${cols.map(([key]) => `<td class="hypo-num">${g.stats[key] ? fmtDec(g.stats[key]) : '&ndash;'}</td>`).join('')}
+        <td class="hypo-num">${fmt(g.real)}</td>
+        <td class="hypo-num ${hypoDeltaClass(g.delta)}">${fmt(g.hypothetical)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  } else {
+    html += `<p class="upload-hint">Per-game log loads with the daily stats — one moment.</p>`;
+  }
+
+  container.innerHTML = html;
+  wireExplorerControls(container, snapshot);
+}
+
+function wireExplorerControls(container, snapshot) {
+  container.querySelectorAll('[data-xtype]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_EXPLORER_TYPE = btn.dataset.xtype;
+      // A name only valid on the other side of the ball would render as "no stats" — clear it
+      // unless this player genuinely has rows for the newly selected type.
+      if (HYPO_EXPLORER_PLAYER && !playerTypes(snapshot, HYPO_EXPLORER_PLAYER).includes(HYPO_EXPLORER_TYPE)) {
+        HYPO_EXPLORER_PLAYER = null;
+      }
+      renderPlayerExplorer();
+    });
+  });
+
+  const search = document.getElementById('hypo-explorer-search');
+  if (search) {
+    const commit = () => {
+      const name = search.value.trim();
+      HYPO_EXPLORER_PLAYER = name || null;
+      // A name typed for the wrong tab is a common miss — switch sides automatically when the
+      // player only exists on the other one.
+      if (name) {
+        const types = playerTypes(snapshot, name);
+        if (types.length && !types.includes(HYPO_EXPLORER_TYPE)) HYPO_EXPLORER_TYPE = types[0];
+      }
+      renderPlayerExplorer();
+    };
+    search.addEventListener('change', commit);
+    search.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') commit();
+    });
+    // Re-rank against the typed text without re-rendering the panel — the datalist stays capped,
+    // and a partially typed name never has to be matched against the whole league in the DOM.
+    search.addEventListener('input', () => {
+      hypoFillDatalist(
+        'hypo-explorer-list',
+        playerSuggestions(snapshot, { type: HYPO_EXPLORER_TYPE, query: search.value, limit: HYPO_SUGGESTION_LIMIT })
+      );
+    });
+  }
+
+  container.querySelectorAll('.hypo-try').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const manager = hypoLabManager();
+      if (!manager || !HYPO_EXPLORER_PLAYER) return;
+      HYPO_LAB_ROUND = btn.dataset.round;
+      hypoAddPlayer(manager, btn.dataset.round, HYPO_EXPLORER_TYPE, HYPO_EXPLORER_PLAYER);
+    });
+  });
 }
 
 function renderWhatIf() {
@@ -16955,6 +17166,18 @@ function renderWhatIf() {
         roster there to see what it would have scored.
       </p>
       <div id="whatif-roster-lab"></div>
+    </div>
+
+    <div class="card hypo-card">
+      <div class="hypo-toolbar">
+        <h2>Player Explorer</h2>
+      </div>
+      <p class="upload-hint">
+        Look up anyone who recorded a stat this season &mdash; they don't have to have been on
+        anyone's roster. See what they were worth, what they'd be worth under your scoring, and who
+        actually had them.
+      </p>
+      <div id="whatif-explorer"></div>
     </div>
 
     <div class="card hypo-card">

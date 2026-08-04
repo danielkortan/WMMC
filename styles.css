@@ -6457,3 +6457,76 @@ body::before {
   background: rgba(217, 164, 65, 0.18);
   font-weight: 600;
 }
+
+/* ---- Player Explorer ---- */
+
+.hypo-explorer-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.5rem 0 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.hypo-explorer-head h3 {
+  margin: 0 0 0.15rem;
+  font-size: 1rem;
+}
+
+.hypo-explorer-owners {
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-explorer-totals {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.hypo-explorer-totals div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.hypo-explorer-totals span {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.hypo-explorer-totals strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-explorer-table td,
+.hypo-explorer-table th {
+  white-space: nowrap;
+}
+
+.hypo-log-title {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-light);
+}
+
+#hypo-explorer-search {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 14rem;
+}
+
+.hypo-try {
+  white-space: nowrap;
+}

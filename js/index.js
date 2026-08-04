@@ -47,6 +47,13 @@ import {
   scoringDiff,
   scoringKeys,
   weeksInRound,
+  topPlayers,
+  playerSuggestions,
+  playerTypes,
+  playerOwnership,
+  playerGameLog,
+  playerRoundTotals,
+  explainPlayer,
 } from './hypothetical.js';
 import { seedFromPeriodTotals } from './seeding.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
@@ -95,6 +102,13 @@ Object.assign(window, {
   scoringDiff,
   scoringKeys,
   weeksInRound,
+  topPlayers,
+  playerSuggestions,
+  playerTypes,
+  playerOwnership,
+  playerGameLog,
+  playerRoundTotals,
+  explainPlayer,
   seedFromPeriodTotals,
   computePlayoffStatuses,
   playoffStatusLabel,

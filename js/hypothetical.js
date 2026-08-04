@@ -130,6 +130,57 @@ function indexWeekly(rows, playerKey) {
   return idx;
 }
 
+// A second index of the same rows, keyed by player alone. The Player Explorer asks a different
+// question from the scorer — "everything this one player did, all season" rather than "this
+// player, this week" — and answering it by scanning every row would make each keystroke a full
+// table scan. Rows are shared with the other indexes, so this costs map entries, not stat data.
+function indexByPlayer(rows, playerKey) {
+  const idx = new Map();
+  for (const row of rows || []) {
+    const name = row[playerKey];
+    if (!name) continue;
+    const bucket = idx.get(name);
+    if (bucket) bucket.push(row);
+    else idx.set(name, [row]);
+  }
+  return idx;
+}
+
+// Season points per player, and the same again per round, from the stored weekly scores.
+//
+// This exists so a search box can offer the players anyone is actually likely to look up before it
+// offers the other ~1,300 men who took an at-bat. The pools are seeded from MLB's whole active
+// catalog, so an unranked list is mostly noise — and rendering it in full is what makes a native
+// datalist crawl. Ranking is by REAL points, computed once per snapshot rather than per keystroke:
+// stable, cheap, and "who was good this year" does not meaningfully change under a point-value
+// tweak anyway.
+function indexPoints(rows, playerKey) {
+  const season = new Map();
+  const byRound = new Map();
+  for (const row of rows || []) {
+    const name = row[playerKey];
+    if (!name) continue;
+    const pts = Number(row.weekly_score) || 0;
+    season.set(name, (season.get(name) || 0) + pts);
+    let round = byRound.get(row.round);
+    if (!round) {
+      round = new Map();
+      byRound.set(row.round, round);
+    }
+    round.set(name, (round.get(name) || 0) + pts);
+  }
+  const rank = (map) =>
+    [...map.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([name, points]) => ({
+        name,
+        points: Math.round(points * 100) / 100,
+      }));
+  const ranked = { season: rank(season), byRound: new Map() };
+  for (const [round, map] of byRound) ranked.byRound.set(round, rank(map));
+  return ranked;
+}
+
 // Build the immutable input the engine scores against.
 //
 // `slots` are the resolved roster slots from the real eligibility path:
@@ -163,6 +214,18 @@ export function buildSnapshot({
     weeklyIdx: {
       batting: indexWeekly(weeklyBatting, 'batter'),
       pitching: indexWeekly(weeklyPitching, 'pitcher'),
+    },
+    dailyByPlayer: {
+      batting: indexByPlayer(dailyBatting, 'batter'),
+      pitching: indexByPlayer(dailyPitching, 'pitcher'),
+    },
+    weeklyByPlayer: {
+      batting: indexByPlayer(weeklyBatting, 'batter'),
+      pitching: indexByPlayer(weeklyPitching, 'pitcher'),
+    },
+    points: {
+      batting: indexPoints(weeklyBatting, 'batter'),
+      pitching: indexPoints(weeklyPitching, 'pitcher'),
     },
     hasDaily: (dailyBatting || []).length > 0 || (dailyPitching || []).length > 0,
   };
@@ -538,6 +601,167 @@ function playoffPicture(snapshot, standings) {
     in: hypothetical.qualifierNames.filter((n) => !realSet.has(n)),
     out: real.qualifierNames.filter((n) => !hypoSet.has(n)),
     changed: real.qualifierNames.join('|') !== hypothetical.qualifierNames.join('|'),
+  };
+}
+
+// ============================================================
+// Player Explorer
+// ============================================================
+// "What did this guy actually do, and what would he be worth under my scoring?" — answerable for
+// ANY player with recorded stats, not just rostered ones, because the nightly sync stores a row
+// for every player who appeared in a final game. That makes "what if I'd started him" answerable
+// without building a scenario at all.
+
+// The highest-scoring players, optionally within one round. This is the default offering for any
+// player search: the top 50 covers essentially everyone a manager would consider starting, and it
+// is a fixed-size list rather than the whole league.
+export function topPlayers(snapshot, { type = 'batting', round = null, limit = 50 } = {}) {
+  const idx = snapshot.points[type];
+  const ranked = round ? idx.byRound.get(round) || [] : idx.season;
+  return ranked.slice(0, limit);
+}
+
+// What a search box should offer right now.
+//
+// With no query: the top scorers, because that is what people look up. With a query: name matches
+// across the FULL league, so nobody is unreachable just because they had a quiet season — ranked
+// prefix-first, then by points, so "sot" surfaces the Soto who matters. Either way the result is
+// capped, which is what keeps the rendered option list small enough to stay responsive.
+export function playerSuggestions(snapshot, { type = 'batting', query = '', round = null, limit = 50 } = {}) {
+  const q = String(query || '')
+    .trim()
+    .toLowerCase();
+  if (!q) return topPlayers(snapshot, { type, round, limit });
+
+  const idx = snapshot.points[type];
+  const ranked = round ? idx.byRound.get(round) || [] : idx.season;
+  const matches = [];
+  for (const entry of ranked) {
+    if (!entry.name.toLowerCase().includes(q)) continue;
+    matches.push(entry);
+  }
+  matches.sort((a, b) => {
+    const ap = a.name.toLowerCase().startsWith(q);
+    const bp = b.name.toLowerCase().startsWith(q);
+    if (ap !== bp) return ap ? -1 : 1;
+    return b.points - a.points || a.name.localeCompare(b.name);
+  });
+  return matches.slice(0, limit);
+}
+
+// Which type(s) a name has rows for, so the UI can resolve a search without asking the user
+// whether they mean a batter or a pitcher. Two-way players legitimately return both.
+export function playerTypes(snapshot, player) {
+  const out = [];
+  if (snapshot.weeklyByPlayer.batting.has(player)) out.push('batting');
+  if (snapshot.weeklyByPlayer.pitching.has(player)) out.push('pitching');
+  return out;
+}
+
+// Who rostered this player, and for which weeks. Read from the resolved slots, so it reflects the
+// real date-windowed ownership rather than the sticky `manager` field on a stat row.
+export function playerOwnership(snapshot, player, type) {
+  const byManager = new Map();
+  for (const slot of snapshot.slots) {
+    if (slot.player !== player || slot.type !== type) continue;
+    let e = byManager.get(slot.manager);
+    if (!e) {
+      e = { manager: slot.manager, rounds: new Set(), weeks: 0, real: 0 };
+      byManager.set(slot.manager, e);
+    }
+    e.rounds.add(slot.round);
+    e.weeks++;
+    e.real = r2(e.real + (Number(slot.realScore) || 0));
+  }
+  return [...byManager.values()].map((e) => ({ ...e, rounds: [...e.rounds] })).sort((a, b) => b.real - a.real);
+}
+
+// Per-game log: one row per stored daily record, scored both ways. Only available once daily rows
+// are loaded — weekly rows cannot be broken back down into games.
+export function playerGameLog(snapshot, player, type, scenario = EMPTY_SCENARIO) {
+  const table = buildScoringTable(scenario && scenario.scoring);
+  const calc = type === 'batting' ? calculateBattingScore : calculatePitchingScore;
+  const rows = snapshot.dailyByPlayer[type].get(player) || [];
+  return rows
+    .map((row) => {
+      const stats = row.delta || row.cumulative || {};
+      return {
+        date: row.date,
+        round: row.round,
+        week: row.week,
+        stats,
+        real: calc(stats, SCORING),
+        hypothetical: calc(stats, table),
+      };
+    })
+    .map((r) => ({ ...r, delta: r2(r.hypothetical - r.real) }))
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+// Per-round totals for one player, scored both ways, with what each roster slot actually credited.
+//
+// `real` is derived from the player's own stat rows, so for a player nobody rostered it still
+// answers "what was he worth" — the whole point of being able to look up any player. `credited` is
+// separate: the points a manager was actually given for him, which differs whenever he was held
+// for only part of a week. Keeping them distinct is what stops the explorer from implying a
+// free agent scored for somebody.
+export function playerRoundTotals(snapshot, player, type, scenario = EMPTY_SCENARIO) {
+  const table = buildScoringTable(scenario && scenario.scoring);
+  const calc = type === 'batting' ? calculateBattingScore : calculatePitchingScore;
+  const rows = snapshot.weeklyByPlayer[type].get(player) || [];
+
+  const byRound = new Map();
+  const entry = (round) => {
+    let e = byRound.get(round);
+    if (!e) {
+      e = { round, real: 0, hypothetical: 0, delta: 0, credited: 0, weeks: 0 };
+      byRound.set(round, e);
+    }
+    return e;
+  };
+
+  for (const row of rows) {
+    const e = entry(row.round);
+    // Anchor to the STORED weekly score and derive only the delta — the same rule the scorer uses,
+    // and for the same reason: a commissioner-adjusted row's stored score is authoritative and does
+    // not necessarily equal a recomputation of its raw line. Recomputing here would make the
+    // explorer quietly disagree with the scoreboard about what a player was worth.
+    const stored = Number(row.weekly_score) || 0;
+    e.real = r2(e.real + stored);
+    e.hypothetical = r2(e.hypothetical + stored + r2(calc(row, table) - calc(row, SCORING)));
+    e.weeks++;
+  }
+  for (const slot of snapshot.slots) {
+    if (slot.player !== player || slot.type !== type) continue;
+    entry(slot.round).credited = r2(entry(slot.round).credited + (Number(slot.realScore) || 0));
+  }
+
+  const order = new Map((snapshot.schedule || SEASON_SCHEDULE).map((s, i) => [s.round, i]));
+  return [...byRound.values()]
+    .map((e) => ({ ...e, delta: r2(e.hypothetical - e.real) }))
+    .sort((a, b) => (order.get(a.round) ?? 99) - (order.get(b.round) ?? 99));
+}
+
+// Everything the explorer shows for one player, in one call.
+export function explainPlayer(snapshot, player, type, scenario = EMPTY_SCENARIO) {
+  const rounds = playerRoundTotals(snapshot, player, type, scenario);
+  const log = snapshot.hasDaily ? playerGameLog(snapshot, player, type, scenario) : [];
+  const total = rounds.reduce(
+    (acc, r) => ({
+      real: r2(acc.real + r.real),
+      hypothetical: r2(acc.hypothetical + r.hypothetical),
+      credited: r2(acc.credited + r.credited),
+    }),
+    { real: 0, hypothetical: 0, credited: 0 }
+  );
+  return {
+    player,
+    type,
+    rounds,
+    log,
+    owners: playerOwnership(snapshot, player, type),
+    total: { ...total, delta: r2(total.hypothetical - total.real) },
+    hasGameLog: log.length > 0,
   };
 }
 
