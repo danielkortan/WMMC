@@ -16510,6 +16510,68 @@ function renderHypoBadges() {
   }
 }
 
+// Which slice of the season the standings table is ranking. A season total conflates competitions
+// that are actually separate: pool play decides seeding, and each playoff round is its own contest.
+// "Who would have scored the most in the quarterfinals" is not answerable from a season column, so
+// the table scopes to one round at a time.
+//
+// Pool Play (PP1 + PP2 combined) is offered as its own scope because that combined total is exactly
+// what the seeding rule ranks on — see js/seeding.js.
+let HYPO_STANDINGS_SCOPE = 'season';
+
+const HYPO_SCOPES = [
+  { key: 'season', label: 'Season', rounds: null },
+  { key: 'PP', label: 'Pool Play', rounds: ['PP1', 'PP2'] },
+  { key: 'PP1', label: 'Pool Play 1', rounds: ['PP1'] },
+  { key: 'PP2', label: 'Pool Play 2', rounds: ['PP2'] },
+  { key: 'QF', label: 'Quarterfinals', rounds: ['QF'] },
+  { key: 'SF', label: 'Semifinals', rounds: ['SF'] },
+  { key: 'Finals', label: 'Finals', rounds: ['Finals'] },
+];
+
+// Totals for one manager within a scope, summed from the per-period figures the engine returns.
+function hypoScopeTotals(entry, rounds) {
+  if (!rounds) return { real: entry.real, hypothetical: entry.hypothetical, delta: entry.delta };
+  let real = 0;
+  let hypothetical = 0;
+  for (const p of entry.periods) {
+    if (!rounds.includes(p.round)) continue;
+    real += p.real;
+    hypothetical += p.hypothetical;
+  }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return { real: r2(real), hypothetical: r2(hypothetical), delta: r2(hypothetical - real) };
+}
+
+// The standings for a scope, re-ranked within it. A manager eliminated before this round has no
+// rows for it and would rank last on zero points, which reads as "he scored nothing" rather than
+// "he wasn't there" — so managers with no data in the scope are dropped instead.
+function hypoScopedStandings(result, rounds) {
+  const rows = result.standings
+    .map((s) => {
+      const played = !rounds || s.periods.some((p) => rounds.includes(p.round));
+      return { manager: s.manager, played, ...hypoScopeTotals(s, rounds) };
+    })
+    .filter((r) => r.played);
+
+  rows.sort((a, b) => b.hypothetical - a.hypothetical || a.manager.localeCompare(b.manager));
+  const realOrder = [...rows].sort((a, b) => b.real - a.real || a.manager.localeCompare(b.manager));
+  const realRank = new Map(realOrder.map((r, i) => [r.manager, i + 1]));
+  rows.forEach((r, i) => {
+    r.rank = i + 1;
+    r.realRank = realRank.get(r.manager);
+    r.rankDelta = r.realRank - r.rank;
+  });
+  return rows;
+}
+
+// Only offer a scope the season actually has rows for — an unplayed Finals tab is a dead end.
+function hypoAvailableScopes(result) {
+  const rounds = new Set();
+  for (const s of result.standings) for (const p of s.periods) if (p.real || p.hypothetical) rounds.add(p.round);
+  return HYPO_SCOPES.filter((sc) => !sc.rounds || sc.rounds.some((r) => rounds.has(r)));
+}
+
 function renderHypoResults(result) {
   const container = document.getElementById('whatif-results');
   if (!container) return;
@@ -16522,16 +16584,27 @@ function renderHypoResults(result) {
   const changes = scoringDiff(HYPO_SCENARIO.scoring);
   const rosterCount = rosterOverrides(HYPO_SCENARIO).length;
 
+  // Resolve the round scope first: the headline counts movement within the table being shown, not
+  // across the season, or it would contradict the rows underneath it.
+  const scopes = hypoAvailableScopes(result);
+  if (!scopes.some((sc) => sc.key === HYPO_STANDINGS_SCOPE)) HYPO_STANDINGS_SCOPE = 'season';
+  const scope = scopes.find((sc) => sc.key === HYPO_STANDINGS_SCOPE) || scopes[0];
+  const rows = hypoScopedStandings(result, scope.rounds);
+
   let html = '';
 
   if (result.identity) {
     html += `<p class="upload-hint">These are the real standings. Change a point value or a roster above to see what would have happened.</p>`;
   } else {
-    const moved = result.standings.filter((s) => s.rankDelta !== 0).length;
+    const moved = rows.filter((s) => s.rankDelta !== 0).length;
     const bits = [];
     if (changes.length) bits.push(`${changes.length} scoring change${changes.length === 1 ? '' : 's'}`);
     if (rosterCount) bits.push(`${rosterCount} roster change${rosterCount === 1 ? '' : 's'}`);
-    bits.push(moved ? `${moved} manager${moved === 1 ? '' : 's'} change position` : 'nobody changes position');
+    bits.push(
+      moved
+        ? `${moved} manager${moved === 1 ? '' : 's'} change position in the ${esc(scope.label.toLowerCase())}`
+        : `nobody changes position in the ${esc(scope.label.toLowerCase())}`
+    );
     html += `<p class="upload-hint">${bits.join(' &middot; ')}</p>`;
   }
 
@@ -16559,10 +16632,29 @@ function renderHypoResults(result) {
     } — daily stats are still loading, so those players are scored on their full week.</p>`;
   }
 
+  // Round scope selector. Same chip pattern as the Roster Lab's round tabs, so the two panels read
+  // as one tool.
+  html += `<div class="hypo-round-tabs hypo-scope-tabs">
+    ${scopes
+      .map(
+        (sc) =>
+          `<button class="hypo-round-tab${sc.key === scope.key ? ' active' : ''}" data-scope="${esc(sc.key)}">${esc(
+            sc.label
+          )}</button>`
+      )
+      .join('')}
+  </div>`;
+
+  html += `<p class="upload-hint">${
+    scope.rounds
+      ? `Ranked on ${esc(scope.label)} points only &mdash; ${rows.length} manager${rows.length === 1 ? '' : 's'} played this round.`
+      : 'Ranked on the full season.'
+  }</p>`;
+
   html += `<div class="table-wrapper"><table class="data-table hypo-standings">
     <thead><tr><th></th><th>Manager</th><th>Real</th><th>What If</th><th>&Delta;</th><th>Move</th></tr></thead>
     <tbody>`;
-  result.standings.forEach((s) => {
+  rows.forEach((s) => {
     const move = s.rankDelta > 0 ? `&uarr; ${s.rankDelta}` : s.rankDelta < 0 ? `&darr; ${-s.rankDelta}` : '&ndash;';
     html += `<tr class="hypo-standings-row" data-manager="${esc(s.manager)}">
       <td class="hypo-rank">${s.rank}</td>
@@ -16573,23 +16665,38 @@ function renderHypoResults(result) {
       <td class="hypo-num ${hypoDeltaClass(s.rankDelta)}">${move}</td>
     </tr>`;
     if (HYPO_EXPANDED === s.manager) {
-      const movers = result.players.filter((p) => p.manager === s.manager && p.delta !== 0).slice(0, 15);
-      const rows = movers.length
-        ? movers
+      // Scope the player breakdown to the same rounds, so the rows sum to the total on this line.
+      const movers = result.playerRounds
+        .filter((p) => p.manager === s.manager && (!scope.rounds || scope.rounds.includes(p.round)))
+        .reduce((acc, p) => {
+          const key = `${p.player}|${p.type}`;
+          const e = acc.get(key) || { player: p.player, real: 0, hypothetical: 0, delta: 0 };
+          e.real += p.real;
+          e.hypothetical += p.hypothetical;
+          e.delta += p.delta;
+          acc.set(key, e);
+          return acc;
+        }, new Map());
+      const list = [...movers.values()]
+        .filter((p) => Math.round(p.delta * 100) !== 0)
+        .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+        .slice(0, 15);
+      const detailRows = list.length
+        ? list
             .map(
               (p) =>
                 `<tr><td>${displayPlayer(p.player, getSeasons()[SELECTED_SEASON])}</td><td class="hypo-num">${fmt(
-                  p.real
-                )}</td><td class="hypo-num">${fmt(p.hypothetical)}</td><td class="hypo-num ${hypoDeltaClass(
+                  Math.round(p.real * 100) / 100
+                )}</td><td class="hypo-num">${fmt(Math.round(p.hypothetical * 100) / 100)}</td><td class="hypo-num ${hypoDeltaClass(
                   p.delta
-                )}">${hypoDelta(p.delta)}</td></tr>`
+                )}">${hypoDelta(Math.round(p.delta * 100) / 100)}</td></tr>`
             )
             .join('')
         : '<tr><td colspan="4" class="upload-hint">No player on this roster is affected by these changes.</td></tr>';
       html += `<tr class="hypo-detail-row"><td colspan="6">
         <table class="data-table compact-table">
           <thead><tr><th>Player</th><th>Real</th><th>What If</th><th>&Delta;</th></tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody>${detailRows}</tbody>
         </table>
       </td></tr>`;
     }
@@ -16597,6 +16704,13 @@ function renderHypoResults(result) {
   html += '</tbody></table></div>';
 
   container.innerHTML = html;
+
+  container.querySelectorAll('[data-scope]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_STANDINGS_SCOPE = btn.dataset.scope;
+      renderHypoResults(result);
+    });
+  });
 
   container.querySelectorAll('.hypo-standings-row').forEach((row) => {
     row.addEventListener('click', () => {

@@ -6530,3 +6530,8 @@ body::before {
 .hypo-try {
   white-space: nowrap;
 }
+
+/* Round scope chips above the What If standings. */
+.hypo-scope-tabs {
+  margin: 0.5rem 0 0.25rem;
+}
