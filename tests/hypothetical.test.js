@@ -17,6 +17,12 @@ import {
   scoringDiff,
   scoringKeys,
   weeksInRound,
+  searchPlayers,
+  playerTypes,
+  playerOwnership,
+  playerGameLog,
+  playerRoundTotals,
+  explainPlayer,
 } from '../js/hypothetical.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -667,5 +673,200 @@ describe('per-round player breakdown (the side-by-side view)', () => {
     const sumHypo = rows.reduce((s, r) => s + r.hypothetical, 0);
     assert.equal(sumReal, period.real);
     assert.equal(sumHypo, period.hypothetical);
+  });
+});
+
+// ============================================================
+// Player Explorer — look up any player, rostered or not
+// ============================================================
+
+const EXPLORER_DAILY_BAT = [
+  { batter: 'Star Guy', round: 'PP1', week: 'Week 1', date: '2026-03-27', delta: { hr: 1, r: 1 } },
+  { batter: 'Star Guy', round: 'PP1', week: 'Week 1', date: '2026-03-29', delta: { hr: 2, rbi: 3 } },
+  { batter: 'Star Guy', round: 'PP1', week: 'Week 2', date: '2026-04-03', delta: { '1b': 2 } },
+  { batter: 'Free Agent', round: 'PP1', week: 'Week 1', date: '2026-03-28', delta: { hr: 5 } },
+];
+const EXPLORER_WEEKLY_BAT = [
+  { batter: 'Star Guy', round: 'PP1', week: 'Week 1', hr: 3, r: 1, rbi: 3, weekly_score: 38 },
+  { batter: 'Star Guy', round: 'PP1', week: 'Week 2', '1b': 2, weekly_score: 6 },
+  { batter: 'Star Guy', round: 'SF', week: 'Week 1', hr: 1, weekly_score: 10 },
+  { batter: 'Free Agent', round: 'PP1', week: 'Week 1', hr: 5, weekly_score: 50 },
+];
+const EXPLORER_WEEKLY_PIT = [{ pitcher: 'Some Arm', round: 'PP1', week: 'Week 1', k: 10, ip: 6, weekly_score: 33.5 }];
+
+function explorerSnapshot({ withDaily = true } = {}) {
+  return buildSnapshot({
+    // Only Star Guy was ever rostered, and only for PP1 Week 1.
+    slots: [rosterSlot('A', 'PP1', 'Week 1', 0, 'Star Guy', 38)],
+    dailyBatting: withDaily ? EXPLORER_DAILY_BAT : [],
+    weeklyBatting: EXPLORER_WEEKLY_BAT,
+    weeklyPitching: EXPLORER_WEEKLY_PIT,
+    scheduleDates: ROSTER_DATES,
+    schedule: ROSTER_SCHEDULE,
+    managers: ['A'],
+  });
+}
+
+describe('searchPlayers', () => {
+  it('lists every player with stats, not just rostered ones', () => {
+    const names = searchPlayers(explorerSnapshot(), { type: 'batting' });
+    assert.deepEqual(names, ['Free Agent', 'Star Guy']);
+  });
+
+  it('filters case-insensitively on a substring', () => {
+    assert.deepEqual(searchPlayers(explorerSnapshot(), { type: 'batting', query: 'star' }), ['Star Guy']);
+    assert.deepEqual(searchPlayers(explorerSnapshot(), { type: 'batting', query: 'GUY' }), ['Star Guy']);
+  });
+
+  it('ranks prefix matches above mid-name matches', () => {
+    const snapshot = buildSnapshot({
+      weeklyBatting: [
+        { batter: 'Juan Soto', round: 'PP1', week: 'Week 1' },
+        { batter: 'Sotomayor Jones', round: 'PP1', week: 'Week 1' },
+      ],
+      schedule: ROSTER_SCHEDULE,
+    });
+    assert.deepEqual(searchPlayers(snapshot, { type: 'batting', query: 'soto' }), ['Sotomayor Jones', 'Juan Soto']);
+  });
+
+  it('honours the result limit', () => {
+    assert.equal(searchPlayers(explorerSnapshot(), { type: 'batting', limit: 1 }).length, 1);
+  });
+
+  it('searches pitchers separately from batters', () => {
+    assert.deepEqual(searchPlayers(explorerSnapshot(), { type: 'pitching' }), ['Some Arm']);
+  });
+});
+
+describe('playerTypes', () => {
+  it('reports which side of the ball a player has rows for', () => {
+    assert.deepEqual(playerTypes(explorerSnapshot(), 'Star Guy'), ['batting']);
+    assert.deepEqual(playerTypes(explorerSnapshot(), 'Some Arm'), ['pitching']);
+    assert.deepEqual(playerTypes(explorerSnapshot(), 'Nobody'), []);
+  });
+});
+
+describe('playerOwnership', () => {
+  it('reports who rostered a player and what they were credited', () => {
+    const owners = playerOwnership(explorerSnapshot(), 'Star Guy', 'batting');
+    assert.equal(owners.length, 1);
+    assert.equal(owners[0].manager, 'A');
+    assert.deepEqual(owners[0].rounds, ['PP1']);
+    assert.equal(owners[0].real, 38);
+  });
+
+  it('returns nobody for a player no manager ever rostered', () => {
+    assert.deepEqual(playerOwnership(explorerSnapshot(), 'Free Agent', 'batting'), []);
+  });
+});
+
+describe('playerGameLog', () => {
+  it('returns one row per game, scored both ways, in date order', () => {
+    const log = playerGameLog(explorerSnapshot(), 'Star Guy', 'batting', { scoring: { batting: { HR: 20 } } });
+    assert.deepEqual(
+      log.map((r) => r.date),
+      ['2026-03-27', '2026-03-29', '2026-04-03']
+    );
+    assert.equal(log[0].real, 12, '1 HR (10) + 1 R (2)');
+    assert.equal(log[0].hypothetical, 22, 'HR now worth 20');
+    assert.equal(log[0].delta, 10);
+  });
+
+  it('covers a player nobody rostered', () => {
+    const log = playerGameLog(explorerSnapshot(), 'Free Agent', 'batting');
+    assert.equal(log.length, 1);
+    assert.equal(log[0].real, 50);
+  });
+
+  it('is empty when daily rows have not loaded', () => {
+    assert.deepEqual(playerGameLog(explorerSnapshot({ withDaily: false }), 'Star Guy', 'batting'), []);
+  });
+});
+
+describe('playerRoundTotals', () => {
+  it('totals a player by round, scored both ways, in schedule order', () => {
+    const rounds = playerRoundTotals(explorerSnapshot(), 'Star Guy', 'batting', {
+      scoring: { batting: { HR: 20 } },
+    });
+    assert.deepEqual(
+      rounds.map((r) => r.round),
+      ['PP1', 'SF']
+    );
+    assert.equal(rounds[0].real, 44, 'week1 38 + week2 6');
+    assert.equal(rounds[0].hypothetical, 74, 'three PP1 home runs gain 10 each');
+    assert.equal(rounds[0].delta, 30);
+  });
+
+  it('separates what a player was worth from what a manager was credited', () => {
+    const rounds = playerRoundTotals(explorerSnapshot(), 'Star Guy', 'batting');
+    const pp1 = rounds.find((r) => r.round === 'PP1');
+    assert.equal(pp1.real, 44, 'he was worth 44 across both PP1 weeks');
+    assert.equal(pp1.credited, 38, 'but only Week 1 was ever rostered');
+    const sf = rounds.find((r) => r.round === 'SF');
+    assert.equal(sf.credited, 0, 'nobody held him in the SF');
+  });
+
+  it('reports a free agent worth points that nobody was credited', () => {
+    const rounds = playerRoundTotals(explorerSnapshot(), 'Free Agent', 'batting');
+    assert.equal(rounds[0].real, 50);
+    assert.equal(rounds[0].credited, 0);
+  });
+});
+
+describe('playerRoundTotals anchoring', () => {
+  // A commissioner-adjusted row: its stored score deliberately does not match its raw line.
+  const anchored = () =>
+    buildSnapshot({
+      slots: [],
+      weeklyBatting: [{ batter: 'Adjusted', round: 'PP1', week: 'Week 1', hr: 1, weekly_score: 99 }],
+      scheduleDates: ROSTER_DATES,
+      schedule: ROSTER_SCHEDULE,
+      managers: [],
+    });
+
+  it('reports the STORED score, not a recomputation of the raw line', () => {
+    const rounds = playerRoundTotals(anchored(), 'Adjusted', 'batting');
+    assert.equal(rounds[0].real, 99, 'the stored score is authoritative');
+  });
+
+  it('applies a scoring change as a delta on top of the stored score', () => {
+    const rounds = playerRoundTotals(anchored(), 'Adjusted', 'batting', { scoring: { batting: { HR: 20 } } });
+    assert.equal(rounds[0].hypothetical, 109, '99 + the extra 10 the one HR is now worth');
+    assert.equal(rounds[0].delta, 10);
+  });
+});
+
+describe('explainPlayer', () => {
+  it('bundles rounds, log, owners and totals', () => {
+    const info = explainPlayer(explorerSnapshot(), 'Star Guy', 'batting', { scoring: { batting: { HR: 20 } } });
+    assert.equal(info.player, 'Star Guy');
+    assert.equal(info.hasGameLog, true);
+    assert.equal(info.owners.length, 1);
+    assert.equal(info.total.real, 54, '44 in PP1 + 10 in the SF');
+    assert.equal(info.total.hypothetical, 94);
+    assert.equal(info.total.delta, 40);
+    assert.equal(info.total.credited, 38);
+  });
+
+  it('reports no game log when daily rows are absent, keeping round totals', () => {
+    const info = explainPlayer(explorerSnapshot({ withDaily: false }), 'Star Guy', 'batting');
+    assert.equal(info.hasGameLog, false);
+    assert.equal(info.rounds.length, 2);
+    assert.equal(info.total.real, 54);
+  });
+
+  it('returns an empty but valid shape for an unknown player', () => {
+    const info = explainPlayer(explorerSnapshot(), 'Nobody At All', 'batting');
+    assert.deepEqual(info.rounds, []);
+    assert.deepEqual(info.owners, []);
+    assert.equal(info.total.real, 0);
+    assert.equal(info.total.delta, 0);
+  });
+
+  it('leaves totals unmoved under the empty scenario', () => {
+    const info = explainPlayer(explorerSnapshot(), 'Star Guy', 'batting', EMPTY_SCENARIO);
+    assert.equal(info.total.hypothetical, info.total.real);
+    assert.equal(info.total.delta, 0);
+    for (const r of info.rounds) assert.equal(r.delta, 0);
   });
 });
