@@ -1421,10 +1421,11 @@
   /* =============================================================
      ROSTER TAB
      ============================================================= */
-  /* Season scoring flow: bump the small type up to phone-readable sizes and
-     let the pool-play panel breathe a little less horizontally. */
+  /* Season score rail: on a phone it is the full-width block above the tabs, so
+     bump the small type up to phone-readable sizes. The rows stay compact — the
+     rail exists to give a quick per-round score read, not a full card each. */
   .sf-pool {
-    padding: 0.9rem 1rem 1rem;
+    padding: 0.85rem 1rem 0.9rem;
   }
 
   .sf-eyebrow,
@@ -1436,12 +1437,15 @@
     font-size: 2.2rem;
   }
 
+  .sf-pool-compact .sf-hero-value {
+    font-size: 1.7rem;
+  }
+
   .sf-hero-split,
   .sf-round-split {
     font-size: 0.82rem;
   }
 
-  /* Two sub-cards share a 390px row — keep Bat/Pit on one line. */
   .sf-sub-split {
     font-size: 0.78rem;
     white-space: nowrap;
@@ -1451,13 +1455,16 @@
     margin: 0 0.28em;
   }
 
-  /* Placeholder rounds shrink to a header + dash rather than a full-height card. */
-  .sf-round-empty {
-    padding: 0.5rem 0.85rem 0.55rem;
+  .sf-sub {
+    padding: 0.4rem 0.6rem;
   }
 
   .sf-sub-value {
     font-size: 1.4rem;
+  }
+
+  .sf-round {
+    padding: 0.6rem 0.85rem 0.65rem;
   }
 
   .sf-round-value {
@@ -1467,6 +1474,14 @@
   .sf-round-vs {
     font-size: 0.82rem;
     white-space: normal;
+  }
+
+  .sf-rounds-label {
+    font-size: 0.72rem;
+  }
+
+  .sf-season-over {
+    font-size: 0.75rem;
   }
 
   .sf-flag {
