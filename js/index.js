@@ -33,34 +33,29 @@ import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
 import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
-import { checkSwapLimit, FREE_SWAP_REASON, PLAYOFF_LIMITED_REASONS } from './swaps.js';
-import { rosterStatusAsOf, rosterStatusForManager, periodWeekKeys, managerWeekWindow } from './eligibility.js';
+import { checkSwapLimit } from './swaps.js';
 import {
-  EMPTY_SCENARIO,
+  periodStartForRound,
+  rosterStatusAsOf,
+  rosterStatusForManager,
+  periodWeekKeys,
+  managerWeekWindow,
+} from './eligibility.js';
+import {
   buildSnapshot,
-  buildScoringTable,
-  isEmptyScenario,
   realRosterForRound,
   rosterOverrides,
   roundsPlayed,
   scoreScenario,
   scoringDiff,
   scoringKeys,
-  weeksInRound,
   lastKnownRoster,
-  scoreRosterForRound,
-  statCoverage,
   scenarioStatCoverage,
-  topPlayers,
   playerSuggestions,
   playerTypes,
-  playerOwnership,
-  playerGameLog,
-  playerRoundTotals,
   explainPlayer,
 } from './hypothetical.js';
 import { seedFromPeriodTotals } from './seeding.js';
-import { resolveBracket } from './bracket.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
@@ -90,36 +85,24 @@ Object.assign(window, {
   formatOddsPct,
   orderWithSwapChains,
   checkSwapLimit,
-  FREE_SWAP_REASON,
-  PLAYOFF_LIMITED_REASONS,
+  periodStartForRound,
   rosterStatusAsOf,
   rosterStatusForManager,
   periodWeekKeys,
   managerWeekWindow,
-  EMPTY_SCENARIO,
   buildSnapshot,
-  buildScoringTable,
-  isEmptyScenario,
   realRosterForRound,
   rosterOverrides,
   roundsPlayed,
   scoreScenario,
   scoringDiff,
   scoringKeys,
-  weeksInRound,
   lastKnownRoster,
-  scoreRosterForRound,
-  statCoverage,
   scenarioStatCoverage,
-  topPlayers,
   playerSuggestions,
   playerTypes,
-  playerOwnership,
-  playerGameLog,
-  playerRoundTotals,
   explainPlayer,
   seedFromPeriodTotals,
-  resolveBracket,
   computePlayoffStatuses,
   playoffStatusLabel,
   statusKeyForPosition,
