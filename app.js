@@ -539,14 +539,13 @@ function weekIndexFromKey(round, week) {
 // Start date of the PERIOD (round) a week belongs to — the schedule start of that round's first
 // week. Used to scope add/drop carry-forward to within a period so a prior period's players don't
 // leak into a new submission period (PP2/QF/SF/Finals). Returns null for the initial period (PP1),
-// leaving its behavior unchanged. Mirrors the server's periodStartForRound.
-function periodStartForRound(seasonData, round) {
-  if (!round || round === SEASON_SCHEDULE[0].round) return null;
-  const scheduleDates = (seasonData && seasonData.schedule_dates) || [];
-  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
-    if (SEASON_SCHEDULE[i].round === round) return scheduleDates[i] ? scheduleDates[i].start : null;
-  }
-  return null;
+// leaving its behavior unchanged.
+//
+// The rule itself lives in js/eligibility.js (canonical, unit-tested) and reaches us on `window`
+// via js/index.js; this is only the season-shaped adapter for it, so app.js is no longer a third
+// implementation alongside that copy and the server's.
+function periodStartForSeason(seasonData, round) {
+  return periodStartForRound(round, SEASON_SCHEDULE, (seasonData && seasonData.schedule_dates) || []);
 }
 
 // Determine the current scoring period from loaded stats data
@@ -813,7 +812,7 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const weekEnd = scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
   // Scope carry-forward to this week's PERIOD so a prior period's players don't leak into a new
   // submission period (matches the server's managerWeekSubtotal). null for PP1 leaves it unchanged.
-  const periodStart = periodStartForRound(seasonData, round);
+  const periodStart = periodStartForSeason(seasonData, round);
   const activeByDates = [];
   if (allMgrDates) {
     const latestAdd = {};
@@ -2202,7 +2201,7 @@ function renderLiveMatchupCards(matchups, byName, renderPanel, subline) {
       <div class="live-matchup-team ${leader ? 'live-matchup-leader' : ''}" onclick="toggleLiveManagerDetails('${key}','${jsStr(t.name)}')">
         <div class="live-matchup-main">
           <span class="bracket-seed">${t.seed || ''}</span>
-          <span class="live-matchup-name ${nameCls}">${escapeHtml(t.name)}</span>
+          <span class="live-matchup-name ${nameCls}">${esc(t.name)}</span>
           <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span>
           <span class="live-matchup-total">${total}</span>
         </div>
@@ -2220,7 +2219,7 @@ function renderLiveMatchupCards(matchups, byName, renderPanel, subline) {
       const e2 = byName[t2.name] ? (byName[t2.name].round_total ?? 0) : 0;
       const leader = e1 !== e2 ? (e1 > e2 ? t1.name : t2.name) : null;
       return `<div class="live-matchup">
-        <div class="live-matchup-label">${escapeHtml(mu.label)}</div>
+        <div class="live-matchup-label">${esc(mu.label)}</div>
         ${teamHtml(t1, leader === t1.name)}
         ${teamHtml(t2, leader === t2.name)}
       </div>`;
@@ -2356,8 +2355,8 @@ function renderDailyContent(d) {
       return '<div class="mgr-detail-panel"><div class="live-mgr-detail-empty">No stats recorded for this date.</div></div>';
     }
     const batterRow = (pl) => `<tr>
-      <td>${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td>${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.abs || 0}</td>
       <td class="num-cell">${pl.stats['1b'] || 0}</td>
       <td class="num-cell">${pl.stats['2b'] || 0}</td>
@@ -2370,8 +2369,8 @@ function renderDailyContent(d) {
       <td class="num-cell"><strong>${fmt(pl.score)}</strong></td>
     </tr>`;
     const pitcherRow = (pl) => `<tr>
-      <td>${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td>${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.gs || 0}</td>
       <td class="num-cell">${pl.stats.w || 0}</td>
       <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
@@ -2441,9 +2440,9 @@ function renderDailyContent(d) {
         : 'No data for this date';
     managersEl.innerHTML = `
       <div class="card">
-        <h3>Playoff Matchups <span class="muted">(${escapeHtml(d.date)})</span></h3>
+        <h3>Playoff Matchups <span class="muted">(${esc(d.date)})</span></h3>
         ${renderLiveMatchupCards(dailyMatchups, byName, renderDailyPanel, subline)}
-        <div class="live-matchup-note">Totals are certified ${escapeHtml(aw.round)} scoreboard points through end of ${escapeHtml(d.date)}. Tap a manager for that day&rsquo;s player stats.</div>
+        <div class="live-matchup-note">Totals are certified ${esc(aw.round)} scoreboard points through end of ${esc(d.date)}. Tap a manager for that day&rsquo;s player stats.</div>
       </div>`;
     return;
   }
@@ -2462,7 +2461,7 @@ function renderDailyContent(d) {
       return `
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
-          <td>${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
+          <td>${esc(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
           <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
           <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
@@ -2480,18 +2479,18 @@ function renderDailyContent(d) {
   const roundLabel = aw.round || '';
   managersEl.innerHTML = `
     <div class="card">
-      <h3>Running Standings <span class="muted">(${escapeHtml(d.date)})</span></h3>
+      <h3>Running Standings <span class="muted">(${esc(d.date)})</span></h3>
       <div class="table-wrapper">
         <table class="data-table compact-table">
           <thead><tr>
             <th>#</th><th>Manager</th>
-            <th title="Certified ${escapeHtml(roundLabel)} scoreboard total through end of ${escapeHtml(d.date)}">Total</th>
-            <th title="Rank movement from start to end of ${escapeHtml(d.date)}">&Delta; Rank</th>
-            <th title="Points accumulated on ${escapeHtml(d.date)} only">Daily</th>
+            <th title="Certified ${esc(roundLabel)} scoreboard total through end of ${esc(d.date)}">Total</th>
+            <th title="Rank movement from start to end of ${esc(d.date)}">&Delta; Rank</th>
+            <th title="Points accumulated on ${esc(d.date)} only">Daily</th>
             <th title="Not available for historical dates">Live</th>
             <th title="Not available for historical dates">Done</th>
             <th title="Not available for historical dates">Left</th>
-            <th title="Running weekly score through ${escapeHtml(d.date)}">Weekly</th>
+            <th title="Running weekly score through ${esc(d.date)}">Weekly</th>
           </tr></thead>
           <tbody>${rows || '<tr><td colspan="9" class="empty">No data for this date.</td></tr>'}</tbody>
         </table>
@@ -2644,8 +2643,8 @@ function renderLiveContent(d) {
     }
 
     const batterRow = (pl) => `<tr>
-      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.abs || 0}</td>
       <td class="num-cell">${pl.stats['1b'] || 0}</td>
       <td class="num-cell">${pl.stats['2b'] || 0}</td>
@@ -2659,8 +2658,8 @@ function renderLiveContent(d) {
     </tr>`;
 
     const pitcherRow = (pl) => `<tr>
-      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.gs || 0}</td>
       <td class="num-cell">${pl.stats.w || 0}</td>
       <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
@@ -2740,16 +2739,16 @@ function renderLiveContent(d) {
       }
       const subline = (r) =>
         r
-          ? `${fmtSignedLive(r.today_score)} ${escapeHtml(dayLabel)}${dayBanked ? ' (in total)' : ''} &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+          ? `${fmtSignedLive(r.today_score)} ${esc(dayLabel)}${dayBanked ? ' (in total)' : ''} &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
           : 'No roster data yet';
       const matchupNote = dayBanked
-        ? `Totals are the certified ${escapeHtml(aw.round)} scoreboard. ${escapeHtml(dayLabel)}&rsquo;s points are already certified into it, so these match the Scoreboard exactly.`
-        : `Totals are the certified ${escapeHtml(aw.round)} scoreboard plus ${escapeHtml(dayLabel)}&rsquo;s points not yet certified into it.`;
+        ? `Totals are the certified ${esc(aw.round)} scoreboard. ${esc(dayLabel)}&rsquo;s points are already certified into it, so these match the Scoreboard exactly.`
+        : `Totals are the certified ${esc(aw.round)} scoreboard plus ${esc(dayLabel)}&rsquo;s points not yet certified into it.`;
       managersEl.innerHTML = `
         <div class="card">
           <h3>Playoff Matchups</h3>
           ${renderLiveMatchupCards(liveMatchups, byName, renderTodayPanel, subline)}
-          <div class="live-matchup-note">${matchupNote} Tap a manager for ${escapeHtml(dayLabel)}&rsquo;s player stats.</div>
+          <div class="live-matchup-note">${matchupNote} Tap a manager for ${esc(dayLabel)}&rsquo;s player stats.</div>
         </div>`;
     } else {
       // Drop any expanded managers that no longer appear in the response so the
@@ -2769,7 +2768,7 @@ function renderLiveContent(d) {
           return `
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
-          <td class="${nameCls}">${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
+          <td class="${nameCls}">${esc(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
           <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
           <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
@@ -2791,9 +2790,9 @@ function renderLiveContent(d) {
           <table class="data-table compact-table">
             <thead><tr>
               <th>#</th><th>Manager</th>
-              <th title="Certified ${escapeHtml(roundLabel)} scoreboard total + any of ${escapeHtml(dayLabel)}'s points not yet certified into it (live weekly does not affect this until the next nightly sync)">Total</th>
-              <th title="Rank movement vs the certified scoreboard, given ${escapeHtml(dayLabel)}'s not-yet-certified points">&Delta; Rank</th>
-              <th title="${dayBanked ? `Points scored ${escapeHtml(dayLabel)} — already certified into Total` : `Points scored ${escapeHtml(dayLabel)}, added to the certified scoreboard total`}">Daily</th>
+              <th title="Certified ${esc(roundLabel)} scoreboard total + any of ${esc(dayLabel)}'s points not yet certified into it (live weekly does not affect this until the next nightly sync)">Total</th>
+              <th title="Rank movement vs the certified scoreboard, given ${esc(dayLabel)}'s not-yet-certified points">&Delta; Rank</th>
+              <th title="${dayBanked ? `Points scored ${esc(dayLabel)} — already certified into Total` : `Points scored ${esc(dayLabel)}, added to the certified scoreboard total`}">Daily</th>
               <th title="Rostered players whose team has a live game today">Live</th>
               <th title="Rostered players whose team's games today are final">Done</th>
               <th title="Rostered players whose team has a game today that hasn't started">Left</th>
@@ -2836,7 +2835,7 @@ function renderLiveContent(d) {
       const detail = canExpand
         ? `<div class="live-game-detail" id="live-game-detail-${key}" style="display:${expanded ? '' : 'none'};"></div>`
         : '';
-      return `<div ${rowAttrs}>${stateLabel}<span class="live-game-line">${escapeHtml(scoreLine)}</span>${arrow}</div>${detail}`;
+      return `<div ${rowAttrs}>${stateLabel}<span class="live-game-line">${esc(scoreLine)}</span>${arrow}</div>${detail}`;
     };
     // "Today" is the live day: during the hold-over window these are last night's games, still
     // listed under the date they started on (which is how MLB dates them too).
@@ -2902,7 +2901,7 @@ async function fetchAndRenderLiveBoxscore(gamePk) {
     target.innerHTML = renderLiveBoxscoreHTML(data);
     target.dataset.loaded = '1';
   } catch (e) {
-    target.innerHTML = `<div class="live-box-loading">Error loading box score: ${escapeHtml(e.message)}</div>`;
+    target.innerHTML = `<div class="live-box-loading">Error loading box score: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2913,13 +2912,13 @@ function renderLiveBoxscoreHTML(d) {
     const pitchers = (d.pitching || {})[sideKey] || [];
 
     const heading = `<div class="live-box-team-header">
-        ${escapeHtml(t.team_name || t.team || sideKey)}
+        ${esc(t.team_name || t.team || sideKey)}
         <span class="muted">${t.runs ?? 0} R · ${t.hits ?? 0} H · ${t.errors ?? 0} E</span>
       </div>`;
 
     const batterRow = (p) => `<tr class="${p.rostered ? 'live-box-rostered' : ''}">
-      <td>${escapeHtml(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${escapeHtml(p.manager)}</span>` : ''}</td>
-      <td>${escapeHtml(p.position || '')}</td>
+      <td>${esc(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${esc(p.manager)}</span>` : ''}</td>
+      <td>${esc(p.position || '')}</td>
       <td class="num-cell">${p.stats.abs || 0}</td>
       <td class="num-cell">${p.stats['1b'] || 0}</td>
       <td class="num-cell">${p.stats['2b'] || 0}</td>
@@ -2933,7 +2932,7 @@ function renderLiveBoxscoreHTML(d) {
     </tr>`;
 
     const pitcherRow = (p) => `<tr class="${p.rostered ? 'live-box-rostered' : ''}">
-      <td>${escapeHtml(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${escapeHtml(p.manager)}</span>` : ''}</td>
+      <td>${esc(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${esc(p.manager)}</span>` : ''}</td>
       <td class="num-cell">${fmtDec(p.stats.ip || 0)}</td>
       <td class="num-cell">${p.stats.h || 0}</td>
       <td class="num-cell">${p.stats.er || 0}</td>
@@ -3025,13 +3024,6 @@ if (typeof document !== 'undefined') {
     const stale = Date.now() - _liveLastFetchedAt > LIVE_POLL_MS;
     if (withinGrace && stale) refreshLive();
   });
-}
-
-function escapeHtml(s) {
-  return String(s ?? '').replace(
-    /[&<>"']/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
-  );
 }
 
 // ============================================================
@@ -4410,9 +4402,13 @@ function renderFinalsContent() {
 
 // ---- Matchup Result Card ----
 
-function renderMatchupResultCard(m) {
-  if (!m) return '';
-  const label = m.label ? `<div class="matchup-label">${m.label}</div>` : '';
+// One matchup card, shared by the results lists and the playoff bracket grid.
+// `showLabel` lets the bracket suppress the round label on cards whose column already names the
+// round; `emptyHtml` is what an absent matchup renders as — nothing in a results list, a TBD
+// placeholder in the bracket, where the slot still has to occupy its cell.
+function renderMatchupResultCard(m, { showLabel = true, emptyHtml = '' } = {}) {
+  if (!m) return emptyHtml;
+  const label = showLabel && m.label ? `<div class="matchup-label">${m.label}</div>` : '';
   const w = m.winner;
   return `
     <div class="matchup">
@@ -4763,26 +4759,11 @@ function renderBracket() {
 
   const b = DATA.bracket;
 
-  function matchupHTML(m, showLabel) {
-    if (!m) return '<div class="matchup"><div class="matchup-team"><span class="team-name">TBD</span></div></div>';
-    const label = showLabel && m.label ? `<div class="matchup-label">${m.label}</div>` : '';
-    const w = m.winner;
-    return `
-      <div class="matchup">
-        ${label}
-        <div class="matchup-team ${w === m.manager1 ? 'winner' : ''}">
-          ${m.seed1 ? `<span class="seed">${m.seed1}</span>` : ''}
-          <span class="team-name">${m.manager1}</span>
-          <span class="team-score">${m.score1 != null ? fmt(m.score1) : '-'}</span>
-        </div>
-        <div class="matchup-team ${w === m.manager2 ? 'winner' : ''}">
-          ${m.seed2 ? `<span class="seed">${m.seed2}</span>` : ''}
-          <span class="team-name">${m.manager2}</span>
-          <span class="team-score">${m.score2 != null ? fmt(m.score2) : '-'}</span>
-        </div>
-      </div>
-    `;
-  }
+  const matchupHTML = (m, showLabel) =>
+    renderMatchupResultCard(m, {
+      showLabel,
+      emptyHtml: '<div class="matchup"><div class="matchup-team"><span class="team-name">TBD</span></div></div>',
+    });
 
   container.innerHTML = `<div class="card">
     <h2>Playoff Bracket</h2>
@@ -8510,7 +8491,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       // closed entirely before this period began doesn't belong here at all. Clamp/filter to
       // the period this round belongs to (mirrors periodStart scoping used for carry-forward
       // eligibility elsewhere in this file).
-      const periodStart = periodStartForRound(seasonData, round);
+      const periodStart = periodStartForSeason(seasonData, round);
       const scopedSpans = periodStart
         ? spans.filter(([, d]) => !d || d >= periodStart).map(([a, d]) => [a < periodStart ? periodStart : a, d])
         : spans;
@@ -8655,7 +8636,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     //                 back; roster_dates is the source of truth, the arrays are a derived cache.
     //   pendingAdd  — incoming player, already in the array but not on the roster until their
     //                 add date. Listed (so the move is visible) but not counted as active.
-    const periodStartThisRound = periodStartForRound(seasonData, round);
+    const periodStartThisRound = periodStartForSeason(seasonData, round);
     const statusAsOfToday = (player) => {
       const entries = [];
       for (const wkDates of Object.values((isActive && (seasonData.roster_dates || {})[managerName]) || {})) {
@@ -9509,7 +9490,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     // period unchanged. The array fallback is period-scoped for the same reason: a manager
     // eliminated in an earlier round still has that round's roster array on file, and reading it
     // would keep their old players out of the available pool for everyone still playing.
-    const curPeriodStart = periodStartForRound(seasonData, swapCurRound);
+    const curPeriodStart = periodStartForSeason(seasonData, swapCurRound);
     const curPeriodWks = periodWeekKeys(swapCurRound, SEASON_SCHEDULE);
 
     const swapRosterStatus = (mgr, player) =>
@@ -13549,7 +13530,7 @@ window.updateCommRosterWeekView = function (managerName) {
   //   commPendingDrop — outgoing player, still rostered and still scoring until their drop date.
   //   commPendingAdd  — incoming player, listed but not on the roster until their add date.
   const commToday = isoDateET(new Date());
-  const commPeriodStart = periodStartForRound(sd, round);
+  const commPeriodStart = periodStartForSeason(sd, round);
   const commStatusAsOfToday = (player) => {
     const entries = [];
     for (const wkDates of Object.values(commMgrRosterDates)) {
@@ -14630,17 +14611,17 @@ function findManagerForPlayer(seasonData, playerName, type) {
   return null;
 }
 
-// Bracket-stage labels for the roast repair actions. Distinct from the `ROUND_LABELS` in
-// js/scoring.js, which is keyed by SCORING round (PP1/PP2 separately) — roasts are keyed by
-// bracket stage, where Pool Play is one thing.
-const ROUND_LABELS_FOR_ROAST = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+// Bracket-stage labels, used by the roast repair actions and the Hall of Fame season card.
+// Distinct from the `ROUND_LABELS` in js/scoring.js, which is keyed by SCORING round (PP1/PP2
+// separately) — a bracket stage is keyed by playoff round, where Pool Play is one thing.
+const BRACKET_STAGE_LABELS = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
 
 // The two commissioner roast-repair buttons, for any round that has already been roasted.
 // Both exist for the same reason: the roast bank and the page-context builder change over
 // time, and a round that was roasted under the old code has no other way back. Regenerate
 // touches only the stored roasts (roster pages); repost also sends the combined message.
 function roastRepairToolsHtml(round) {
-  const label = ROUND_LABELS_FOR_ROAST[round] || round;
+  const label = BRACKET_STAGE_LABELS[round] || round;
   const repostWhat =
     round === 'PP'
       ? 'reposts the combined playoff-field + Hall of Shame message'
@@ -15399,7 +15380,7 @@ window.regenerateRoundRoasts = async function (round) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  const label = ROUND_LABELS_FOR_ROAST[round] || round;
+  const label = BRACKET_STAGE_LABELS[round] || round;
   const losers = eliminatedInRound(sd, round);
   const podium = round === 'Finals' ? podiumRolesFromRoasts(sd) : [];
   const total = losers.length + podium.length;
@@ -15433,7 +15414,7 @@ window.repostRoundRoasts = async function (round) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  const label = ROUND_LABELS_FOR_ROAST[round] || round;
+  const label = BRACKET_STAGE_LABELS[round] || round;
   const losers = eliminatedInRound(sd, round);
   const podium = round === 'Finals' ? podiumRolesFromRoasts(sd) : [];
   if (losers.length + podium.length === 0) {
@@ -16065,9 +16046,6 @@ const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
 // Per-manager season overrides for managers who didn't play every historical season
 const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 2, 'Joey Auclair': 7, 'Edgar Rivas': 6 };
 
-// Human labels for the round a season is currently playing.
-const HOF_ROUND_LABELS = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
-
 // Every manager's finishing status for a season — settled placings for the eliminated, a
 // live "current round" status for anyone still alive. Returns the shape described in
 // js/playoffStatus.js (entries / standings / currentRound / complete / podium), or null when
@@ -16320,7 +16298,7 @@ function hofLiveSeasonRowsHtml(live) {
   if (!live) return '';
 
   const key = `live-${live.year}`;
-  const roundLabel = HOF_ROUND_LABELS[live.currentRound] || live.currentRound || '';
+  const roundLabel = BRACKET_STAGE_LABELS[live.currentRound] || live.currentRound || '';
   const aliveCount = live.entries.filter((e) => e.live).length;
   const summary =
     live.currentRound === 'PP'
