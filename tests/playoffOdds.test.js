@@ -281,6 +281,27 @@ describe('currentQualification', () => {
     assert.equal(q.pp2LeaderByPool['2'].pp2, 210);
   });
 
+  // server.js' copy of currentQualification gained pp1LeaderByPool in #415 so the
+  // corrections-sweep Slack alert could name WHICH pool a winner flipped in. This copy is the
+  // canonical, unit-tested one; the two must stay identical (CLAUDE.md), so pin the shape here.
+  it('names the PP1 leader of each pool alongside their score', () => {
+    const q = currentQualification(sixManagerEntries(), 5);
+    assert.deepEqual(q.pp1LeaderByPool['1'], { manager: 'A1', pp1: 300 });
+    assert.deepEqual(q.pp1LeaderByPool['2'], { manager: 'B1', pp1: 280 });
+  });
+
+  it('omits a pool from pp1LeaderByPool when nobody has scored', () => {
+    const q = currentQualification(
+      [
+        { manager: 'X', pool: '1', pp1: 0, pp2: 0 },
+        { manager: 'Y', pool: '2', pp1: 10, pp2: 0 },
+      ],
+      2
+    );
+    assert.equal(q.pp1LeaderByPool['1'], undefined);
+    assert.deepEqual(q.pp1LeaderByPool['2'], { manager: 'Y', pp1: 10 });
+  });
+
   it('requires a positive score to lead or take a wildcard', () => {
     const q = currentQualification(
       [
