@@ -214,13 +214,16 @@ export function projectManager(playerProjections) {
 // (score > 0) qualify; wildcards (highest combined total, > 0) fill the
 // bracket to `bracketSize`; winners always seed above wildcards.
 // Returns per-pool leaders plus the current qualifier list and cut line so
-// callers can show "points back of the last wildcard".
+// callers can show "points back of the last wildcard". pp1LeaderByPool /
+// pp2LeaderByPool name the pool alongside the leader, which is what the
+// corrections-sweep Slack alert needs to say WHICH pool a winner flipped in.
 export function currentQualification(entries, bracketSize = 8) {
   const pools = {};
   for (const e of entries) (pools[e.pool] = pools[e.pool] || []).push(e);
 
   const pp1Leaders = new Set();
   const pp2Leaders = new Set();
+  const pp1LeaderByPool = {};
   const pp2LeaderByPool = {};
   for (const [pool, members] of Object.entries(pools)) {
     let b1 = 0;
@@ -237,7 +240,10 @@ export function currentQualification(entries, bracketSize = 8) {
         w2 = m.manager;
       }
     }
-    if (w1) pp1Leaders.add(w1);
+    if (w1) {
+      pp1Leaders.add(w1);
+      pp1LeaderByPool[pool] = { manager: w1, pp1: b1 };
+    }
     if (w2) {
       pp2Leaders.add(w2);
       pp2LeaderByPool[pool] = { manager: w2, pp2: b2 };
@@ -257,6 +263,7 @@ export function currentQualification(entries, bracketSize = 8) {
   return {
     pp1Leaders,
     pp2Leaders,
+    pp1LeaderByPool,
     pp2LeaderByPool,
     qualifierNames: qualifiers.map((e) => e.manager),
     cutTotal,
