@@ -685,6 +685,60 @@ function getBetweenPeriodsInfo(sd) {
 }
 
 // ============================================================
+// Weekly stat rows, bucketed by round|week and then by manager.
+// ============================================================
+// managerWeekSubtotal is called 256 times to score one scoreboard — 16 scheduled weeks x 8
+// managers x batting/pitching — and each call used to walk the whole weekly array twice looking
+// for its own week. Bucketing once per array turns those scans into a Map lookup. Row ORDER
+// inside each bucket is the array's own order, so every derived list downstream is byte-identical
+// to what the scans produced; this is a lookup change, not a scoring change.
+//
+// Legacy 'PP1P' / 'PP2P' import variants share weeks with their parent round, so they normalize
+// onto the parent's key — the same rule the old inline matchesRoundWeek applied.
+//
+// Cached in a WeakMap on the rows array itself (the pattern _normTeamIndexCache already uses), so
+// a fresh season parse — or any code that REPLACES sd.weekly_batting — silently gets a fresh
+// index. A push changes `length` and rebuilds. The one case neither covers is replacing a row
+// in situ at the same length, which is why editStat calls invalidateWeeklyRowIndex.
+const _weeklyRowIndexCache = new WeakMap();
+const EMPTY_WEEK_BUCKET = { rows: [], byManager: new Map() };
+
+function parentRound(round) {
+  return round && round.length > 1 && round.endsWith('P') ? round.slice(0, -1) : round;
+}
+
+function weeklyRowIndex(rowsArr) {
+  if (!Array.isArray(rowsArr)) return null;
+  const cached = _weeklyRowIndexCache.get(rowsArr);
+  if (cached && cached.length === rowsArr.length) return cached.byWeek;
+
+  const byWeek = new Map();
+  for (const r of rowsArr) {
+    if (!r || !r.week) continue;
+    const key = `${parentRound(r.round)}|${r.week}`;
+    let bucket = byWeek.get(key);
+    if (!bucket) {
+      bucket = { rows: [], byManager: new Map() };
+      byWeek.set(key, bucket);
+    }
+    bucket.rows.push(r);
+    if (r.manager) {
+      const mine = bucket.byManager.get(r.manager);
+      if (mine) mine.push(r);
+      else bucket.byManager.set(r.manager, [r]);
+    }
+  }
+  _weeklyRowIndexCache.set(rowsArr, { length: rowsArr.length, byWeek });
+  return byWeek;
+}
+
+// Drop a cached index after a row is swapped out in place — the only mutation the length check
+// cannot see.
+function invalidateWeeklyRowIndex(rowsArr) {
+  if (Array.isArray(rowsArr)) _weeklyRowIndexCache.delete(rowsArr);
+}
+
+// ============================================================
 // Per-week subtotal for one manager. Single source of truth for the
 // "what stats count toward this manager this week" question used by
 // renderRosterData (the My Roster weekly listing), computeRosterPeriodScores
@@ -699,13 +753,9 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const week = schedWeek.week;
   const weekKey = `${round}|${week}`;
 
-  // Legacy 'PP1P' / 'PP2P' import variants share weeks with their parents.
-  const matchesRoundWeek = (r) => {
-    if (r.week !== week) return false;
-    if (r.round === round) return true;
-    if (r.round && r.round.endsWith('P') && r.round.slice(0, -1) === round) return true;
-    return false;
-  };
+  // Every row for this round+week (legacy 'PP1P'/'PP2P' folded in), looked up once instead of
+  // scanning the whole weekly array twice per call. See weeklyRowIndex.
+  const weekBucket = (weeklyRowIndex(rowsArr) || new Map()).get(`${parentRound(round)}|${week}`) || EMPTY_WEEK_BUCKET;
 
   const scheduleDates = seasonData.schedule_dates || [];
   const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
@@ -807,7 +857,7 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
           s.player_in &&
           s.week_key === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
-          (weekRosterDates[s.player_in] || rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
+          (weekRosterDates[s.player_in] || weekBucket.rows.some((r) => r[playerKey] === s.player_in))
       )
       .map((s) => s.player_in),
   ]);
@@ -815,10 +865,10 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   // Manager-attributed rows first; then null-manager rows for eligible
   // players, deduped by player so a stale ghost row can't double-count
   // alongside an attributed entry.
-  const weekManagerRows = rowsArr.filter((r) => r.manager === managerName && matchesRoundWeek(r));
+  const weekManagerRows = weekBucket.byManager.get(managerName) || [];
   const allWeekRows = weekManagerRows.slice();
-  rowsArr.forEach((r) => {
-    if (!matchesRoundWeek(r) || r.manager === managerName) return;
+  weekBucket.rows.forEach((r) => {
+    if (r.manager === managerName) return;
     // A row attributed to ANOTHER manager still counts here when this manager held the player for
     // part of the week — a mid-week handover (trade / waiver pickup). `manager` is a sticky derived
     // cache naming whoever held him at compile time, so it cannot arbitrate a contested week; the
@@ -12526,6 +12576,8 @@ window.savePlayerStats = function (manager, statType, playerName, weekKey) {
     } else {
       sd.weekly_batting.push(record);
     }
+    // A replacement at the same length is invisible to the row index's length check.
+    invalidateWeeklyRowIndex(sd.weekly_batting);
 
     // Recompute total_score for this batter
     let total = 0;
@@ -12585,6 +12637,8 @@ window.savePlayerStats = function (manager, statType, playerName, weekKey) {
     } else {
       sd.weekly_pitching.push(record);
     }
+    // A replacement at the same length is invisible to the row index's length check.
+    invalidateWeeklyRowIndex(sd.weekly_pitching);
   }
 
   // Auto-add to roster for this week if not already
