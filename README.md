@@ -11,6 +11,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
 - **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
+- **Hypothetical Zone ("What If")** — A read-only sandbox for every manager. The **Scoring Lab** changes what any stat is worth (including three batting stats and one pitching stat that are recorded but currently unscored) and rescores the standings instantly. The **Roster Lab** swaps who a manager started for a whole period and shows it beside what they actually had, side by side, then reports whether the change alters who makes the playoffs (using the league's real seeding rule). A manager who never reached a round can enter a roster for it to score the round they didn't play. The **Player Explorer** looks up any player who recorded a stat — rostered or not — with a per-game log, per-round totals scored both ways, and who actually held him. The **Playoff Picture** shows pool play by pool with each period's winners and the wild cards, then re-seeds and re-pairs the bracket under the scenario; where a promoted manager never played a round it says so rather than inventing a result. Runs entirely in the browser against a snapshot — no write path to league data, and an unmodified scenario reproduces the live scoreboard exactly. Scenarios are shareable by link
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
 - **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap log with undo (plus approvals for guard-flagged swaps), audit log
@@ -41,18 +42,18 @@ npm install
 
 All configuration is via environment variables (no `.env` loader is bundled — set them in your shell or in `render.yaml` for deployments).
 
-| Variable                       | Default                           | Description                                                                              |
-| ------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------- |
-| `PORT`                         | `3000`                            | HTTP port                                                                                |
-| `LOGIN_PASSWORD`               | `Welcome2Hell`                    | Global fallback password used when a manager has no per-account password set             |
-| `DB_PATH`                      | `./db.json`                       | Path to the runtime JSON database. On Render, point this at a persistent disk mount.     |
-| `UPSTASH_REDIS_REST_URL`       | _(unset)_                         | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys. |
-| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_                         | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                         |
-| `SLACK_WEBHOOK_URL`            | _(unset)_                         | General notifications channel (swaps, sync errors).                                      |
-| `SLACK_SCOREBOARD_WEBHOOK_URL` | falls back to `SLACK_WEBHOOK_URL` | Channel for the daily scoreboard post.                                                   |
-| `SLACK_SIGNING_SECRET`         | _(unset)_                         | Required if you wire up the `/api/slack/command` slash command.                          |
-| `ANTHROPIC_API_KEY`            | _(unset)_                         | Optional. Enables AI-generated elimination roasts; unset falls back to a template bank.  |
-| `GOOGLE_CLIENT_ID`             | _(unset)_                         | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).           |
+| Variable                       | Default        | Description                                                                                  |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------- |
+| `PORT`                         | `3000`         | HTTP port                                                                                    |
+| `LOGIN_PASSWORD`               | `Welcome2Hell` | Global fallback password used when a manager has no per-account password set                 |
+| `DB_PATH`                      | `./db.json`    | Path to the runtime JSON database. On Render, point this at a persistent disk mount.         |
+| `UPSTASH_REDIS_REST_URL`       | _(unset)_      | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.     |
+| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_      | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                             |
+| `SLACK_WEBHOOK_URL`            | _(unset)_      | General notifications channel (swaps, sync errors).                                          |
+| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_      | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`. |
+| `SLACK_SIGNING_SECRET`         | _(unset)_      | Required if you wire up the `/api/slack/command` slash command.                              |
+| `ANTHROPIC_API_KEY`            | _(unset)_      | Optional. Enables AI-generated elimination roasts; unset falls back to a template bank.      |
+| `GOOGLE_CLIENT_ID`             | _(unset)_      | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).               |
 
 ### Running
 
@@ -240,6 +241,9 @@ WMMC/
 │   └── pre-push           # Auto-stamps version.json with today's date
 ├── js/                    # New modular frontend (extracted from app.js — work in progress)
 │                          #   scoring.js, csv.js, utils.js — pure logic (unit-tested)
+│                          #   hypothetical.js — What If sandbox engine (pure, read-only)
+│                          #   seeding.js — pool-play seeding rule (real bracket + What If)
+│                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
 └── tests/                 # Tests for pure js/ modules

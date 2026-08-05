@@ -1965,6 +1965,1126 @@ Calendar sim re-run: WELCOME on 5/04, daily 5/05→7/13, recaps 7/13 PP2 / 8/03 
 Saturday. 178/178 tests, lint + format clean. Server-only (Slack-post concern, like
 `buildPlayoffMatchupsSlackText`), so no committed unit test per the testing convention.
 
+## 2026-07-29 — A mid-week trade erased the outgoing manager's drop-day points
+
+**Symptom (commissioner).** The 7am QF matchup post disagreed with the app: Daniel Kortan 416.4
+(B 315 / P 101.4) in Slack vs 453.7 (B 315 / P 138.7) on the board — exactly Gavin Williams' QF
+Week 2 start (37.35) missing, the day of his 7/28 drop. Alex Thalacker was short 12 batting points
+the same morning. The Jul-28 "Best & Worst" showed Kortan at P 0 for a day his pitcher had thrown
+seven innings. Separately, "Blocked a destructive season save — Anton Capria total drops 78.9"
+repeated with **no matching swap anywhere in the swap log** — because it is not a swap event at all,
+it is the full-season save guard refusing a write.
+
+**Cause.** `player_dates` stores ONE scoring window per player per week; the weekly stat row is
+likewise one row per player per week with a single sticky `manager`. Neither can express a player
+who changes hands INSIDE a week — which is exactly what an effective-tomorrow trade does
+(`drop_date = today` for the seller, `add_date = tomorrow` for the buyer, both in the same week).
+`syncPlayerDatesFromRosterDates` wrote each manager's claim straight into the shared slot, so the
+last one written won and the other side of the handover was discarded. `rebuildWeeklyFromDaily`
+then recomputed the shared row against that single surviving window and stamped whoever currently
+held the player as its `manager`. With the buyer's `{start: 7/29}` surviving, the seller's drop-day
+points were erased from the database outright; with the seller's `{end: 7/28}` surviving instead,
+the buyer was credited with a start he never owned. **Which one happened depended on manager key
+order** — the same data scored differently on different passes, which is why a client's save could
+compute a total 78.9 below the stored one and trip the ≥40-pt crater guard with nothing in the swap
+log to explain it. The live view was immune (PR #381 gave `/api/mlb/live` per-manager windows), so
+the app looked right while every stored/Slack number was wrong — and would have stayed wrong once
+the week rolled out of live enrichment.
+
+**Fix.** Three layers, all keyed on "the date windows are the truth, `manager` is a derived cache":
+
+- `syncPlayerDatesFromRosterDates` merges every manager's claim to the widest window instead of
+  last-writer-wins, so no day anyone rostered him is dropped from the row (and the result no longer
+  depends on key order).
+- `applyManagerScoreSplits` (new, run at the end of `rebuildWeeklyFromDaily` and
+  `recomputeMidWeekAddScores`) writes `row.manager_scores = { manager: points }` for contested
+  players only — each owner's own days, from the daily rows. `managerWeekSubtotal` (server + the
+  app.js mirror) reads it, and claims a row attributed to another manager when this manager has his
+  own window that week. The client is not sent daily rows, so the split has to be persisted for the
+  two copies to agree.
+- `findManagerForPlayerDate` (new) resolves the daily Best/Worst owner AS OF the date scored rather
+  than from the current roster array, so a player's final rostered day is credited to the manager
+  who actually had him. `drop_date` is inclusive, so a drop ON the date still counts that date.
+
+**Vetted** per `SAVE_HARDENING_PLAN.md` §7 on a fixture reproducing the incident, old code vs new: no
+swap and single-owner mid-week drop are byte-identical (100 / 74.7); the trade case goes from
+"seller 37.35, buyer 25.3" (order A,B) or "seller 37.35, buyer 37.35" (order B,A) to a stable
+seller 74.7 / buyer 25.3 in both orders; the daily high/low went from having no attribution at all to
+crediting the seller. Every manager total on `tests/fixtures/staging-seed.json` is unchanged, both
+directly and after a full `syncPlayerDatesFromRosterDates` + `recomputeMidWeekAddScores` pass.
+
+**Not yet done:** the vet against the LIVE db (no prod access from this sandbox). Run the before/
+after per-manager comparison there before trusting the first post-deploy numbers, and expect the
+first sync after deploy to move the affected managers UP by the points that were erased — the score
+guard warns on a >200-pt jump but only blocks drops, so it will not stand in the way.
+
+## 2026-07-29 — A wrong certified total sat in Slack for three hours with nothing watching
+
+**Incident.** The 7am QF post scored Daniel Kortan 416.4 while the app showed 453.7 — exactly Gavin
+Williams' 37.35 start on 7/28, the day his effective-tomorrow trade dropped him. The Jul-28 Best &
+Worst showed Kortan at P 0 the same morning, and "Blocked a destructive season save — Anton Capria
+total drops 78.9" repeated three times with no swap in the log to explain it.
+
+**What it turned out to be.** Not a scoring bug. The certified totals came from a server process
+holding a `db.json` in which that manager-week scored 0, while the row it was derived from — and
+every daily record behind it — said 37.35. `/api/seasons` and `/api/diag/manager`, milliseconds
+apart in the same paste, returned contradictory answers from the same file. The process restarted
+at 09:34 ET and every reading since agrees at 37.35 (total 3171.65 → 3209). The drift healed with
+the restart; **the cause of the drift itself was never proven** — the process holding the evidence
+is gone. Ruled out along the way: a code-version difference (the incident shape scores correctly on
+all eight builds merged that day), duplicate/ghost rows, client-server drift (both copies of
+`managerWeekSubtotal` are byte-equivalent), stale client caching (`/api/seasons` ETags the body
+itself), and multiple instances (`/api/build` returned a single process id across 12 calls).
+
+**The real defect was that nothing noticed.** Every guard in `server.js` compares a total against
+ANOTHER total — the swing guard against yesterday's snapshot, the save guard against the stored
+season — so a rollup that quietly stops matching the stats underneath it is invisible to all of
+them. Finding it took six rounds of hand-querying the DB from a browser console.
+
+**Fix: `auditWeeklyRollupDrift`.** Recomputes each manager-week straight from the daily rows inside
+that manager's own roster windows (from `roster_dates`, period-scoped, both bounds inclusive) and
+reports where the certified subtotal disagrees, naming the players responsible. Deliberately does
+NOT read the weekly rows or their sticky `manager` field — those are the cache being audited. Runs
+after the 4am compile and again before the 7am post (on a fresh read, since a blocked compile
+leaves rejected scores in memory), alerts via `postSlack` once per distinct finding-set per
+process, and is exposed on demand at `GET /api/diag/rollup-audit`. Detection only. Commissioner
+overrides (`drop_locked` / `manual_fields`) are exempt — a hand-set number is supposed to differ.
+
+On this incident it would have posted at 4am: _"Daniel Kortan QF|Week 2: certified 0 vs 37.35 from
+the daily rows (under by 37.35) — Gavin Williams -37.35."_
+
+**Verified** on the incident shape (rollup loses the row → flagged, names the player), a stale
+rollup score on a full-week player (flagged), a ghost row crediting a player the manager no longer
+rosters (flagged, +50), a commissioner override (correctly silent), and both seasons of
+`tests/fixtures/staging-seed.json` (silent — no false positives). Kept in `server.js` with no `js/`
+copy and no unit test, matching the live-day precedent: the client has no use for it and the
+project already carries enough hand-synced duplicate pairs.
+
+**Side note worth keeping.** The per-manager window scoring added in the same PR makes the
+certified number self-healing for exactly the class of player that broke here: any player whose
+roster window covers only part of a week is now scored from the daily rows rather than from the
+stored rollup, so a bad rollup score for him can no longer reach a total.
+
+## 2026-07-30 — The drift audit's first alert was a false positive (effective-tomorrow adds)
+
+**Alert.** `auditWeeklyRollupDrift` posted at 4am, one day after it shipped: Chris Bentivegna
+PP2|Week 4 certified 227.55 vs 298.55 (Michael Harris II -71) and Jamie Rogers PP2|Week 5 certified
+296.6 vs 316.7 (Tyler Phillips -20.1). Both still drifting on demand via
+`GET /api/diag/rollup-audit`, both attributing the whole gap to one player certified at exactly 0.
+
+**The scoreboard was right; the audit was wrong.** Each flagged player had a single `roster_dates`
+entry holding an `add_date` **one day after the end of the week key it was filed under** — Harris
+`PP2|Week 4` (ends 07-05) add 07-06, Phillips `PP2|Week 5` (ends 07-12) add 07-13. That is the
+effective-tomorrow swap submitted on a week's **final day**: the add takes effect the next week, the
+entry lands in the submission week's bucket, and `player_in` is already in that week's roster array.
+Bentivegna's roster history confirms it — Harris first appears in the `PP2|Week 4` array, absent from
+every earlier week. The stored `weekly_score` was 0 with `override: false`, so the compile agreed
+with the read path; only the audit dissented. Nobody was owed points and no data repair was needed.
+
+**Why only these two of twelve played weeks.** `managerWeekRosterWindows` collected the latest
+add/drop constrained to `add_date <= weekEnd`, so an add dated after the week was **discarded**,
+leaving the player with no date events at all — which dropped him into the roster-array fallback and
+credited him the **whole week** he never played. An add after `weekEnd` is not missing information;
+it is positive evidence of absence. Fixed by collecting those players into `joinedAfterWeek` in the
+same pass and excluding them from the fallback only (the in-range branches are untouched, so a
+player with any in-range add/drop is unaffected). Also corrected the alert's own remediation line:
+it told the commissioner to re-run **Sync Now**, which only touches the current week
+(`/api/mlb/sync-current` → `resolveWeeksForCatchUp`) and therefore cannot repair a finished one —
+**Rebuild Totals** (`/api/mlb/rebuild-weeklies`) is the button that recompiles past weeks.
+
+**Accepted tradeoff, decided deliberately.** If an `add_date` after a week's end is a _typo_ and the
+player really was rostered, the audit now stays silent where it used to fire. Certified already
+scores that player 0 either way, so the audit was reporting the downstream consequence of a bad
+roster date, not a rollup-vs-daily disagreement — and bad roster dates belong to `ghost-audit` /
+`roster-audit` / the swap log. Keeping the old behavior would mean every effective-tomorrow swap
+landing on a week boundary posts a false drift alert, which trains the commissioner to ignore the
+one alert that exists to be trusted.
+
+**Verified** with a harness that extracts the real functions out of both the patched and the
+committed `server.js` and runs them side by side: both live shapes flip firing → silent; the 7/29
+incident shape (in-range add, rollup lost the row) still fires at -30; a no-dates player with a
+zeroed rollup still fires (fallback preserved); a drop dated _after_ the week still fires; a
+`manual_fields` override stays silent; a mid-week add whose rollup matches stays silent; both seasons
+of `tests/fixtures/staging-seed.json` unchanged. Per-manager totals vet per the core invariant: all
+8 fixture managers byte-identical before and after (`managerWeekSubtotal` is not touched — the change
+is confined to detection-only code). 187 unit tests, lint, and format all pass.
+
+**Worth remembering for the next one of these.** `weekly_rows[].manager` in `/api/mlb/player-debug`
+is stamped from _current_ rosters by `rebuild-weeklies`, so a player shows his present manager on
+every historical week — it is NOT evidence he was rostered then, and it made both flagged players
+look like season-long holdings at first read. Ownership comes from `roster_dates` + the roster
+arrays, exactly as the core invariant says.
+
+## 2026-07-30 — The pool-play scoreboard shell came back, because the guard checked a proxy
+
+**Incident.** The duplicate 7am post PR #383 was supposed to stop showed up again during QF Week 2:
+the real Quarterfinal bracket post, plus a second one reading "Current Period: _Season_" with the
+pool-play "Overall Standings — _No scores recorded yet._" section. PR #383's `hasScoreboardData`
+was deployed at the time.
+
+**Why the guard missed it.** It tested two _proxies_ for "can this post mean anything" — does the
+season have any `schedule_dates` entry with start+end, OR any `weekly_batting`/`weekly_pitching`
+row — while the thing that actually decides the post's shape is whether a **round** resolves.
+Those are not the same question, and at least three states satisfy the proxies while still
+resolving to no round:
+
+- a schedule whose weeks are all still in the future (`detectCurrentRound` matches neither "contains
+  today" nor "most recently completed", so it returns null) with no scores yet;
+- `weekly_pitching` rows restored but not `weekly_batting` — the in-builder round fallback read the
+  batting table only;
+- and the inverse hazard: `schedule_dates` wiped (a known failure mode here — see the boot audit)
+  with only pool-play rows left, which resolves to PP2 and reinstates the pool-play frames
+  mid-playoffs rather than falling back to "Season".
+
+**Fix: ask the real question, once, in one place.** New `resolveScoreboardRound(sd)` is now the only
+answer to "which period does a scoreboard post for this season cover":
+schedule → latest round with stat rows in _either_ table → null. It also returns null when the
+bracket is locked (`confirmed_seeding.qualifierNames`) and pool play is all this process can see —
+pool play is over and we cannot name the playoff round, so silence beats stale framing. An explicit
+`opts.summaryRound` wrap-up bypasses it and still renders its pool-play frames.
+
+`buildScoreboardBlocks` frames the post from it and returns the resolved `round`;
+`hasScoreboardData` is now a one-line delegation to it, so the pre-flight check and the post that
+goes out cannot disagree. And the guard moved to the send-time chokepoint: **`postScoreboardSlack`
+throws on a null round**, so the 7am auto-post, the manual commissioner post, `/wmmc`, and any
+future caller all inherit it — the upstream checks now only exist to produce a better error (409 /
+ephemeral) and to avoid consuming the day's `last_scoreboard_post_date` slot.
+
+**Verified.** The eight-state table (healthy QF, blank instance, blank season, all-future schedule,
+pitching-only, bracket-locked-pool-play-only, historical season with scores and no schedule, opening
+day) resolves as intended — the three new states are the ones that changed, the healthy/opening-day/
+historical ones are untouched. Before/after render of the real `/api/slack/command` path against
+`tests/fixtures/staging-seed.json` is byte-identical. No scoring path is touched: this only gates
+and frames the Slack post, and reads no managers, roster windows, or swaps.
+
+## 2026-07-30 — Eliminated managers were still being tagged on Live box scores
+
+**Symptom.** With the bracket past the Quarterfinals, opening a game card on the Live tab showed
+the red manager pill next to players belonging to managers who were already out — Austin's name
+sitting on a Rangers batter in a round Austin isn't playing in. The Live standings above it
+(correctly) didn't list him at all, so the two halves of the same tab disagreed.
+
+**Cause.** The two halves resolved "who rosters this player" from different sources.
+`/api/mlb/live` derives rosters from the `roster_dates` windows scoped to the current period
+(`periodStartForRound`) — the invariant's source of truth. `/api/mlb/live/game/:gamePk` instead
+called `findManagerForPlayerWeek(...) || findManagerForPlayer(...)`, both of which read the
+`sd.rosters` ARRAYS. Those arrays are a derived cache, and `findManagerForPlayer` in particular
+scans **every week of the season**, so any player who was ever on an eliminated manager's roster
+kept resolving to them forever. `wasDroppedBeforeWeek` didn't catch it: the player was never
+_dropped_, his manager just stopped playing.
+
+**Fix.** Extracted the live endpoint's period-scoped derivation verbatim into
+`buildWeekRostersFromDates(sd, round, week, asOf)` and pointed the box score at it, deleting both
+array fallbacks there. Eliminated managers now fall out for the right structural reason rather than
+via a bracket-participant list: they have no add inside the current period, so no player resolves to
+them. Same helper on both sides means the box-score tag can never name a manager the standings
+aren't showing. When the live day falls outside any schedule week there is no roster to flag
+against, so nothing is tagged — which matches `/api/mlb/live` returning empty managers for that
+same state.
+
+**Verified.** The extraction is byte-identical to the block it replaced (comment/indent-insensitive
+diff of the pre-change block vs. the helper body), so `/api/mlb/live` — and every score it feeds —
+is untouched; no manager totals move. A synthetic SF-week fixture with an eliminated manager holding
+a QF roster in both `roster_dates` and `sd.rosters` confirms the three cases: the eliminated
+manager's player is untagged in SF, the active manager's player still tags, and asking for QF itself
+still returns the eliminated manager (history intact, only the current-round view changed).
+209 tests pass; lint and format clean.
+
+## 2026-07-31 — The duplicate 7am post was never in the code; it was a second webhook holder
+
+**Symptom.** Third consecutive morning of two 7am posts: the pool-play shell ("Current Period:
+_Season_", "🏆 Overall Standings — _No scores recorded yet._") stacked above the real Quarterfinals
+post. Slack groups consecutive app messages under one 7:00 AM header, so it reads as one post with a
+duplicated intro — the commissioner reasonably reported it as a rendering bug. It is two messages.
+
+**The guards were right.** Extracted `resolveScoreboardRound` / `hasScoreboardData` from HEAD and ran
+them over every state that can render that frame — no season, `{}`, schedule wiped, blank date
+strings, bracket-locked-pool-only — all resolve null, and `postScoreboardSlack` throws on null. A
+process running current `main` **cannot** emit that post. So the sender was running something else.
+
+**Elimination, in order.** Prod: one `[Scoreboard] Daily scoreboard posted successfully` in the 7am
+logs, on the post-#392 build, with a disk and Upstash (so it holds real data and posts the correct
+QF layout). Staging: `origin/staging` is 118 commits behind (7/20, predates both guards) and so
+_could_ render the shell, but its Render env has no Slack vars at all — `scheduleScoreboardPost`
+returns at the webhook check. Render has exactly two services and zero env groups. Claude Code
+sandboxes: the agent proxy blocks `hooks.slack.com` outright (`CONNECT tunnel failed, 403`), so no
+web/phone session could post even holding the URL. The commissioner's Windows laptop: no Node
+process, and WSL is not installed.
+
+**What actually found it.** The posts render as "WMMC Scoreboard" while the Slack app is named
+"PlusPlus", and `postSlack` never sends a `username` — a modern app-managed webhook always posts
+under the app's own identity and cannot be renamed per-hook. Therefore the webhooks were **legacy
+Incoming WebHook custom integrations** (workspace-level, each with its own configurable name/icon),
+which is why the app's own Incoming Webhooks page read "Off" with no URLs. **Three sessions searched
+the wrong inventory.** The real list lives at
+`<workspace>.slack.com/apps/manage/custom-integrations`. It held exactly one webhook posting as
+"WMMC Scoreboard" — so the second sender was using **prod's own URL**, copied out at some point;
+nothing about it was discoverable from the code, and there was no third webhook to find.
+
+**Resolution (operational).** New from-scratch Slack app "WMMC" with two app-managed webhooks
+(`#greatelmotontine` scoreboard, `#wmmcnotis` swaps), `/wmmc` moved onto it (Socket Mode had to be
+turned off for the Request URL field to appear, and the old app's `/wmmc` had to be deleted first —
+slash command names are unique per workspace), new signing secret, all three env vars updated on
+Render, both legacy integrations revoked. Verified before revoking: `/wmmc` renders, and
+`POST /api/slack/scoreboard` (no UI button exists for it — call it from the console via `apiFetch`)
+posts to the scoreboard channel.
+
+**Code change (the only one this incident justified).** `SLACK_SCOREBOARD_WEBHOOK_URL` no longer
+falls back to `SLACK_WEBHOOK_URL`. That fallback meant a process configured only for swap
+notifications silently became a scoreboard poster into the swaps channel — wrong output, and one
+more way for a stray instance to reach the league. Unset now disables the auto-post with a log line
+that says why. Prod sets both explicitly, so nothing changes there. Touches no managers, roster
+windows, swaps, or scoring — no totals move.
+
+**For next time.** When a Slack post cannot be explained by any code path, stop reading code and
+inventory the webhooks — **including `apps/manage/custom-integrations`**, not just the app's page. A
+display name that does not match the app name is the tell that a legacy integration is in play. And
+treat a webhook URL as a credential: this one leaked far enough to outlive three fix attempts.
+
+**Amendment (same day) — the sender was never identified, and that is where this entry ends.**
+The webhook is revoked, so whatever it is now gets a 404 from Slack and reaches nobody; the hunt
+was stopped deliberately, not completed. Leads exhausted, so the next session does not re-run them:
+production (posts once, on the current build, holds real data), staging (no Slack env vars at all),
+the account-wide Render list (exactly two services, zero env groups), the commissioner's Windows
+laptop (no Node process, WSL not installed), Claude Code sandboxes (the agent proxy blocks
+`hooks.slack.com` outright — `CONNECT tunnel failed, 403` — so no web/phone session can post even
+holding the URL), Heroku (the account is empty, and free dynos were discontinued in Nov 2022, so a
+free app there has been off for years), and the Google Sheets Apps Script triggers (deleted as a
+precaution; the gsheets path is a dormant fallback the MLB API replaced).
+
+What is known about it: it ran `server.js` from a **7/05–7/28** checkout (the post carries the
+header link added 2026-07-05 but lacks the 7/29 guard), against an empty `db.json` (no seasons →
+`detectCurrentRound` → null), with **no** Upstash credentials (with them it would have restored real
+data and posted a correct scoreboard), on the same `getNextEasternHour(7)` timer, holding the
+legacy scoreboard webhook — i.e. production's own URL, copied out at some point. An equally good
+fit that was never ruled out: nothing was running the app at all, and a scheduled job somewhere was
+replaying one captured payload, which is indistinguishable from the Slack side because the shell
+post is byte-identical every morning.
+
+**If duplicates ever return, start from "find the sender", not from the code.** The scoreboard
+guards have now been verified correct twice.
+
+## "End Quarterfinals" 409'd, didn't stick, and carried rosters into SF Week 1 (2026-08-03)
+
+**Symptom (commissioner, live).** Clicking **End Quarterfinals** raised the "Your view was out of
+date, so that change was not saved" alert and reloaded; the button stayed active. A Slack
+`:no_entry: Blocked a destructive season save (2026)` fired listing six managers with
+`SF|Week 1 roster shrank (B 4→0, P 3→0)`. No round-end Slack post with roasts, and the commissioner
+submission panel still read **Semifinals — pending finalization**.
+
+**Root cause (one click, two full-season saves built from two different snapshots).**
+`finalizeRound()` took its own `getSeasons()` deep copy, then called `advancePlayers()`, which took
+a **second independent copy**, mutated it and saved it — after which `finalizeRound` saved its own
+now-stale first copy on top. The second payload lacked the SF Week 1 rosters the first had just
+written, so it rewound the local cache and hit the server as a destructive/stale save. Because
+`finalized_rounds` rode on that rejected payload, **QF was never finalized** — which is the single
+cause of all three reported symptoms: `getSFParticipants()` returns null without `finalized_rounds`
+including `'QF'` (→ "pending finalization"), and the follow-up **"Advance SF Winners & Dump QF Loser
+Rosters"** button — the thing that generates QF roasts and posts the round-end Slack — only renders
+once QF is finalized. (The roasts visible on eliminated managers' pages were the older Pool Play
+ones.)
+
+**Second bug, same click.** Advancing into SF Week 1 (index 12) is a **period boundary**, where the
+CORE SCORING INVARIANT forbids carry-forward — the new period is owned by its submissions. It wrote
+prior-round rosters, unbacked by `roster_dates`, for every manager holding a QF Week 2 roster,
+QF losers included. `finalizeRound` did this for QF→SF (12) and SF→Finals (14); the PP→QF (10) call
+was already dead code behind an early `return`.
+
+**Third bug, the very next step.** `dumpPlayoffLosers()` removed the losers' next-round submissions
+by mutating `sd.period_submissions` and saving the season — but the per-year save treats
+`initial_submissions`/`period_submissions` as **server-authoritative** and unconditionally restores
+the stored copy, so every "dump" left the losers' SF/Finals submissions intact. Now goes through
+`removeSubmissionRemote()` (the atomic DELETE endpoint), then re-reads before saving `eliminated`/
+`losers_dumped`.
+
+**Fix (app.js only).** `advancePlayers` split into pure mutator `applyAdvancePlayers(sd, weekIndex)`
+
+- a thin `window.advancePlayers` wrapper — **the caller owns the save**, so one click writes exactly
+  one payload. `applyAdvancePlayers` refuses period-boundary weeks (new client-side
+  `isPeriodBoundaryWeek`, mirror of the server's), and the Advance Players button is replaced on those
+  weeks by a note explaining the round comes from submissions. `finalizeRound` is now `async`, mutates
+  one snapshot, does one awaited save, and only re-renders once the save is confirmed — a rejected
+  save leaves the button live instead of showing a finalization the server refused. Its unused
+  `weekIndex` param is gone (all four call sites updated).
+
+**Verified E2E** (Playwright, synthetic 8-manager season re-dated so QF Week 2 ended yesterday).
+_Before the fix_ the drive reproduced production exactly: two POSTs (`200` then `409`), the verbatim
+"out of date" alert, QF unfinalized, no dump button, and 8 unbacked `SF|Week 1` rosters + 64
+zero-stat rows. _After_: single `POST -> 200`, zero alerts, `finalized_rounds ["PP","QF"]`,
+`advanced_weeks []`, zero SF rosters/rows, dump button present and issuing real submission DELETEs,
+and **all 8 per-manager totals unchanged (delta 0)** — the §7 invariant vetting.
+
+**Repair for a season already polluted:** `POST /api/seasons/:year/purge-orphan-boundary-rosters`
+(dry-run first) clears boundary-week rosters not backed by a submission. Validated against the
+damaged fixture: cleared 8, `moved_totals: []`. A leftover `advanced_weeks: [12]` is cosmetic once
+the button is hidden at boundaries. Re-clicking End Quarterfinals afterwards then succeeds cleanly.
+
+## Round-end Slack post rebuilt: results, margin ordering, matchup-aware roasts, Friday reminder (2026-08-03)
+
+Commissioner's verdict on the first working QF round-end post: "it worked, but it's not great."
+Five changes, all in `server.js` (Slack composition only — no scoring math touched).
+
+**1. Playoff rounds now open with the actual results.** The `summary` block was hardcoded
+PP-only, so a QF/SF post went straight into roasts and never said who won or who advanced.
+It now calls the existing `buildPlayoffMatchupsSlackText(sd, round, { final: true })` — the same
+builder the daily scoreboard uses, so the two posts can never disagree about a score. Renders
+every matchup with both totals, the B/P split, ✅/❌, and an "Advancing to the Semifinals: …"
+footer.
+
+**2. Eliminations are ordered by margin of defeat, narrowest first.** Alphabetical order buried
+the heartbreaker wherever the alphabet put it. Matchups are resolved ONCE into `matchupByManager`
+and reused for sorting, the per-manager line, and roast generation. PP (no head-to-head) and any
+unresolvable matchup fall back to alphabetical, sorted last.
+
+**3. Each roast carries its head-to-head line** — `lost to X 1,182.4–1,274.4 (by 92)`. Formatted
+with the same 1dp/thousands-separator formatter as the results block, so one number never appears
+twice in a message wearing two different faces.
+
+**4. Roasts can talk about the game.** The elimination prompt never mentioned the opponent, score,
+or margin — only a list of bad players. New `computeMatchupNarrativeForRoast(sd, round, manager,
+opponent)` walks the round's scored days accumulating both sides from `computeDailyHighLow`'s
+`managerTotals` (newly returned; the top/bottom lists are sliced to 3 and unusable for this), and
+derives lead changes, whether the loser ever led, their biggest lead, when they lost it for good,
+and wire-to-wire status. Fed to the prompt with explicit steers for the three interesting shapes
+(blown lead / never led / margin ≤ 25). `fallbackRoast` got a matching head-to-head bank for the
+no-API-key path. **Cross-check that matters:** the day-walk's final totals matched
+`playoffMatchupResultForRoast`'s weekly-rollup scores exactly for all four managers — two
+independent derivations agreeing.
+
+**5. Submission instructions moved to the Friday post.** A round ends Sunday and the next
+deadline is 8 days later, so the full walkthrough was read a week before it could be acted on.
+`buildNextRoundInstructions` (round-keyed) became `buildSubmissionInstructionsFor` (upcoming-round
+keyed) plus `buildSubmissionWindowBlock(sd, todayISO)`, which fires only when today is
+`roundStart − 3` (the same definition `getPeriodOpenDate` already uses for "window opens") and
+appends to the daily scoreboard blocks. The round-end post keeps only
+`buildDeadlineReminderLine` — one `:alarm_clock:` line with the Monday first pitch, rendered via
+the shared `periodLockLabel`, which now emits a real zone abbreviation (`8:00 PM EDT`) instead of
+a hardcoded `ET` that was wrong for half the season.
+
+**Verified E2E** with a Slack sink + Playwright on a synthetic season whose QF just ended, using
+daily rows and weekly rollups derived from the same deltas so they can't disagree. Confirmed:
+results block + advancement footer, margin order (92 → 133.1 → 196.45 → 562.85), head-to-head
+lines, the reminder line, the Friday block present on `start−3` and absent on every other day, and
+one narrative per manager including a genuine blown-lead case (led 2 of 14 days, up 28.1, lost it
+July 22). Per-manager totals unchanged.
+
+**Gotcha for the next fixture:** `buildPlayoffMatchupsSlackText` and `playoffMatchupResultForRoast`
+both return null without `sd.confirmed_seeding`, which is written by "End Pool Play" in the UI —
+a hand-built fixture that only sets `finalized_rounds: ['PP']` silently degrades to the old
+alphabetical, matchup-less post. Drive End Pool Play through the UI rather than faking it.
+
+## Fallback roast bank: doubled, no-repeat within/across periods, article fix (2026-08-03)
+
+Follow-up to the round-end post rebuild, same PR (#396).
+
+**Grammar.** `roastRoundLabel` returns the round WITH its article (`'the Quarterfinals'`) because
+43 of its 54 uses read `across/in/of ${roundLabel}`. But 11 templates put a possessive right
+before it — `${manager}'s ${roundLabel}` — producing "Casey Curve's the Quarterfinals". Fixed with
+a second `roastRoundLabelBare()` used only in those 11 positions; stripping the article globally
+would have broken the 43 correct ones instead.
+
+**Doubled the banks.** core 20→40, betrayal 15→30, dayBank 15→30, head-to-head 7→17 (max bank
+57→110). The dayBank additions respect that bank's standing rule: `best_day`/`worst_day` are
+picked independently by score, NOT by date, so no template may imply chronology
+(no then/before/after/rally).
+
+**No repeated joke in a period, or across back-to-back periods.** Every template now carries a
+stable id (`sub-bank:index`), persisted as `sd.roasts[mgr].template_id`.
+`recentFallbackTemplateIds(sd, round)` collects ids used in this round and the previous one; the
+`/roasts/slack` loop seeds a live set from it and grows it as it picks, because the batch isn't
+written until after the loop.
+
+Two design points that mattered:
+
+- **h2h is four fixed sub-banks** (`h2h-base/-wire/-lead/-close`), not one conditionally-appended
+  array. With one array, index 2 means a different joke to a wire-to-wire loser than to a
+  blown-lead one — ids must be stable across managers or the exclusion is meaningless.
+- **Probe forward from the natural slot; do NOT pick out of a filtered array.** The first version
+  did `bank.filter(...)` then `seed % pool.length`, which renumbers every index — so storing one
+  manager's roast silently reshuffled everyone else's, and picks changed on every regenerate even
+  with zero collisions. Now: seed → natural slot → walk forward to the first non-excluded id. A
+  manager keeps the same joke run after run, and only a real collision moves them, by one slot.
+
+**Return-shape change:** `fallbackRoast`/`fallbackRoastForOutcome`/`generateRoastWithClaude` now
+return `{ text, templateId }` (templateId null when Claude wrote it, and for champion/third, which
+are one-per-season and can't collide). Three call sites updated.
+
+**Verified** with no `ANTHROPIC_API_KEY` so every roast came from the bank: 4 QF managers got 4
+distinct ids; two identical regenerate runs produced byte-identical assignments (stability); and
+planting `core:6` on a Pool Play roast moved Drew Dinger — whose natural QF pick is `core:6` — to
+`core:7` while leaving the other three untouched (minimal displacement, cross-period exclusion).
+
+## Roster-page elimination roasts: round-by-round sections, league ranks, and a negative-points bug (2026-08-03)
+
+**What was wrong.** The page context under the Hall of Shame banner read as trivia, not a roast:
+
+- "Getting here" was one line (seed + pedigree) with no supporting numbers.
+- A playoff exit collapsed the whole tournament into a single head-to-head line — a Semifinals
+  loser got no Pool Play or Quarterfinals section at all.
+- Every point total was unanchored. "Rafael Devers shows up (123 pts)" says nothing about whether
+  123 was good.
+- Close losses read exactly like blowouts (`closeCall = margin <= 20` tweaked one QF template).
+- The day-by-day line collided two numbers with nothing between them: "the bottom 3 4 times".
+- **A batter was shown at -12.7 pts for a single game, which is arithmetically impossible.**
+
+**The negative-points bug (the real one).** Daily rows store `delta` = today's cumulative line
+minus the previous snapshot's. When MLB revises an earlier box score downward, the cumulative
+total drops and the difference lands on whatever date the correction happened to sync — producing
+a negative delta. Every batting weight in `SCORING` is positive (1B/2B/3B/HR/R/RBI/SB/BB), so a
+negative batting _game_ cannot exist; it is always a correction to an earlier one. Pitchers _can_
+legitimately go negative (H/ER/BB carry negative weights), so the guard is **the negative stat,
+not the negative score**: `isCorrectionDelta` = any component < 0.
+
+Fixed in `countsAsGameDelta` (= `hadGameDelta && !isCorrectionDelta`), used by both
+`computeDailyHighLow` (which only filtered all-zero deltas before, so the daily Slack "worst
+player" post had the same defect) and `buildManagerPerformanceForRoast`. All-zero deltas are
+excluded from day totals too, so a date on which nobody played stops registering as a 0-pt
+"worst day". **No score moves** — weekly and season totals are computed from the weekly rows, not
+from these filters. Verified on a synthetic QF: without the guard the worst "game" was
+`-22 pts {1b:-2, hr:-1, r:-1, rbi:-2}`; with it, a real 2-pt game (7 rows dropped, 1 correction +
+6 no-plays).
+
+**New: league-wide role ranks.** `computeRoleRanksForRoast(sd, managerNames, round)` ranks every
+(manager, player) roster SLOT by round total, split by role, using the same ownership rule and
+weekly rows as `buildManagerPerformanceForRoast`, so a rank can never disagree with the points the
+roast credits. Ties share a rank. It also ranks managers by batting and by pitching total for the
+round (managers with 0 in both are excluded, so an eliminated manager doesn't pad everyone's
+rank). This is what produces "6th of 45 hitters couldn't cover the 45th" and "2nd of 9 for
+pitching, 9th of 9 for hitting". Fed to the Claude prompt too (`roastPromptRankLines`).
+
+**New: one section per round played.** `buildRoundBreakdownsForRoast` walks `ROAST_ROUND_ORDER`
+up to the elimination round and emits a stage per round the manager actually played (skipping
+rounds with no rostered players). `buildRoastPageContext` renders each as its own paragraph with a
+`[[Label]]` marker; app.js pulls the marker into a `.roast-context-label` chip and renders
+unmarked paragraphs exactly as before, so roasts stored before this change still render.
+
+**Margin drives intensity in every round.** `roastMarginTier` (heartbreak ≤10, close ≤25,
+competitive ≤60, clear ≤150, blowout) selects the result sentence for each playoff section and the
+"missed it by" sentence for a Pool Play exit. Heartbreak/close losses additionally get the
+cruellest line available: "One 22-point game — one — out of X, who managed 13.4 across the entire
+round, and Joey is still playing."
+
+Two things that had to be threaded through: rounds the manager _won_ get their own roster-sentence
+bank (calling the Finals winner's #30 hitter "closer to the truth" is just false), and `outcome`
+now reaches `buildRoastPageContext` so champion/3rd-place pages don't get "and it was all for
+nothing" framing.
+
+**Perf.** `collectRoastInputs` gathers everything for one manager and takes a per-request cache;
+the combined `/roasts/slack` loop shares one, so each round's league rank table is built once
+rather than once per eliminated manager. Earlier stages skip the `computeDailyHighLow`-per-date
+sweep (`skipDayExtremes`) — only the elimination round shows a day-by-day tally.
+
+**Also fixed in the joke bank** (the text that goes to Slack): seven `dayBank` templates presented
+best/worst day numbers without saying which was which ("boils down to two numbers: 87.6 points on
+Jul 26, and 9 on Jul 22"), or were pure recitation with no joke at all. Rewritten to label both
+and land a beat. Template _ids_ are index-based and unchanged, so the no-repeat exclusion is
+unaffected.
+
+**Verified** end-to-end against a synthetic 9-manager season through the real
+`/api/seasons/:year/generate-roast` endpoint (no `ANTHROPIC_API_KEY`, so the bank wrote the jokes):
+QF exit, PP exit, Finals champion, and Finals runner-up all render correct sections; screenshotted
+the banner at 1280px and 390px.
+
+## Article bug had a SECOND class, and production has no ANTHROPIC_API_KEY (2026-08-03)
+
+Ran the regenerate-only probe against live 2026 QF roasts. Two findings.
+
+**1. The possessive fix was incomplete.** `roastRoundLabelBare` covered `${manager}'s ${roundLabel}`,
+but `roundLabel` is also used **attributively** — modifying a following noun, or after a determiner —
+where the article is equally wrong:
+
+- `a ${perf.total}-point ${roundLabel} team total` → "a 442.75-point **the Quarterfinals** team total"
+- `this ${roundLabel} matchup` → "this **the Quarterfinals** matchup"
+- `The ${roundLabel} highlight package` → "**The the Quarterfinals** highlight package"
+
+17 more spots fixed (11 `-point`, 2 possessive, 2 `this…matchup`, 2 `The…`). Two of the possessive
+ones were **my own regression**: I ran the possessive swap first and then added 50 new templates,
+some of which reintroduced the pattern. Order of operations matters — do the mechanical fix LAST,
+or re-run it after adding content.
+
+**Classification rule for the next person:** article-free before a noun or after a determiner
+(`a 442-point Quarterfinals team total`, `this Quarterfinals matchup`); article kept after a
+preposition or verb (`across the Quarterfinals`, `spent the Quarterfinals waiting`, `Time of death:
+the Quarterfinals`). 96 usages read fine, 22 flagged by heuristic, 17 genuinely broken — the
+heuristic over-flags `surviving/end/same/you ${roundLabel}`, so classify by eye, don't bulk-replace.
+
+**2. Production is NOT using Claude for roasts.** All four live QF roasts came back verbatim from
+the static bank ("Breaking news out of the WMMC newsroom…" is `core:11`). So `ANTHROPIC_API_KEY`
+is unset (or failing) on the Render service — `render.yaml` declares it `sync: false`, i.e. set by
+hand in the dashboard, and it evidently never was. I had earlier asserted the live roasts "clearly
+read as Claude-written"; that was an assumption, and it was wrong.
+
+Consequence: the entire matchup-aware prompt work (PR #396) is dormant in production — the prompt
+is only reached when the key exists. The fallback bank's own head-to-head templates DO fire, but
+only when the seeded pick lands in `h2h-*`, which is 17 of 110 slots. Setting the key in the Render
+dashboard is the single lever that turns the feature on.
+
+## Roast repair buttons generalized to every round (2026-08-03)
+
+**Gap.** "Regenerate Roasts" and "Regenerate & Repost Roasts to Slack" existed only on the Pool
+Play block (`i === 9`). Once QF/SF/Finals were dumped the admin panel showed a static "loser
+rosters dumped" line and nothing else — no way to refresh roasts after the bank or the
+page-context builder changed, short of a browser-console API call. The PP buttons exist for
+exactly that scenario, so the fix is generalization, not new capability.
+
+`regeneratePoolPlayRoastsOnly` / `repostPoolPlayRoasts` → `regenerateRoundRoasts(round)` /
+`repostRoundRoasts(round)`, plus `roastRepairToolsHtml(round)` rendered under PP (when
+finalized) and under QF/SF/Finals (when dumped).
+
+**The design decision worth keeping: read who was eliminated from stored state, not from the
+bracket.** The PP versions recomputed non-qualifiers via `getQFQualifiers`. A repair action must
+not do that — by the time you're reposting, the round is long finalized and `sd.eliminated` may
+carry commissioner corrections the recomputed bracket would silently overwrite. `eliminatedInRound`
+reads `sd.eliminated` (authoritative; every finalize/dump path writes it) and folds in stored
+roasts as a fallback for the window where a dump wrote roasts but the eliminated map didn't land.
+
+**Finals podium round-trips through `roast.outcome`.** `podiumRolesFromRoasts` reads champion /
+runner_up / third back off the stored roasts rather than re-deriving the bracket winner, so a
+repost can never crown someone different from the original post. Verified: seeding the four Finals
+roasts and reading back gives podium = [champion, runner_up, third] and Hall of Shame = [4th]
+only — the same split `crownChampionAndRoastFinals` produces.
+
+Regeneration stays **sequential** — each `generate-roast` is a read-modify-write of `db.json`.
+
+**Verified** by driving the real admin panel with Playwright against a fixture with PP+QF
+finalized and dumped: both button pairs render with the right round bound, `regenerateRoundRoasts('QF')`
+rewrote exactly the 4 QF-eliminated managers with the new sectioned page context and correct
+round/outcome, and `repostRoundRoasts('QF')` failed gracefully ("Slack webhook not configured")
+rather than throwing.
+
+## Day-by-day tally replaced with a per-round summary (2026-08-03)
+
+**Why.** The "Day by day" section counted how often the manager finished top-3/bottom-3 leaguewide
+across the round. Two problems: it was a bare tally with no dates or scores attached, and it existed
+only for the elimination round because the leaguewide sweep was too expensive to run per round.
+
+**Replaced with, in EVERY round section:** the manager's own three best and three worst scoring days
+(date + score), and a top-3/bottom-3 leaderboard per position carrying each player's round total,
+league rank among same-role players, and how many days they were the best on that roster at that
+position.
+
+**The perf win that made it possible.** Everything above derives from this manager's own weekly and
+daily rows, which `buildManagerPerformanceForRoast` already walks. The old tally needed
+`computeDailyHighLow` per date — a leaguewide sweep — which is why it was gated behind
+`skipDayExtremes` for earlier rounds. Deleting `computeRoundDayExtremesForRoast` removed the only
+caller of `computeDailyHighLow` in the roast path entirely: the roast context is now both richer
+and cheaper, and `skipDayExtremes` is gone. `computeDailyHighLow`'s `bottomPlayersByScore` field
+existed solely for that tally and had no other consumer, so it went too.
+
+**Three things that only showed up in real output:**
+
+- `days_led` is printed for the top-3 only. On a five-hitter roster over thirty days everybody leads
+  sometimes, so "best on 6 days" sitting next to a name filed under `Worst:` reads as praise and
+  muddles the contrast.
+- The two lists overlap on short rosters (top 3 and bottom 3 of five players share the middle one).
+  The bottom list drops any name already in the top list rather than printing it twice — which is
+  why a five-man roster shows three best and two worst, not three and three.
+- Same for days: with ≤5 scored days the best and worst lists are the same days in opposite order,
+  so the worst list is suppressed.
+
+**Formatting.** With top-3 AND bottom-3 per position, a round section became a wall of text. Section
+bits are now joined with `\n` (blank line still separates sections), and the roster page renders
+single newlines as `<br>` — result, split, days, hitters, pitchers each get their own line.
+`rosterSentence` was deleted: it named one player per role, which the leaderboard now supersedes,
+and keeping both printed the same names twice.
+
+The prompt gets the new signal too — `roastPromptRankLines` now carries days-led per player and the
+best/worst scoring days, so the joke can tell "carried the team" from "had one loud afternoon".
+
+**Verified** end to end through the real endpoint on a synthetic season (QF exit, PP exit, Finals
+champion), plus screenshots at 1280px and 390px.
+
+## Round summary became three tables; roasts are now server-authoritative on save (2026-08-03)
+
+**Change.** The per-round best/worst summary was two dense prose sentences. Replaced with three
+tables per round section, laid out side by side: **Scoring days** (the manager's own best 3 and
+worst 3, with each day's rank among all managers that date), **Top performers** (top 3 hitters +
+top 3 pitchers, with rank among same-role players and days-led), and **Bottom performers** (bottom
+3 of each). Every number carries a rank.
+
+**Day ranks needed a leaguewide sweep back — but a cheap one.** Ranking a day against all managers
+needs every manager's total for that date. Rather than reinstate `computeDailyHighLow` per date,
+`computeRoleRanksForRoast` now also emits `dayRanks`, built from the daily rows in the same pass,
+with the **same ownership rule and correction guard** as the per-manager totals it already
+computes. That matters: reusing `computeDailyHighLow` would have ranked a day using a different
+attribution path than the score printed next to it. And because the rank table is memoized per
+round in the request cache, it is built once per round for the whole combined post, not once per
+manager.
+
+**Structured payload, not HTML in a string.** `buildRoastPageContext` now returns
+`{ text, tables }`; `tables` is keyed by the same `[[Section label]]` the text uses, and is stored
+as `roast.page_tables`. The roster page builds the DOM and escapes every cell, so a player name out
+of the MLB feed can never inject markup. Roasts stored before this render text-only — tables are
+additive, never required.
+
+**The save bug this surfaced.** `sd.roasts` was union-merged on the full-season save: the server's
+copy filled in only managers the incoming payload did not mention. But the client **never writes**
+`sd.roasts` — three read sites in app.js, zero writes — so a roast in a payload is always a stale
+echo of something the server wrote. The union-merge therefore let a full-season save carrying a
+pre-regeneration roast silently roll that manager back: same manager, older text, and any field
+added since (`page_tables`) quietly dropped. Now the server's copy always wins per manager. This is
+the exact class of bug CLAUDE.md's "never wipe a server-authoritative field from a client payload"
+warns about, and it was live before tables made it visible.
+
+**Layout.** `.roast-tables` is `repeat(auto-fit, minmax(210px, 1fr))` rather than a fixed 3-column
+grid, so a round with only two tables (a roster too short to have distinct bottom performers) still
+fills the row instead of leaving a hole. Verified stacking cleanly at 390px with no horizontal
+overflow.
+
+## Round sections became three narrative lines over the tables (2026-08-03)
+
+**Shape.** Each round section is now exactly three prose lines, then its three tables: **(1) what
+happened** — the result or where they finished, tiered by margin; **(2) how it played out** — the
+day-by-day story; **(3) where the points came from and who to blame**. The tables stopped being a
+summary of the prose and became the data view under it.
+
+**Line 2 needed a per-round matchup narrative, which used to be elimination-round only.**
+`computeMatchupNarrativeForRoast` walked the round's dates calling `computeDailyHighLow` per date —
+the sweep that made it too expensive to run for every round. Rewrote it to read the `dayRanks`
+table `computeRoleRanksForRoast` already builds (every manager's total for every date, same
+ownership rule, same correction guard). Signature changed from `(sd, round, manager, opponent)` to
+`(dayRanks, manager, opponent)`. Now every round the manager played gets its own story — blown
+lead, wire-to-wire, lead changed N times — and it costs one table build per round for a whole
+combined post. That is the third `computeDailyHighLow` caller removed from the roast path.
+
+Pool Play has no single opponent, so line 2 there is the shape of the round instead, counted off
+the same table: how often this roster was the league's best or worst team on a day.
+
+**Two overstatements the fixture caught, both worth keeping in mind for future template work:**
+
+- "A roster with two settings and no dial between them" fired on 3-best/3-worst out of 30 days,
+  which is not two settings, it is mediocrity. The day-shape line now branches on the _ratio_
+  (best≫worst, worst≫best, neither, all-zero) and only uses the two-settings framing when the
+  counts really are comparable and non-zero.
+- "X did the opposite" fired on a roster whose weakest link was 15th of 27 leaguewide — middling,
+  not catastrophic. Now gated on `rank > of * 0.5`, with a "nobody was a disaster" bank for strong
+  rosters. Overstating a number the reader can check in the table underneath is the fastest way to
+  make the whole section untrustworthy.
+
+Repeated phrasings ("carried what there was to carry", "did the opposite") are now seeded banks via
+the existing `pick`, so adjacent sections and adjacent managers don't read as a form letter.
+
+## The roast API call could 500 instead of falling back (2026-08-03)
+
+**Symptom.** Regenerating live QF roasts, one manager came back `500 {"error":"Failed to generate
+roast"}` while the other seven succeeded. Same manager had succeeded minutes earlier in a different
+run, so it was transient, not data-dependent.
+
+**Cause.** `generateRoastWithClaude` handled `!resp.ok` — an HTTP error status falls back to the
+static bank — but the `fetch` itself was unguarded. A network-level rejection (socket reset, DNS
+blip, TLS failure) throws, and the throw goes straight past the fallback, out of the function, and
+into the route's `catch`, which returns 500 and stores nothing. `generateWelcomeRoast` two thousand
+lines down wraps the identical call in try/catch, so this was an inconsistency rather than a
+decision.
+
+**Why it mattered more than a one-off 500.** In the combined `/roasts/slack` loop the throw is
+caught per manager and falls back to **the existing stored roast**. So a blip mid-repost silently
+puts a manager's _previous_ roast into the new Slack post, and nothing surfaces it — you would only
+notice by reading all of them against what the console printed.
+
+**Fix.** `try`/`catch` around the fetch, plus `AbortSignal.timeout(ROAST_API_TIMEOUT_MS)` (30s) —
+the combined post generates sequentially because each call is a read-modify-write of `db.json`, so
+one hung connection stalls every manager behind it. Also guarded `resp.json()` (a truncated body is
+the same class of failure) and `resp.text()` in the error path.
+
+**Verified by before/after against a dead endpoint.** Pointed the call at `https://127.0.0.1:9`
+(discard port) in both `origin/main`'s server.js and the fixed one, with a dummy API key so the
+code path is reached:
+
+- before: `HTTP 500`, `{"error":"Failed to generate roast"}`, nothing stored.
+- after: `HTTP 200`, static-bank roast stored with `template_id=day:27`, `page_tables` intact, and
+  `Anthropic API call failed for Anton Capria - TypeError fetch failed` in the log.
+
+Note for future testing in this container: `/etc/hosts` already pins `api.anthropic.com`, and Node's
+fetch goes through the agent proxy regardless, so neither a hosts override nor `NO_PROXY` will
+simulate an unreachable API. Patching the URL is the reliable way.
+
+---
+
+## 2026-08-05 — Live tab boxscores scrolled inside their column while the page had empty gutters
+
+**Symptom.** Desktop Live tab: the expanded per-game boxscores (two 12-column tables side by side)
+each had their own horizontal scrollbar, while the page itself showed wide empty margins.
+
+**Two independent causes.**
+
+1. `.live-box-table th, .live-box-table td { padding: 0.25rem 0.4rem }` never applied. Specificity:
+   `.data-table thead th` / `.data-table tbody td` are (0,1,2) and beat a bare `.live-box-table th`
+   at (0,1,1), so every cell kept the generic **0.75rem** side padding — 24 columns × 24px ≈ 288px
+   of padding per table. `.mgr-detail-panel .data-table thead th` (0,2,2) already did this right;
+   the boxscore rule was just written at the wrong specificity. Fixed by matching the
+   `thead th` / `tbody td` shape, plus `letter-spacing: 0` on the headers.
+2. `main { max-width: 1200px }` applies to every tab, but Live is the only one that renders two
+   full boxscores side by side. Raised to 1560px above 1280px viewport width, scoped with
+   `main:has(> #live.active)` (`:has()` is already used elsewhere in `styles.css`).
+
+Also dropped `white-space: nowrap` on the first column only — the numeric columns stay nowrap and
+tabular, so the player-name column is the one that absorbs any remaining squeeze by wrapping.
+
+**Measured** with a static harness reproducing `renderLiveBoxscoreHTML`'s markup against the real
+`styles.css`, comparing `scrollWidth - clientWidth` per `.table-wrapper`:
+
+| viewport | before (worst overflow) | after |
+| -------- | ----------------------- | ----- |
+| 1280     | 164px                   | 0     |
+| 1650     | 164px                   | 0     |
+| 1920     | 164px                   | 0     |
+
+Zero overflow on the whole Live tab (standings, expanded manager detail, boxscores) from 1000px up.
+Mobile is untouched — the widening is behind `min-width: 1280px`, and 12-column tables still scroll
+on a phone, which is out of scope here.
+
+## The Hypothetical Zone, and two MLB sync bugs it uncovered (2026-08-05)
+
+**What shipped.** A read-only "What If" sandbox tab, in five PRs: #403 engine + Scoring Lab,
+#404 Roster Lab, #405 Player Explorer, #406 round-scoped standings + mobile nav, #408 stat-coverage
+diagnostic. Then two sync fixes it surfaced: #411 and #413.
+
+**Design decisions to preserve.**
+
+1. _The sandbox derives only the DELTA._
+   `hypothetical = realScore + (score(rows, scenarioTable) − score(rows, realTable))`. The stored
+   score is authoritative and never recomputed, so the empty scenario reproduces the live scoreboard
+   **by construction**, and a commissioner-adjusted row (whose stored score does not match its raw
+   line) cancels out of the subtraction. Do not "simplify" this into a from-scratch recompute.
+2. _The engine does not reimplement roster windows._ It consumes resolved slots from
+   `managerWeekSubtotal`, which owns the core invariant. One source of truth for "who was rostered
+   when".
+3. _Seeding and bracket rules live in `js/seeding.js` and `js/bracket.js`_, shared by the real
+   bracket and the sandbox, so a hypothetical can never disagree with reality about the rules.
+   `app.js`'s `computePoolPlaySeeding` now delegates to `seedFromPeriodTotals`.
+4. _The sandbox never invents data._ A manager promoted into a round they never played carries
+   their last real roster forward, labelled as an assumption. A round nobody has played does not
+   resolve at all (`roundHasStats`) — otherwise an unplayed semifinal scores 0–0 for everyone and
+   crowns a champion on seed alone.
+
+**Bug 1 — a July game counted in a May week (#411).** A postponed game keeps its **originally
+scheduled** date in the MLB schedule response. Once the makeup is played it reads `Final`, so
+`fetchMLBGames` — which took the date from the wrapper the game arrived in — accepted it and stamped
+it with the rainout date. gamePk 823062, played 2026-07-07, was counted as a 2026-05-05 start,
+inflating one pitcher's PP1 Week 1 line from 6 IP to 13 IP and ~34 points to his manager. Fixed by
+taking `game.officialDate` and dropping games outside the requested range. MLB lists such games under
+**both** dates, so the makeup is still scored correctly in its real week — verified against live data
+before shipping. `gamesFromSchedule` (Live tab) had the same flaw and was fixed too.
+
+**Bug 2 — late stat corrections were never picked up (#413).** `resolveWeeksForCatchUp` only
+re-syncs the current week and the one before it, within the same phase, so a correction landing on a
+week that has since closed is invisible. Three were sitting in the 2026 season: +5, +2 and −0.6.
+`sweepStatCorrections` now walks every completed week on the Wednesday run, syncs each into a clone,
+measures, and adopts only that week's rows. **It refuses movement over `MLB_CORRECTION_MAX_SWING`
+(default 15) and Slack-alerts instead** — a real correction is small; a big swing is a bug, which is
+exactly how bug 1 presented.
+
+**Gotchas.**
+
+- **`/api/mlb/compare` is NOT a scoring prediction.** Its `mlb_total` comes from `enrichBatting`,
+  which scores the whole week **unclipped**, while stored scores are clipped to each player's roster
+  window. A mid-week swap shows there as a large phantom difference a real re-sync would never
+  produce. It sent this investigation down the wrong path twice. Use `POST /api/mlb/resync-dryrun`,
+  which runs the real `performMLBSync` against a deep clone and persists nothing.
+- **`MLB_API_BASE` env var** overrides the MLB API base URL — point it at a local stub to exercise
+  sync paths with no network. Defaults to the real API.
+- `js/hypothetical.js` uses `\0` **escapes** in Map keys. They were once raw NUL bytes, which made
+  git treat the file as binary and hide its diffs.
+
+**Done.** PP1 was re-synced week by week (after #411 was deployed, and only once all five weeks
+dry-ran clean), restoring the daily rows and the batting `so`/`lob`/`abs` that round had been missing.
+Worth confirming once in a new session — PP1 strikeouts should now be non-zero, and the What If
+Scoring Lab should move Pool Play 1 when SO is given a value:
+
+```js
+const sd = (await fetch('/api/seasons').then((x) => x.json()))['2026'];
+console.log(
+  'PP1 SO:',
+  (sd.weekly_batting || []).filter((r) => r.round === 'PP1').reduce((a, r) => a + (r.so || 0), 0)
+);
+```
+
+**Open.** Mobile Roster Lab stacks its two columns, so actual-vs-hypothetical takes a scroll.
+
+**Next tasks (requested, not started).** _Both were built in PR #415 — see the entry below,
+which also corrects task 2's diagnosis. Kept here as written for the record._
+
+1. _Slack prompt only when a round outcome changes._ On the Wednesday run **after a round ends**,
+   post to Slack **only if** corrections would change a round _outcome_ — a pool-play period winner,
+   a wildcard/qualifier, or a playoff matchup winner. Stay silent when only point totals move.
+   Sketch: capture the outcome before and after `sweepStatCorrections` and compare. The rules exist
+   in `js/seeding.js` and `js/bracket.js`, but those are ESM and **`server.js` cannot import them** —
+   check first whether `server.js` already has equivalent seeding logic (playoff odds / Slack
+   scoreboard) before adding a third copy, and if a copy is unavoidable add it to the "must stay in
+   sync" list in CLAUDE.md.
+
+2. _The scoreboard scaling limit._ At ~1,340 batters / 16k weekly rows the scoreboard never finishes
+   rendering — over three minutes, measured. This is **pre-existing**: it reproduces on `7087e0a`,
+   before any What If work, so nothing in this session caused it. Cause: `managerWeekSubtotal` runs
+   256× per render (16 weeks × 8 managers × 2 types), each call scanning every weekly row. Likely fix
+   is to index the weekly rows by `manager|round|week` once per render instead of re-scanning per
+   call. It touches the core scoring path, so it needs a before/after per-manager totals comparison —
+   `POST /api/mlb/resync-dryrun` is not the right tool there (it re-syncs); compare
+   `captureScoreSnapshot` output before and after the refactor instead. Worth measuring the real
+   season's row count first to see how close production actually is to the wall.
+
+---
+
+## 2026-08-05 — The two queued "next tasks", and one of them was chasing the wrong thing
+
+Both came off the task list in the entry directly above. That list sat on an unmerged branch
+(PR #414) while this work happened, so it was invisible from a fresh clone — worth remembering that
+a task queued only in an open PR is a task nobody will find.
+
+### 1. The corrections sweep now posts only when a RESULT changed
+
+**The rule.** A stat correction that moves a manager 2.4 points is not news. One that overturns a
+pool-play period winner, who qualifies (or the seed order the bracket pairs off), or a playoff
+matchup winner, is. `captureRoundOutcomes` snapshots those three things, `diffRoundOutcomes` says
+what moved, and the Wednesday sweep posts only when the list is non-empty. Point totals moving is
+the expected weekly case and stays in the log.
+
+**No third copy of the rules, which was the whole risk.** `server.js` already owns both halves:
+`currentQualification` (the playoff-odds engine) for pool winners + qualifiers, and
+`computePlayoffPairs` (the Slack matchup post) for who played whom and who won. Both re-used
+verbatim, so an alert can never disagree with the bracket it describes. `js/seeding.js` /
+`js/bracket.js` are the client's ESM copies and `server.js` cannot import them — the temptation
+to paste a third implementation is exactly what CLAUDE.md warns about. The only edit to existing
+logic was adding `pp1LeaderByPool` next to `currentQualification`'s existing `pp2LeaderByPool` so
+the message can name the pool.
+
+**A shape change worth knowing about.** `sweepStatCorrections` now adopts accepted weeks into a
+`target` season — the live `sd` when applying, a throwaway deep clone on a dry run — and returns
+`{ results, outcomeChanges }` rather than a bare array (two callers: the 4am cron and
+`POST /api/mlb/apply-corrections`). That is what lets `dryRun` answer "would this change a result?"
+without the live season seeing a row.
+
+**How it was verified, and the reusable recipe.** A stub MLB Stats API behind `MLB_API_BASE`
+(serve `/api/v1/schedule` + `/api/v1/game/:id/boxscore` out of a mutable plan; a "stat correction"
+is then just a plan edit between two sweeps), the staging seed for managers/pools/rosters, and
+`DB_PATH` pointed at a scratch db.json. Per-manager pool totals compared before and after each
+sweep:
+
+| run                                       | applied | outcome_changes                      |
+| ----------------------------------------- | ------- | ------------------------------------ |
+| +10 to a manager 20 pts off the pool lead | 1 week  | `[]` — silent, the case that matters |
+| +30 over three weeks, passing the leader  | 2 weeks | PP1 winner flip + seed-order change  |
+| the same as a dry run                     | 0 (dry) | reported, db.json totals unchanged   |
+
+One extra HR = +10 pts, comfortably under the 15-pt refusal ceiling, so the ceiling still fires
+independently. Gotcha for the fixture: give the managers distinct baselines. With everyone tied,
+the tie-break — not the correction — decides every pool, and the "silent" case cannot be tested.
+
+### 2. The scoreboard scaling limit: the stated cause was wrong
+
+**The claim was `managerWeekSubtotal` x 256 per render, and ~3 minutes at ~1,340 batters / 16k
+weekly rows. It is not.** Measured with `scripts/measure-scoreboard.js` (added in the same PR —
+loads the real `app.js` in a VM sandbox, times the pass, prints per-manager totals, runs against a
+real `db.json` or a synthesized season of any size):
+
+| season                         | rows   | before | after  |
+| ------------------------------ | ------ | ------ | ------ |
+| 1340 bat / 550 pit / 512 swaps | 30,240 | 287 ms | 134 ms |
+| 1340 bat / 700 pit / no swaps  | 32,640 | 292 ms | 112 ms |
+| 2680 bat / 900 pit             | 57,280 | 467 ms | 176 ms |
+
+Under half a second at nearly twice production scale, and **linear** in row count — the curve was
+checked at 8k / 13k / 24k / 45k rows. Swap volume barely moves it either. So the scoring pass
+cannot be a three-minute render, and the next session should not spend more time on it. **The real
+suspect is the payload, not the loop:** `GET /api/seasons` still ships `score_snapshots` and the
+daily rows, re-downloaded on every tab switch (see the open follow-up further up this file, and
+the localStorage-quota incident it came from). Multi-MB JSON over a phone connection, parsed on
+the main thread, is a much better fit for "never finishes". Measure the real `db.json` first:
+`node scripts/measure-scoreboard.js --db db.json --season 2026`.
+
+**The optimization shipped anyway, because it is free.** Weekly rows are now bucketed by
+`round|week` (legacy `PP1P`/`PP2P` folded onto the parent) and by manager, cached in a WeakMap on
+the rows array. 2–2.7x on the pass. It is a lookup change, not a scoring change: bucket order is
+the array's own order, so `weekManagerRows` / `allWeekRows` / `finalRows` / `detailOut` all come
+out identical. Proven three ways — identical per-manager totals and qualifier list across five
+season shapes; identical call-for-call (including `detailOut`) on a fixture built for the
+semantics a synthetic season cannot produce (legacy `PP1P` rounds, null-manager rows, contested
+`manager_scores` splits, duplicate ghost rows, a drop-and-re-add, a swap-in evidenced only by a
+stat row, a pending swap that must be ignored); and a byte-identical rendered scoreboard in a real
+browser against a real server.
+
+**Cache invalidation is the part to be careful with.** Replacing `sd.weekly_batting` gets a fresh
+index for free (WeakMap key), and a `push` changes `length` and rebuilds. The one mutation neither
+catches is a row replaced **in place at the same length** — `editStat` does exactly that, and calls
+`invalidateWeeklyRowIndex`. Any new code that swaps a weekly row in situ must do the same.
+
+**Still open.** Mobile Roster Lab stacks its two columns (from #414's list). And the seasons
+payload trim above, which is now the most likely lead on scoreboard slowness.
+
+## 2026-08-05 — The slow scoreboard was `GET /api/seasons`, not the scoring pass
+
+Follow-on to the entry above, which ruled out `managerWeekSubtotal`. Measuring the **live** app
+found the real cost. Console, logged in, on production:
+
+| measurement       | value                                        |
+| ----------------- | -------------------------------------------- |
+| waiting on server | **784 ms** cold, **753 ms** on a repeat      |
+| downloading       | 26 ms / 18 ms                                |
+| wire              | 320 KB gzipped (2,850 KB raw) — gzip is fine |
+| `JSON.parse`      | 8 ms                                         |
+| weekly rows       | 10,568 — not the 16k the old note claimed    |
+
+**The repeat being just as slow was the whole diagnosis.** `sendJsonRevalidated` derived the ETag
+_from_ the serialized body, so the server parsed the entire `db.json` (daily rows included — far
+more than it sends), serialized ~3 MB, SHA-1'd it and gzipped it, and only then decided to return 304. A 304 cost the same as a 200.
+
+**Why that reads as "never finishes" rather than "slow".** All of it is synchronous, so requests do
+not overlap — they queue behind whichever one holds the event loop. The first measurement of that
+same request was **3,598 ms**, roughly four requests' worth of pile-up during page load. Add other
+managers, or the 4am sync holding the loop, and the tab just sits there.
+
+**Fix (#416).** Build the payload once and hold it, keyed on a fingerprint of `db.json`:
+`dbWriteCounter` (bumped in `writeDB`, which every in-process write funnels through) plus the
+file's `mtime`+`size` (for anything that replaces the file from outside — the **startup Upstash
+restore writes `DB_FILE` directly**, bypassing `writeDB`; so does a manual repair). One `statSync`
+per request instead of a multi-megabyte read. `sendJsonRevalidated` split into `buildJsonPayload` +
+`sendPreparedJson`; gzip is now lazy and retained.
+
+Measured old-vs-new on a 10,240-row / 10.6 MB fixture: `GET` 283 ms → 83 ms, **304 410 ms → 2 ms**,
+payload byte-identical. Both invalidation paths tested explicitly (a swap through the API; a
+`db.json` edited underneath the process), plus two reads with no write between them returning the
+same ETag — otherwise a "cache" that silently rebuilds every time would have passed.
+
+**Not yet reproduced: the three-minute figure itself.** It came from the same note whose diagnosis
+was already wrong, so treat the number as unverified. The queueing explanation fits, but it is an
+inference.
+
+### NEXT TASK — cache the parsed `db.json` in `readDB()`
+
+`readDB()` still does a synchronous read + `JSON.parse` of the whole ~10 MB `db.json` on **every
+request to every endpoint** — 112 call sites. #416 only stopped `GET /api/seasons` paying it.
+Caching it would speed up everything, but the blast radius is much wider than the payload cache.
+
+Steps, in order:
+
+1. **Confirm the payload cache actually landed in production first.** Re-run the resource-timing
+   console block (`performance.getEntriesByName(origin + '/api/seasons')`, reporting
+   `responseStart - requestStart`). Expect waiting-on-server to collapse to single-digit ms. If the
+   scoreboard still stalls after that, stop and re-diagnose — do not build this on an assumption.
+2. **Measure `readDB()` in isolation** before changing it: log timing around the read+parse for a
+   few requests on production data. It should be ~200–400 ms at 10 MB. If it is not the remaining
+   hot spot, this task is not worth its risk.
+3. **The hazard that makes this different from #416.** 83 of the call sites do
+   `const db = readDB()` and then **mutate the returned object** before calling `writeDB(db)`. A
+   naive cache that hands every caller the _same_ object turns those into shared mutable state: a
+   half-finished mutation in one handler becomes visible to the next request, and an abandoned one
+   (a validation failure that returns early without writing) silently poisons the cache. Options,
+   roughly in increasing order of safety: return a structured clone per call (cheaper than a
+   re-parse, but not free); split into `readDBForWrite()` (uncached, as today) vs `readDBCached()`
+   (shared, read-only) and migrate read-only endpoints one at a time; or freeze the cached object
+   so a mutation throws loudly instead of corrupting. **Prefer the split** — it keeps every write
+   path on today's exact semantics, so the risk is confined to endpoints that only read.
+4. **Invalidate identically to #416** — reuse `dbFingerprint()` rather than inventing a second
+   scheme. The Upstash-restore-writes-the-file-directly case is already handled there.
+5. **Vet with per-manager totals**, since read paths feed scoring:
+   `node scripts/measure-scoreboard.js --db db.json --season 2026 --json before.json`, then the
+   same after, and diff. Byte-identical or it is not this change.
+
+**Also still open:** mobile Roster Lab stacks its two columns (from the #414 list).
+
+## 2026-08-05 — Redundancy audit: one real boot-time bug, one drift, and a scope correction
+
+A QA sweep for duplicated code, dead code and unnecessary guards. Baseline was healthier than
+expected — 331 tests green, lint and format clean, and **zero orphan top-level functions** in
+either monolith (289 defs in `app.js`, 241 in `server.js`, every one reachable). The problems were
+duplication and one hot spot. Four PRs: #419, #420, #421, #423.
+
+### The one that mattered: `backfillWmmcQS` ran on every boot (#419)
+
+It was the **only one of the six startup migrations without a db flag**. Every restart — every
+Render deploy, every spin-down wake — it ran over every season, including completed ones, and boot
+then `writeDB`'d unconditionally.
+
+The cost is the same O(rows × daily) shape already fixed for the scoreboard in #417:
+`recomputeAllWeeklyScores` calls `computeEffectiveBattingScore` per weekly row, and each of those
+`.filter()`s the whole daily array. Benchmarked at this league's row counts (10,568 weekly rows):
+
+| weekly rows | daily rows | time     |
+| ----------- | ---------- | -------- |
+| 10,500      | 40,000     | 3,530 ms |
+| 10,500      | 80,000     | 6,529 ms |
+
+Batting half only; pitching repeats it. **~7–13s of synchronous, event-loop-blocking work per
+boot.** Worth holding next to the still-unreproduced "three-minute scoreboard" figure — the
+queueing story fits, though this is boot-time, not per-request, so it is at most a partial answer.
+
+**The proof it was safe to stop is worth reusing.** Boot the OLD code twice against the same
+scratch db: the second boot printed no `[WMMC-QS]` correction line at all. It was already
+correcting nothing — it just paid the full recompute to discover that. Then all four combinations
+(old×2, new×2) produced byte-identical per-manager totals.
+
+**What deliberately stayed on every boot:** `dedupeWeeklyRows`. It is O(n) and still earns its
+place — the Sunday auto-advance tests for an existing row with `b.manager === m.name`, while a
+duplicate is any second row for the same `round|week|player`, so a row on file under a different
+manager (or `null`) can still produce one. **Latent bug, not fixed here:** that existence check
+should probably be manager-agnostic. Left alone because it changes roster behavior and did not
+belong in a cleanup PR.
+
+### `currentQualification` had already drifted (#420)
+
+`server.js` gained `pp1LeaderByPool` in #415; the canonical, unit-tested `js/playoffOdds.js` copy
+never got it. Exactly the hazard CLAUDE.md warns about — **the tests were certifying a copy that
+was not the one running**, so parity read green while it was not.
+
+Every other documented pair was genuinely in sync (checked by normalizing and comparing bodies:
+`SCORING`, `SEASON_SCHEDULE`, `detectScoreSwings`, `checkSwapLimit`, and the whole odds engine).
+Two undocumented duplicates are now on the CLAUDE.md list: `ROUND_LABELS`, and
+`SEASON_SCHEDULE`'s one _permitted_ difference (client entries carry `label`, the server's do not)
+so a future parity check does not "fix" it.
+
+### Duplication deleted (#421)
+
+`escapeHtml` ≡ `esc` (33 sites). `HOF_ROUND_LABELS` ≡ `ROUND_LABELS_FOR_ROAST`, character-identical
+1,400 lines apart → `BRACKET_STAGE_LABELS`. The bracket grid's nested `matchupHTML` ≡
+`renderMatchupResultCard`. And **`periodStartForRound` was a third implementation** beside
+`js/eligibility.js` and `server.js` — the period scoping the core invariant names by function.
+
+Gotcha for anyone doing this again: `app.js` is a **classic script**, so a top-level
+`function periodStartForRound` _assigns to_ `window.periodStartForRound` and clobbers the module's
+export. The local adapter has to be renamed (`periodStartForSeason`), not kept.
+
+Also stripped 13 dead entries from the `js/index.js` window bridge. They stay exported from their
+modules — tests need them, and `resolveBracket` is imported by `js/hypothetical.js` — only the
+bridge drops them. `eslint.config.js`'s `projectGlobals` caught the newly-bridged name immediately;
+that list is doing real work, keep it accurate.
+
+### The scope correction, which is the lesson
+
+I opened by estimating **~330 lines of retirable one-shot migration code**. That was wrong, and
+this file already said why. The 2026-06 cleanup that deleted `repairMissingSwapRecords`,
+`repairMissingRosterChains` and `repairBentivegnaPitcherRoster` (−524 lines) carries an explicit
+**"Kept"** list right beside it. The operative rule is:
+
+> **delete hardcoded, incident-specific one-shots; keep generic repairs and structural migrations.**
+
+Applying that honestly, only **two** qualified (#423, −140 lines): `purgeGhostHerreraFromJoey`
+(hardcoded to one manager and one player; merged to prod 2026-06-07 with a verified settled total)
+and `purgeBoundaryAutoAdvance` (repairs damage from a boundary auto-advance `isPeriodBoundaryWeek`
+now structurally prevents). `repairCarryForwardRosters` — the largest at 139 lines, and the one
+that inflated my estimate most — **is not a one-shot at all**: no flag, runs every boot by design.
+
+Check this file's "Kept" list before proposing to retire anything in that family.
+
+### Reusable: verifying a boot-path change is score-neutral
+
+`scripts/measure-scoreboard.js` needs a db with **daily** rows to be meaningful — the staging seed
+ships weekly rows only, which makes `computeEffectiveBattingScore` return `null` and the whole
+recompute a no-op, so a broken change would pass. Synthesize daily rows by splitting each weekly
+row's counting stats across the week's dates first.
+
+Then boot the real server with `DB_PATH` at a scratch file, `MLB_API_BASE` at a dead port
+(bootstrap fails fast and logs "continuing"), and a free `PORT`. **A boot rewrites
+`managers_seed.json`** via the googleEmail backfill — `git checkout --` it before committing.
+
+### Still open
+
+- The `readDB()` cache (the task queued above this entry) — unchanged by any of this.
+- Boot does **13** `readDB()` calls, each a full parse of the whole db.
+- The Sunday auto-advance's manager-scoped duplicate check, noted above.
+- Mobile Roster Lab stacks its two columns (from the #414 list).
+
+
 **Follow-up: welcome post moved to an hour before first pitch (2026-07-29).** Commissioner
 confirmed staging has no `SLACK_SCOREBOARD_WEBHOOK_URL`, so the duplicate blank post in the
 QF Week 2 screenshot did NOT come from staging — source still unidentified (most likely a

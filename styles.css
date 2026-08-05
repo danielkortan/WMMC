@@ -701,6 +701,25 @@ main {
 
 .matchup-team .team-name {
   flex: 1;
+  min-width: 0;
+}
+
+/* Batting/pitching split beneath a manager's name on the scoreboard's playoff matchup cards.
+   Kept at normal weight so it stays readable inside a bolded winner row. */
+.matchup-team .matchup-team-sub {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-light);
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.1rem;
+}
+
+/* A round still in progress has no winner yet — highlight whoever is currently ahead, in a
+   different colour from the settled `.winner` row so the two never read as the same claim. */
+.matchup-team.matchup-leader {
+  background: rgba(16, 185, 129, 0.1);
+  font-weight: 700;
 }
 
 .matchup-team .team-score {
@@ -2410,96 +2429,168 @@ html.wmmc-has-session #login-screen {
 }
 
 /* ============================================================ */
-/* My Roster — season scoring flow                              */
-/* Pool Play panel (total + PP1/PP2 nested) connecting down     */
-/* into the QF -> SF -> Finals track. Built by                  */
-/* renderRosterScoreFlow in app.js.                             */
+/* My Roster — page layout                                      */
+/* Tabs + tab content on the left, a narrow score rail on the   */
+/* right (manager picker, then the per-round score blocks).      */
+/* Markup lives in index.html #roster-panel.                     */
 /* ============================================================ */
 
-.score-flow {
-  margin-bottom: 1.25rem;
+.roster-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* Stacked: the rail (picker + scores) reads first, above the tabs. */
+.roster-rail {
+  order: -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.roster-main {
+  min-width: 0;
+}
+
+/* Wide enough for the two columns without squeezing the tab tables. `main` is
+   widened to match (see the max-width rule further down) so the left column keeps
+   roughly the width it had when the score blocks ran across the top. */
+@media (min-width: 1100px) {
+  .roster-layout {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .roster-main {
+    flex: 1 1 auto;
+  }
+
+  .roster-rail {
+    order: 0;
+    flex: 0 0 300px;
+    width: 300px;
+    /* Scores stay in view while the roster tables scroll. Cleared below the nav bar. */
+    position: sticky;
+    top: 4rem;
+  }
+}
+
+/* Rail blocks are spaced by the column gap, and a narrow column can't afford the
+   full card padding. */
+.roster-rail > .card {
+  margin-bottom: 0;
+  padding: 0.75rem 0.85rem;
+}
+
+/* The manager picker is a rail block now, so its label and dropdown stack. */
+@media (min-width: 1100px) {
+  .roster-manager-bar-inner {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .roster-manager-bar-inner h2 {
+    font-size: 1rem;
+    white-space: normal;
+    text-align: left;
+  }
+
+  .roster-manager-bar-inner .custom-dd,
+  .roster-manager-bar-inner .form-select {
+    max-width: none;
+  }
+}
+
+/* ============================================================ */
+/* My Roster — season score rail                                */
+/* Pool Play block (total + PP1/PP2) over the QF/SF/Finals       */
+/* score rows. Built by renderRosterScoreFlow in app.js.        */
+/* ============================================================ */
+
+.score-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 .sf-eyebrow {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.07em;
 }
 
 .sf-sep {
-  margin: 0 0.4em;
+  margin: 0 0.35em;
   opacity: 0.5;
 }
 
-/* ---- Pool Play panel ---- */
+/* ---- Pool Play block ---- */
 
 .sf-pool {
   position: relative;
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 1rem 1.15rem 1.1rem;
+  border-left: 3px solid var(--primary);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem 0.75rem;
   box-shadow: var(--shadow);
-  overflow: hidden;
-}
-
-/* Navy spine marking pool play as the season's trunk. */
-.sf-pool::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 4px;
-  background: var(--primary);
 }
 
 .sf-pool-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.5rem;
   flex-wrap: wrap;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.2rem;
 }
 
 .sf-hero {
   display: flex;
   align-items: baseline;
-  gap: 0.75rem;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
 
 .sf-hero-value {
-  font-size: 2.4rem;
+  font-size: 1.9rem;
   font-weight: 800;
-  line-height: 1.05;
+  line-height: 1.1;
   letter-spacing: -0.02em;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
 .sf-hero-split {
-  font-size: 0.82rem;
+  font-size: 0.74rem;
   color: var(--text-light);
   font-variant-numeric: tabular-nums;
 }
 
-/* PP1 / PP2 read as the two halves the hero total is made of. */
+/* PP1 / PP2 read as the two halves the total is made of — one compact row each,
+   label left and score right, with the Bat/Pit split tucked underneath. */
 .sf-subs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
-  margin-top: 0.85rem;
-  padding-top: 0.85rem;
+  gap: 0.3rem;
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
   border-top: 1px dashed var(--border);
 }
 
 .sf-sub {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  column-gap: 0.5rem;
   background: rgba(0, 45, 98, 0.04);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  padding: 0.3rem 0.5rem;
 }
 
 .sf-sub-empty {
@@ -2509,25 +2600,46 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-sub-label {
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.06em;
 }
 
 .sf-sub-value {
-  font-size: 1.3rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: var(--text);
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .sf-sub-split {
-  font-size: 0.72rem;
+  grid-column: 1 / -1;
+  font-size: 0.68rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.sf-sub-split:empty {
+  display: none;
+}
+
+/* Once the bracket is underway pool play is settled history: shrink the total and
+   drop the per-half Bat/Pit lines so the live round leads the rail instead. */
+.sf-pool-compact .sf-hero-value {
+  font-size: 1.45rem;
+}
+
+.sf-pool-compact .sf-sub-split {
+  display: none;
+}
+
+.sf-pool-compact .sf-subs {
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
 }
 
 /* ---- Qualification chip ---- */
@@ -2535,10 +2647,10 @@ html.wmmc-has-session #login-screen {
 .sf-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.3rem 0.65rem;
+  gap: 0.35rem;
+  padding: 0.22rem 0.5rem;
   border-radius: 999px;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   font-weight: 700;
   border: 1px solid transparent;
   line-height: 1.25;
@@ -2550,7 +2662,7 @@ html.wmmc-has-session #login-screen {
 
 .sf-chip-note {
   display: block;
-  font-size: 0.68rem;
+  font-size: 0.64rem;
   font-weight: 600;
   opacity: 0.75;
   letter-spacing: 0.01em;
@@ -2580,79 +2692,68 @@ html.wmmc-has-session #login-screen {
   color: var(--text-muted);
 }
 
-/* ---- Connector from pool play into the bracket ---- */
-
-.sf-bridge {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  height: 2.6rem;
-}
-
-.sf-bridge::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 2px;
-  transform: translateX(-50%);
-  background: linear-gradient(to bottom, var(--border), var(--border));
-}
-
-.sf-bridge-pill {
-  position: relative;
-  background: var(--bg);
-  border: 1px solid var(--border);
+/* Eliminated in pool play — the rail ends here. */
+.sf-season-over {
+  text-align: center;
+  border: 1px dashed rgba(196, 30, 58, 0.35);
   border-radius: 999px;
-  padding: 0.2rem 0.75rem;
+  padding: 0.3rem 0.75rem;
   font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.09em;
-  color: var(--text-muted);
-}
-
-/* Terminal connector — the line stops at the pill instead of running past it. */
-.sf-bridge-end::before {
-  bottom: 50%;
-}
-
-.sf-bridge-out .sf-bridge-pill {
-  border-color: rgba(196, 30, 58, 0.35);
   color: var(--danger);
 }
 
-/* ---- Playoff round track ---- */
+/* ---- Playoff round rows ---- */
 
-.sf-rounds {
+.sf-rounds-label {
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--text-muted);
+  margin: 0.15rem 0 0.4rem;
+}
+
+.sf-rounds-list {
   display: flex;
-  align-items: stretch;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.45rem;
 }
 
 .sf-round {
-  flex: 1 1 0;
   min-width: 0;
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.7rem 0.85rem 0.8rem;
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem 0.55rem;
   box-shadow: var(--shadow);
-  border-top: 3px solid var(--border);
 }
 
+/* Wraps rather than letting the result flag spill out of a narrow round card —
+   the cards get tightest in the side-by-side band between 701px and the
+   two-column breakpoint. */
 .sf-round-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.4rem;
-  margin-bottom: 0.15rem;
+  gap: 0.25rem 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.1rem;
+}
+
+/* Score and Bat/Pit share one line — the whole point of the rail is a quick read. */
+.sf-round-body {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .sf-round-value {
-  font-size: 1.5rem;
+  font-size: 1.3rem;
   font-weight: 800;
   line-height: 1.15;
   color: var(--text);
@@ -2661,16 +2762,14 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-round-split {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .sf-round-vs {
-  margin-top: 0.45rem;
-  padding-top: 0.4rem;
-  border-top: 1px dashed var(--border);
-  font-size: 0.74rem;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
   color: var(--text-light);
   white-space: nowrap;
   overflow: hidden;
@@ -2688,37 +2787,21 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-flag {
-  font-size: 0.62rem;
+  font-size: 0.6rem;
   font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
-  padding: 0.12rem 0.4rem;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.35rem;
   border-radius: 5px;
   background: var(--border);
   color: var(--text-light);
   white-space: nowrap;
 }
 
-.sf-arrow {
-  flex: 0 0 auto;
-  align-self: center;
-  width: 1.1rem;
-  color: var(--text-muted);
-  text-align: center;
-  font-size: 1rem;
-  line-height: 1;
-}
-
-.sf-arrow::before {
-  content: '\203A'; /* single right angle quote — a light chevron */
-  font-size: 1.4rem;
-  opacity: 0.6;
-}
-
 /* Round states */
 
 .sf-state-won {
-  border-top-color: var(--success);
+  border-left-color: var(--success);
 }
 
 .sf-state-won .sf-flag {
@@ -2727,7 +2810,7 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-state-champion {
-  border-top-color: var(--rank1);
+  border-left-color: var(--rank1);
   background: var(--winner);
 }
 
@@ -2737,7 +2820,7 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-state-runner-up {
-  border-top-color: var(--rank2);
+  border-left-color: var(--rank2);
 }
 
 .sf-state-runner-up .sf-flag {
@@ -2746,7 +2829,7 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-state-third {
-  border-top-color: var(--rank3);
+  border-left-color: var(--rank3);
 }
 
 .sf-state-third .sf-flag {
@@ -2755,7 +2838,7 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-state-lost {
-  border-top-color: var(--danger);
+  border-left-color: var(--danger);
 }
 
 .sf-state-lost .sf-flag {
@@ -2763,8 +2846,10 @@ html.wmmc-has-session #login-screen {
   color: var(--danger);
 }
 
+/* The round being played is the one worth spotting first. */
 .sf-state-live {
-  border-top-color: var(--primary);
+  border-left-color: var(--primary);
+  border-left-width: 4px;
 }
 
 .sf-state-live .sf-flag {
@@ -2780,7 +2865,6 @@ html.wmmc-has-session #login-screen {
   box-shadow: none;
   background: transparent;
   border-style: dashed;
-  border-top-style: dashed;
 }
 
 .sf-state-out {
@@ -2804,7 +2888,7 @@ html.wmmc-has-session #login-screen {
 }
 
 .sf-round-empty .sf-round-value {
-  font-size: 1.2rem;
+  font-size: 1.1rem;
   line-height: 1;
 }
 
@@ -2814,6 +2898,33 @@ html.theme-dark .sf-sub {
 
 html.theme-dark .sf-state-champion .sf-flag {
   color: #2b2200;
+}
+
+/* Stacked (below the two-column breakpoint) the rail is full width, so the pool
+   block and the round rows sit side by side instead of running down the page. */
+@media (min-width: 701px) and (max-width: 1099px) {
+  .score-rail {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .sf-pool {
+    flex: 1 1 240px;
+  }
+
+  .sf-rounds {
+    flex: 2 1 420px;
+  }
+
+  .sf-rounds-list {
+    flex-direction: row;
+    align-items: stretch;
+  }
+
+  .sf-round {
+    flex: 1 1 0;
+  }
 }
 
 /* ============================================================ */
@@ -3788,18 +3899,6 @@ html.theme-dark .sf-state-champion .sf-flag {
 /* ============================================================ */
 
 @media (max-width: 768px) {
-  /* Track wraps to a vertical stack; the chevrons turn to point down. */
-  .sf-rounds {
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .sf-arrow {
-    width: auto;
-    height: 0.9rem;
-    transform: rotate(90deg);
-  }
-
   .period-players-groups {
     grid-template-columns: 1fr;
   }
@@ -4575,6 +4674,17 @@ body::before {
   white-space: nowrap;
 }
 
+/* "B: 321  P: 83.75" — the B/P labels sit a shade lighter than their numbers so
+   the points read first. The second label gets extra room so the two pairs
+   don't run together (each label is nbsp-joined to its own number). */
+.bracket-score-detail-label {
+  opacity: 0.7;
+}
+
+.bracket-score-detail-label:not(:first-child) {
+  margin-left: 0.25rem;
+}
+
 /* ---- Live tab: playoff matchup (bracket) view ----
    During QF/SF/Finals the Live tab's Running Standings table becomes these
    head-to-head matchup cards, visually matching the Playoff Bracket card. */
@@ -4905,6 +5015,12 @@ body::before {
   min-width: 100%;
 }
 
+/* Round-qualified week label ("QF Week 1") — keep it on one line; the wrapper
+   scrolls horizontally when the table outgrows the card. */
+.pqv-week {
+  white-space: nowrap;
+}
+
 .pqv-totals td {
   background: var(--bg-alt, #f8f9fa);
   border-top: 2px solid var(--border) !important;
@@ -4966,7 +5082,10 @@ body::before {
   text-align: left;
 }
 
-============================================================ */ #hall-of-fame-content .data-table thead th[onclick] {
+/* ============================================================
+   Hall of Fame
+   ============================================================ */
+#hall-of-fame-content .data-table thead th[onclick] {
   user-select: none;
   color: var(--accent);
 }
@@ -4991,6 +5110,62 @@ body::before {
 .hof-records-table th:nth-child(2),
 .hof-records-table td:nth-child(2) {
   min-width: 7rem;
+}
+
+/* Season in progress — the live row sitting above the finished seasons */
+.hof-live-row td {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.hof-live-badge {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* Still alive: the round they're playing right now, not where they finished. */
+.hof-status-live {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.hof-status-live::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.hof-status-out {
+  color: var(--text-light);
+}
+
+.hof-seed {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 @media (max-width: 768px) {
@@ -5491,6 +5666,18 @@ body::before {
     min-width: 0;
   }
 }
+
+/* Two tabs need more than the 1200px `main` cap. Live puts two full boxscores side
+   by side, so the cap left wide desktops with empty gutters while the tables scrolled
+   inside their own column. My Roster gained a 300px score rail beside its tab content,
+   and the extra width is what keeps the tab content itself near the width it had
+   before the rail existed. Give those two tabs (and only those) the extra room. */
+@media (min-width: 1280px) {
+  main:has(> #live.active),
+  main:has(> #my-roster.active) {
+    max-width: 1560px;
+  }
+}
 .live-box-team-header {
   font-weight: 600;
   font-size: 0.95rem;
@@ -5507,10 +5694,25 @@ body::before {
   letter-spacing: 0.05em;
   margin: 0.4rem 0 0.2rem;
 }
-.live-box-table th,
-.live-box-table td {
-  padding: 0.25rem 0.4rem;
-  font-size: 0.82rem;
+/* These twelve-column boxscores sit two-up, so every pixel of cell padding is
+   multiplied by 24. The selectors below are deliberately `thead th`/`tbody td`
+   rather than plain `th`/`td`: the generic `.data-table thead th` (0.75rem
+   side padding) out-specifies a bare `.live-box-table th`, so the shorter
+   selector silently lost and the tables overflowed their column. */
+.live-box-table thead th,
+.live-box-table tbody td {
+  padding: 0.25rem 0.35rem;
+  font-size: 0.8rem;
+}
+.live-box-table thead th {
+  letter-spacing: 0;
+}
+/* The name column is the only one that can give: let it wrap so the numeric
+   columns — which stay nowrap and tabular — are never pushed out of view. */
+.live-box-table thead th:first-child,
+.live-box-table tbody td:first-child {
+  white-space: normal;
+  text-align: left;
 }
 .live-box-rostered {
   background: rgba(34, 197, 94, 0.1);
@@ -5691,6 +5893,93 @@ body::before {
 }
 .roast-context p:last-child {
   margin-bottom: 0;
+}
+/* Round section heading inside the roast context ("Pool Play", "Quarterfinals", "Day by
+   day"). Inline rather than its own block so a section stays one paragraph, with the label
+   reading as a lead-in to the sentence that follows it. */
+.roast-context-label {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #ff8c5a;
+  margin-right: 0.5rem;
+}
+.roast-context p + p {
+  margin-top: 0.7rem;
+}
+/* Per-round summary tables (scoring days, top performers, bottom performers). Three across
+   on desktop, wrapping to one column on narrow screens — auto-fit rather than a fixed
+   3-column grid so a round with only two tables still fills the row. */
+.roast-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.9rem;
+}
+.roast-table {
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 105, 53, 0.18);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem 0.5rem;
+  min-width: 0;
+  overflow-x: auto;
+}
+.roast-table-title {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ff8c5a;
+  margin-bottom: 0.3rem;
+}
+.roast-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+  color: #d8b8a5;
+}
+.roast-table th {
+  text-align: right;
+  font-weight: 600;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a8887a;
+  padding: 0.1rem 0.3rem 0.2rem;
+  border-bottom: 1px solid rgba(255, 105, 53, 0.18);
+  white-space: nowrap;
+}
+.roast-table td {
+  text-align: right;
+  padding: 0.16rem 0.3rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* First column is the day or the player — left-aligned, and the only cell allowed to be
+   the one that shrinks when the table is tight. */
+.roast-table th:first-child,
+.roast-table .roast-table-name {
+  text-align: left;
+  white-space: normal;
+  width: 99%;
+}
+.roast-table tbody tr + tr td {
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+/* Rows on the wrong side of the ledger — the worst days, the bottom performers. */
+.roast-table-low td {
+  color: #b98d7d;
+}
+.roast-banner.roast-champion .roast-context-label {
+  color: #e5c158;
+}
+.roast-banner.roast-runner-up .roast-context-label {
+  color: #cdd3da;
+}
+.roast-banner.roast-third .roast-context-label {
+  color: #dd9a5c;
 }
 
 /* Finals-round podium roasts (champion, runner-up, 3rd-place-game winner) — same shape as
@@ -5922,4 +6211,589 @@ body::before {
   .accolade-detail-table thead th {
     font-size: 0.55rem;
   }
+}
+
+/* ===================================================================
+   Hypothetical Zone ("What If")
+   A sandbox tab. The striped banner and the amber accent exist to make
+   these numbers unmistakable at a glance — nothing in this tab is
+   league data, and it must never be screenshotted as if it were.
+   =================================================================== */
+
+.hypo-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #d9a441;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(217, 164, 65, 0.16),
+    rgba(217, 164, 65, 0.16) 10px,
+    rgba(217, 164, 65, 0.06) 10px,
+    rgba(217, 164, 65, 0.06) 20px
+  );
+  color: var(--text);
+}
+
+.hypo-banner strong {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+}
+
+.hypo-banner span {
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-card {
+  border-left: 3px solid #d9a441;
+}
+
+.hypo-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.hypo-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hypo-scoring-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.25rem;
+  margin-top: 0.75rem;
+}
+
+.hypo-scoring-grid h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-light);
+}
+
+.hypo-scoring-table .hypo-stat-key {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hypo-input {
+  width: 5.5rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.hypo-input:focus {
+  outline: 2px solid #d9a441;
+  outline-offset: -1px;
+}
+
+.hypo-row-changed {
+  background: rgba(217, 164, 65, 0.1);
+}
+
+.hypo-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(217, 164, 65, 0.22);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hypo-new-tag {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  border: 1px dashed var(--text-muted);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.hypo-warning {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(217, 164, 65, 0.14);
+  font-size: 0.78rem;
+  color: var(--text-light);
+}
+
+.hypo-standings-row {
+  cursor: pointer;
+}
+
+.hypo-standings-row:hover {
+  background: rgba(217, 164, 65, 0.08);
+}
+
+.hypo-rank {
+  width: 2rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hypo-strong {
+  font-weight: 700;
+}
+
+.hypo-up {
+  color: var(--success);
+}
+
+.hypo-down {
+  color: var(--danger);
+}
+
+.hypo-flat {
+  color: var(--text-muted);
+}
+
+.hypo-detail-row > td {
+  padding: 0 0.5rem 0.6rem;
+  background: rgba(217, 164, 65, 0.05);
+}
+
+/* ---- Roster Lab: actual vs hypothetical, side by side ---- */
+
+.hypo-lab-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.hypo-lab-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-lab-controls select {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.hypo-round-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.hypo-round-tab {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text-light);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hypo-round-tab:hover {
+  border-color: #d9a441;
+}
+
+.hypo-round-tab.active {
+  background: #d9a441;
+  border-color: #d9a441;
+  color: #1c1c2e;
+}
+
+/* A round this manager never reached — still selectable, but visibly not a real roster. */
+.hypo-round-tab.hypo-round-unplayed {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.hypo-roster-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 700px) {
+  .hypo-roster-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hypo-roster-col {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem 0.5rem;
+  background: var(--card-bg);
+}
+
+/* The hypothetical column is the one being edited — give it the sandbox accent. */
+.hypo-roster-col + .hypo-roster-col {
+  border-color: #d9a441;
+  background: rgba(217, 164, 65, 0.05);
+}
+
+.hypo-roster-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.hypo-roster-head h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.hypo-roster-section h4 {
+  margin: 0.5rem 0 0.2rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.hypo-roster-table td {
+  padding: 0.25rem 0.3rem;
+  font-size: 0.82rem;
+}
+
+/* Benched: really rostered, but not in the hypothetical. Kept visible so the comparison is
+   complete — a player silently vanishing from the actual column would hide the trade-off. */
+.hypo-roster-muted td {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.hypo-roster-added td {
+  background: rgba(217, 164, 65, 0.12);
+}
+
+.hypo-roster-action {
+  width: 1.6rem;
+  text-align: right;
+}
+
+.hypo-x {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.15rem;
+}
+
+.hypo-x:hover {
+  color: var(--danger);
+}
+
+.hypo-roster-empty {
+  margin: 0.75rem 0;
+}
+
+.hypo-roster-total {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-roster-summary {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(217, 164, 65, 0.12);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.hypo-add-row label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-add-row input {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 12rem;
+}
+
+.hypo-playoffs {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(45, 124, 45, 0.12);
+  font-size: 0.82rem;
+}
+
+.hypo-playoffs-changed {
+  background: rgba(217, 164, 65, 0.18);
+  font-weight: 600;
+}
+
+/* ---- Player Explorer ---- */
+
+.hypo-explorer-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.5rem 0 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.hypo-explorer-head h3 {
+  margin: 0 0 0.15rem;
+  font-size: 1rem;
+}
+
+.hypo-explorer-owners {
+  font-size: 0.8rem;
+  color: var(--text-light);
+}
+
+.hypo-explorer-totals {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.hypo-explorer-totals div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.hypo-explorer-totals span {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.hypo-explorer-totals strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hypo-explorer-table td,
+.hypo-explorer-table th {
+  white-space: nowrap;
+}
+
+.hypo-log-title {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-light);
+}
+
+#hypo-explorer-search {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 14rem;
+}
+
+.hypo-try {
+  white-space: nowrap;
+}
+
+/* Round scope chips above the What If standings. */
+.hypo-scope-tabs {
+  margin: 0.5rem 0 0.25rem;
+}
+
+/* ---- Playoff Picture: pools, seeds, bracket ---- */
+
+.hypo-rule {
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid #d9a441;
+  background: rgba(217, 164, 65, 0.07);
+  border-radius: 0 6px 6px 0;
+}
+
+.hypo-pool-title {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-light);
+}
+
+.hypo-pool-table td {
+  white-space: nowrap;
+}
+
+/* A manager holding a playoff spot under this scenario. */
+.hypo-qualified td {
+  background: rgba(45, 124, 45, 0.07);
+}
+
+.hypo-badge-win {
+  background: rgba(45, 124, 45, 0.22);
+}
+
+.hypo-matchups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.6rem;
+}
+
+.hypo-matchup {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  background: var(--card-bg);
+}
+
+/* Undecided: one side has no roster for this round, so no winner is claimed. */
+.hypo-matchup-open {
+  border-style: dashed;
+  background: rgba(217, 164, 65, 0.05);
+}
+
+.hypo-matchup-label {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.hypo-matchup-side {
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+}
+
+.hypo-matchup-winner {
+  font-weight: 700;
+  color: var(--success);
+}
+
+.hypo-seed-chip {
+  display: inline-block;
+  min-width: 1.15rem;
+  padding: 0 0.2rem;
+  border-radius: 4px;
+  background: var(--border);
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* ---- Roster Lab: click-to-swap ---- */
+
+.hypo-swap-name {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--primary);
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px dashed var(--text-muted);
+}
+
+.hypo-swap-name:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.hypo-roster-swapping td {
+  background: rgba(217, 164, 65, 0.16);
+}
+
+.hypo-swap-row td {
+  background: rgba(217, 164, 65, 0.09);
+  padding: 0.45rem 0.4rem;
+}
+
+.hypo-swap-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  margin-right: 0.5rem;
+}
+
+.hypo-swap-row input {
+  padding: 0.22rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 11rem;
+}
+
+/* Gained / lost a pool crown or a wild card under the scenario. */
+.hypo-badge-gain {
+  outline: 2px solid var(--success);
+  outline-offset: 1px;
+}
+
+.hypo-badge-lost {
+  background: rgba(196, 30, 58, 0.16);
+  color: var(--danger);
+  text-decoration: line-through;
 }

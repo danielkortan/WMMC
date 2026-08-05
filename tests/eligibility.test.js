@@ -7,6 +7,8 @@ import {
   rosterStatusAsOf,
   periodWeekKeys,
   rosterStatusForManager,
+  managerWeekWindow,
+  mergeWeekWindows,
 } from '../js/eligibility.js';
 
 // A compact schedule spanning a period boundary (PP1 → PP2), with a gap, to exercise the rules.
@@ -312,5 +314,71 @@ describe('rosterStatusForManager', () => {
 
   it('handles a manager with no roster data at all', () => {
     assert.equal(rosterStatusForManager('Skubal', { periodStart: sfStart, asOf: today, weekKeys: sfWeeks }), 'none');
+  });
+});
+
+// A player can change hands INSIDE a week (a trade: dropped by A on the 28th — his last rostered,
+// still-scoring day — and added by B on the 29th). A week's scoring window is stored once per
+// player, not once per owner, so the two claims have to merge for storage and split again per
+// manager for scoring. Getting that wrong is what erased a manager's drop-day points in QF Week 2.
+const week = { weekStart: '2026-07-27', weekEnd: '2026-08-02' };
+
+describe('managerWeekWindow', () => {
+  it('returns null when the manager held the player for the whole week', () => {
+    assert.equal(managerWeekWindow(null, week), null);
+    assert.equal(managerWeekWindow({}, week), null);
+    assert.equal(managerWeekWindow({ add_date: '2026-07-27' }, week), null); // added on day 1
+    assert.equal(managerWeekWindow({ drop_date: '2026-08-02' }, week), null); // dropped on the last day
+  });
+
+  it('bounds a mid-week drop at the drop date (inclusive) and leaves the start open', () => {
+    assert.deepEqual(managerWeekWindow({ drop_date: '2026-07-28' }, week), { start: null, end: '2026-07-28' });
+  });
+
+  it('bounds a mid-week add at the add date (inclusive) and leaves the end open', () => {
+    assert.deepEqual(managerWeekWindow({ add_date: '2026-07-29' }, week), { start: '2026-07-29', end: null });
+  });
+
+  it('bounds both sides for a player added and dropped inside one week', () => {
+    assert.deepEqual(managerWeekWindow({ add_date: '2026-07-29', drop_date: '2026-07-31' }, week), {
+      start: '2026-07-29',
+      end: '2026-07-31',
+    });
+  });
+});
+
+describe('mergeWeekWindows', () => {
+  const dropped = { start: null, end: '2026-07-28' }; // manager A: week start .. 7/28
+  const added = { start: '2026-07-29', end: null }; // manager B: 7/29 .. week end
+
+  it('covers both sides of a mid-week handover', () => {
+    assert.equal(mergeWeekWindows([dropped, added]), null); // open on both sides = the whole week
+  });
+
+  it('gives the same answer whichever claim is seen first', () => {
+    assert.deepEqual(mergeWeekWindows([dropped, added]), mergeWeekWindows([added, dropped]));
+    const a = { start: '2026-07-29', end: '2026-07-30' };
+    const b = { start: '2026-07-28', end: '2026-08-01' };
+    assert.deepEqual(mergeWeekWindows([a, b]), mergeWeekWindows([b, a]));
+  });
+
+  it('widens to the earliest start and the latest end', () => {
+    assert.deepEqual(
+      mergeWeekWindows([
+        { start: '2026-07-30', end: '2026-07-31' },
+        { start: '2026-07-28', end: '2026-07-29' },
+      ]),
+      { start: '2026-07-28', end: '2026-07-31' }
+    );
+  });
+
+  it('a whole-week claim swallows every narrower one', () => {
+    assert.equal(mergeWeekWindows([dropped, null]), null);
+    assert.equal(mergeWeekWindows([null, added]), null);
+  });
+
+  it('returns null for no claims at all', () => {
+    assert.equal(mergeWeekWindows([]), null);
+    assert.equal(mergeWeekWindows(null), null);
   });
 });

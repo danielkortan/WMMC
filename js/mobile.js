@@ -23,6 +23,7 @@ function buildMobileNav() {
     { icon: '📈', label: 'Trends', tab: 'trends' },
     { icon: 'ℹ️', label: 'League Info', tab: 'league-info' },
     { icon: '🏆', label: 'Hall of Fame', tab: 'hall-of-fame' },
+    { icon: '🔮', label: 'What If', tab: 'whatif' },
   ];
 
   const MORE_TAB_IDS = new Set([...moreTabs.map((t) => t.tab), 'commissioner']);

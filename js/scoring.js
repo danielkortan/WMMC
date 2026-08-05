@@ -52,6 +52,48 @@ export const ROUND_LABELS = {
   Finals: 'Finals',
 };
 
+// Compact round prefix for tables that only have room for a few characters.
+// Historical seasons split a round's batting and pitching halves into their own
+// keys (PP1/PP1P, 3B/3P, FB/FP) and store the finals and 3rd-place weeks under
+// F1/F2 and 3PWK1/3PWK2, so every alias collapses to the round that was played.
+const ROUND_SHORT_LABELS = {
+  PP1: 'PP1',
+  PP1P: 'PP1',
+  PP2: 'PP2',
+  PP2P: 'PP2',
+  QF: 'QF',
+  QFP: 'QF',
+  SF: 'SF',
+  SFP: 'SF',
+  Finals: 'Finals',
+  F1: 'Finals',
+  F2: 'Finals',
+  FB: 'Finals',
+  FP: 'Finals',
+  '3PWK1': '3rd Place',
+  '3PWK2': '3rd Place',
+  '3B': '3rd Place',
+  '3P': '3rd Place',
+};
+
+// Short display name for a round key. Unknown keys pass through unchanged so a
+// future round never renders as blank.
+export function roundShortLabel(round) {
+  if (!round) return '';
+  return ROUND_SHORT_LABELS[round] || String(round);
+}
+
+// Week label for tables that show one week per row with no separate round
+// column: 'QF Week 1' instead of a bare 'Week 1'. Every round restarts its week
+// numbering at Week 1, so the unqualified week reads as if a playoff-only player
+// had been rostered since opening day.
+export function weekLabel(round, week) {
+  const r = roundShortLabel(round);
+  const w = week ? String(week) : '';
+  if (r && w) return `${r} ${w}`;
+  return r || w;
+}
+
 // Convert IP from baseball "X.1" / "X.2" notation into a true decimal.
 // "6.1" → 6 + 1/3, "7.2" → 7 + 2/3. Identical to server's convertIPDecimal.
 export function convertIP(rawIP) {
@@ -65,31 +107,59 @@ export function convertIP(rawIP) {
   return parseFloat(rawIP) || 0;
 }
 
-export function calculateBattingScore(stats) {
+// Stat field (as stored on daily/weekly rows) → SCORING key. Driving the calculators from these
+// maps is what lets the What If lab score a stat line against a MODIFIED point table without a
+// second scoring implementation: pass a table with different values, get different points.
+//
+// The trailing entries (ABS/SO/LOB, GS) have NO key in the real SCORING table, so they contribute
+// zero to every real score and the league's scoring is unchanged. They are listed because the
+// stat IS captured on our stored rows, which makes "what if strikeouts cost a point" a question
+// the sandbox can actually answer. Never add a key here that the stat rows don't carry — a
+// scoring slider for a stat we never recorded would silently score as zero.
+export const BATTING_STAT_KEYS = {
+  '1b': '1B',
+  '2b': '2B',
+  '3b': '3B',
+  hr: 'HR',
+  r: 'R',
+  rbi: 'RBI',
+  sb: 'SB',
+  bb: 'BB',
+  abs: 'ABS',
+  so: 'SO',
+  lob: 'LOB',
+};
+
+export const PITCHING_STAT_KEYS = {
+  w: 'W',
+  qs: 'QS',
+  cg: 'CG',
+  cgso: 'CGSO',
+  nh: 'NH',
+  ip: 'IP',
+  h: 'H',
+  er: 'ER',
+  bb: 'BB',
+  k: 'K',
+  gs: 'GS',
+};
+
+// `scoring` defaults to the league's real point table, so every existing caller is unchanged.
+export function calculateBattingScore(stats, scoring = SCORING) {
+  const table = (scoring && scoring.batting) || {};
   let score = 0;
-  score += (stats['1b'] || 0) * SCORING.batting['1B'];
-  score += (stats['2b'] || 0) * SCORING.batting['2B'];
-  score += (stats['3b'] || 0) * SCORING.batting['3B'];
-  score += (stats.hr || 0) * SCORING.batting['HR'];
-  score += (stats.r || 0) * SCORING.batting['R'];
-  score += (stats.rbi || 0) * SCORING.batting['RBI'];
-  score += (stats.sb || 0) * SCORING.batting['SB'];
-  score += (stats.bb || 0) * SCORING.batting['BB'];
+  for (const [field, key] of Object.entries(BATTING_STAT_KEYS)) {
+    score += (stats[field] || 0) * (table[key] || 0);
+  }
   return Math.round(score * 100) / 100;
 }
 
-export function calculatePitchingScore(stats) {
+export function calculatePitchingScore(stats, scoring = SCORING) {
+  const table = (scoring && scoring.pitching) || {};
   let score = 0;
-  score += (stats.w || 0) * SCORING.pitching['W'];
-  score += (stats.qs || 0) * SCORING.pitching['QS'];
-  score += (stats.cg || 0) * SCORING.pitching['CG'];
-  score += (stats.cgso || 0) * SCORING.pitching['CGSO'];
-  score += (stats.nh || 0) * SCORING.pitching['NH'];
-  score += (stats.ip || 0) * SCORING.pitching['IP'];
-  score += (stats.h || 0) * SCORING.pitching['H'];
-  score += (stats.er || 0) * SCORING.pitching['ER'];
-  score += (stats.bb || 0) * SCORING.pitching['BB'];
-  score += (stats.k || 0) * SCORING.pitching['K'];
+  for (const [field, key] of Object.entries(PITCHING_STAT_KEYS)) {
+    score += (stats[field] || 0) * (table[key] || 0);
+  }
   return Math.round(score * 100) / 100;
 }
 

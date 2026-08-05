@@ -47,7 +47,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
 - `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
-- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
 - `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
@@ -93,7 +93,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - **Always open a pull request for every change — never push to `main` directly.** This is the standard process for this repo: develop on a feature branch, push it, and open a PR so changes are reviewed and CI runs before they reach production. (`render.yaml` auto-deploys `main` on merge, so a merged PR _is_ a production deploy.)
 - Open the PR as soon as the branch is pushed and the work is ready for review — don't wait to be asked. After opening one, offer to watch it for CI failures and review comments.
 - Keep PRs focused: one logical change per PR, with a clear title and a body summarizing what changed and why.
-- Do not merge your own PR unless explicitly told to — opening it is the deliverable; merging is the maintainer's call.
+- Do not merge your own PR unless explicitly told to — opening it is the deliverable; merging is the maintainer's call. **Exception: docs-only PRs** (`MEMORY.md`, `ERRORS.md`, `README.md`, `RUNBOOK.md`, the `*_PLAN.md` files — no code, no config) — merge those yourself once `check` is green, no need to ask. Anything that touches `server.js`, `app.js`, `js/`, `styles.css`, `index.html`, `render.yaml` or `package.json` still waits for the maintainer, because merging deploys it.
 - **`main` is protected.** Merging requires the **`check`** status check (the job in `.github/workflows/ci.yml` — tests + lint + format) to pass, and the PR branch must be up to date with `main` first. If `main` moves while a PR is open, merge/rebase `main` into the branch before the merge button enables. If you ever rename the CI job, update the required-check name in the branch protection rule to match, or merges will block on a check that never reports.
 
 ## Conventions and patterns
@@ -112,7 +112,8 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 - `checkSwapLimit` (+ `FREE_SWAP_REASON`/`PLAYOFF_LIMITED_REASONS`) exists in **both** `js/swaps.js` (canonical, unit-tested; the swap form's pre-check) and `server.js` (the enforcing copy at swap submission). Same rule as `detectScoreSwings`: the two copies must stay identical — edit both. Relatedly, the client's `getCurrentScheduleRound` (app.js) and the server's `currentScheduleRound` implement the same round-detection rule (between weeks → the upcoming round) and must stay in step.
 
-- `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.)
+- `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.) The one permitted difference: the `js/scoring.js` entries carry a `label` for the UI and the `server.js` ones do not — `round` and `week` must match exactly.
+- `ROUND_LABELS` is a fourth `server.js` ↔ `js/scoring.js` duplicate, on the same must-stay-identical footing as the three above. (Not to be confused with `app.js`'s `ROUND_LABELS_FOR_ROAST`, which is keyed by bracket stage, where Pool Play is one thing.)
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.
