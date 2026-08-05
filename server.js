@@ -7558,6 +7558,124 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
 // to restore weeks whose stored stats are missing entirely (not just unattributed). Awaits the
 // Upstash backup and reports its size/status so a silent persistence failure (e.g. payload too
 // large) is visible rather than lost.
+// ============================================================
+// Late MLB stat corrections
+// ============================================================
+// MLB revises box scores after the fact — a hit reclassified as an error, an RBI credited days
+// later. The existing catch-up only ever re-syncs the current week and the one before it, and only
+// within the same phase (resolveWeeksForCatchUp), so a correction landing on a week that has since
+// closed is never picked up. Three such corrections were sitting in the 2026 season: +5, +2 and
+// -0.6 across three managers in weeks that finished months earlier.
+//
+// THE POLICY, and why there is a ceiling.
+//
+// A real stat correction is small. When a re-sync of a completed week wants to move a manager by
+// tens of points, that is not MLB revising a box score — it is a bug. We know because we hit one: a
+// rained-out game made up in July was being counted in its original May week, worth ~34 points to a
+// single manager, and it looked exactly like "missing points" until the gamePk was opened.
+//
+// So corrections within MLB_CORRECTION_MAX_SWING are applied automatically, and anything larger is
+// REFUSED and flagged for a human. Auto-applying big swings is how a bug gets silently written into
+// the league's history; refusing them is how it gets noticed.
+const CORRECTION_MAX_SWING = Number(process.env.MLB_CORRECTION_MAX_SWING || 15);
+
+// Per-manager total differences between two score snapshots, largest first.
+function totalsDelta(before, after) {
+  const out = [];
+  for (const manager of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[manager] && before[manager].total) || 0;
+    const a = (after[manager] && after[manager].total) || 0;
+    if (Math.abs(a - b) >= 0.01) out.push({ manager, before: r2s(b), after: r2s(a), diff: r2s(a - b) });
+  }
+  return out.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff));
+}
+
+// Move one week's stat rows from a synced clone into the live season. Surgical on purpose: only
+// rows for that week are touched, so a sweep of one week can never disturb another.
+function adoptWeekRows(sd, clone, schedWeek) {
+  const isWeek = (r) => r.round === schedWeek.round && r.week === schedWeek.week;
+  for (const key of ['weekly_batting', 'weekly_pitching', 'daily_batting', 'daily_pitching']) {
+    const kept = (sd[key] || []).filter((r) => !isWeek(r));
+    const incoming = (clone[key] || []).filter(isWeek);
+    sd[key] = [...kept, ...incoming];
+  }
+  // Team maps are cumulative and safe to merge — a trade recorded during the sync should stick.
+  Object.assign(sd.batters_team || (sd.batters_team = {}), clone.batters_team || {});
+  Object.assign(sd.pitchers_team || (sd.pitchers_team = {}), clone.pitchers_team || {});
+}
+
+// Sweep completed weeks for late corrections.
+//
+// Each week is synced into its own clone and measured before anything is adopted, so a week whose
+// movement exceeds the ceiling is simply discarded — the live season never sees it. `apply: false`
+// makes the whole thing a report.
+async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_SWING, apply = true } = {}) {
+  const results = [];
+  for (let idx = 0; idx < SEASON_SCHEDULE.length; idx++) {
+    const schedWeek = SEASON_SCHEDULE[idx];
+    const dates = (sd.schedule_dates || [])[idx];
+    if (!dates?.start || !dates?.end) continue;
+    // Completed weeks only. The current week is the daily sync's job, and re-syncing it here would
+    // just race that.
+    if (dates.end >= todayISO) continue;
+
+    const label = `${schedWeek.round} ${schedWeek.week}`;
+    let clone;
+    try {
+      clone = JSON.parse(JSON.stringify(sd));
+      const before = captureScoreSnapshot(clone, todayISO).totals;
+      await performMLBSync(clone, schedWeek, dates, { trigger: 'auto', note: 'corrections-sweep' });
+      const diffs = totalsDelta(before, captureScoreSnapshot(clone, todayISO).totals);
+
+      if (diffs.length === 0) {
+        results.push({ week: label, status: 'clean' });
+        continue;
+      }
+      const maxSwing = Math.max(...diffs.map((d) => Math.abs(d.diff)));
+      if (maxSwing > threshold) {
+        results.push({ week: label, status: 'flagged', max_swing: maxSwing, diffs });
+        continue;
+      }
+      if (apply) adoptWeekRows(sd, clone, schedWeek);
+      results.push({ week: label, status: apply ? 'applied' : 'would_apply', max_swing: maxSwing, diffs });
+    } catch (e) {
+      results.push({ week: label, status: 'error', error: e.message });
+    }
+  }
+  return results;
+}
+
+// POST /api/mlb/apply-corrections  { year, threshold?, dryRun? }
+// Commissioner-run sweep. dryRun reports without writing.
+app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => {
+  const year = (req.body.year || new Date().getFullYear()).toString();
+  const dryRun = !!req.body.dryRun;
+  const threshold = req.body.threshold != null ? Number(req.body.threshold) : CORRECTION_MAX_SWING;
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const results = await sweepStatCorrections(sd, { todayISO: todayET, threshold, apply: !dryRun });
+    const applied = results.filter((r) => r.status === 'applied' || r.status === 'would_apply');
+    const flagged = results.filter((r) => r.status === 'flagged');
+
+    if (!dryRun && applied.length) {
+      addAuditEntry(db, 'mlb_corrections_applied', {
+        year,
+        threshold,
+        weeks: applied.map((r) => r.week),
+      });
+      db.seasons[year] = sd;
+      writeDB(db);
+    }
+    res.json({ ok: true, dry_run: dryRun, threshold, applied: applied.length, flagged: flagged.length, results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/mlb/resync-dryrun — what a re-sync WOULD do, without doing any of it.
 // Body: { year, round, week? }   (omit `week` to dry-run every week of the round)
 //
@@ -15523,6 +15641,44 @@ function scheduleMLBApiSync() {
                   `${r.batting_imported} bat / ${r.pitching_imported} pit (${r.games_fetched} games)`
               );
             }
+            // Late corrections on weeks that have already closed. The Wednesday catch-up above
+            // only reaches the current and prior week, so anything MLB revises after that is
+            // invisible without this sweep. Movement beyond the ceiling is refused, not applied —
+            // see sweepStatCorrections for why that ceiling exists.
+            try {
+              const sweep = await sweepStatCorrections(sd, { todayISO: todayET });
+              const applied = sweep.filter((r) => r.status === 'applied');
+              const flagged = sweep.filter((r) => r.status === 'flagged');
+              if (applied.length) {
+                addAuditEntry(db, 'mlb_corrections_applied', {
+                  year: season,
+                  threshold: CORRECTION_MAX_SWING,
+                  weeks: applied.map((r) => r.week),
+                });
+                console.log(
+                  `[MLB-API] Late corrections applied to ${applied.length} week(s): ` +
+                    applied.map((r) => `${r.week} (max ${r.max_swing})`).join(', ')
+                );
+              }
+              if (flagged.length) {
+                // Too big to be a stat correction. A human should look before this is written.
+                const detail = flagged
+                  .map(
+                    (r) =>
+                      `${r.week}: ${r.diffs.map((d) => `${d.manager} ${d.diff > 0 ? '+' : ''}${d.diff}`).join(', ')}`
+                  )
+                  .join(' | ');
+                console.warn(`[MLB-API] Corrections sweep REFUSED ${flagged.length} week(s): ${detail}`);
+                await postSlack(
+                  `:warning: WMMC corrections sweep refused ${flagged.length} week(s) — a re-sync wanted to move ` +
+                    `a manager by more than ${CORRECTION_MAX_SWING} pts, which is too large to be a stat correction. ` +
+                    `Nothing was written. ${detail}`
+                ).catch(() => {});
+              }
+            } catch (e) {
+              console.error('[MLB-API] Corrections sweep failed:', e.message);
+            }
+
             dirty = true;
             statsCompiled = true;
           }
