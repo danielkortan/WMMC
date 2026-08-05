@@ -2787,21 +2787,38 @@ exactly how bug 1 presented.
 - `js/hypothetical.js` uses `\0` **escapes** in Map keys. They were once raw NUL bytes, which made
   git treat the file as binary and hide its diffs.
 
-**Open.**
+**Done.** PP1 was re-synced week by week (after #411 was deployed, and only once all five weeks
+dry-ran clean), restoring the daily rows and the batting `so`/`lob`/`abs` that round had been missing.
+Worth confirming once in a new session — PP1 strikeouts should now be non-zero, and the What If
+Scoring Lab should move Pool Play 1 when SO is given a value:
 
-- PP1 has no daily rows and no batting `so`/`lob`/`abs`. All five PP1 weeks dry-run clean, so a
-  per-week `POST /api/mlb/sync` is safe and would restore them (fixes the Scoring Lab's strikeout
-  experiments, the Explorer's PP1 game log, accolades' high-strikeout days, mid-week precision).
-  **Not yet run.**
-- Pre-existing scoreboard scaling limit: at ~1,340 batters / 16k weekly rows the scoreboard never
-  finishes rendering. Reproduces on `7087e0a`, before any What If work. `managerWeekSubtotal` runs
-  256× per render, each scanning every weekly row.
-- Mobile Roster Lab stacks its two columns, so actual-vs-hypothetical takes a scroll.
+```js
+const sd = (await fetch('/api/seasons').then((x) => x.json()))['2026'];
+console.log(
+  'PP1 SO:',
+  (sd.weekly_batting || []).filter((r) => r.round === 'PP1').reduce((a, r) => a + (r.so || 0), 0)
+);
+```
 
-**Next task (requested, not started).** On the Wednesday run **after a round ends**, post to Slack
-**only if** corrections would change a round _outcome_ — a pool-play period winner, a
-wildcard/qualifier, or a playoff matchup winner. Stay silent when only point totals move. Sketch:
-capture the outcome before and after `sweepStatCorrections` and compare. The rules exist in
-`js/seeding.js` and `js/bracket.js`, but those are ESM and **`server.js` cannot import them** — check
-first whether `server.js` already has equivalent seeding logic (playoff odds / Slack scoreboard) before
-adding a third copy, and if a copy is unavoidable add it to the "must stay in sync" list in CLAUDE.md.
+**Open.** Mobile Roster Lab stacks its two columns, so actual-vs-hypothetical takes a scroll.
+
+**Next tasks (requested, not started).**
+
+1. _Slack prompt only when a round outcome changes._ On the Wednesday run **after a round ends**,
+   post to Slack **only if** corrections would change a round _outcome_ — a pool-play period winner,
+   a wildcard/qualifier, or a playoff matchup winner. Stay silent when only point totals move.
+   Sketch: capture the outcome before and after `sweepStatCorrections` and compare. The rules exist
+   in `js/seeding.js` and `js/bracket.js`, but those are ESM and **`server.js` cannot import them** —
+   check first whether `server.js` already has equivalent seeding logic (playoff odds / Slack
+   scoreboard) before adding a third copy, and if a copy is unavoidable add it to the "must stay in
+   sync" list in CLAUDE.md.
+
+2. _The scoreboard scaling limit._ At ~1,340 batters / 16k weekly rows the scoreboard never finishes
+   rendering — over three minutes, measured. This is **pre-existing**: it reproduces on `7087e0a`,
+   before any What If work, so nothing in this session caused it. Cause: `managerWeekSubtotal` runs
+   256× per render (16 weeks × 8 managers × 2 types), each call scanning every weekly row. Likely fix
+   is to index the weekly rows by `manager|round|week` once per render instead of re-scanning per
+   call. It touches the core scoring path, so it needs a before/after per-manager totals comparison —
+   `POST /api/mlb/resync-dryrun` is not the right tool there (it re-syncs); compare
+   `captureScoreSnapshot` output before and after the refactor instead. Worth measuring the real
+   season's row count first to see how close production actually is to the wall.
