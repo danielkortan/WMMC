@@ -701,6 +701,25 @@ main {
 
 .matchup-team .team-name {
   flex: 1;
+  min-width: 0;
+}
+
+/* Batting/pitching split beneath a manager's name on the scoreboard's playoff matchup cards.
+   Kept at normal weight so it stays readable inside a bolded winner row. */
+.matchup-team .matchup-team-sub {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-light);
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.1rem;
+}
+
+/* A round still in progress has no winner yet — highlight whoever is currently ahead, in a
+   different colour from the settled `.winner` row so the two never read as the same claim. */
+.matchup-team.matchup-leader {
+  background: rgba(16, 185, 129, 0.1);
+  font-weight: 700;
 }
 
 .matchup-team .team-score {

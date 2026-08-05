@@ -5310,6 +5310,51 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   return html;
 }
 
+// Playoff scoreboard sections render the round's head-to-head matchups — the same pairs as the
+// Playoff Bracket card and the Live tab — instead of a league-wide ranked table. Once the bracket
+// starts only its participants can score, so an "overall" list of every manager is noise. Totals
+// are the same periodScores() rows the table used, so no number moves. `seedRank` breaks ties on
+// a finalized round; while a round is live the highlight is only "currently ahead".
+function renderPlayoffMatchupCards(matchups, scores, seedRank, isFinalized) {
+  const byName = {};
+  scores.forEach((s) => (byName[s.manager] = s));
+  const rowOf = (name) => byName[name] || { batting: 0, pitching: 0, total: 0 };
+
+  const teamHtml = (t, cls) => {
+    const r = rowOf(t.name);
+    return `<div class="matchup-team ${cls}">
+      ${t.seed ? `<span class="seed">${t.seed}</span>` : ''}
+      <span class="team-name">${esc(t.name)}<span class="matchup-team-sub">B ${fmt(r.batting)} &middot; P ${fmt(r.pitching)}</span></span>
+      <span class="team-score">${fmt(r.total)}</span>
+    </div>`;
+  };
+
+  const cards = matchups
+    .map((mu) => {
+      const [t1, t2] = mu.teams;
+      const a = rowOf(t1.name).total;
+      const b = rowOf(t2.name).total;
+      // A finalized round marks the official winner (seed tiebreak included); a live round just
+      // flags whoever currently leads, and nobody while the two are level.
+      const ahead = isFinalized
+        ? roundMatchupWinner(t1.name, a, t2.name, b, seedRank)
+        : a === b
+          ? null
+          : a > b
+            ? t1.name
+            : t2.name;
+      const cls = isFinalized ? 'winner' : 'matchup-leader';
+      return `<div class="matchup">
+        <div class="matchup-label">${esc(mu.label)}</div>
+        ${teamHtml(t1, ahead === t1.name ? cls : '')}
+        ${teamHtml(t2, ahead === t2.name ? cls : '')}
+      </div>`;
+    })
+    .join('');
+
+  return `<div class="matchup-results-grid">${cards}</div>`;
+}
+
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
@@ -5740,6 +5785,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       return tbl;
     };
 
+    // Playoff rounds are head-to-head, so each section shows just that round's matchups. The
+    // ranked table is only the fallback for a round whose pairings aren't determined yet (the
+    // prior round isn't finalized), where there is nothing to pair managers up by.
+    const playoffSeedRank = seedRankLookup(seasonData);
+    const finalizedRounds = new Set(seasonData.finalized_rounds || []);
+
     html += `<div class="card scoreboard-card">`;
     [
       { key: 'qf', has: hasQF, label: 'Quarterfinals', round: ['QF'] },
@@ -5748,6 +5799,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     ].forEach(({ key, has, label, round }) => {
       if (!has) return;
       const open = currentSectionId === key;
+      const scores = periodScores(round);
+      const matchups = playoffRoundMatchups(seasonData, round[0]);
+      const body = matchups
+        ? renderPlayoffMatchupCards(matchups, scores, playoffSeedRank, finalizedRounds.has(round[0]))
+        : renderPlayoffTable(scores);
       html += `
         <div class="sb-section${open ? '' : ' sb-section-collapsed'}" id="sb-section-${key}">
           <div class="sb-section-header" onclick="toggleScoreboardSection('${key}')">
@@ -5755,7 +5811,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
             <span class="sb-section-arrow">▾</span>
           </div>
           <div class="sb-period" id="sb-${key}" style="display:${open ? 'block' : 'none'}">
-            ${renderPlayoffTable(periodScores(round))}
+            ${body}
           </div>
         </div>`;
     });
