@@ -2982,3 +2982,104 @@ Steps, in order:
    same after, and diff. Byte-identical or it is not this change.
 
 **Also still open:** mobile Roster Lab stacks its two columns (from the #414 list).
+
+## 2026-08-05 — Redundancy audit: one real boot-time bug, one drift, and a scope correction
+
+A QA sweep for duplicated code, dead code and unnecessary guards. Baseline was healthier than
+expected — 331 tests green, lint and format clean, and **zero orphan top-level functions** in
+either monolith (289 defs in `app.js`, 241 in `server.js`, every one reachable). The problems were
+duplication and one hot spot. Four PRs: #419, #420, #421, #423.
+
+### The one that mattered: `backfillWmmcQS` ran on every boot (#419)
+
+It was the **only one of the six startup migrations without a db flag**. Every restart — every
+Render deploy, every spin-down wake — it ran over every season, including completed ones, and boot
+then `writeDB`'d unconditionally.
+
+The cost is the same O(rows × daily) shape already fixed for the scoreboard in #417:
+`recomputeAllWeeklyScores` calls `computeEffectiveBattingScore` per weekly row, and each of those
+`.filter()`s the whole daily array. Benchmarked at this league's row counts (10,568 weekly rows):
+
+| weekly rows | daily rows | time     |
+| ----------- | ---------- | -------- |
+| 10,500      | 40,000     | 3,530 ms |
+| 10,500      | 80,000     | 6,529 ms |
+
+Batting half only; pitching repeats it. **~7–13s of synchronous, event-loop-blocking work per
+boot.** Worth holding next to the still-unreproduced "three-minute scoreboard" figure — the
+queueing story fits, though this is boot-time, not per-request, so it is at most a partial answer.
+
+**The proof it was safe to stop is worth reusing.** Boot the OLD code twice against the same
+scratch db: the second boot printed no `[WMMC-QS]` correction line at all. It was already
+correcting nothing — it just paid the full recompute to discover that. Then all four combinations
+(old×2, new×2) produced byte-identical per-manager totals.
+
+**What deliberately stayed on every boot:** `dedupeWeeklyRows`. It is O(n) and still earns its
+place — the Sunday auto-advance tests for an existing row with `b.manager === m.name`, while a
+duplicate is any second row for the same `round|week|player`, so a row on file under a different
+manager (or `null`) can still produce one. **Latent bug, not fixed here:** that existence check
+should probably be manager-agnostic. Left alone because it changes roster behavior and did not
+belong in a cleanup PR.
+
+### `currentQualification` had already drifted (#420)
+
+`server.js` gained `pp1LeaderByPool` in #415; the canonical, unit-tested `js/playoffOdds.js` copy
+never got it. Exactly the hazard CLAUDE.md warns about — **the tests were certifying a copy that
+was not the one running**, so parity read green while it was not.
+
+Every other documented pair was genuinely in sync (checked by normalizing and comparing bodies:
+`SCORING`, `SEASON_SCHEDULE`, `detectScoreSwings`, `checkSwapLimit`, and the whole odds engine).
+Two undocumented duplicates are now on the CLAUDE.md list: `ROUND_LABELS`, and
+`SEASON_SCHEDULE`'s one _permitted_ difference (client entries carry `label`, the server's do not)
+so a future parity check does not "fix" it.
+
+### Duplication deleted (#421)
+
+`escapeHtml` ≡ `esc` (33 sites). `HOF_ROUND_LABELS` ≡ `ROUND_LABELS_FOR_ROAST`, character-identical
+1,400 lines apart → `BRACKET_STAGE_LABELS`. The bracket grid's nested `matchupHTML` ≡
+`renderMatchupResultCard`. And **`periodStartForRound` was a third implementation** beside
+`js/eligibility.js` and `server.js` — the period scoping the core invariant names by function.
+
+Gotcha for anyone doing this again: `app.js` is a **classic script**, so a top-level
+`function periodStartForRound` _assigns to_ `window.periodStartForRound` and clobbers the module's
+export. The local adapter has to be renamed (`periodStartForSeason`), not kept.
+
+Also stripped 13 dead entries from the `js/index.js` window bridge. They stay exported from their
+modules — tests need them, and `resolveBracket` is imported by `js/hypothetical.js` — only the
+bridge drops them. `eslint.config.js`'s `projectGlobals` caught the newly-bridged name immediately;
+that list is doing real work, keep it accurate.
+
+### The scope correction, which is the lesson
+
+I opened by estimating **~330 lines of retirable one-shot migration code**. That was wrong, and
+this file already said why. The 2026-06 cleanup that deleted `repairMissingSwapRecords`,
+`repairMissingRosterChains` and `repairBentivegnaPitcherRoster` (−524 lines) carries an explicit
+**"Kept"** list right beside it. The operative rule is:
+
+> **delete hardcoded, incident-specific one-shots; keep generic repairs and structural migrations.**
+
+Applying that honestly, only **two** qualified (#423, −140 lines): `purgeGhostHerreraFromJoey`
+(hardcoded to one manager and one player; merged to prod 2026-06-07 with a verified settled total)
+and `purgeBoundaryAutoAdvance` (repairs damage from a boundary auto-advance `isPeriodBoundaryWeek`
+now structurally prevents). `repairCarryForwardRosters` — the largest at 139 lines, and the one
+that inflated my estimate most — **is not a one-shot at all**: no flag, runs every boot by design.
+
+Check this file's "Kept" list before proposing to retire anything in that family.
+
+### Reusable: verifying a boot-path change is score-neutral
+
+`scripts/measure-scoreboard.js` needs a db with **daily** rows to be meaningful — the staging seed
+ships weekly rows only, which makes `computeEffectiveBattingScore` return `null` and the whole
+recompute a no-op, so a broken change would pass. Synthesize daily rows by splitting each weekly
+row's counting stats across the week's dates first.
+
+Then boot the real server with `DB_PATH` at a scratch file, `MLB_API_BASE` at a dead port
+(bootstrap fails fast and logs "continuing"), and a free `PORT`. **A boot rewrites
+`managers_seed.json`** via the googleEmail backfill — `git checkout --` it before committing.
+
+### Still open
+
+- The `readDB()` cache (the task queued above this entry) — unchanged by any of this.
+- Boot does **13** `readDB()` calls, each a full parse of the whole db.
+- The Sunday auto-advance's manager-scoped duplicate check, noted above.
+- Mobile Roster Lab stacks its two columns (from the #414 list).
