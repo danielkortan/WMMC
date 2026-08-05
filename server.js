@@ -3777,19 +3777,23 @@ function dedupeWeeklyRows(sd) {
   return removed;
 }
 
-// Re-derive QS on existing pitching records using the WMMC rule. Idempotent
-// — repeated runs converge on the same values — so it's safe to invoke on
-// every server startup. Manual commissioner overrides (manual_fields=qs or
-// drop_locked) are left intact. After fixing the daily deltas we refresh the
-// cumulative QS on each weekly_pitching row and recompute weekly_score so
-// every downstream view (My Roster, scoreboard, Live tab) agrees.
+// One-shot maintenance: re-derive QS on existing pitching records using the WMMC rule, then
+// resync player_dates and recompute every weekly_score so the corrected values reach My Roster,
+// the scoreboard and the Live tab without waiting for the next 4am sync. Manual commissioner
+// overrides (manual_fields=qs or drop_locked) are left intact.
+//
+// Gated by a db flag, like every sibling migration above. It is idempotent, but it is NOT cheap:
+// recomputeAllWeeklyScores rescans the whole daily array once per weekly row, which is ~7-13s of
+// synchronous, event-loop-blocking work at this league's row counts — paid on every boot (so on
+// every Render deploy and every spin-down wake) to redo work that cannot have changed. A later
+// full recompute is still available on demand via POST /api/seasons/:year/recompute-scores.
 function backfillWmmcQS(db) {
+  if (!db || db.wmmc_qs_backfill_done) return false;
+
   let dailyTouched = 0;
   let weeklyTouched = 0;
-  let dupesRemoved = 0;
   for (const sd of Object.values(db.seasons || {})) {
     if (!sd) continue;
-    dupesRemoved += dedupeWeeklyRows(sd);
     for (const r of sd.daily_pitching || []) {
       if ((r.manual_fields || []).includes('qs') || r.drop_locked) continue;
       const d = r.delta || {};
@@ -3838,11 +3842,11 @@ function backfillWmmcQS(db) {
     syncPlayerDatesFromRosterDates(sd);
     recomputeAllWeeklyScores(sd);
   }
-  if (dailyTouched > 0 || weeklyTouched > 0 || dupesRemoved > 0) {
-    console.log(
-      `[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s), removed ${dupesRemoved} duplicate weekly row(s)`
-    );
+  db.wmmc_qs_backfill_done = true;
+  if (dailyTouched > 0 || weeklyTouched > 0) {
+    console.log(`[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s)`);
   }
+  return true;
 }
 
 // ============================================================
@@ -16196,11 +16200,27 @@ async function main() {
       console.error('[Player Pool] Bootstrap error (continuing):', e.message);
     }
 
-    // Re-derive QS on existing pitching records using the WMMC rule.
+    // Two steps on one db read:
+    //  1. STANDING repair — collapse duplicate weekly rows. Cheap (one pass over the weekly
+    //     arrays) and still needed every boot: the Sunday auto-advance checks for an existing
+    //     row with `b.manager === m.name`, while a duplicate is any second row for the same
+    //     round|week|player, so a row already on file under a different manager (or null) can
+    //     still produce one — and duplicates double-count in every total.
+    //  2. ONE-SHOT — re-derive QS using the WMMC rule and recompute weekly scores. Gated by a
+    //     db flag so it runs once, like the purges above.
     try {
       const dbForBackfill = readDB();
-      backfillWmmcQS(dbForBackfill);
-      writeDB(dbForBackfill);
+      let changed = false;
+      for (const sd of Object.values(dbForBackfill.seasons || {})) {
+        if (!sd) continue;
+        const removed = dedupeWeeklyRows(sd);
+        if (removed > 0) {
+          changed = true;
+          console.log(`[Weekly dedupe] Removed ${removed} duplicate weekly row(s).`);
+        }
+      }
+      if (backfillWmmcQS(dbForBackfill)) changed = true;
+      if (changed) writeDB(dbForBackfill);
     } catch (e) {
       console.error('[WMMC-QS] Backfill error (continuing):', e.message);
     }
