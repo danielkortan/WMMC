@@ -7646,6 +7646,10 @@ function setupMyRoster() {
     titleEl.textContent = loggedInMgr.name + "'s Roster";
     document.getElementById('roster-content').innerHTML =
       '<div class="card"><p style="color:var(--text-muted);">Your account is currently inactive. Contact the commissioner to be reactivated.</p></div>';
+    // The rail is persistent DOM, so it has to be emptied explicitly on this path —
+    // renderRosterData (its only other writer) never runs for an inactive manager.
+    const inactiveRail = document.getElementById('roster-score-rail');
+    if (inactiveRail) inactiveRail.innerHTML = '';
     return;
   }
 
@@ -8008,11 +8012,19 @@ function buildRosterScoreFlow(managerName, seasonData, periodScores) {
   return labelFlowStates(flow);
 }
 
-// Render the flow built above. Pure presentation — no data derivation here.
+// Render the flow built above into the roster page's right-hand score rail. Pure
+// presentation — no data derivation here.
+//
+// The rail is a narrow vertical column (see .roster-layout / .score-rail in styles.css),
+// so everything is a one-or-two-line row rather than a wide card: pool play stacks its
+// total over PP1/PP2, and the playoff rounds stack beneath it as compact score rows.
+// Once the bracket is underway pool play is settled history, so it renders in a compact
+// mode (smaller total, no Bat/Pit on the PP1/PP2 rows) and stops out-shouting the round
+// that is actually being played.
 function renderRosterScoreFlow(flow) {
   if (!flow.hasPoolData && !flow.rounds.some((r) => r.score)) return '';
 
-  const split = (s) => (s ? `Bat ${fmt(s.batting)}<span class="sf-sep">·</span>Pit ${fmt(s.pitching)}` : '&nbsp;');
+  const split = (s) => (s ? `Bat ${fmt(s.batting)}<span class="sf-sep">·</span>Pit ${fmt(s.pitching)}` : '');
 
   const CHIP_TEXT = {
     qualified: '✓',
@@ -8029,22 +8041,27 @@ function renderRosterScoreFlow(flow) {
        </span>`
     : '';
 
+  // Pool play recedes once it can no longer change: the bracket has scores, or seeding
+  // is final (qualified/missed) — as opposed to a still-projected seed mid-pool-play.
+  const settledStatus = flow.status && (flow.status.kind === 'qualified' || flow.status.kind === 'missed');
+  const poolCompact = !!(settledStatus || flow.rounds.some((r) => r.score));
+
   const sub = (label, s) => `<div class="sf-sub${s ? '' : ' sf-sub-empty'}">
-      <div class="sf-sub-label">${label}</div>
-      <div class="sf-sub-value">${s ? fmt(s.total) : '—'}</div>
-      <div class="sf-sub-split">${split(s)}</div>
+      <span class="sf-sub-label">${label}</span>
+      <span class="sf-sub-value">${s ? fmt(s.total) : '—'}</span>
+      <span class="sf-sub-split">${split(s)}</span>
     </div>`;
 
-  let html = '<div class="score-flow">';
+  let html = '<div class="score-rail">';
 
-  html += `<div class="sf-pool">
+  html += `<div class="sf-pool${poolCompact ? ' sf-pool-compact' : ''}">
     <div class="sf-pool-head">
-      <div class="sf-eyebrow">Pool Play</div>
+      <span class="sf-eyebrow">Pool Play</span>
       ${chip}
     </div>
     <div class="sf-hero">
-      <div class="sf-hero-value">${fmt(flow.pool.total)}</div>
-      <div class="sf-hero-split">${split(flow.pool)}</div>
+      <span class="sf-hero-value">${fmt(flow.pool.total)}</span>
+      <span class="sf-hero-split">${split(flow.pool)}</span>
     </div>
     <div class="sf-subs">
       ${sub('Pool Play 1', flow.pp1)}
@@ -8053,18 +8070,15 @@ function renderRosterScoreFlow(flow) {
   </div>`;
 
   if (flow.eliminatedInPool) {
-    html += `<div class="sf-bridge sf-bridge-end sf-bridge-out"><span class="sf-bridge-pill">Season Over</span></div>`;
+    html += `<div class="sf-season-over">Season Over</div>`;
     return html + '</div>';
   }
 
   if (!flow.showPlayoffs) return html + '</div>';
 
-  html += `<div class="sf-bridge"><span class="sf-bridge-pill">Playoffs</span></div>`;
-
   const WON_STATES = new Set(['won', 'champion', 'third']);
-  html += '<div class="sf-rounds">';
-  flow.rounds.forEach((r, i) => {
-    if (i > 0) html += '<span class="sf-arrow" aria-hidden="true"></span>';
+  html += '<div class="sf-rounds"><div class="sf-rounds-label">Playoffs</div><div class="sf-rounds-list">';
+  flow.rounds.forEach((r) => {
     let vs = '';
     if (r.opponent) {
       const verb = WON_STATES.has(r.state) ? 'def.' : r.state === 'lost' || r.state === 'runner-up' ? 'lost to' : 'vs';
@@ -8073,18 +8087,20 @@ function renderRosterScoreFlow(flow) {
       }</div>`;
     }
     // A round with no score yet drops the Bat/Pit line entirely so the placeholder
-    // card stays compact — it matters most on mobile, where the track is a stack.
+    // row stays a single line instead of reserving space for a score it doesn't have.
     html += `<div class="sf-round sf-state-${r.state}${r.score ? '' : ' sf-round-empty'}">
       <div class="sf-round-head">
         <span class="sf-eyebrow">${esc(r.label)}</span>
         ${r.flag ? `<span class="sf-flag">${esc(r.flag)}</span>` : ''}
       </div>
-      <div class="sf-round-value">${r.score ? fmt(r.score.total) : '—'}</div>
-      ${r.score ? `<div class="sf-round-split">${split(r.score)}</div>` : ''}
+      <div class="sf-round-body">
+        <span class="sf-round-value">${r.score ? fmt(r.score.total) : '—'}</span>
+        ${r.score ? `<span class="sf-round-split">${split(r.score)}</span>` : ''}
+      </div>
       ${vs}
     </div>`;
   });
-  html += '</div>';
+  html += '</div></div>';
 
   return html + '</div>';
 }
@@ -8204,9 +8220,13 @@ function renderRosterData(managerName, isCommissioner) {
     }
   }
 
-  // ---- Season Scoring Flow ----
-  // Pool Play panel (total + PP1/PP2 nested) flowing into the playoff track.
-  html += renderRosterScoreFlow(buildRosterScoreFlow(managerName, seasonData, periodScores));
+  // ---- Season Scoring Rail ----
+  // The per-round score blocks live in the right-hand rail (#roster-score-rail, under the
+  // manager picker), not inline above the tabs. The rail is a persistent node — it also
+  // holds the commissioner's custom dropdown, whose state must survive a re-render — so it
+  // is written directly here rather than through `container`'s innerHTML below.
+  const rail = document.getElementById('roster-score-rail');
+  if (rail) rail.innerHTML = renderRosterScoreFlow(buildRosterScoreFlow(managerName, seasonData, periodScores));
 
   // Preserve the active tab when re-rendering
   const activeTabBtn = document.querySelector('.roster-tab.active');

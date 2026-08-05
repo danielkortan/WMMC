@@ -215,15 +215,26 @@
       </section>
 
       <!-- Rosters -->
+      <!-- Two columns on desktop: the Roster/Team Stats/Swaps tabs on the left, a narrow
+           score rail on the right holding the manager picker and the per-round score
+           blocks. The rail is a persistent node (it owns the commissioner's custom
+           dropdown), so renderRosterData writes #roster-score-rail separately from
+           #roster-content instead of rebuilding the whole panel. Below 1100px the rail
+           stacks above the tabs (see .roster-layout in styles.css). -->
       <section id="my-roster" class="tab-content">
-        <div id="roster-manager-bar" class="card" style="display: none">
-          <div class="roster-manager-bar-inner">
-            <h2 id="roster-title">Roster</h2>
-            <div id="roster-manager-dropdown" class="custom-dd" style="display: none"></div>
+        <div id="roster-panel" class="roster-layout">
+          <div class="roster-main">
+            <div id="roster-content"></div>
           </div>
-        </div>
-        <div id="roster-panel">
-          <div id="roster-content"></div>
+          <aside class="roster-rail">
+            <div id="roster-manager-bar" class="card" style="display: none">
+              <div class="roster-manager-bar-inner">
+                <h2 id="roster-title">Roster</h2>
+                <div id="roster-manager-dropdown" class="custom-dd" style="display: none"></div>
+              </div>
+            </div>
+            <div id="roster-score-rail"></div>
+          </aside>
         </div>
       </section>
 
