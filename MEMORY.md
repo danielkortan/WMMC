@@ -3107,3 +3107,52 @@ the ET date rolls past opening day.
 first pitch → post now, not never; MLB fetch throws → post now; empty slate → post now;
 non-opening day → nothing armed; already-claimed day → nothing armed. 178/178, lint + format
 clean.
+
+## 2026-08-05 — Open-PR triage: #386 refreshed, #374 retired in favor of a focused round gate
+
+**Context.** Two PRs had been open since late July and had fallen 135 (#386) and 167 (#374)
+commits behind `main`. Both were CI-green, but against week-old bases.
+
+**#386 (welcome post an hour before first pitch) — refreshed, still valid.** `server.js` merged
+cleanly; only `MEMORY.md` (append-only) conflicted. Nothing on `main` duplicates it —
+`scheduleSeasonWelcomePost` was absent — and the wiring survived the merge intact (7am job, boot
+re-arm, retry, `last_welcome_post_date` claim). 333/333.
+
+**#374 (Live tab eliminated-manager ownership) — ~80% superseded, closed.** `main` had
+independently reimplemented the core, better: `buildWeekRostersFromDates` replaced #374's
+`buildWeekRosterIndex` with the same date-window derivation **plus** scheduled-swap handling and
+`rosterWindowByPlayer`, and `resolveLiveDay()` replaced its hand-rolled ET date. The headline bug
+(box score tagging players to knocked-out managers via the all-weeks `findManagerForPlayer`
+fallback) is already fixed on `main`: in any non-PP1 period a manager with no current-period add
+fails `isRosteredForDay`, so eliminated managers resolve to nobody. All five `server.js` conflict
+hunks resolved to "take main's side."
+
+**What was NOT covered, and is what shipped instead.** `/api/mlb/daily` built `allManagers` from
+`Object.keys(sd.rosters)` with no elimination filter. That list never consults roster windows, so
+`main`'s period scoping doesn't reach it — eliminated managers still rendered as 0-point ghost
+rows, and `rankByTotals` ranked them. Ported just the round gate onto current `main`:
+`ELIMINATION_ROUND_ORDER` / `isManagerActiveInRound` / `isManagerInRound` in `js/eligibility.js`
+(canonical, unit-tested) mirrored into `server.js`, plus `roundParticipants` (bracket field via
+`computePlayoffPairs`, so this can never disagree with the Playoff Bracket card).
+
+Authority order is bracket field → `sd.eliminated`, and **every** unknown fails open. Note
+`sd.eliminated[m]` is the round a manager went out _in_, so `'QF'` means they _played_ the QF —
+active iff `elimIdx >= roundIdx`.
+
+**Verified** (fabricated QF season: 12 managers, 8 the confirmed field, 4 knocked out in PP but
+still holding PP rosters in `sd.rosters`), before/after on `/api/mlb/daily`:
+
+|        | managers | player rows | active managers' today / round_total / rank |
+| ------ | -------- | ----------- | ------------------------------------------- |
+| before | 12       | 16          | 39.5/39.5/1 … 30.5/30.5/8                   |
+| after  | 8        | 16          | **identical**                               |
+
+The only diff is the four ghost rows disappearing. Fail-open confirmed three ways: pool-play date
+→ 12; QF with `confirmed_seeding` deleted → 8 via `sd.eliminated`; QF with neither → 12.
+343/343 tests (+10), lint + format clean.
+
+### Gotcha worth remembering
+
+Runtime stat keys in `daily_*.delta` are **lowercase** (`1b`, `r`, `rbi`, `ip`, `k`) — `SCORING`
+is keyed uppercase (`'1B'`, `R`, …) and `calculateBattingScore` does the mapping. A fixture built
+with the `SCORING` spelling scores a silent 0.
