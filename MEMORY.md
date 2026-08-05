@@ -2911,3 +2911,74 @@ catches is a row replaced **in place at the same length** — `editStat` does ex
 
 **Still open.** Mobile Roster Lab stacks its two columns (from #414's list). And the seasons
 payload trim above, which is now the most likely lead on scoreboard slowness.
+
+## 2026-08-05 — The slow scoreboard was `GET /api/seasons`, not the scoring pass
+
+Follow-on to the entry above, which ruled out `managerWeekSubtotal`. Measuring the **live** app
+found the real cost. Console, logged in, on production:
+
+| measurement       | value                                        |
+| ----------------- | -------------------------------------------- |
+| waiting on server | **784 ms** cold, **753 ms** on a repeat      |
+| downloading       | 26 ms / 18 ms                                |
+| wire              | 320 KB gzipped (2,850 KB raw) — gzip is fine |
+| `JSON.parse`      | 8 ms                                         |
+| weekly rows       | 10,568 — not the 16k the old note claimed    |
+
+**The repeat being just as slow was the whole diagnosis.** `sendJsonRevalidated` derived the ETag
+_from_ the serialized body, so the server parsed the entire `db.json` (daily rows included — far
+more than it sends), serialized ~3 MB, SHA-1'd it and gzipped it, and only then decided to return 304. A 304 cost the same as a 200.
+
+**Why that reads as "never finishes" rather than "slow".** All of it is synchronous, so requests do
+not overlap — they queue behind whichever one holds the event loop. The first measurement of that
+same request was **3,598 ms**, roughly four requests' worth of pile-up during page load. Add other
+managers, or the 4am sync holding the loop, and the tab just sits there.
+
+**Fix (#416).** Build the payload once and hold it, keyed on a fingerprint of `db.json`:
+`dbWriteCounter` (bumped in `writeDB`, which every in-process write funnels through) plus the
+file's `mtime`+`size` (for anything that replaces the file from outside — the **startup Upstash
+restore writes `DB_FILE` directly**, bypassing `writeDB`; so does a manual repair). One `statSync`
+per request instead of a multi-megabyte read. `sendJsonRevalidated` split into `buildJsonPayload` +
+`sendPreparedJson`; gzip is now lazy and retained.
+
+Measured old-vs-new on a 10,240-row / 10.6 MB fixture: `GET` 283 ms → 83 ms, **304 410 ms → 2 ms**,
+payload byte-identical. Both invalidation paths tested explicitly (a swap through the API; a
+`db.json` edited underneath the process), plus two reads with no write between them returning the
+same ETag — otherwise a "cache" that silently rebuilds every time would have passed.
+
+**Not yet reproduced: the three-minute figure itself.** It came from the same note whose diagnosis
+was already wrong, so treat the number as unverified. The queueing explanation fits, but it is an
+inference.
+
+### NEXT TASK — cache the parsed `db.json` in `readDB()`
+
+`readDB()` still does a synchronous read + `JSON.parse` of the whole ~10 MB `db.json` on **every
+request to every endpoint** — 112 call sites. #416 only stopped `GET /api/seasons` paying it.
+Caching it would speed up everything, but the blast radius is much wider than the payload cache.
+
+Steps, in order:
+
+1. **Confirm the payload cache actually landed in production first.** Re-run the resource-timing
+   console block (`performance.getEntriesByName(origin + '/api/seasons')`, reporting
+   `responseStart - requestStart`). Expect waiting-on-server to collapse to single-digit ms. If the
+   scoreboard still stalls after that, stop and re-diagnose — do not build this on an assumption.
+2. **Measure `readDB()` in isolation** before changing it: log timing around the read+parse for a
+   few requests on production data. It should be ~200–400 ms at 10 MB. If it is not the remaining
+   hot spot, this task is not worth its risk.
+3. **The hazard that makes this different from #416.** 83 of the call sites do
+   `const db = readDB()` and then **mutate the returned object** before calling `writeDB(db)`. A
+   naive cache that hands every caller the _same_ object turns those into shared mutable state: a
+   half-finished mutation in one handler becomes visible to the next request, and an abandoned one
+   (a validation failure that returns early without writing) silently poisons the cache. Options,
+   roughly in increasing order of safety: return a structured clone per call (cheaper than a
+   re-parse, but not free); split into `readDBForWrite()` (uncached, as today) vs `readDBCached()`
+   (shared, read-only) and migrate read-only endpoints one at a time; or freeze the cached object
+   so a mutation throws loudly instead of corrupting. **Prefer the split** — it keeps every write
+   path on today's exact semantics, so the risk is confined to endpoints that only read.
+4. **Invalidate identically to #416** — reuse `dbFingerprint()` rather than inventing a second
+   scheme. The Upstash-restore-writes-the-file-directly case is already handled there.
+5. **Vet with per-manager totals**, since read paths feed scoring:
+   `node scripts/measure-scoreboard.js --db db.json --season 2026 --json before.json`, then the
+   same after, and diff. Byte-identical or it is not this change.
+
+**Also still open:** mobile Roster Lab stacks its two columns (from the #414 list).
