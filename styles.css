@@ -5567,6 +5567,15 @@ body::before {
     min-width: 0;
   }
 }
+
+/* Live is the one tab that puts two full boxscores side by side, so the 1200px
+   `main` cap left wide desktops with empty gutters while the tables scrolled
+   inside their own column. Give this tab (and only this tab) the extra width. */
+@media (min-width: 1280px) {
+  main:has(> #live.active) {
+    max-width: 1560px;
+  }
+}
 .live-box-team-header {
   font-weight: 600;
   font-size: 0.95rem;
@@ -5583,10 +5592,25 @@ body::before {
   letter-spacing: 0.05em;
   margin: 0.4rem 0 0.2rem;
 }
-.live-box-table th,
-.live-box-table td {
-  padding: 0.25rem 0.4rem;
-  font-size: 0.82rem;
+/* These twelve-column boxscores sit two-up, so every pixel of cell padding is
+   multiplied by 24. The selectors below are deliberately `thead th`/`tbody td`
+   rather than plain `th`/`td`: the generic `.data-table thead th` (0.75rem
+   side padding) out-specifies a bare `.live-box-table th`, so the shorter
+   selector silently lost and the tables overflowed their column. */
+.live-box-table thead th,
+.live-box-table tbody td {
+  padding: 0.25rem 0.35rem;
+  font-size: 0.8rem;
+}
+.live-box-table thead th {
+  letter-spacing: 0;
+}
+/* The name column is the only one that can give: let it wrap so the numeric
+   columns — which stay nowrap and tabular — are never pushed out of view. */
+.live-box-table thead th:first-child,
+.live-box-table tbody td:first-child {
+  white-space: normal;
+  text-align: left;
 }
 .live-box-rostered {
   background: rgba(34, 197, 94, 0.1);
