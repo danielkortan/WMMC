@@ -20,6 +20,8 @@ import {
   lastKnownRoster,
   scoreRosterForRound,
   roundHasStats,
+  statCoverage,
+  scenarioStatCoverage,
   topPlayers,
   playerSuggestions,
   playerTypes,
@@ -999,5 +1001,78 @@ describe('rounds the league has not played', () => {
       schedule: ROSTER_SCHEDULE,
     });
     assert.equal(roundHasStats(snapshot, 'SF'), true);
+  });
+});
+
+describe('statCoverage — why a round refuses to move', () => {
+  const schedule2 = [
+    { round: 'PP1', week: 'Week 1' },
+    { round: 'PP2', week: 'Week 1' },
+  ];
+  const dates2 = [
+    { start: '2026-03-26', end: '2026-04-01' },
+    { start: '2026-04-02', end: '2026-04-08' },
+  ];
+  const weekly2 = [
+    { batter: 'P', round: 'PP1', week: 'Week 1', hr: 1, so: 5, weekly_score: 10 },
+    { batter: 'P', round: 'PP2', week: 'Week 1', hr: 1, so: 5, weekly_score: 10 },
+  ];
+  const slot2 = (round, week, weekIdx) => rosterSlot('A', round, week, weekIdx, 'P', 10);
+  const build = (daily) =>
+    buildSnapshot({
+      slots: [slot2('PP1', 'Week 1', 0), slot2('PP2', 'Week 1', 1)],
+      dailyBatting: daily,
+      weeklyBatting: weekly2,
+      scheduleDates: dates2,
+      schedule: schedule2,
+      managers: ['A'],
+    });
+
+  it('reports the stat as both scored and recorded on the weekly path', () => {
+    assert.deepEqual(statCoverage(build([]), 'batting', 'SO', 'PP1'), { scored: 5, recorded: 5 });
+  });
+
+  it('flags a round whose per-game rows omit the stat the weekly totals record', () => {
+    const snapshot = build([
+      { batter: 'P', round: 'PP1', week: 'Week 1', date: '2026-03-27', delta: { hr: 1 } },
+      { batter: 'P', round: 'PP2', week: 'Week 1', date: '2026-04-03', delta: { hr: 1, so: 5 } },
+    ]);
+    assert.deepEqual(statCoverage(snapshot, 'batting', 'SO', 'PP1'), { scored: 0, recorded: 5 });
+    assert.deepEqual(statCoverage(snapshot, 'batting', 'SO', 'PP2'), { scored: 5, recorded: 5 });
+  });
+
+  it('flags a round whose per-game rows fall outside its own calendar', () => {
+    const snapshot = build([
+      { batter: 'P', round: 'PP1', week: 'Week 1', date: '2026-02-01', delta: { hr: 1, so: 5 } },
+      { batter: 'P', round: 'PP2', week: 'Week 1', date: '2026-04-03', delta: { hr: 1, so: 5 } },
+    ]);
+    assert.deepEqual(statCoverage(snapshot, 'batting', 'SO', 'PP1'), { scored: 0, recorded: 5 });
+  });
+
+  it('reports a genuinely absent stat as zero on both counts', () => {
+    const snapshot = buildSnapshot({
+      slots: [slot2('PP1', 'Week 1', 0)],
+      weeklyBatting: [{ batter: 'P', round: 'PP1', week: 'Week 1', hr: 1, weekly_score: 10 }],
+      scheduleDates: dates2,
+      schedule: schedule2,
+      managers: ['A'],
+    });
+    assert.deepEqual(statCoverage(snapshot, 'batting', 'SO', 'PP1'), { scored: 0, recorded: 0 });
+  });
+
+  it('returns zero for a key that maps to no stat field', () => {
+    assert.deepEqual(statCoverage(build([]), 'batting', 'NOPE', 'PP1'), { scored: 0, recorded: 0 });
+  });
+
+  it('summarises coverage for every changed scoring value', () => {
+    const snapshot = build([]);
+    const cov = scenarioStatCoverage(snapshot, { scoring: { batting: { SO: -2 } } }, ['PP1', 'PP2']);
+    assert.equal(cov.length, 1);
+    assert.equal(cov[0].key, 'SO');
+    assert.deepEqual(
+      cov[0].rounds.map((r) => r.round),
+      ['PP1', 'PP2']
+    );
+    assert.equal(cov[0].rounds[0].scored, 5);
   });
 });

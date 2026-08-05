@@ -6659,3 +6659,15 @@ body::before {
   font-size: 0.85rem;
   min-width: 11rem;
 }
+
+/* Gained / lost a pool crown or a wild card under the scenario. */
+.hypo-badge-gain {
+  outline: 2px solid var(--success);
+  outline-offset: 1px;
+}
+
+.hypo-badge-lost {
+  background: rgba(196, 30, 58, 0.16);
+  color: var(--danger);
+  text-decoration: line-through;
+}

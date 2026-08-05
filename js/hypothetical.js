@@ -312,6 +312,64 @@ export function realRosterForRound(snapshot, manager, round) {
   return { batters: [...batters], pitchers: [...pitchers] };
 }
 
+// How much of a stat the SCORER actually sees, per round — and how much the weekly totals claim.
+//
+// This exists because a silent zero is the worst answer this tool can give. Change a point value
+// and a round that shows no movement is telling you one of three very different things: the stat
+// genuinely never happened, the stat is recorded but the per-game rows the scorer reads don't
+// carry it, or the per-game rows are dated outside the round's own calendar and get filtered out.
+// The first is a fact about baseball; the other two are data problems, and presenting them as "no
+// change" quietly invites the wrong conclusion.
+//
+// `scored` counts the stat over exactly the rows scoreSlot would use (per-game rows inside the
+// slot's window when they exist, else the weekly row), so it reflects what the arithmetic sees.
+// `recorded` counts the weekly totals. scored === 0 while recorded > 0 is the tell.
+export function statCoverage(snapshot, side, key, round) {
+  const map = side === 'batting' ? BATTING_STAT_KEYS : PITCHING_STAT_KEYS;
+  const field = Object.keys(map).find((f) => map[f] === key);
+  if (!field) return { scored: 0, recorded: 0 };
+
+  const type = side;
+  let scored = 0;
+  let recorded = 0;
+  const seen = new Set();
+
+  for (const slot of snapshot.slots) {
+    if (slot.round !== round || slot.type !== type) continue;
+    const rowKey = `${slot.player}\0${slot.round}\0${slot.week}`;
+
+    const daily = snapshot.dailyIdx[type].get(rowKey);
+    if (daily && daily.length) {
+      const { start, end } = slotWindow(snapshot, slot);
+      for (const row of daily) {
+        if (start && row.date < start) continue;
+        if (end && row.date > end) continue;
+        scored += Number((row.delta || row.cumulative || {})[field]) || 0;
+      }
+    } else {
+      const weekly = snapshot.weeklyIdx[type].get(rowKey);
+      if (weekly) scored += Number(weekly[field]) || 0;
+    }
+
+    // Weekly totals are counted once per player-week, however many managers held him.
+    if (!seen.has(rowKey)) {
+      seen.add(rowKey);
+      const weekly = snapshot.weeklyIdx[type].get(rowKey);
+      if (weekly) recorded += Number(weekly[field]) || 0;
+    }
+  }
+  return { scored: r2(scored), recorded: r2(recorded) };
+}
+
+// Coverage for every scoring value a scenario changes, across the rounds in `rounds`. The UI uses
+// this to explain a round that refuses to move.
+export function scenarioStatCoverage(snapshot, scenario, rounds) {
+  return scoringDiff(scenario && scenario.scoring).map((change) => ({
+    ...change,
+    rounds: (rounds || []).map((round) => ({ round, ...statCoverage(snapshot, change.side, change.key, round) })),
+  }));
+}
+
 // Whether the season has ANY recorded stats for a round. A round nobody has played yet cannot be
 // scored for anyone, and must not be confused with "this manager had no roster" — otherwise an
 // unplayed semifinal resolves 0-0 for everybody and hands out a champion on seed alone.
