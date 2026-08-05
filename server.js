@@ -7584,8 +7584,9 @@ app.post('/api/mlb/resync-dryrun', requireCommissioner, async (req, res) => {
   const weeks = SEASON_SCHEDULE.map((schedWeek, idx) => ({ schedWeek, idx })).filter(
     ({ schedWeek }) => schedWeek.round === round && (!week || schedWeek.week === week)
   );
-  if (weeks.length === 0)
+  if (weeks.length === 0) {
     return res.status(400).json({ error: `No schedule slot for ${round}${week ? ` / ${week}` : ''}` });
+  }
 
   try {
     const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -7594,10 +7595,12 @@ app.post('/api/mlb/resync-dryrun', requireCommissioner, async (req, res) => {
     const clone = JSON.parse(JSON.stringify(sd));
     const before = captureScoreSnapshot(clone, todayET).totals;
     const beforeRows = new Map();
-    for (const r of clone.weekly_batting || [])
+    for (const r of clone.weekly_batting || []) {
       beforeRows.set(`b\0${r.round}\0${r.week}\0${r.batter}`, r.weekly_score || 0);
-    for (const r of clone.weekly_pitching || [])
+    }
+    for (const r of clone.weekly_pitching || []) {
       beforeRows.set(`p\0${r.round}\0${r.week}\0${r.pitcher}`, r.weekly_score || 0);
+    }
 
     const synced = [];
     for (const { schedWeek, idx } of weeks) {
