@@ -16579,11 +16579,27 @@ function hypoAvailableScopes(result) {
 // PP1 and PP2 leaders, then the wildcards that fill the rest — followed by the bracket those seeds
 // produce under the scenario.
 
-function hypoSeedBadges(entry, seeding) {
+// Badges for a manager's standing in the field, marked GAINED or LOST against what really
+// happened. A hypothetical that flips a pool crown or a wild card is the headline result — showing
+// only the end state would leave the reader to diff two tables in their head.
+function hypoSeedBadges(entry, seeding, realSeeding) {
+  const real = realSeeding && realSeeding.byManager[entry.manager];
   const badges = [];
-  if (entry.isPP1Leader) badges.push('<span class="hypo-badge hypo-badge-win">PP1 winner</span>');
-  if (entry.isPP2Leader) badges.push('<span class="hypo-badge hypo-badge-win">PP2 winner</span>');
-  if (seeding.wildcardSet.has(entry.manager)) badges.push('<span class="hypo-badge">Wild card</span>');
+  const mark = (label, now, was, winStyle) => {
+    if (!now && !was) return;
+    const cls = winStyle ? 'hypo-badge hypo-badge-win' : 'hypo-badge';
+    if (now && !was) badges.push(`<span class="${cls} hypo-badge-gain">${label} &uarr; gained</span>`);
+    else if (!now && was) badges.push(`<span class="hypo-badge hypo-badge-lost">${label} &darr; lost</span>`);
+    else badges.push(`<span class="${cls}">${label}</span>`);
+  };
+  mark('PP1 winner', entry.isPP1Leader, !!(real && real.isPP1Leader), true);
+  mark('PP2 winner', entry.isPP2Leader, !!(real && real.isPP2Leader), true);
+  const gainedCrown =
+    (entry.isPP1Leader && !(real && real.isPP1Leader)) || (entry.isPP2Leader && !(real && real.isPP2Leader));
+  const wcNow = seeding.wildcardSet.has(entry.manager);
+  const wcWas = !!(realSeeding && realSeeding.wildcardSet.has(entry.manager));
+  // A wild card given up because this manager won their pool is not a loss worth flagging.
+  if (!(wcWas && !wcNow && gainedCrown)) mark('Wild card', wcNow, wcWas, false);
   return badges.join(' ');
 }
 
@@ -16595,7 +16611,33 @@ function renderHypoPools(seeding, realSeeding) {
   const seedOf = new Map(seeding.qualifierNames.map((n, i) => [n, i + 1]));
   const realSeedOf = new Map((realSeeding ? realSeeding.qualifierNames : []).map((n, i) => [n, i + 1]));
 
-  let html = `<p class="upload-hint hypo-rule">
+  const flips = [];
+  if (realSeeding) {
+    for (const entry of Object.values(seeding.byManager)) {
+      const real = realSeeding.byManager[entry.manager];
+      if (!real) continue;
+      if (entry.isPP1Leader && !real.isPP1Leader) flips.push(`${entry.manager} takes Pool Play 1`);
+      if (!entry.isPP1Leader && real.isPP1Leader) flips.push(`${entry.manager} loses Pool Play 1`);
+      if (entry.isPP2Leader && !real.isPP2Leader) flips.push(`${entry.manager} takes Pool Play 2`);
+      if (!entry.isPP2Leader && real.isPP2Leader) flips.push(`${entry.manager} loses Pool Play 2`);
+      const wcNow = seeding.wildcardSet.has(entry.manager);
+      const wcWas = realSeeding.wildcardSet.has(entry.manager);
+      // Losing a wild card BY WINNING THE POOL is a promotion, not a demotion — reporting it as a
+      // loss reads exactly backwards. Only mention the wild card when the pool crown didn't change.
+      const gainedCrown = (entry.isPP1Leader && !real.isPP1Leader) || (entry.isPP2Leader && !real.isPP2Leader);
+      const lostCrown = (!entry.isPP1Leader && real.isPP1Leader) || (!entry.isPP2Leader && real.isPP2Leader);
+      if (wcNow && !wcWas && !lostCrown) flips.push(`${entry.manager} takes a wild card`);
+      if (!wcNow && wcWas && !gainedCrown) flips.push(`${entry.manager} loses a wild card`);
+    }
+  }
+
+  let html = flips.length
+    ? `<p class="hypo-playoffs hypo-playoffs-changed">Pool play changes hands &mdash; ${flips
+        .map(esc)
+        .join(' &middot; ')}</p>`
+    : '';
+
+  html += `<p class="upload-hint hypo-rule">
     <strong>How the field is decided.</strong> Each pool crowns a <strong>Pool Play 1 winner</strong>
     (most PP1 points in that pool) and a <strong>Pool Play 2 winner</strong> (most PP2 points) — one
     manager can be both. Every pool winner is seeded above every non-winner. The remaining spots go
@@ -16623,7 +16665,7 @@ function renderHypoPools(seeding, realSeeding) {
             ? `${seed}${moved ? ` <span class="${realSeed ? 'hypo-up' : 'hypo-up'}">(was ${realSeed || 'out'})</span>` : ''}`
             : `<span class="hypo-flat">&ndash;${realSeed ? ` <span class="hypo-down">(was ${realSeed})</span>` : ''}</span>`
         }</td>
-        <td>${hypoSeedBadges(e, seeding)}</td>
+        <td>${hypoSeedBadges(e, seeding, realSeeding)}</td>
       </tr>`;
     }
     html += '</tbody></table></div>';
@@ -16775,6 +16817,31 @@ function renderHypoResults(result) {
       ? `Ranked on ${esc(scope.label)} points only &mdash; ${rows.length} manager${rows.length === 1 ? '' : 's'} played this round.`
       : 'Ranked on the full season.'
   }</p>`;
+
+  // A round showing no movement is ambiguous, so say which kind of nothing it is: the stat never
+  // happened here, or it is recorded in the weekly totals but absent from the per-game rows the
+  // scorer reads. The second is a data gap, and reporting it as "no change" would be misleading.
+  if (!result.identity && rows.length && rows.every((r) => r.delta === 0)) {
+    const snapshot = hypoSnapshot(SELECTED_SEASON);
+    const scopeRounds = scope.rounds || [...new Set(SEASON_SCHEDULE.map((w) => w.round))];
+    const coverage = snapshot ? scenarioStatCoverage(snapshot, HYPO_SCENARIO, scopeRounds) : [];
+    const notes = [];
+    for (const change of coverage) {
+      const scored = change.rounds.reduce((a, r) => a + r.scored, 0);
+      const recorded = change.rounds.reduce((a, r) => a + r.recorded, 0);
+      if (scored !== 0) continue;
+      notes.push(
+        recorded > 0
+          ? `<strong>${esc(change.key)}</strong> is recorded in the weekly totals for ${esc(
+              scope.label
+            )} (${fmt(recorded)}) but is missing from the per-game rows this tool scores, so changing its value cannot move this round. That is a gap in the stored daily data, not a scoring result.`
+          : `No <strong>${esc(change.key)}</strong> was recorded in ${esc(
+              scope.label
+            )} at all, so changing its value has nothing to act on here.`
+      );
+    }
+    if (notes.length) html += `<p class="hypo-warning">${notes.join(' ')}</p>`;
+  }
 
   html += `<div class="table-wrapper"><table class="data-table hypo-standings">
     <thead><tr><th></th><th>Manager</th><th>Real</th><th>What If</th><th>&Delta;</th><th>Move</th></tr></thead>
