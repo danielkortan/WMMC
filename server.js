@@ -619,6 +619,10 @@ function writeManagersSeed(managers) {
   }
 }
 
+// Bumped by writeDB. Part of the fingerprint that decides whether a cached db.json-derived
+// payload is still good — see seasonsPayload.
+let dbWriteCounter = 0;
+
 function readDB() {
   try {
     if (fs.existsSync(DB_FILE)) {
@@ -637,6 +641,10 @@ function readDB() {
 }
 
 function writeDB(data, opts = {}) {
+  // Every write invalidates anything derived from db.json. Bumped BEFORE the write, not after, so
+  // a write that throws part-way still drops the caches rather than leaving them claiming to
+  // describe a file that may have changed. See seasonsPayload.
+  dbWriteCounter++;
   // Stamp every write so startup can tell whether the local disk copy or the
   // Upstash backup is newer (prevents a stale backup from clobbering good data).
   data.last_saved_at = new Date().toISOString();
@@ -905,24 +913,75 @@ function computeSeasonRev(sd) {
 // never serve stale without asking; an unchanged re-fetch is a 304 with zero body bytes, and an
 // actual transfer is gzipped (~10x smaller for JSON). Express compresses nothing by default, and
 // its automatic ETag is set too late to short-circuit the JSON work, so both are explicit here.
-function sendJsonRevalidated(req, res, obj) {
+// Serialize + hash once, so a payload that hasn't changed can be served again without redoing
+// either. The gzip is deliberately NOT computed here — a 304 never needs it, and it is the most
+// expensive step of the three.
+function buildJsonPayload(obj) {
   const body = JSON.stringify(obj);
-  const etag = '"' + crypto.createHash('sha1').update(body).digest('hex') + '"';
-  res.set('ETag', etag);
+  return {
+    body,
+    etag: '"' + crypto.createHash('sha1').update(body).digest('hex') + '"',
+    gzip: null,
+  };
+}
+
+function sendPreparedJson(req, res, payload) {
+  res.set('ETag', payload.etag);
   res.set('Cache-Control', 'no-cache');
   res.set('Vary', 'Accept-Encoding');
   // includes() rather than equality: proxies may weaken the tag (W/"...") or the browser may
   // send several candidates comma-separated.
-  if (String(req.headers['if-none-match'] || '').includes(etag)) return res.status(304).end();
+  if (String(req.headers['if-none-match'] || '').includes(payload.etag)) return res.status(304).end();
   res.set('Content-Type', 'application/json; charset=utf-8');
   if (/\bgzip\b/i.test(String(req.headers['accept-encoding'] || ''))) {
+    // Compressed once and kept alongside the body: for a cached payload every later request is a
+    // buffer write, and for an uncached one this costs exactly what it always did.
+    if (!payload.gzip) payload.gzip = zlib.gzipSync(payload.body);
     res.set('Content-Encoding', 'gzip');
-    return res.send(zlib.gzipSync(body));
+    return res.send(payload.gzip);
   }
-  res.send(body);
+  res.send(payload.body);
 }
 
-app.get('/api/seasons', (req, res) => {
+function sendJsonRevalidated(req, res, obj) {
+  sendPreparedJson(req, res, buildJsonPayload(obj));
+}
+
+// GET /api/seasons is the most expensive read in the app, and every client hits it on load and on
+// every tab switch. Building it means parsing the whole db.json (daily rows included — far more
+// than it sends), serializing ~3 MB of client-facing season data, hashing it, and gzipping it.
+// All of that is synchronous, so requests do not overlap: they queue behind whichever one is
+// holding the event loop.
+//
+// Measured on production data: ~780 ms of blocked loop per call, and **the same for a 304**,
+// because the ETag used to be derived FROM the serialized body — the server did the entire job
+// before deciding to send nothing. Several of those queued behind each other is what a scoreboard
+// that "never finishes" actually looks like.
+//
+// So build it once and hold it. The payload is a pure function of db.json, so the only question is
+// whether the file has changed since. `dbWriteCounter` catches every in-process write (they all go
+// through writeDB) and the file's mtime+size catches anything that replaced it from outside — the
+// startup Upstash restore writes DB_FILE directly, and a commissioner may repair it by hand. That
+// costs one statSync instead of a multi-megabyte read.
+//
+// Cost of holding it: the body string plus the gzip buffer, a few MB resident. That is the trade —
+// a few MB of RSS against ~780 ms of blocked event loop on every request.
+let seasonsPayloadCache = null;
+
+function dbFingerprint() {
+  try {
+    const st = fs.statSync(DB_FILE);
+    return `${dbWriteCounter}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${dbWriteCounter}:missing`;
+  }
+}
+
+function seasonsPayload() {
+  const fingerprint = dbFingerprint();
+  if (seasonsPayloadCache && seasonsPayloadCache.fingerprint === fingerprint) {
+    return seasonsPayloadCache.payload;
+  }
   const db = readDB();
   const seasons = db.seasons || {};
   // Attach the concurrency token per season (not persisted) so the client can echo it on save.
@@ -939,7 +998,13 @@ app.get('/api/seasons', (req, res) => {
     const { score_snapshots: _snaps, daily_batting: _db, daily_pitching: _dp, ...clientSd } = sd;
     out[year] = { ...clientSd, _rev: computeSeasonRev(sd) };
   }
-  sendJsonRevalidated(req, res, out);
+  const payload = buildJsonPayload(out);
+  seasonsPayloadCache = { fingerprint, payload };
+  return payload;
+}
+
+app.get('/api/seasons', (req, res) => {
+  sendPreparedJson(req, res, seasonsPayload());
 });
 
 // POST /api/seasons — save all seasons (full replace)
