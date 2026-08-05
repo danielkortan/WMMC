@@ -2734,13 +2734,103 @@ Zero overflow on the whole Live tab (standings, expanded manager detail, boxscor
 Mobile is untouched — the widening is behind `min-width: 1280px`, and 12-column tables still scroll
 on a phone, which is out of scope here.
 
+## The Hypothetical Zone, and two MLB sync bugs it uncovered (2026-08-05)
+
+**What shipped.** A read-only "What If" sandbox tab, in five PRs: #403 engine + Scoring Lab,
+#404 Roster Lab, #405 Player Explorer, #406 round-scoped standings + mobile nav, #408 stat-coverage
+diagnostic. Then two sync fixes it surfaced: #411 and #413.
+
+**Design decisions to preserve.**
+
+1. _The sandbox derives only the DELTA._
+   `hypothetical = realScore + (score(rows, scenarioTable) − score(rows, realTable))`. The stored
+   score is authoritative and never recomputed, so the empty scenario reproduces the live scoreboard
+   **by construction**, and a commissioner-adjusted row (whose stored score does not match its raw
+   line) cancels out of the subtraction. Do not "simplify" this into a from-scratch recompute.
+2. _The engine does not reimplement roster windows._ It consumes resolved slots from
+   `managerWeekSubtotal`, which owns the core invariant. One source of truth for "who was rostered
+   when".
+3. _Seeding and bracket rules live in `js/seeding.js` and `js/bracket.js`_, shared by the real
+   bracket and the sandbox, so a hypothetical can never disagree with reality about the rules.
+   `app.js`'s `computePoolPlaySeeding` now delegates to `seedFromPeriodTotals`.
+4. _The sandbox never invents data._ A manager promoted into a round they never played carries
+   their last real roster forward, labelled as an assumption. A round nobody has played does not
+   resolve at all (`roundHasStats`) — otherwise an unplayed semifinal scores 0–0 for everyone and
+   crowns a champion on seed alone.
+
+**Bug 1 — a July game counted in a May week (#411).** A postponed game keeps its **originally
+scheduled** date in the MLB schedule response. Once the makeup is played it reads `Final`, so
+`fetchMLBGames` — which took the date from the wrapper the game arrived in — accepted it and stamped
+it with the rainout date. gamePk 823062, played 2026-07-07, was counted as a 2026-05-05 start,
+inflating one pitcher's PP1 Week 1 line from 6 IP to 13 IP and ~34 points to his manager. Fixed by
+taking `game.officialDate` and dropping games outside the requested range. MLB lists such games under
+**both** dates, so the makeup is still scored correctly in its real week — verified against live data
+before shipping. `gamesFromSchedule` (Live tab) had the same flaw and was fixed too.
+
+**Bug 2 — late stat corrections were never picked up (#413).** `resolveWeeksForCatchUp` only
+re-syncs the current week and the one before it, within the same phase, so a correction landing on a
+week that has since closed is invisible. Three were sitting in the 2026 season: +5, +2 and −0.6.
+`sweepStatCorrections` now walks every completed week on the Wednesday run, syncs each into a clone,
+measures, and adopts only that week's rows. **It refuses movement over `MLB_CORRECTION_MAX_SWING`
+(default 15) and Slack-alerts instead** — a real correction is small; a big swing is a bug, which is
+exactly how bug 1 presented.
+
+**Gotchas.**
+
+- **`/api/mlb/compare` is NOT a scoring prediction.** Its `mlb_total` comes from `enrichBatting`,
+  which scores the whole week **unclipped**, while stored scores are clipped to each player's roster
+  window. A mid-week swap shows there as a large phantom difference a real re-sync would never
+  produce. It sent this investigation down the wrong path twice. Use `POST /api/mlb/resync-dryrun`,
+  which runs the real `performMLBSync` against a deep clone and persists nothing.
+- **`MLB_API_BASE` env var** overrides the MLB API base URL — point it at a local stub to exercise
+  sync paths with no network. Defaults to the real API.
+- `js/hypothetical.js` uses `\0` **escapes** in Map keys. They were once raw NUL bytes, which made
+  git treat the file as binary and hide its diffs.
+
+**Done.** PP1 was re-synced week by week (after #411 was deployed, and only once all five weeks
+dry-ran clean), restoring the daily rows and the batting `so`/`lob`/`abs` that round had been missing.
+Worth confirming once in a new session — PP1 strikeouts should now be non-zero, and the What If
+Scoring Lab should move Pool Play 1 when SO is given a value:
+
+```js
+const sd = (await fetch('/api/seasons').then((x) => x.json()))['2026'];
+console.log(
+  'PP1 SO:',
+  (sd.weekly_batting || []).filter((r) => r.round === 'PP1').reduce((a, r) => a + (r.so || 0), 0)
+);
+```
+
+**Open.** Mobile Roster Lab stacks its two columns, so actual-vs-hypothetical takes a scroll.
+
+**Next tasks (requested, not started).** _Both were built in PR #415 — see the entry below,
+which also corrects task 2's diagnosis. Kept here as written for the record._
+
+1. _Slack prompt only when a round outcome changes._ On the Wednesday run **after a round ends**,
+   post to Slack **only if** corrections would change a round _outcome_ — a pool-play period winner,
+   a wildcard/qualifier, or a playoff matchup winner. Stay silent when only point totals move.
+   Sketch: capture the outcome before and after `sweepStatCorrections` and compare. The rules exist
+   in `js/seeding.js` and `js/bracket.js`, but those are ESM and **`server.js` cannot import them** —
+   check first whether `server.js` already has equivalent seeding logic (playoff odds / Slack
+   scoreboard) before adding a third copy, and if a copy is unavoidable add it to the "must stay in
+   sync" list in CLAUDE.md.
+
+2. _The scoreboard scaling limit._ At ~1,340 batters / 16k weekly rows the scoreboard never finishes
+   rendering — over three minutes, measured. This is **pre-existing**: it reproduces on `7087e0a`,
+   before any What If work, so nothing in this session caused it. Cause: `managerWeekSubtotal` runs
+   256× per render (16 weeks × 8 managers × 2 types), each call scanning every weekly row. Likely fix
+   is to index the weekly rows by `manager|round|week` once per render instead of re-scanning per
+   call. It touches the core scoring path, so it needs a before/after per-manager totals comparison —
+   `POST /api/mlb/resync-dryrun` is not the right tool there (it re-syncs); compare
+   `captureScoreSnapshot` output before and after the refactor instead. Worth measuring the real
+   season's row count first to see how close production actually is to the wall.
+
 ---
 
 ## 2026-08-05 — The two queued "next tasks", and one of them was chasing the wrong thing
 
-Both came off the task list in PR #414's memory entry. Note that entry is on the still-open
-`claude/hypothetical-zone-managers-316enn` branch, not on `main` — the list is invisible from a
-fresh clone until #414 merges.
+Both came off the task list in the entry directly above. That list sat on an unmerged branch
+(PR #414) while this work happened, so it was invisible from a fresh clone — worth remembering that
+a task queued only in an open PR is a task nobody will find.
 
 ### 1. The corrections sweep now posts only when a RESULT changed
 
