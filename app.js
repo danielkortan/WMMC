@@ -685,6 +685,60 @@ function getBetweenPeriodsInfo(sd) {
 }
 
 // ============================================================
+// Weekly stat rows, bucketed by round|week and then by manager.
+// ============================================================
+// managerWeekSubtotal is called 256 times to score one scoreboard — 16 scheduled weeks x 8
+// managers x batting/pitching — and each call used to walk the whole weekly array twice looking
+// for its own week. Bucketing once per array turns those scans into a Map lookup. Row ORDER
+// inside each bucket is the array's own order, so every derived list downstream is byte-identical
+// to what the scans produced; this is a lookup change, not a scoring change.
+//
+// Legacy 'PP1P' / 'PP2P' import variants share weeks with their parent round, so they normalize
+// onto the parent's key — the same rule the old inline matchesRoundWeek applied.
+//
+// Cached in a WeakMap on the rows array itself (the pattern _normTeamIndexCache already uses), so
+// a fresh season parse — or any code that REPLACES sd.weekly_batting — silently gets a fresh
+// index. A push changes `length` and rebuilds. The one case neither covers is replacing a row
+// in situ at the same length, which is why editStat calls invalidateWeeklyRowIndex.
+const _weeklyRowIndexCache = new WeakMap();
+const EMPTY_WEEK_BUCKET = { rows: [], byManager: new Map() };
+
+function parentRound(round) {
+  return round && round.length > 1 && round.endsWith('P') ? round.slice(0, -1) : round;
+}
+
+function weeklyRowIndex(rowsArr) {
+  if (!Array.isArray(rowsArr)) return null;
+  const cached = _weeklyRowIndexCache.get(rowsArr);
+  if (cached && cached.length === rowsArr.length) return cached.byWeek;
+
+  const byWeek = new Map();
+  for (const r of rowsArr) {
+    if (!r || !r.week) continue;
+    const key = `${parentRound(r.round)}|${r.week}`;
+    let bucket = byWeek.get(key);
+    if (!bucket) {
+      bucket = { rows: [], byManager: new Map() };
+      byWeek.set(key, bucket);
+    }
+    bucket.rows.push(r);
+    if (r.manager) {
+      const mine = bucket.byManager.get(r.manager);
+      if (mine) mine.push(r);
+      else bucket.byManager.set(r.manager, [r]);
+    }
+  }
+  _weeklyRowIndexCache.set(rowsArr, { length: rowsArr.length, byWeek });
+  return byWeek;
+}
+
+// Drop a cached index after a row is swapped out in place — the only mutation the length check
+// cannot see.
+function invalidateWeeklyRowIndex(rowsArr) {
+  if (Array.isArray(rowsArr)) _weeklyRowIndexCache.delete(rowsArr);
+}
+
+// ============================================================
 // Per-week subtotal for one manager. Single source of truth for the
 // "what stats count toward this manager this week" question used by
 // renderRosterData (the My Roster weekly listing), computeRosterPeriodScores
@@ -699,13 +753,9 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const week = schedWeek.week;
   const weekKey = `${round}|${week}`;
 
-  // Legacy 'PP1P' / 'PP2P' import variants share weeks with their parents.
-  const matchesRoundWeek = (r) => {
-    if (r.week !== week) return false;
-    if (r.round === round) return true;
-    if (r.round && r.round.endsWith('P') && r.round.slice(0, -1) === round) return true;
-    return false;
-  };
+  // Every row for this round+week (legacy 'PP1P'/'PP2P' folded in), looked up once instead of
+  // scanning the whole weekly array twice per call. See weeklyRowIndex.
+  const weekBucket = (weeklyRowIndex(rowsArr) || new Map()).get(`${parentRound(round)}|${week}`) || EMPTY_WEEK_BUCKET;
 
   const scheduleDates = seasonData.schedule_dates || [];
   const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
@@ -807,7 +857,7 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
           s.player_in &&
           s.week_key === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
-          (weekRosterDates[s.player_in] || rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
+          (weekRosterDates[s.player_in] || weekBucket.rows.some((r) => r[playerKey] === s.player_in))
       )
       .map((s) => s.player_in),
   ]);
@@ -815,10 +865,10 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   // Manager-attributed rows first; then null-manager rows for eligible
   // players, deduped by player so a stale ghost row can't double-count
   // alongside an attributed entry.
-  const weekManagerRows = rowsArr.filter((r) => r.manager === managerName && matchesRoundWeek(r));
+  const weekManagerRows = weekBucket.byManager.get(managerName) || [];
   const allWeekRows = weekManagerRows.slice();
-  rowsArr.forEach((r) => {
-    if (!matchesRoundWeek(r) || r.manager === managerName) return;
+  weekBucket.rows.forEach((r) => {
+    if (r.manager === managerName) return;
     // A row attributed to ANOTHER manager still counts here when this manager held the player for
     // part of the week — a mid-week handover (trade / waiver pickup). `manager` is a sticky derived
     // cache naming whoever held him at compile time, so it cannot arbitrate a contested week; the
@@ -5310,6 +5360,51 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   return html;
 }
 
+// Playoff scoreboard sections render the round's head-to-head matchups — the same pairs as the
+// Playoff Bracket card and the Live tab — instead of a league-wide ranked table. Once the bracket
+// starts only its participants can score, so an "overall" list of every manager is noise. Totals
+// are the same periodScores() rows the table used, so no number moves. `seedRank` breaks ties on
+// a finalized round; while a round is live the highlight is only "currently ahead".
+function renderPlayoffMatchupCards(matchups, scores, seedRank, isFinalized) {
+  const byName = {};
+  scores.forEach((s) => (byName[s.manager] = s));
+  const rowOf = (name) => byName[name] || { batting: 0, pitching: 0, total: 0 };
+
+  const teamHtml = (t, cls) => {
+    const r = rowOf(t.name);
+    return `<div class="matchup-team ${cls}">
+      ${t.seed ? `<span class="seed">${t.seed}</span>` : ''}
+      <span class="team-name">${esc(t.name)}<span class="matchup-team-sub">B ${fmt(r.batting)} &middot; P ${fmt(r.pitching)}</span></span>
+      <span class="team-score">${fmt(r.total)}</span>
+    </div>`;
+  };
+
+  const cards = matchups
+    .map((mu) => {
+      const [t1, t2] = mu.teams;
+      const a = rowOf(t1.name).total;
+      const b = rowOf(t2.name).total;
+      // A finalized round marks the official winner (seed tiebreak included); a live round just
+      // flags whoever currently leads, and nobody while the two are level.
+      const ahead = isFinalized
+        ? roundMatchupWinner(t1.name, a, t2.name, b, seedRank)
+        : a === b
+          ? null
+          : a > b
+            ? t1.name
+            : t2.name;
+      const cls = isFinalized ? 'winner' : 'matchup-leader';
+      return `<div class="matchup">
+        <div class="matchup-label">${esc(mu.label)}</div>
+        ${teamHtml(t1, ahead === t1.name ? cls : '')}
+        ${teamHtml(t2, ahead === t2.name ? cls : '')}
+      </div>`;
+    })
+    .join('');
+
+  return `<div class="matchup-results-grid">${cards}</div>`;
+}
+
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
@@ -5740,6 +5835,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       return tbl;
     };
 
+    // Playoff rounds are head-to-head, so each section shows just that round's matchups. The
+    // ranked table is only the fallback for a round whose pairings aren't determined yet (the
+    // prior round isn't finalized), where there is nothing to pair managers up by.
+    const playoffSeedRank = seedRankLookup(seasonData);
+    const finalizedRounds = new Set(seasonData.finalized_rounds || []);
+
     html += `<div class="card scoreboard-card">`;
     [
       { key: 'qf', has: hasQF, label: 'Quarterfinals', round: ['QF'] },
@@ -5748,6 +5849,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     ].forEach(({ key, has, label, round }) => {
       if (!has) return;
       const open = currentSectionId === key;
+      const scores = periodScores(round);
+      const matchups = playoffRoundMatchups(seasonData, round[0]);
+      const body = matchups
+        ? renderPlayoffMatchupCards(matchups, scores, playoffSeedRank, finalizedRounds.has(round[0]))
+        : renderPlayoffTable(scores);
       html += `
         <div class="sb-section${open ? '' : ' sb-section-collapsed'}" id="sb-section-${key}">
           <div class="sb-section-header" onclick="toggleScoreboardSection('${key}')">
@@ -5755,7 +5861,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
             <span class="sb-section-arrow">▾</span>
           </div>
           <div class="sb-period" id="sb-${key}" style="display:${open ? 'block' : 'none'}">
-            ${renderPlayoffTable(periodScores(round))}
+            ${body}
           </div>
         </div>`;
     });
@@ -12470,6 +12576,8 @@ window.savePlayerStats = function (manager, statType, playerName, weekKey) {
     } else {
       sd.weekly_batting.push(record);
     }
+    // A replacement at the same length is invisible to the row index's length check.
+    invalidateWeeklyRowIndex(sd.weekly_batting);
 
     // Recompute total_score for this batter
     let total = 0;
@@ -12529,6 +12637,8 @@ window.savePlayerStats = function (manager, statType, playerName, weekKey) {
     } else {
       sd.weekly_pitching.push(record);
     }
+    // A replacement at the same length is invisible to the row index's length check.
+    invalidateWeeklyRowIndex(sd.weekly_pitching);
   }
 
   // Auto-add to roster for this week if not already
