@@ -47,6 +47,8 @@ import {
   scoringDiff,
   scoringKeys,
   weeksInRound,
+  lastKnownRoster,
+  scoreRosterForRound,
   topPlayers,
   playerSuggestions,
   playerTypes,
@@ -56,6 +58,7 @@ import {
   explainPlayer,
 } from './hypothetical.js';
 import { seedFromPeriodTotals } from './seeding.js';
+import { resolveBracket } from './bracket.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
@@ -102,6 +105,8 @@ Object.assign(window, {
   scoringDiff,
   scoringKeys,
   weeksInRound,
+  lastKnownRoster,
+  scoreRosterForRound,
   topPlayers,
   playerSuggestions,
   playerTypes,
@@ -110,6 +115,7 @@ Object.assign(window, {
   playerRoundTotals,
   explainPlayer,
   seedFromPeriodTotals,
+  resolveBracket,
   computePlayoffStatuses,
   playoffStatusLabel,
   statusKeyForPosition,

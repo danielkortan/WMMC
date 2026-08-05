@@ -37,6 +37,7 @@ import {
   PITCHING_STAT_KEYS,
 } from './scoring.js';
 import { seedFromPeriodTotals } from './seeding.js';
+import { resolveBracket } from './bracket.js';
 
 // A scenario that changes nothing. Scoring the snapshot against this must return the real
 // standings, unchanged — that is the property tests/hypothetical.test.js pins down.
@@ -311,6 +312,63 @@ export function realRosterForRound(snapshot, manager, round) {
   return { batters: [...batters], pitchers: [...pitchers] };
 }
 
+// Whether the season has ANY recorded stats for a round. A round nobody has played yet cannot be
+// scored for anyone, and must not be confused with "this manager had no roster" — otherwise an
+// unplayed semifinal resolves 0-0 for everybody and hands out a champion on seed alone.
+export function roundHasStats(snapshot, round) {
+  for (const idx of [snapshot.weeklyIdx.batting, snapshot.weeklyIdx.pitching]) {
+    for (const row of idx.values()) {
+      if (row.round === round) return true;
+    }
+  }
+  return false;
+}
+
+// The most recent roster a manager actually had before `round`, walking the schedule backwards.
+// Returns { round, batters, pitchers } or null if they never rostered anyone.
+//
+// This is the sensible DEFAULT for a manager the scenario promotes into a round they never played:
+// absent any other information, assume they would have run back the team they last put out. It is
+// an assumption, not a record — the real league starts every period from a fresh submission and
+// never carries players across a boundary (see the core invariant), so anything built on this must
+// say where the roster came from.
+export function lastKnownRoster(snapshot, manager, round) {
+  const order = [];
+  for (const s of snapshot.schedule || SEASON_SCHEDULE) {
+    if (!order.includes(s.round)) order.push(s.round);
+  }
+  const idx = order.indexOf(round);
+  if (idx < 0) return null;
+  for (let i = idx - 1; i >= 0; i--) {
+    const roster = realRosterForRound(snapshot, manager, order[i]);
+    if (roster.batters.length || roster.pitchers.length) return { round: order[i], ...roster };
+  }
+  return null;
+}
+
+// Points a given roster would score across every week of a round, under `table`. Used to price a
+// carried-forward roster in a round its manager never played.
+export function scoreRosterForRound(snapshot, manager, round, roster, scenario = EMPTY_SCENARIO) {
+  const table = buildScoringTable(scenario && scenario.scoring);
+  const weeks = weeksInRound(snapshot, round);
+  let total = 0;
+  for (const [type, players] of [
+    ['batting', roster.batters || []],
+    ['pitching', roster.pitchers || []],
+  ]) {
+    for (const player of players) {
+      for (const { week, weekIdx } of weeks) {
+        total += scoreSlot(
+          snapshot,
+          { manager, round, week, weekIdx, player, type, addDate: null, dropDate: null },
+          table
+        ).score;
+      }
+    }
+  }
+  return r2(total);
+}
+
 // Resolve the scenario's roster overrides into the slot set that should actually be scored.
 //
 // A (manager, round) with an override has its real slots REPLACED: each named player gets a slot
@@ -550,7 +608,7 @@ export function scoreScenario(snapshot, scenario = EMPTY_SCENARIO) {
     standings,
     players: [...byPlayer.values()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)),
     playerRounds: [...byPlayerRound.values()],
-    playoffs: playoffPicture(snapshot, standings),
+    playoffs: playoffPicture(snapshot, standings, scenario),
     rosterChanges: { benched: benched.length, added: added.length, overrides: rosterOverrides(scenario) },
     fidelity: {
       exact: approximateSlots === 0,
@@ -571,7 +629,7 @@ export function scoreScenario(snapshot, scenario = EMPTY_SCENARIO) {
 // it is genuinely computable. What happens AFTER the seeds is not: a manager who never played the
 // semifinal has no semifinal roster, which is why entering one is a deliberate, labeled step
 // rather than something the engine invents.
-function playoffPicture(snapshot, standings) {
+function playoffPicture(snapshot, standings, scenario = EMPTY_SCENARIO) {
   const pools = snapshot.pools || {};
   const entriesFor = (pick) =>
     standings
@@ -595,9 +653,37 @@ function playoffPicture(snapshot, standings) {
 
   const realSet = new Set(real.qualifierNames);
   const hypoSet = new Set(hypothetical.qualifierNames);
+
+  // Re-run the tournament on the new seeds. A manager the scenario promoted into a round they
+  // never played has no roster there, so their side scores null and the bracket stops rather than
+  // inventing a result — see js/bracket.js.
+  const hypoByManager = new Map(standings.map((s) => [s.manager, s]));
+  const carried = [];
+  const scoreFor = (manager, round) => {
+    const entry = hypoByManager.get(manager);
+    if (!entry) return null;
+    const period = entry.periods.find((p) => p.round === round);
+    if (period) return period.hypothetical;
+    // Promoted into a round they never played. Default to the last roster they actually fielded,
+    // priced against this round's stats — and record it so the UI can label the assumption.
+    // A round the whole league has yet to play has nothing to score anyone on, carried roster or
+    // not — leave it undecided rather than resolving every game 0-0 on seed.
+    if (!roundHasStats(snapshot, round)) return null;
+    const fallback = lastKnownRoster(snapshot, manager, round);
+    if (!fallback) return null;
+    carried.push({ manager, round, fromRound: fallback.round });
+    return scoreRosterForRound(snapshot, manager, round, fallback, scenario);
+  };
+  const bracket = resolveBracket(hypothetical.qualifierNames, scoreFor);
+
   return {
     real: real.qualifierNames,
     hypothetical: hypothetical.qualifierNames,
+    realSeeding: real,
+    seeding: hypothetical,
+    bracket,
+    carried,
+    unplayedRounds: ['QF', 'SF', 'Finals'].filter((r) => !roundHasStats(snapshot, r)),
     in: hypothetical.qualifierNames.filter((n) => !realSet.has(n)),
     out: real.qualifierNames.filter((n) => !hypoSet.has(n)),
     changed: real.qualifierNames.join('|') !== hypothetical.qualifierNames.join('|'),

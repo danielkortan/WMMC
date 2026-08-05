@@ -6535,3 +6535,127 @@ body::before {
 .hypo-scope-tabs {
   margin: 0.5rem 0 0.25rem;
 }
+
+/* ---- Playoff Picture: pools, seeds, bracket ---- */
+
+.hypo-rule {
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid #d9a441;
+  background: rgba(217, 164, 65, 0.07);
+  border-radius: 0 6px 6px 0;
+}
+
+.hypo-pool-title {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-light);
+}
+
+.hypo-pool-table td {
+  white-space: nowrap;
+}
+
+/* A manager holding a playoff spot under this scenario. */
+.hypo-qualified td {
+  background: rgba(45, 124, 45, 0.07);
+}
+
+.hypo-badge-win {
+  background: rgba(45, 124, 45, 0.22);
+}
+
+.hypo-matchups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.6rem;
+}
+
+.hypo-matchup {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  background: var(--card-bg);
+}
+
+/* Undecided: one side has no roster for this round, so no winner is claimed. */
+.hypo-matchup-open {
+  border-style: dashed;
+  background: rgba(217, 164, 65, 0.05);
+}
+
+.hypo-matchup-label {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.hypo-matchup-side {
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+}
+
+.hypo-matchup-winner {
+  font-weight: 700;
+  color: var(--success);
+}
+
+.hypo-seed-chip {
+  display: inline-block;
+  min-width: 1.15rem;
+  padding: 0 0.2rem;
+  border-radius: 4px;
+  background: var(--border);
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* ---- Roster Lab: click-to-swap ---- */
+
+.hypo-swap-name {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--primary);
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px dashed var(--text-muted);
+}
+
+.hypo-swap-name:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.hypo-roster-swapping td {
+  background: rgba(217, 164, 65, 0.16);
+}
+
+.hypo-swap-row td {
+  background: rgba(217, 164, 65, 0.09);
+  padding: 0.45rem 0.4rem;
+}
+
+.hypo-swap-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  margin-right: 0.5rem;
+}
+
+.hypo-swap-row input {
+  padding: 0.22rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 11rem;
+}
