@@ -2733,3 +2733,91 @@ tabular, so the player-name column is the one that absorbs any remaining squeeze
 Zero overflow on the whole Live tab (standings, expanded manager detail, boxscores) from 1000px up.
 Mobile is untouched — the widening is behind `min-width: 1280px`, and 12-column tables still scroll
 on a phone, which is out of scope here.
+
+---
+
+## 2026-08-05 — The two queued "next tasks", and one of them was chasing the wrong thing
+
+Both came off the task list in PR #414's memory entry. Note that entry is on the still-open
+`claude/hypothetical-zone-managers-316enn` branch, not on `main` — the list is invisible from a
+fresh clone until #414 merges.
+
+### 1. The corrections sweep now posts only when a RESULT changed
+
+**The rule.** A stat correction that moves a manager 2.4 points is not news. One that overturns a
+pool-play period winner, who qualifies (or the seed order the bracket pairs off), or a playoff
+matchup winner, is. `captureRoundOutcomes` snapshots those three things, `diffRoundOutcomes` says
+what moved, and the Wednesday sweep posts only when the list is non-empty. Point totals moving is
+the expected weekly case and stays in the log.
+
+**No third copy of the rules, which was the whole risk.** `server.js` already owns both halves:
+`currentQualification` (the playoff-odds engine) for pool winners + qualifiers, and
+`computePlayoffPairs` (the Slack matchup post) for who played whom and who won. Both re-used
+verbatim, so an alert can never disagree with the bracket it describes. `js/seeding.js` /
+`js/bracket.js` are the client's ESM copies and `server.js` cannot import them — the temptation
+to paste a third implementation is exactly what CLAUDE.md warns about. The only edit to existing
+logic was adding `pp1LeaderByPool` next to `currentQualification`'s existing `pp2LeaderByPool` so
+the message can name the pool.
+
+**A shape change worth knowing about.** `sweepStatCorrections` now adopts accepted weeks into a
+`target` season — the live `sd` when applying, a throwaway deep clone on a dry run — and returns
+`{ results, outcomeChanges }` rather than a bare array (two callers: the 4am cron and
+`POST /api/mlb/apply-corrections`). That is what lets `dryRun` answer "would this change a result?"
+without the live season seeing a row.
+
+**How it was verified, and the reusable recipe.** A stub MLB Stats API behind `MLB_API_BASE`
+(serve `/api/v1/schedule` + `/api/v1/game/:id/boxscore` out of a mutable plan; a "stat correction"
+is then just a plan edit between two sweeps), the staging seed for managers/pools/rosters, and
+`DB_PATH` pointed at a scratch db.json. Per-manager pool totals compared before and after each
+sweep:
+
+| run                                       | applied | outcome_changes                      |
+| ----------------------------------------- | ------- | ------------------------------------ |
+| +10 to a manager 20 pts off the pool lead | 1 week  | `[]` — silent, the case that matters |
+| +30 over three weeks, passing the leader  | 2 weeks | PP1 winner flip + seed-order change  |
+| the same as a dry run                     | 0 (dry) | reported, db.json totals unchanged   |
+
+One extra HR = +10 pts, comfortably under the 15-pt refusal ceiling, so the ceiling still fires
+independently. Gotcha for the fixture: give the managers distinct baselines. With everyone tied,
+the tie-break — not the correction — decides every pool, and the "silent" case cannot be tested.
+
+### 2. The scoreboard scaling limit: the stated cause was wrong
+
+**The claim was `managerWeekSubtotal` x 256 per render, and ~3 minutes at ~1,340 batters / 16k
+weekly rows. It is not.** Measured with `scripts/measure-scoreboard.js` (added in the same PR —
+loads the real `app.js` in a VM sandbox, times the pass, prints per-manager totals, runs against a
+real `db.json` or a synthesized season of any size):
+
+| season                         | rows   | before | after  |
+| ------------------------------ | ------ | ------ | ------ |
+| 1340 bat / 550 pit / 512 swaps | 30,240 | 287 ms | 134 ms |
+| 1340 bat / 700 pit / no swaps  | 32,640 | 292 ms | 112 ms |
+| 2680 bat / 900 pit             | 57,280 | 467 ms | 176 ms |
+
+Under half a second at nearly twice production scale, and **linear** in row count — the curve was
+checked at 8k / 13k / 24k / 45k rows. Swap volume barely moves it either. So the scoring pass
+cannot be a three-minute render, and the next session should not spend more time on it. **The real
+suspect is the payload, not the loop:** `GET /api/seasons` still ships `score_snapshots` and the
+daily rows, re-downloaded on every tab switch (see the open follow-up further up this file, and
+the localStorage-quota incident it came from). Multi-MB JSON over a phone connection, parsed on
+the main thread, is a much better fit for "never finishes". Measure the real `db.json` first:
+`node scripts/measure-scoreboard.js --db db.json --season 2026`.
+
+**The optimization shipped anyway, because it is free.** Weekly rows are now bucketed by
+`round|week` (legacy `PP1P`/`PP2P` folded onto the parent) and by manager, cached in a WeakMap on
+the rows array. 2–2.7x on the pass. It is a lookup change, not a scoring change: bucket order is
+the array's own order, so `weekManagerRows` / `allWeekRows` / `finalRows` / `detailOut` all come
+out identical. Proven three ways — identical per-manager totals and qualifier list across five
+season shapes; identical call-for-call (including `detailOut`) on a fixture built for the
+semantics a synthetic season cannot produce (legacy `PP1P` rounds, null-manager rows, contested
+`manager_scores` splits, duplicate ghost rows, a drop-and-re-add, a swap-in evidenced only by a
+stat row, a pending swap that must be ignored); and a byte-identical rendered scoreboard in a real
+browser against a real server.
+
+**Cache invalidation is the part to be careful with.** Replacing `sd.weekly_batting` gets a fresh
+index for free (WeakMap key), and a `push` changes `length` and rebuilds. The one mutation neither
+catches is a row replaced **in place at the same length** — `editStat` does exactly that, and calls
+`invalidateWeeklyRowIndex`. Any new code that swaps a weekly row in situ must do the same.
+
+**Still open.** Mobile Roster Lab stacks its two columns (from #414's list). And the seasons
+payload trim above, which is now the most likely lead on scoreboard slowness.
