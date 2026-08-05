@@ -3197,126 +3197,6 @@ function purgeCarriedForwardDropRecords(db) {
   return true;
 }
 
-// One-shot maintenance: undo period-boundary auto-advances. The Sunday auto-advance
-// now skips period (round) boundaries — PP1→PP2, PP2→QF, QF→SF, SF→Finals — because
-// those are populated via the roster-submission workflow. A run before that fix carried
-// a boundary week (e.g. PP2 Week 1) forward and marked it advanced. This removes those
-// carry-forward roster copies, their zero-stat weekly rows, and the advanced /
-// auto_advanced markers so the boundary week is empty again and submissions own it.
-// Safe by construction: active season only, and a week is skipped untouched if any of
-// its weekly rows carry real points (so an already-played boundary is never disturbed).
-// Score-neutral. Gated by a db flag → runs once.
-function purgeBoundaryAutoAdvance(db) {
-  if (!db || db.boundary_auto_advance_purge_done) return false;
-
-  let rostersRemoved = 0;
-  let weeklyRemoved = 0;
-  const weeksCleared = [];
-
-  for (const sd of Object.values(db.seasons || {})) {
-    if (!sd || sd.status !== 'active') continue;
-    const autoAdvanced = Array.isArray(sd.auto_advanced_weeks) ? sd.auto_advanced_weeks : [];
-    const candidates = autoAdvanced.filter((i) => isPeriodBoundaryWeek(i));
-    if (candidates.length === 0) continue;
-
-    const cleared = [];
-    for (const i of candidates) {
-      const { round, week } = SEASON_SCHEDULE[i];
-      const rowMatches = (r) => r.round === round && r.week === week;
-
-      // Never disturb a boundary week that has actually been played.
-      const hasRealStats =
-        (sd.weekly_batting || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0) ||
-        (sd.weekly_pitching || []).some((r) => rowMatches(r) && (r.weekly_score || 0) !== 0);
-      if (hasRealStats) continue;
-
-      const weekKey = `${round}|${week}`;
-      for (const mgrRoster of Object.values(sd.rosters || {})) {
-        if (mgrRoster[weekKey]) {
-          delete mgrRoster[weekKey];
-          rostersRemoved++;
-        }
-      }
-
-      const before = (sd.weekly_batting || []).length + (sd.weekly_pitching || []).length;
-      sd.weekly_batting = (sd.weekly_batting || []).filter((r) => !rowMatches(r));
-      sd.weekly_pitching = (sd.weekly_pitching || []).filter((r) => !rowMatches(r));
-      weeklyRemoved += before - ((sd.weekly_batting || []).length + (sd.weekly_pitching || []).length);
-
-      cleared.push(i);
-      weeksCleared.push(weekKey);
-    }
-
-    // Drop the markers for the weeks we cleared so the every-boot roster repair
-    // treats the boundary week as un-advanced and submissions can own it.
-    if (cleared.length > 0) {
-      sd.advanced_weeks = (sd.advanced_weeks || []).filter((i) => !cleared.includes(i));
-      sd.auto_advanced_weeks = autoAdvanced.filter((i) => !cleared.includes(i));
-    }
-  }
-
-  db.boundary_auto_advance_purge_done = true;
-  if (rostersRemoved > 0 || weeklyRemoved > 0) {
-    console.log(
-      `[Boundary purge] Cleared ${weeksCleared.join(', ')}: ${rostersRemoved} roster(s), ${weeklyRemoved} weekly row(s).`
-    );
-  }
-  return true;
-}
-
-// One-shot maintenance: purge an orphaned "ghost" player from a manager's records.
-// Iván Herrera scored for Joey Auclair across PP1 Weeks 1–5 (~207 pts) via stat records
-// plus a roster_dates add-date, but was never in his initial submission, any weekly
-// roster, or any approved swap. The roster-validated scoreboard correctly excluded him
-// (~1,342) while raw-stat paths — the diag dump and the score-guard snapshot — still
-// counted him (~1,549). That 207-pt phantom made the nightly compile look like a 40+ pt
-// drop, so the score guard blocked the save every morning (and never recorded a snapshot,
-// leaving the trail empty). repairGhostInitialRosterPlayers only cleans Week 1, so it
-// could never fully remove a multi-week ghost. Commissioner confirmed he was never
-// rostered → remove his stat records and date/roster entries for Joey across all weeks.
-// Score-neutral for every correct (roster-validated) view. Gated by a db flag → runs once.
-function purgeGhostHerreraFromJoey(db) {
-  if (!db || db.ghost_herrera_purge_done) return false;
-
-  const MANAGER = 'Joey Auclair';
-  const isGhost = (name) => normalizeName(name) === 'ivan herrera';
-  let removed = 0;
-
-  for (const sd of Object.values(db.seasons || {})) {
-    if (!sd || sd.status !== 'active') continue;
-
-    const filterStats = (list, key) => {
-      if (!Array.isArray(list)) return list;
-      const kept = list.filter((r) => !(r.manager === MANAGER && isGhost(r[key])));
-      removed += list.length - kept.length;
-      return kept;
-    };
-    sd.weekly_batting = filterStats(sd.weekly_batting, 'batter');
-    sd.daily_batting = filterStats(sd.daily_batting, 'batter');
-    sd.weekly_pitching = filterStats(sd.weekly_pitching, 'pitcher');
-    sd.daily_pitching = filterStats(sd.daily_pitching, 'pitcher');
-
-    // Drop his date entries (roster_dates: week → {player}; player_dates: week →
-    // {batter|pitcher → {player}}) and any stray roster membership, all weeks.
-    for (const week of Object.values((sd.roster_dates || {})[MANAGER] || {})) {
-      for (const name of Object.keys(week || {})) if (isGhost(name)) delete week[name];
-    }
-    for (const week of Object.values((sd.player_dates || {})[MANAGER] || {})) {
-      for (const sub of ['batter', 'pitcher']) {
-        if (week && week[sub]) for (const name of Object.keys(week[sub])) if (isGhost(name)) delete week[sub][name];
-      }
-    }
-    for (const wr of Object.values((sd.rosters || {})[MANAGER] || {})) {
-      if (wr.batters) wr.batters = wr.batters.filter((p) => !isGhost(p));
-      if (wr.pitchers) wr.pitchers = wr.pitchers.filter((p) => !isGhost(p));
-    }
-  }
-
-  db.ghost_herrera_purge_done = true;
-  if (removed > 0) console.log(`[Ghost purge] Removed ${removed} Iván Herrera stat record(s) from ${MANAGER}.`);
-  return true;
-}
-
 // Version stamp — mirrors app.js ROSTER_REPAIR_VERSION.  Bump both together.
 // v6: carry-forward now folds swaps effective in a trusted seed week into the
 // baseline, so an in-season move made during the first week propagates forward.
@@ -3777,19 +3657,23 @@ function dedupeWeeklyRows(sd) {
   return removed;
 }
 
-// Re-derive QS on existing pitching records using the WMMC rule. Idempotent
-// — repeated runs converge on the same values — so it's safe to invoke on
-// every server startup. Manual commissioner overrides (manual_fields=qs or
-// drop_locked) are left intact. After fixing the daily deltas we refresh the
-// cumulative QS on each weekly_pitching row and recompute weekly_score so
-// every downstream view (My Roster, scoreboard, Live tab) agrees.
+// One-shot maintenance: re-derive QS on existing pitching records using the WMMC rule, then
+// resync player_dates and recompute every weekly_score so the corrected values reach My Roster,
+// the scoreboard and the Live tab without waiting for the next 4am sync. Manual commissioner
+// overrides (manual_fields=qs or drop_locked) are left intact.
+//
+// Gated by a db flag, like every sibling migration above. It is idempotent, but it is NOT cheap:
+// recomputeAllWeeklyScores rescans the whole daily array once per weekly row, which is ~7-13s of
+// synchronous, event-loop-blocking work at this league's row counts — paid on every boot (so on
+// every Render deploy and every spin-down wake) to redo work that cannot have changed. A later
+// full recompute is still available on demand via POST /api/seasons/:year/recompute-scores.
 function backfillWmmcQS(db) {
+  if (!db || db.wmmc_qs_backfill_done) return false;
+
   let dailyTouched = 0;
   let weeklyTouched = 0;
-  let dupesRemoved = 0;
   for (const sd of Object.values(db.seasons || {})) {
     if (!sd) continue;
-    dupesRemoved += dedupeWeeklyRows(sd);
     for (const r of sd.daily_pitching || []) {
       if ((r.manual_fields || []).includes('qs') || r.drop_locked) continue;
       const d = r.delta || {};
@@ -3838,11 +3722,11 @@ function backfillWmmcQS(db) {
     syncPlayerDatesFromRosterDates(sd);
     recomputeAllWeeklyScores(sd);
   }
-  if (dailyTouched > 0 || weeklyTouched > 0 || dupesRemoved > 0) {
-    console.log(
-      `[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s), removed ${dupesRemoved} duplicate weekly row(s)`
-    );
+  db.wmmc_qs_backfill_done = true;
+  if (dailyTouched > 0 || weeklyTouched > 0) {
+    console.log(`[WMMC-QS] Backfill: corrected ${dailyTouched} daily delta(s), ${weeklyTouched} weekly row(s)`);
   }
+  return true;
 }
 
 // ============================================================
@@ -16196,11 +16080,27 @@ async function main() {
       console.error('[Player Pool] Bootstrap error (continuing):', e.message);
     }
 
-    // Re-derive QS on existing pitching records using the WMMC rule.
+    // Two steps on one db read:
+    //  1. STANDING repair — collapse duplicate weekly rows. Cheap (one pass over the weekly
+    //     arrays) and still needed every boot: the Sunday auto-advance checks for an existing
+    //     row with `b.manager === m.name`, while a duplicate is any second row for the same
+    //     round|week|player, so a row already on file under a different manager (or null) can
+    //     still produce one — and duplicates double-count in every total.
+    //  2. ONE-SHOT — re-derive QS using the WMMC rule and recompute weekly scores. Gated by a
+    //     db flag so it runs once, like the purges above.
     try {
       const dbForBackfill = readDB();
-      backfillWmmcQS(dbForBackfill);
-      writeDB(dbForBackfill);
+      let changed = false;
+      for (const sd of Object.values(dbForBackfill.seasons || {})) {
+        if (!sd) continue;
+        const removed = dedupeWeeklyRows(sd);
+        if (removed > 0) {
+          changed = true;
+          console.log(`[Weekly dedupe] Removed ${removed} duplicate weekly row(s).`);
+        }
+      }
+      if (backfillWmmcQS(dbForBackfill)) changed = true;
+      if (changed) writeDB(dbForBackfill);
     } catch (e) {
       console.error('[WMMC-QS] Backfill error (continuing):', e.message);
     }
@@ -16213,26 +16113,6 @@ async function main() {
       if (ran) writeDB(dbForPurge);
     } catch (e) {
       console.error('[Carry-forward purge] Error (continuing):', e.message);
-    }
-
-    // One-shot: undo any period-boundary auto-advance (e.g. PP2 Week 1 carried
-    // forward before boundaries were excluded). Gated by a db flag so it runs once.
-    try {
-      const dbForBoundaryPurge = readDB();
-      const ran = purgeBoundaryAutoAdvance(dbForBoundaryPurge);
-      if (ran) writeDB(dbForBoundaryPurge);
-    } catch (e) {
-      console.error('[Boundary purge] Error (continuing):', e.message);
-    }
-
-    // One-shot: purge the Iván Herrera ghost records from Joey Auclair (never rostered;
-    // caused the recurring score-guard block). Gated by a db flag so it runs once.
-    try {
-      const dbForGhostPurge = readDB();
-      const ran = purgeGhostHerreraFromJoey(dbForGhostPurge);
-      if (ran) writeDB(dbForGhostPurge);
-    } catch (e) {
-      console.error('[Ghost purge] Error (continuing):', e.message);
     }
 
     // Fill / recompute per-week roster entries carrying forward approved swaps.
