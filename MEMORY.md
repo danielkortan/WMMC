@@ -2698,3 +2698,38 @@ code path is reached:
 Note for future testing in this container: `/etc/hosts` already pins `api.anthropic.com`, and Node's
 fetch goes through the agent proxy regardless, so neither a hosts override nor `NO_PROXY` will
 simulate an unreachable API. Patching the URL is the reliable way.
+
+---
+
+## 2026-08-05 — Live tab boxscores scrolled inside their column while the page had empty gutters
+
+**Symptom.** Desktop Live tab: the expanded per-game boxscores (two 12-column tables side by side)
+each had their own horizontal scrollbar, while the page itself showed wide empty margins.
+
+**Two independent causes.**
+
+1. `.live-box-table th, .live-box-table td { padding: 0.25rem 0.4rem }` never applied. Specificity:
+   `.data-table thead th` / `.data-table tbody td` are (0,1,2) and beat a bare `.live-box-table th`
+   at (0,1,1), so every cell kept the generic **0.75rem** side padding — 24 columns × 24px ≈ 288px
+   of padding per table. `.mgr-detail-panel .data-table thead th` (0,2,2) already did this right;
+   the boxscore rule was just written at the wrong specificity. Fixed by matching the
+   `thead th` / `tbody td` shape, plus `letter-spacing: 0` on the headers.
+2. `main { max-width: 1200px }` applies to every tab, but Live is the only one that renders two
+   full boxscores side by side. Raised to 1560px above 1280px viewport width, scoped with
+   `main:has(> #live.active)` (`:has()` is already used elsewhere in `styles.css`).
+
+Also dropped `white-space: nowrap` on the first column only — the numeric columns stay nowrap and
+tabular, so the player-name column is the one that absorbs any remaining squeeze by wrapping.
+
+**Measured** with a static harness reproducing `renderLiveBoxscoreHTML`'s markup against the real
+`styles.css`, comparing `scrollWidth - clientWidth` per `.table-wrapper`:
+
+| viewport | before (worst overflow) | after |
+| -------- | ----------------------- | ----- |
+| 1280     | 164px                   | 0     |
+| 1650     | 164px                   | 0     |
+| 1920     | 164px                   | 0     |
+
+Zero overflow on the whole Live tab (standings, expanded manager detail, boxscores) from 1000px up.
+Mobile is untouched — the widening is behind `min-width: 1280px`, and 12-column tables still scroll
+on a phone, which is out of scope here.
