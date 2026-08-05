@@ -4139,6 +4139,8 @@ const MAX_SCORE_SNAPSHOTS = 21;
 // per-manager / per-week / per-player breakdown. Mirrors computeRoundScores'
 // attribution (managerWeekSubtotal) so the snapshot always matches what the
 // scoreboard shows.
+const r2s = (n) => Math.round(n * 100) / 100;
+
 function captureScoreSnapshot(sd, dateISO) {
   const batting = sd.weekly_batting || [];
   const pitching = sd.weekly_pitching || [];
@@ -7556,6 +7558,115 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
 // to restore weeks whose stored stats are missing entirely (not just unattributed). Awaits the
 // Upstash backup and reports its size/status so a silent persistence failure (e.g. payload too
 // large) is visible rather than lost.
+// POST /api/mlb/resync-dryrun — what a re-sync WOULD do, without doing any of it.
+// Body: { year, round, week? }   (omit `week` to dry-run every week of the round)
+//
+// The premise worth testing: if the scoring logic is right, re-syncing a completed week from the
+// source data should reproduce the scores already stored. Any movement is either a real MLB stat
+// correction or a bug — and either way it is something to look at BEFORE it is written to the
+// league's history, not after.
+//
+// So this runs the genuine path — performMLBSync, the same function the real sync calls, with the
+// same weekly rebuild and the same roster-window clipping — against a DEEP COPY of the season, and
+// reports the per-manager and per-player differences. The copy is discarded; nothing is persisted.
+//
+// This is deliberately not /api/mlb/compare, which is a much rougher instrument: compare scores the
+// whole week unclipped via enrichBatting, so a mid-week swap shows up there as a large phantom
+// difference that a real re-sync would never produce. Reading those numbers as a scoring prediction
+// is a mistake this endpoint exists to prevent.
+app.post('/api/mlb/resync-dryrun', requireCommissioner, async (req, res) => {
+  const { year, round, week } = req.body || {};
+  if (!year || !round) return res.status(400).json({ error: 'year and round are required' });
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+
+  const weeks = SEASON_SCHEDULE.map((schedWeek, idx) => ({ schedWeek, idx })).filter(
+    ({ schedWeek }) => schedWeek.round === round && (!week || schedWeek.week === week)
+  );
+  if (weeks.length === 0)
+    return res.status(400).json({ error: `No schedule slot for ${round}${week ? ` / ${week}` : ''}` });
+
+  try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+    // The whole point: operate on a copy. Nothing below can reach the stored season.
+    const clone = JSON.parse(JSON.stringify(sd));
+    const before = captureScoreSnapshot(clone, todayET).totals;
+    const beforeRows = new Map();
+    for (const r of clone.weekly_batting || [])
+      beforeRows.set(`b\0${r.round}\0${r.week}\0${r.batter}`, r.weekly_score || 0);
+    for (const r of clone.weekly_pitching || [])
+      beforeRows.set(`p\0${r.round}\0${r.week}\0${r.pitcher}`, r.weekly_score || 0);
+
+    const synced = [];
+    for (const { schedWeek, idx } of weeks) {
+      const dates = (clone.schedule_dates || [])[idx];
+      if (!dates?.start || !dates?.end) {
+        return res.status(400).json({ error: `No schedule dates for ${schedWeek.round} ${schedWeek.week}` });
+      }
+      const r = await performMLBSync(clone, schedWeek, dates, { trigger: 'dry-run', note: 'resync-dryrun' });
+      synced.push({ week: `${schedWeek.round} ${schedWeek.week}`, games: r.games_fetched });
+    }
+
+    const after = captureScoreSnapshot(clone, todayET).totals;
+
+    const managers = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+    const managerDiffs = managers
+      .map((manager) => {
+        const b = (before[manager] && before[manager].total) || 0;
+        const a = (after[manager] && after[manager].total) || 0;
+        return { manager, stored_total: r2s(b), resync_total: r2s(a), diff: r2s(a - b) };
+      })
+      .filter((m) => Math.abs(m.diff) >= 0.01)
+      .sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff));
+
+    // Which individual stat rows moved — the material for diagnosing a difference rather than
+    // just noticing one.
+    const playerDiffs = [];
+    const collect = (rows, prefix, nameKey) => {
+      for (const r of rows || []) {
+        if (!weeks.some(({ schedWeek }) => schedWeek.round === r.round && schedWeek.week === r.week)) continue;
+        const key = `${prefix}\0${r.round}\0${r.week}\0${r[nameKey]}`;
+        const was = beforeRows.has(key) ? beforeRows.get(key) : null;
+        const now = r.weekly_score || 0;
+        if (was === null || Math.abs(now - was) >= 0.01) {
+          playerDiffs.push({
+            player: r[nameKey],
+            type: prefix === 'b' ? 'batting' : 'pitching',
+            round: r.round,
+            week: r.week,
+            manager: r.manager || null,
+            stored: was,
+            resync: r2s(now),
+            diff: was === null ? null : r2s(now - was),
+            note: was === null ? 'row did not exist before' : undefined,
+          });
+        }
+      }
+    };
+    collect(clone.weekly_batting, 'b', 'batter');
+    collect(clone.weekly_pitching, 'p', 'pitcher');
+    playerDiffs.sort((x, y) => Math.abs(y.diff || 0) - Math.abs(x.diff || 0));
+
+    res.json({
+      dry_run: true,
+      persisted: false,
+      weeks_synced: synced,
+      managers_moved: managerDiffs.length,
+      manager_diffs: managerDiffs,
+      player_rows_moved: playerDiffs.length,
+      player_diffs: playerDiffs.slice(0, 100),
+      verdict:
+        managerDiffs.length === 0
+          ? 'clean — a real re-sync would not move any manager total'
+          : 'movement detected — investigate before syncing for real',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/mlb/backfill-unscored — fill RECORDED-BUT-UNSCORED stat fields on an existing week.
 // Body: { year, round, week }
 //
@@ -7729,7 +7840,10 @@ app.get('/api/mlb/storage-status', requireCommissioner, (req, res) => {
 // MLB Stats API Integration
 // ============================================================
 
-const MLB_API_BASE = 'https://statsapi.mlb.com';
+// Overridable so the MLB integration can be exercised against a stub locally — the dry-run and
+// backfill paths are otherwise untestable without live network access. Unset in production, where
+// it falls back to the real API.
+const MLB_API_BASE = process.env.MLB_API_BASE || 'https://statsapi.mlb.com';
 
 async function mlbApiFetch(path) {
   const resp = await fetch(`${MLB_API_BASE}${path}`);
