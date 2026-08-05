@@ -7556,6 +7556,104 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
 // to restore weeks whose stored stats are missing entirely (not just unattributed). Awaits the
 // Upstash backup and reports its size/status so a silent persistence failure (e.g. payload too
 // large) is visible rather than lost.
+// POST /api/mlb/backfill-unscored — fill RECORDED-BUT-UNSCORED stat fields on an existing week.
+// Body: { year, round, week }
+//
+// Some early weeks were stored without the stat fields the rubric does not score — batting so/lob/
+// abs and pitching gs. Nothing in SCORING reads them, so their absence costs no points, but the
+// What If Scoring Lab (which can put a value on them), the Player Explorer and the season
+// accolades all read them, and a whole round of zeros makes those features silently useless.
+//
+// Deliberately NOT a re-sync. performMLBSync rebuilds weekly rows and recomputes weekly_score,
+// which risks moving real pool-play totals months after the fact. This writes ONLY the unscored
+// fields on rows that already exist, never weekly_score, and never creates or deletes a row — so
+// by construction it cannot change a single manager's score.
+//
+// That claim is not left to construction alone: per-manager totals are captured before and after
+// and the write is ABORTED if any of them moved. See CLAUDE.md — anything touching stat rows owes
+// a before/after totals comparison.
+app.post('/api/mlb/backfill-unscored', requireCommissioner, async (req, res) => {
+  const ctx = resolveMLBWeek(req, true);
+  if (ctx.error) return res.status(400).json({ error: ctx.error });
+  const { db, sd, year, round, week, dates } = ctx;
+
+  const BAT_FIELDS = ['so', 'lob', 'abs'];
+  const PIT_FIELDS = ['gs'];
+
+  try {
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const before = captureScoreSnapshot(sd, todayET).totals;
+
+    const gameRecords = await fetchMLBPerGameStats(dates.start, dates.end, buildIdToWmmcName(sd));
+    const { batting, pitching } = aggregatePerGame(gameRecords);
+
+    const filled = { batting: 0, pitching: 0 };
+    const skippedManual = [];
+
+    const fill = (rows, nameKey, source, fields, counterKey) => {
+      for (const row of rows) {
+        if (row.round !== round || row.week !== week) continue;
+        // A commissioner-entered row is authoritative; leave it exactly as it is.
+        if ((row.manual_fields && row.manual_fields.length) || row.drop_locked) {
+          skippedManual.push(row[nameKey]);
+          continue;
+        }
+        const stats = source[row[nameKey]];
+        if (!stats) continue;
+        let changed = false;
+        for (const f of fields) {
+          // Only fill a hole. An existing value is never overwritten — this is a repair, not a
+          // re-import, and a stored number may reflect a correction we should not undo.
+          if (!row[f] && stats[f]) {
+            row[f] = stats[f];
+            changed = true;
+          }
+        }
+        if (changed) filled[counterKey]++;
+      }
+    };
+
+    fill(sd.weekly_batting || [], 'batter', batting, BAT_FIELDS, 'batting');
+    fill(sd.weekly_pitching || [], 'pitcher', pitching, PIT_FIELDS, 'pitching');
+
+    // The safety assertion. Nothing here should be able to move a total; prove it before writing.
+    const after = captureScoreSnapshot(sd, todayET).totals;
+    const moved = [];
+    for (const mgr of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const b = (before[mgr] && before[mgr].total) || 0;
+      const a = (after[mgr] && after[mgr].total) || 0;
+      if (Math.abs(a - b) >= 0.01) moved.push({ manager: mgr, before: b, after: a });
+    }
+    if (moved.length) {
+      return res.status(409).json({
+        error: 'Aborted — filling unscored fields changed a manager total, which must never happen.',
+        moved,
+      });
+    }
+
+    addAuditEntry(db, 'backfill_unscored', {
+      year,
+      round,
+      week,
+      batting_rows_filled: filled.batting,
+      pitching_rows_filled: filled.pitching,
+    });
+    db.seasons[year] = sd;
+    writeDB(db);
+    res.json({
+      ok: true,
+      week: { round, week, start: dates.start, end: dates.end },
+      games_fetched: gameRecords.length,
+      batting_rows_filled: filled.batting,
+      pitching_rows_filled: filled.pitching,
+      skipped_manual: [...new Set(skippedManual)],
+      manager_totals_unchanged: true,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/mlb/backfill', requireCommissioner, async (req, res) => {
   const year = (req.body.year || new Date().getFullYear()).toString();
   const db = readDB();
