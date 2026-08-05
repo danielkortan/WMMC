@@ -3084,6 +3084,30 @@ Then boot the real server with `DB_PATH` at a scratch file, `MLB_API_BASE` at a 
 - The Sunday auto-advance's manager-scoped duplicate check, noted above.
 - Mobile Roster Lab stacks its two columns (from the #414 list).
 
+**Follow-up: welcome post moved to an hour before first pitch (2026-07-29).** Commissioner
+confirmed staging has no `SLACK_SCOREBOARD_WEBHOOK_URL`, so the duplicate blank post in the
+QF Week 2 screenshot did NOT come from staging — source still unidentified (most likely a
+prod instance that came up before its `/var/data` disk mounted, since `readDB()` returns
+`{seasons:{}}` in that case). The #383 guard makes it harmless either way, and its
+`console.error` now names the offending process the next time it happens.
+
+7am was the wrong hour for a post nobody can act on. `scheduleSeasonWelcomePost(reason)` now
+arms a timer for `firstPitch - 1h` using `fetchFirstPitchToday` (earliest `gameDate` on the
+day's MLB schedule, same field `fetchStartedTeamsToday` reads). Called from the 7am run AND
+at boot — the timer can sit for ~6 hours and an in-memory `setTimeout` does not survive a
+Render restart, so without the boot re-arm one restart on opening day loses the post for the
+season. No-ops on every other day. Falls back to posting immediately when the MLB lookup
+fails or the slate is empty. Separate `db.last_welcome_post_date` claim, written AFTER a
+successful post (opposite of the daily scoreboard's claim-first): a post that failed because
+nobody had drafted yet gets retried every 30 min, bounded because the function no-ops once
+the ET date rolls past opening day.
+
+**Verified:** 8/8 timing harness driving the real function with a stubbed clock/db/MLB —
+7:05pm first pitch → armed 11h05m out; 1:10pm day game → 5h10m; restart at 8pm after a 7pm
+first pitch → post now, not never; MLB fetch throws → post now; empty slate → post now;
+non-opening day → nothing armed; already-claimed day → nothing armed. 178/178, lint + format
+clean.
+
 ## 2026-08-05 — Open-PR triage: #386 refreshed, #374 retired in favor of a focused round gate
 
 **Context.** Two PRs had been open since late July and had fallen 135 (#386) and 167 (#374)
