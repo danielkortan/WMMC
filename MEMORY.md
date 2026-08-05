@@ -3084,7 +3084,6 @@ Then boot the real server with `DB_PATH` at a scratch file, `MLB_API_BASE` at a 
 - The Sunday auto-advance's manager-scoped duplicate check, noted above.
 - Mobile Roster Lab stacks its two columns (from the #414 list).
 
-
 **Follow-up: welcome post moved to an hour before first pitch (2026-07-29).** Commissioner
 confirmed staging has no `SLACK_SCOREBOARD_WEBHOOK_URL`, so the duplicate blank post in the
 QF Week 2 screenshot did NOT come from staging — source still unidentified (most likely a
