@@ -5069,6 +5069,7 @@ function currentQualification(entries, bracketSize = 8) {
 
   const pp1Leaders = new Set();
   const pp2Leaders = new Set();
+  const pp1LeaderByPool = {};
   const pp2LeaderByPool = {};
   for (const [pool, members] of Object.entries(pools)) {
     let b1 = 0;
@@ -5085,7 +5086,10 @@ function currentQualification(entries, bracketSize = 8) {
         w2 = m.manager;
       }
     }
-    if (w1) pp1Leaders.add(w1);
+    if (w1) {
+      pp1Leaders.add(w1);
+      pp1LeaderByPool[pool] = { manager: w1, pp1: b1 };
+    }
     if (w2) {
       pp2Leaders.add(w2);
       pp2LeaderByPool[pool] = { manager: w2, pp2: b2 };
@@ -5105,6 +5109,7 @@ function currentQualification(entries, bracketSize = 8) {
   return {
     pp1Leaders,
     pp2Leaders,
+    pp1LeaderByPool,
     pp2LeaderByPool,
     qualifierNames: qualifiers.map((e) => e.manager),
     cutTotal,
@@ -7604,13 +7609,110 @@ function adoptWeekRows(sd, clone, schedWeek) {
   Object.assign(sd.pitchers_team || (sd.pitchers_team = {}), clone.pitchers_team || {});
 }
 
+// ============================================================
+// Did a correction change a RESULT, or only a number?
+// ============================================================
+// A stat correction that moves a manager 2.4 points is not news. A stat correction that hands a
+// pool to someone else, moves a manager across the wildcard cut, or flips a quarterfinal is news
+// the commissioner has to act on — the bracket, the Hall of Fame and the roasts all read from
+// those outcomes. So the sweep posts to Slack ONLY when one of them changes, and stays silent
+// otherwise. Point totals moving is the expected case; posting it every Wednesday would train
+// everyone to ignore the channel.
+//
+// No new seeding or bracket logic here. `currentQualification` (the playoff-odds engine) already
+// owns "who wins each pool and who qualifies", and `computePlayoffPairs` (the Slack matchup post)
+// already owns "who played whom and who won". Both are re-used verbatim, so a correction alert can
+// never disagree with the bracket it is describing. The ESM `js/seeding.js` / `js/bracket.js`
+// copies are the client's; `server.js` cannot import them, and a third copy is exactly what
+// CLAUDE.md warns about.
+function captureRoundOutcomes(db, sd) {
+  const managers = (db.managers || []).filter((m) => m.active !== false && m.pool);
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+
+  const roundTotals = (round) => {
+    const out = {};
+    for (const row of computeRoundScores(batting, pitching, [round], sd)) out[row.manager] = row.total;
+    return out;
+  };
+
+  const poolWinners = {};
+  let qualifiers = [];
+  if (managers.length) {
+    const pp1 = roundTotals('PP1');
+    const pp2 = roundTotals('PP2');
+    const qual = currentQualification(
+      managers.map((m) => ({ manager: m.name, pool: m.pool, pp1: pp1[m.name] || 0, pp2: pp2[m.name] || 0 }))
+    );
+    for (const [pool, w] of Object.entries(qual.pp1LeaderByPool)) poolWinners[`PP1|${pool}`] = w.manager;
+    for (const [pool, w] of Object.entries(qual.pp2LeaderByPool)) poolWinners[`PP2|${pool}`] = w.manager;
+    qualifiers = qual.qualifierNames;
+  }
+
+  // Playoff pairings come off the locked confirmed_seeding snapshot, so they exist only once pool
+  // play has been ended in the app. Before that there is nothing here to overturn.
+  const matchups = {};
+  for (const round of ['QF', 'SF', 'Finals']) {
+    const computed = computePlayoffPairs(sd, round);
+    if (!computed) continue;
+    for (const p of computed.pairs) matchups[p.label] = p.leader;
+  }
+
+  return { poolWinners, qualifiers, matchups, seedingLocked: (sd.finalized_rounds || []).includes('PP') };
+}
+
+// What changed between two outcome snapshots, as lines a human can read in Slack. Empty array =
+// nothing to say.
+function diffRoundOutcomes(before, after) {
+  const changes = [];
+
+  for (const key of new Set([...Object.keys(before.poolWinners), ...Object.keys(after.poolWinners)])) {
+    const [period, pool] = key.split('|');
+    const b = before.poolWinners[key] || '(nobody)';
+    const a = after.poolWinners[key] || '(nobody)';
+    if (b !== a) changes.push(`${pool} ${period} winner: ${b} → ${a}`);
+  }
+
+  const wasIn = new Set(before.qualifiers);
+  const isIn = new Set(after.qualifiers);
+  const droppedOut = before.qualifiers.filter((m) => !isIn.has(m));
+  const movedIn = after.qualifiers.filter((m) => !wasIn.has(m));
+  if (droppedOut.length || movedIn.length) {
+    changes.push(`Qualifiers: in ${movedIn.join(', ') || '—'} · out ${droppedOut.join(', ') || '—'}`);
+  } else if (before.qualifiers.join('|') !== after.qualifiers.join('|')) {
+    // Same eight, different order — the bracket pairs 1v8/4v5/3v6/2v7 off this order, so a reorder
+    // changes who plays whom even though nobody's spot moved.
+    changes.push(`Seed order: ${before.qualifiers.join(', ')} → ${after.qualifiers.join(', ')}`);
+  }
+
+  for (const label of new Set([...Object.keys(before.matchups), ...Object.keys(after.matchups)])) {
+    const b = before.matchups[label] || '(undecided)';
+    const a = after.matchups[label] || '(undecided)';
+    if (b !== a) changes.push(`${label} winner: ${b} → ${a}`);
+  }
+
+  return changes;
+}
+
 // Sweep completed weeks for late corrections.
 //
 // Each week is synced into its own clone and measured before anything is adopted, so a week whose
 // movement exceeds the ceiling is simply discarded — the live season never sees it. `apply: false`
 // makes the whole thing a report.
-async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_SWING, apply = true } = {}) {
+//
+// Accepted weeks are always adopted into a `target` season object. When applying, that IS `sd`;
+// on a dry run it is a throwaway deep clone, so the report can still answer "would this change a
+// result?" without the live season ever seeing the rows. Pass `db` to get that answer back as
+// `outcomeChanges` — see captureRoundOutcomes.
+//
+// Returns { results, outcomeChanges }. `outcomeChanges` is null when no `db` was supplied and an
+// empty array when the corrections moved only point totals.
+async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_SWING, apply = true, db = null } = {}) {
   const results = [];
+  const target = apply ? sd : JSON.parse(JSON.stringify(sd));
+  const outcomesBefore = db ? captureRoundOutcomes(db, target) : null;
+  let adopted = 0;
+
   for (let idx = 0; idx < SEASON_SCHEDULE.length; idx++) {
     const schedWeek = SEASON_SCHEDULE[idx];
     const dates = (sd.schedule_dates || [])[idx];
@@ -7622,7 +7724,10 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
     const label = `${schedWeek.round} ${schedWeek.week}`;
     let clone;
     try {
-      clone = JSON.parse(JSON.stringify(sd));
+      // Measure each week against the season as it stands NOW — `target`, not the original `sd` —
+      // so an earlier week's adopted correction is already in the baseline and can't be counted
+      // twice.
+      clone = JSON.parse(JSON.stringify(target));
       const before = captureScoreSnapshot(clone, todayISO).totals;
       await performMLBSync(clone, schedWeek, dates, { trigger: 'auto', note: 'corrections-sweep' });
       const diffs = totalsDelta(before, captureScoreSnapshot(clone, todayISO).totals);
@@ -7636,13 +7741,33 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
         results.push({ week: label, status: 'flagged', max_swing: maxSwing, diffs });
         continue;
       }
-      if (apply) adoptWeekRows(sd, clone, schedWeek);
+      adoptWeekRows(target, clone, schedWeek);
+      adopted++;
       results.push({ week: label, status: apply ? 'applied' : 'would_apply', max_swing: maxSwing, diffs });
     } catch (e) {
       results.push({ week: label, status: 'error', error: e.message });
     }
   }
-  return results;
+
+  let outcomeChanges = null;
+  if (outcomesBefore) {
+    outcomeChanges = adopted ? diffRoundOutcomes(outcomesBefore, captureRoundOutcomes(db, target)) : [];
+  }
+  return { results, outcomeChanges };
+}
+
+// The Slack post for a correction that overturned something. Kept as its own builder, like the
+// other build*SlackText helpers, so the message can be read (and checked) without running a cron.
+function buildCorrectionOutcomeSlackText(appliedWeeks, outcomeChanges, seedingLocked) {
+  return (
+    `:rotating_light: *A late MLB stat correction changed a result.*\n` +
+    `Applied to ${appliedWeeks.length} week(s): ${appliedWeeks.join(', ')}.\n` +
+    outcomeChanges.map((c) => `\u{2022} ${c}`).join('\n') +
+    (seedingLocked
+      ? `\n_Pool play is already finalized, so the locked seeding and the live bracket are ` +
+        `unchanged — but pool play no longer says what the bracket was built from._`
+      : '')
+  );
 }
 
 // POST /api/mlb/apply-corrections  { year, threshold?, dryRun? }
@@ -7657,7 +7782,12 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
 
   try {
     const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const results = await sweepStatCorrections(sd, { todayISO: todayET, threshold, apply: !dryRun });
+    const { results, outcomeChanges } = await sweepStatCorrections(sd, {
+      todayISO: todayET,
+      threshold,
+      apply: !dryRun,
+      db,
+    });
     const applied = results.filter((r) => r.status === 'applied' || r.status === 'would_apply');
     const flagged = results.filter((r) => r.status === 'flagged');
 
@@ -7666,11 +7796,20 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
         year,
         threshold,
         weeks: applied.map((r) => r.week),
+        outcome_changes: outcomeChanges,
       });
       db.seasons[year] = sd;
       writeDB(db);
     }
-    res.json({ ok: true, dry_run: dryRun, threshold, applied: applied.length, flagged: flagged.length, results });
+    res.json({
+      ok: true,
+      dry_run: dryRun,
+      threshold,
+      applied: applied.length,
+      flagged: flagged.length,
+      outcome_changes: outcomeChanges,
+      results,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -15646,7 +15785,10 @@ function scheduleMLBApiSync() {
             // invisible without this sweep. Movement beyond the ceiling is refused, not applied —
             // see sweepStatCorrections for why that ceiling exists.
             try {
-              const sweep = await sweepStatCorrections(sd, { todayISO: todayET });
+              const { results: sweep, outcomeChanges } = await sweepStatCorrections(sd, {
+                todayISO: todayET,
+                db,
+              });
               const applied = sweep.filter((r) => r.status === 'applied');
               const flagged = sweep.filter((r) => r.status === 'flagged');
               if (applied.length) {
@@ -15654,11 +15796,24 @@ function scheduleMLBApiSync() {
                   year: season,
                   threshold: CORRECTION_MAX_SWING,
                   weeks: applied.map((r) => r.week),
+                  outcome_changes: outcomeChanges,
                 });
                 console.log(
                   `[MLB-API] Late corrections applied to ${applied.length} week(s): ` +
                     applied.map((r) => `${r.week} (max ${r.max_swing})`).join(', ')
                 );
+              }
+              // Only a changed RESULT is worth a Slack post. Corrections that move point totals
+              // and nothing else stay in the log — see captureRoundOutcomes for why.
+              if (outcomeChanges && outcomeChanges.length) {
+                console.warn(`[MLB-API] Corrections changed a round outcome: ${outcomeChanges.join(' | ')}`);
+                await postSlack(
+                  buildCorrectionOutcomeSlackText(
+                    applied.map((r) => r.week),
+                    outcomeChanges,
+                    (sd.finalized_rounds || []).includes('PP')
+                  )
+                ).catch(() => {});
               }
               if (flagged.length) {
                 // Too big to be a stat correction. A human should look before this is written.
