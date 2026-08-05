@@ -7862,9 +7862,21 @@ async function fetchMLBGames(startDate, endDate) {
   const games = [];
   for (const dateEntry of data.dates || []) {
     for (const game of dateEntry.games || []) {
-      if (game.status?.abstractGameState === 'Final') {
-        games.push({ gameId: game.gamePk, date: dateEntry.date });
-      }
+      if (game.status?.abstractGameState !== 'Final') continue;
+      // Take the date from the GAME, not from the wrapper it arrived in.
+      //
+      // A postponed game keeps its ORIGINALLY SCHEDULED date in the schedule response — a rainout
+      // from May 5 made up on July 7 is still listed under May 5, and once the makeup is played it
+      // reads Final. Trusting `dateEntry.date` therefore credits July's stat line to a May week:
+      // that is exactly how a July 7 Brewers-Cardinals game (gamePk 823062) turned up as a May 5
+      // start, handing a manager points he had not earned that week.
+      //
+      // `officialDate` is the day the game actually counts for. Games whose official date falls
+      // outside the requested range are dropped outright — the range is the caller's contract, and
+      // a re-sync of a past week must not absorb a makeup played months later.
+      const playedOn = game.officialDate || (game.gameDate ? game.gameDate.slice(0, 10) : dateEntry.date);
+      if (playedOn < startDate || playedOn > endDate) continue;
+      games.push({ gameId: game.gamePk, date: playedOn });
     }
   }
   return games;
@@ -10928,7 +10940,9 @@ function gamesFromSchedule(scheduleData) {
     for (const g of dateEntry.games || []) {
       games.push({
         game_id: g.gamePk,
-        date: dateEntry.date,
+        // Same trap as fetchMLBGames: a postponed game is listed under the date it was originally
+        // scheduled for, so the game's own officialDate is what it actually counts for.
+        date: g.officialDate || (g.gameDate ? g.gameDate.slice(0, 10) : dateEntry.date),
         scheduled_time: g.gameDate || null,
         state: g.status?.abstractGameState || 'Preview',
         status_detail: g.status?.detailedState || null,
