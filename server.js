@@ -5554,6 +5554,42 @@ function computePlayoffPairs(sd, round) {
   return { pairs, score, seedRank };
 }
 
+// The managers actually playing in `round`, from the confirmed-seeding bracket math that already
+// backs the Playoff Bracket card and the Slack matchup posts — so any view gated on this can never
+// disagree with the bracket. Empty for pool play, and empty when the seeding isn't determined yet
+// (callers treat that as "unknown" and fail open rather than hiding anyone).
+function roundParticipants(sd, round) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return [];
+  const computed = computePlayoffPairs(sd, round);
+  if (!computed) return [];
+  const names = [];
+  for (const p of computed.pairs) {
+    for (const n of [p.a, p.b]) if (n && !names.includes(n)) names.push(n);
+  }
+  return names;
+}
+
+// Mirrors of js/eligibility.js ELIMINATION_ROUND_ORDER / isManagerActiveInRound / isManagerInRound
+// — keep the copies identical (same rule as SCORING / detectScoreSwings; the server can't import
+// the ESM module). `sd.eliminated[manager]` is the round a manager went out IN, so 'QF' means they
+// PLAYED the quarterfinals: active iff elimIdx >= roundIdx.
+const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
+function isManagerActiveInRound(round, eliminatedRound) {
+  if (!round || round === 'PP1' || round === 'PP2') return true;
+  if (!eliminatedRound) return true;
+  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(eliminatedRound);
+  const roundIdx = ELIMINATION_ROUND_ORDER.indexOf(round);
+  if (elimIdx < 0 || roundIdx < 0) return true;
+  return elimIdx >= roundIdx;
+}
+
+function isManagerInRound(manager, round, { participants = null, eliminated = null } = {}) {
+  if (!round || round === 'PP1' || round === 'PP2') return true;
+  const field = (participants || []).filter((n) => typeof n === 'string' && n);
+  if (field.length) return field.includes(manager);
+  return isManagerActiveInRound(round, (eliminated || {})[manager]);
+}
+
 // A given manager's own playoff-round matchup result (opponent, both scores, margin, won?)
 // for the elimination-roast context — "how close did they come" for QF/SF/Finals, the
 // playoff-round equivalent of the PP standings block. Null if the round/seeding isn't
@@ -11684,7 +11720,16 @@ app.get('/api/mlb/daily', (req, res) => {
   const inCertifiedRounds = (r) =>
     certifiedRounds.has(r) || (r && r.endsWith('P') && certifiedRounds.has(r.slice(0, -1)));
 
-  const allManagers = new Set(Object.keys(sd.rosters || {}));
+  // Only managers still competing in this date's round. sd.rosters keeps every roster a manager
+  // ever had, so an unfiltered list puts managers knocked out rounds ago into the standings as
+  // 0-point ghost rows and lets their stale rosters tag players. Gating here rather than at render
+  // time keeps the ranks honest too: rankByTotals below runs over this same set. Fails open (pool
+  // play, undetermined seeding, unknown round), so this can never hide an active manager. Active
+  // managers' totals are untouched — only rows that scored nothing this round drop out.
+  const roundField = roundParticipants(sd, weekRound);
+  const isActiveManager = (m) =>
+    isManagerInRound(m, weekRound, { participants: roundField, eliminated: sd.eliminated || {} });
+  const allManagers = new Set([...Object.keys(sd.rosters || {})].filter(isActiveManager));
   const battingRows = sd.weekly_batting || [];
   const pitchingRows = sd.weekly_pitching || [];
 
@@ -11714,7 +11759,9 @@ app.get('/api/mlb/daily', (req, res) => {
         if (r.date > cutoff || r.round !== weekRound || r.week !== weekName) continue;
         const name = r[playerKey];
         const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
-        if (!mgr) continue;
+        // findManagerForPlayerWeek reads the sd.rosters cache, which still holds eliminated
+        // managers' old rosters — same gate as allManagers so totals and rows agree.
+        if (!mgr || !isActiveManager(mgr)) continue;
         if (wasDroppedBeforeWeek(sd, mgr, name, `${weekRound}|${weekName}`, start)) continue;
         if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
         totals[mgr] = (totals[mgr] || 0) + scoreFunc(r.delta || {});
@@ -11770,7 +11817,7 @@ app.get('/api/mlb/daily', (req, res) => {
       if (r.date !== date || r.round !== weekRound || r.week !== weekName) continue;
       const name = r[playerKey];
       const mgr = findManagerForPlayerWeek(sd, name, playerType, r.round, r.week);
-      if (!mgr) continue;
+      if (!mgr || !isActiveManager(mgr)) continue;
       if (wasDroppedBeforeWeek(sd, mgr, name, `${weekRound}|${weekName}`, start)) continue;
       if (!isDateEligibleForPlayer(sd, name, playerType, r.round, r.week, r.date)) continue;
       players.push({
