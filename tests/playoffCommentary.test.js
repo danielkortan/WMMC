@@ -14,6 +14,8 @@ import {
   hotTakesCacheHit,
   SLACK_EMOJI,
   enforceVettedEmoji,
+  catchUpPace,
+  commentaryBudget,
 } from '../js/playoffCommentary.js';
 
 const SHORT = {
@@ -737,5 +739,150 @@ describe('emoji shortcodes', () => {
   it('has no duplicates and every entry is well-formed', () => {
     assert.equal(new Set(SLACK_EMOJI).size, SLACK_EMOJI.length);
     for (const code of SLACK_EMOJI) assert.match(code, /^:[a-z_0-9]+:$/);
+  });
+});
+
+describe('catchUpPace', () => {
+  it('reports the target, the actual pace, and the multiple between them', () => {
+    const p = catchUpPace({ margin: 233, daysLeft: 4, trailerTotal: 376, daysElapsed: 10 });
+    assert.equal(p.needPerDay, 58.3);
+    assert.equal(p.actualPerDay, 37.6);
+    assert.equal(p.multiple, 1.6);
+  });
+
+  it('calls a comfortable chase comfortable, which is the misreading it exists to prevent', () => {
+    // 7 a day for a manager averaging 48 is nothing. A bare "0.1x" invites the opposite joke.
+    const p = catchUpPace({ margin: 28, daysLeft: 4, trailerTotal: 483, daysElapsed: 10 });
+    assert.equal(p.multiple, 0.1);
+    assert.match(p.verdict, /not the problem it looks like/);
+  });
+
+  it('grades a stretch and a hopeless case differently', () => {
+    assert.match(catchUpPace({ margin: 233, daysLeft: 4, trailerTotal: 376, daysElapsed: 10 }).verdict, /real stretch/);
+    assert.match(
+      catchUpPace({ margin: 400, daysLeft: 2, trailerTotal: 100, daysElapsed: 10 }).verdict,
+      /barring a miracle/
+    );
+  });
+
+  it('handles a manager who has scored nothing', () => {
+    const p = catchUpPace({ margin: 50, daysLeft: 3, trailerTotal: 0, daysElapsed: 10 });
+    assert.equal(p.multiple, Infinity);
+    assert.match(p.verdict, /scored nothing at all/);
+  });
+
+  it('returns null when the maths would be meaningless', () => {
+    assert.equal(catchUpPace({ margin: 0, daysLeft: 4, trailerTotal: 100, daysElapsed: 5 }), null);
+    assert.equal(catchUpPace({ margin: 50, daysLeft: 0, trailerTotal: 100, daysElapsed: 5 }), null);
+    assert.equal(catchUpPace({ margin: 50, daysLeft: 4, trailerTotal: 100, daysElapsed: 0 }), null);
+    assert.equal(catchUpPace(), null);
+  });
+});
+
+describe('commentaryBudget', () => {
+  const base = { round: 'SF', daysLeft: 11 };
+  const quiet = {
+    ...base,
+    matchups: [{ label: 'SF1', a: 'A', b: 'B', aTotal: 300, bTotal: 240, aDelta: 20, bDelta: 18 }],
+    dailyTotals: { A: 20, B: 18 },
+  };
+
+  it('gives a quiet day two takes', () => {
+    assert.equal(commentaryBudget(quiet), 2);
+  });
+
+  it('gives an eventful day three', () => {
+    const busy = {
+      ...base,
+      daysLeft: 3,
+      matchups: [
+        { label: 'SF1', a: 'A', b: 'B', aTotal: 148.4, bTotal: 109.3, aDelta: 48.4, bDelta: 4 }, // flip + big day
+        { label: 'SF2', a: 'C', b: 'D', aTotal: 400, bTotal: 100, aDelta: 30, bDelta: 0 }, // blowout + dead day
+      ],
+      dailyTotals: { A: 48.4, B: 4, C: 30, D: 0 },
+      underperformers: [{ manager: 'D', player: 'X', type: 'Batter', roundPerGame: 2, priorPerGame: 20, games: 6 }],
+    };
+    assert.equal(commentaryBudget(busy), 3);
+  });
+
+  it('never exceeds three or drops below two for a real round', () => {
+    for (const daysLeft of [0, 1, 5, 14]) {
+      const n = commentaryBudget({ ...quiet, daysLeft });
+      assert.ok(n === 2 || n === 3, `budget was ${n}`);
+    }
+  });
+
+  it('is zero outside the playoffs or with nothing to talk about', () => {
+    assert.equal(commentaryBudget({ ...quiet, round: 'PP2' }), 0);
+    assert.equal(commentaryBudget({ ...base, matchups: [] }), 0);
+    assert.equal(commentaryBudget(), 0);
+  });
+
+  it('caps the bank at the budget it computes', () => {
+    const lines = buildPlayoffCommentary({ ...quiet, seed: 3, shortNames: {}, maxLines: commentaryBudget(quiet) });
+    assert.ok(lines.length <= 2, JSON.stringify(lines));
+  });
+});
+
+describe('commentaryFactSheet — run-in and slumps', () => {
+  const base = {
+    round: 'SF',
+    roundLabel: 'Semifinals',
+    year: 2026,
+    shortNames: SHORT,
+    matchups: [
+      { label: 'SF1', a: 'Jamie Rogers', b: 'Ryan Sullivan', aTotal: 609, bTotal: 376, aDelta: 24, bDelta: 4 },
+    ],
+    dailyTotals: { 'Jamie Rogers': 24, 'Ryan Sullivan': 4 },
+  };
+
+  it('adds the run-in only near the end of the round', () => {
+    assert.ok(!/THE RUN-IN/.test(commentaryFactSheet({ ...base, daysLeft: 11, daysElapsed: 3 })));
+    const late = commentaryFactSheet({ ...base, daysLeft: 4, daysElapsed: 10 });
+    assert.match(late, /THE RUN-IN \(4 days left, 10 scored so far\)/);
+    assert.match(late, /Ryan S\. needs 58\.3 per day/);
+    assert.match(late, /Verdict:/);
+  });
+
+  it('omits the run-in when there is no scoring history to compare with', () => {
+    assert.ok(!/THE RUN-IN/.test(commentaryFactSheet({ ...base, daysLeft: 4, daysElapsed: 0 })));
+  });
+
+  it('ranks the whole bracket only when there is more than one matchup', () => {
+    assert.ok(!/ROUND TOTALS ACROSS THE WHOLE BRACKET/.test(commentaryFactSheet({ ...base, daysLeft: 9 })));
+    const two = commentaryFactSheet({
+      ...base,
+      daysLeft: 9,
+      matchups: [
+        ...base.matchups,
+        { label: 'SF2', a: 'Daniel Kortan', b: 'Alex Thalacker', aTotal: 483, bTotal: 511, aDelta: 3, bDelta: 36 },
+      ],
+    });
+    assert.match(two, /ROUND TOTALS ACROSS THE WHOLE BRACKET/);
+    // Best first.
+    const order = two.slice(two.indexOf('ROUND TOTALS')).split('\n').slice(1, 5).join(' ');
+    assert.ok(order.indexOf('Jamie') < order.indexOf('Ryan S.'), order);
+  });
+
+  it('lists slumping players with both rates, and omits the section when there are none', () => {
+    assert.ok(!/PLAYERS GOING BACKWARDS/.test(commentaryFactSheet({ ...base, daysLeft: 9 })));
+    const withSlump = commentaryFactSheet({
+      ...base,
+      daysLeft: 9,
+      underperformers: [
+        {
+          manager: 'Ryan Sullivan',
+          player: 'CJ Abrams',
+          type: 'Batter',
+          roundPerGame: 4.2,
+          priorPerGame: 18.6,
+          games: 9,
+        },
+      ],
+    });
+    assert.match(
+      withSlump,
+      /CJ Abrams \(Ryan S\., Batter\): 4\.2 per game this round vs 18\.6 before it, over 9 games/
+    );
   });
 });
