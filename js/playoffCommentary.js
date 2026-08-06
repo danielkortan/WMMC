@@ -535,3 +535,26 @@ export function tidyCommentaryLine(line) {
     .replace(/([A-Z]\.)\.(?!\.)/g, '$1')
     .trim();
 }
+
+// Cache key for a day's takes. The takes are about ONE day's scoring inside ONE round, so
+// both belong in the key: a new day obviously invalidates them, and so does a round rolling
+// over underneath the same day (the Monday a round ends, "yesterday" belongs to the round
+// that just finished). Returns null when either half is missing, which callers treat as
+// "not cacheable" rather than as a key that could accidentally match.
+export function hotTakesCacheKey(dayISO, round) {
+  if (!dayISO || !round) return null;
+  return `${dayISO}|${round}`;
+}
+
+// Is a stored takes cache still the right answer for this day and round?
+export function hotTakesCacheHit(cached, dayISO, round) {
+  const key = hotTakesCacheKey(dayISO, round);
+  return !!(
+    key &&
+    cached &&
+    cached.key === key &&
+    Array.isArray(cached.lines) &&
+    cached.lines.length > 0 &&
+    cached.lines.every((l) => typeof l === 'string' && l.trim())
+  );
+}

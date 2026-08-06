@@ -226,6 +226,27 @@ banks. Different feature, much bigger diff, and the elimination bank is full of 
 `${roundLabel}` article traps documented on 2026-08-03 — a bulk rewrite there wants its own PR and
 its own read-through, not a ride-along.
 
+**The takes are cached for the day, and that is what makes `/wmmc` work.** A slash command has
+three seconds to answer Slack, full stop — that limit is not configurable, and the usual escape
+hatch (ack immediately, deliver later via the `response_url` Slack sends, valid 30 min / 5 posts)
+would have `/wmmc` generating its OWN takes and putting a second, different set of jokes about the
+same day in the channel. So instead: `ensureFreshHotTakes` generates at most once per `day|round`
+and stores the result as `sd.hot_takes`, a derived cache in the same family as `sd.playoff_odds`
+(preserved on a full-season save by the same defense). `buildScoreboardBlocks` prefers a matching
+cache over the bank, so the sync path gets the written version for free. One API call a day, and
+`/wmmc` and the 7am post can never disagree.
+
+Two bugs found while wiring the endpoint, both pre-existing:
+
+- `POST /api/slack/scoreboard` gated on `SLACK_WEBHOOK_URL` but posts via
+  `SLACK_SCOREBOARD_WEBHOOK_URL`. A deploy with only the scoreboard webhook set got a 503 with
+  nothing wrong; a deploy missing it got `{ok:true}` for a post `postScoreboardSlack` had
+  silently dropped. Now checks whichever webhook is actually about to be used.
+- The same endpoint did `readDB()` → post → `addAuditEntry(db)` → `writeDB(db)`. Harmless before,
+  fatal now: the post writes `hot_takes` to its own fresh copy, and writing back the snapshot
+  taken minutes earlier (from before an API call) erased them. It now re-reads before the audit
+  write. This is the same shape as every clobber in this log — a db read held across slow work.
+
 **Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
 seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
 the quarterfinals. And in the Finals the two games mean opposite things — "this is the closest he

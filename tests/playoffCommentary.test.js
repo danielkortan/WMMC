@@ -10,6 +10,8 @@ import {
   commentaryFactSheet,
   commentaryMentionsUnknownScore,
   tidyCommentaryLine,
+  hotTakesCacheKey,
+  hotTakesCacheHit,
 } from '../js/playoffCommentary.js';
 
 const SHORT = {
@@ -570,5 +572,36 @@ describe('tidyCommentaryLine', () => {
 
   it('does not eat a hyphen that is part of the sentence', () => {
     assert.equal(tidyCommentaryLine(':coffin: 233-point lead'), ':coffin: 233-point lead');
+  });
+});
+
+describe('hotTakesCacheKey / hotTakesCacheHit', () => {
+  it('keys on the day AND the round', () => {
+    assert.equal(hotTakesCacheKey('2026-08-05', 'SF'), '2026-08-05|SF');
+    assert.notEqual(hotTakesCacheKey('2026-08-05', 'SF'), hotTakesCacheKey('2026-08-05', 'QF'));
+    assert.notEqual(hotTakesCacheKey('2026-08-05', 'SF'), hotTakesCacheKey('2026-08-06', 'SF'));
+  });
+
+  it('is null when either half is missing, so nothing can accidentally match', () => {
+    assert.equal(hotTakesCacheKey(null, 'SF'), null);
+    assert.equal(hotTakesCacheKey('2026-08-05', null), null);
+    assert.equal(hotTakesCacheHit({ key: null, lines: ['x'] }, null, 'SF'), false);
+  });
+
+  it('hits only for the same day and the same round', () => {
+    const cached = { key: '2026-08-05|SF', lines: [':zap: a take'] };
+    assert.equal(hotTakesCacheHit(cached, '2026-08-05', 'SF'), true);
+    assert.equal(hotTakesCacheHit(cached, '2026-08-06', 'SF'), false);
+    // The Monday a round rolls over: same "yesterday", new round.
+    assert.equal(hotTakesCacheHit(cached, '2026-08-05', 'Finals'), false);
+  });
+
+  it('misses on an empty, absent or junk cache rather than rendering nothing', () => {
+    assert.equal(hotTakesCacheHit(null, '2026-08-05', 'SF'), false);
+    assert.equal(hotTakesCacheHit({}, '2026-08-05', 'SF'), false);
+    assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF', lines: [] }, '2026-08-05', 'SF'), false);
+    assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF' }, '2026-08-05', 'SF'), false);
+    assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF', lines: ['  '] }, '2026-08-05', 'SF'), false);
+    assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF', lines: [null] }, '2026-08-05', 'SF'), false);
   });
 });
