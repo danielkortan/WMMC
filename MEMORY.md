@@ -3156,3 +3156,89 @@ The only diff is the four ghost rows disappearing. Fail-open confirmed three way
 Runtime stat keys in `daily_*.delta` are **lowercase** (`1b`, `r`, `rbi`, `ip`, `k`) — `SCORING`
 is keyed uppercase (`'1B'`, `R`, …) and `calculateBattingScore` does the mapping. A fixture built
 with the `SCORING` spelling scores a silent 0.
+
+## 2026-08-06 — Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted
+
+Reviewed all 425 PRs (none open), all 60 remote branches, and cross-referenced every route,
+export and doc against the tree. Three docs were wrong; the code was cleaner than expected.
+
+### Fixed here (docs only)
+
+- **`DATA_REPAIRS.md` listed four repairs that no longer exist.** `repairMissingSwapRecords` and
+  `repairMissingRosterChains` went in #252 (Phase 3b); `purgeBoundaryAutoAdvance` and
+  `purgeGhostHerreraFromJoey` went in #423. Only `purgeCarriedForwardDropRecords` and
+  `applyMLBApiTakeover` remain gated. Retired rows now move to a **Retired** table instead of
+  being deleted, so a recurrence starts from "already fixed once".
+- **Both plan docs still said "proposal for review"** though every phase shipped.
+  `SAVE_HARDENING_PLAN.md` → delivered (#286/#288/#290/#251/#252); `ROSTER_OPS_PLAN.md` →
+  delivered (3a/3b #322, 3c #323, clamp+undo #324).
+- **`tests/fixtures/README.md` claimed `db.sample.json` "is committed so every Claude session and
+  every unit test has current league data".** It has **never existed on any branch** — the
+  Action's Upstash secrets were never added. Any agent trusting that line goes looking for real
+  league data that isn't there. The README now says so and documents how to generate it. The
+  tooling itself (`scripts/sanitize-db.js`, `refresh-fixture.sh`, the workflow) works fine and
+  was kept.
+
+### Branches: all 58 non-`main` branches are retirable
+
+Every `claude/*` branch's PR is merged. Three (`mobile-display-optimization-eb437p`,
+`season-accolades-stats-z6dw9n`, `swaps-log-dropdowns-mobile-2vgq8v`) only _look_ unmerged
+because they predate the history rewrite — `main`'s root `60f78c1` is a squash of everything
+through #339, so they share no merge base. `live-tab-ownership-filter-jik50j` is #374, the one
+closed-unmerged PR, superseded by #425. `tmp/hook-signing-probe` is a throwaway probe.
+`staging` is 820 commits behind and still the deploy target of the `wmmc-staging` Render
+service — refresh it or retire the branch and the `render.yaml` block together.
+
+Deletion could not be done from an agent session: pushes succeed but ref deletions get HTTP 403.
+
+### The endpoint audit — 17 routes with no caller, and why they stay
+
+Cross-referencing the 88 routes against `app.js`, `index.html`, `RUNBOOK.md` and `README.md`
+turns up 17 with no caller anywhere. **"No HTTP caller" is not "dead"**, and this is the second
+time that heuristic has misfired here (see the 2026-08-05 scope correction above):
+
+- `/api/mlb/apply-corrections` delegates to `sweepStatCorrections`, which **the nightly scheduler
+  calls directly** (server.js:15873). The route is the manual door onto live machinery.
+- `apply-corrections`, `resync-dryrun` and `backfill-unscored` were all added **the day before
+  this audit** (#409, #413). They are commissioner tooling awaiting a UI, not residue.
+- The boundary/roster repair routes (`rebuild-roster-arrays`, `reconstruct-rosters`,
+  `reconcile-boundary-rosters`, `purge-orphan-boundary-rosters`) rebuild derived caches from
+  `roster_dates` — the canonical derivation. They are **generic repairs**, which the operative
+  rule says to keep.
+
+Genuinely incident-specific and plausibly retirable, for a human who knows whether they still get
+curl'd during incidents: `dedupe-repair-swaps` (dedupes repair-swaps written by repairs that no
+longer exist), `reseed-approved-boundary-rosters` (the 2026-06-08 clobber), `test-guard-alert`,
+`name-check`/`name-fix` (superseded by the roster-audit/roster-fix UI in #307), `recent-stats`,
+`rollup-audit`. Left alone deliberately — that call needs operational knowledge, not a grep.
+
+### Google Sheets: ~1,160 dead lines, with a live wire through them
+
+`applyMLBApiTakeover` force-sets `enabled = false` at boot and strips `source: 'gsheets'` rows.
+The engine is still fully present with **zero** frontend callers: server.js:6153–7151 (sync
+engine), 7153–7236 (the four endpoints), 14835–14860 and 15144–15195 (scheduler). Deleting it is
+the largest single cleanup available — but `google_sheets_config.season` is the **app-wide
+current-season pointer** (read in 10 places) and `POST /api/google-sheets/config` is its **only
+writer**. `RUNBOOK.md` already warns about this. Extract the pointer to something like
+`db.active_season` **first**, then delete. Not attempted here.
+
+### Verified clean — don't re-audit these
+
+- Every must-stay-in-sync duplicate pair matches: `SCORING` (identical keys and values),
+  `SEASON_SCHEDULE` (16 entries, `round`/`week` exact, `label` only on the `js/` side as
+  intended), `ROUND_LABELS`, `detectScoreSwings`, `checkSwapLimit`, `projectManager`,
+  `gameFactor`, `currentQualification`. `computeTeamQualityFactors` differs only by a local alias
+  (`oddsClamp` vs `clamp`) — not drift.
+- `app.js` has **no dead functions** — all 329 declarations are referenced. #421 did that job.
+- `js/index.js`'s window bridge has no stale entries.
+- The five "exported but never imported" `js/` constants (`ELIMINATION_ROUND_ORDER`,
+  `UNSCORED_BATTING_KEYS`, `UNSCORED_PITCHING_KEYS`, `ODDS_DEFAULT_SIMS`,
+  `PLAYOFF_STATUS_LABELS`) are all used **inside their own module**, and two are halves of
+  documented server mirrors. Dropping `export` would be noise. Left alone.
+
+### Still open
+
+- `MEMORY.md` is 230 KB / 3,158 lines and `CLAUDE.md` says to read it at session start — the
+  largest recurring context cost in the repo. Worth splitting into recent + `MEMORY-ARCHIVE.md`.
+- `CNAME` (`wmmc.live`) and `.nojekyll` are GitHub Pages mechanisms; the app deploys on Render.
+  Probably vestigial — confirm Pages isn't serving the apex domain before removing.
