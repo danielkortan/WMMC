@@ -267,6 +267,31 @@ reachable needs a lead held all day, a margin between the nailbiter and blowout 
 manager hauling while the other sleeps. Worth knowing that those two banks are the easiest to
 accidentally make unreachable.
 
+**A silent fallback is a bug, and it cost us an afternoon.** The first live posts came out in the
+bank's voice. Nobody could say why, because the no-key path returned the bank with **no log line
+at all** — a missing key, a rejected key, blocked egress and a bad model id were indistinguishable
+from outside. Three changes:
+
+- `generatePlayoffCommentary` now returns `{ lines, source }` and every fallback names its reason,
+  once, at the point it happens. The reason is logged AND stored on `sd.hot_takes.source`, so the
+  post itself carries a record of who wrote it.
+- `GET /api/admin/anthropic-check` (commissioner only) asks the API a one-token question with the
+  service's own key and reports unset / wrong / rejected / unreachable / working. It returns the
+  key's length, last four characters and whether it matches `sk-ant-`, which separates "not set"
+  from "set to the wrong thing" without putting a secret in an HTTP response.
+- A forced re-roll now actually moves. It did not before, and that is the subtle one: the bank is
+  seeded off the date so a repost tells the same joke — right for a retry, wrong for "give me
+  different ones". `sd.hot_takes.rerolls` counts presses and nudges the seed by that count, so
+  each re-roll lands on a different template while staying deterministic.
+
+**What this says about the 2026-08-03 key finding.** The commissioner confirmed `ANTHROPIC_API_KEY`
+IS set in the Render dashboard, and the Hot Takes still fell back — which means the Haiku
+elimination roasts were failing for the same reason all along. Two different models, one
+environment, both landing on their banks. So the 2026-08-03 entry reached a wrong conclusion
+(`the key is unset`) from a real symptom, and my correction of it — `bank output does not prove a
+missing key` — was right about the logic and did not find the actual cause either. The cause is
+still open at the time of writing; `anthropic-check` exists to close it.
+
 **Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
 seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
 the quarterfinals. And in the Finals the two games mean opposite things — "this is the closest he
