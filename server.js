@@ -695,6 +695,41 @@ function addAuditEntry(db, action, details, email) {
 }
 
 // ============================================================
+// Current-season pointer
+// ============================================================
+
+// THE app-wide "which season is live" pointer. It drives the daily Slack scoreboard, the season
+// welcome post, the 4am MLB sync, the /wmmc slash command, the player-pool bootstrap and the
+// weekly auto-advance — so getting it wrong breaks all six at once, silently.
+//
+// It used to live on `db.google_sheets_config.season`, which made it a hostage of the Google
+// Sheets importer: the only writer was that integration's config endpoint, and a cleanup pass
+// aimed at the importer would have taken the pointer with it. The importer stays (it is the
+// break-glass fallback for an MLB API outage — see RUNBOOK.md); the pointer just no longer
+// lives inside it.
+//
+// The legacy fallback is deliberate and permanent-ish: `migrateActiveSeasonPointer` copies the
+// value across on boot, but a db restored from an older Upstash backup would arrive without
+// `active_season`, and falling back keeps that instance pointing at the right season instead of
+// silently jumping to the current calendar year.
+function activeSeason(db) {
+  return (
+    (db && db.active_season) || ((db && db.google_sheets_config) || {}).season || new Date().getFullYear().toString()
+  );
+}
+
+// One-shot: lift the pointer out of google_sheets_config. Idempotent — it only writes when
+// `active_season` is unset and the legacy value exists, so it is safe on every boot.
+function migrateActiveSeasonPointer(db) {
+  if (!db || db.active_season) return false;
+  const legacy = (db.google_sheets_config || {}).season;
+  if (!legacy) return false;
+  db.active_season = legacy;
+  console.log(`[Season pointer] Migrated active season "${legacy}" out of google_sheets_config.`);
+  return true;
+}
+
+// ============================================================
 // Input validation helpers
 // ============================================================
 
@@ -2850,6 +2885,44 @@ app.post('/api/admin/db-restore', requireCommissioner, async (req, res) => {
 });
 
 // ============================================================
+// Current-season pointer
+// ============================================================
+
+// GET /api/admin/active-season — which season the automations act on.
+app.get('/api/admin/active-season', (req, res) => {
+  const db = readDB();
+  res.json({
+    active_season: activeSeason(db),
+    explicit: !!db.active_season,
+    seasons: Object.keys(db.seasons || {}).sort(),
+  });
+});
+
+// POST /api/admin/active-season { season } — repoint every automation at a different season.
+// This is the pointer's only writer. It used to be `POST /api/google-sheets/config { season }`,
+// which buried an app-wide setting inside a dormant integration's config endpoint.
+app.post('/api/admin/active-season', requireCommissioner, (req, res) => {
+  const season = String((req.body || {}).season || '').trim();
+  if (!/^\d{4}$/.test(season)) {
+    return res.status(400).json({ error: 'season must be a 4-digit year' });
+  }
+  const db = readDB();
+  if (!(db.seasons || {})[season]) {
+    // Pointing at a season that does not exist would silently disable the daily scoreboard post,
+    // the sync and the auto-advance — all of which resolve `sd` and bail when it is missing.
+    return res
+      .status(400)
+      .json({ error: `Season ${season} does not exist`, seasons: Object.keys(db.seasons || {}).sort() });
+  }
+  const previous = activeSeason(db);
+  db.active_season = season;
+  addAuditEntry(db, 'active_season_changed', { from: previous, to: season }, req.get('X-User-Email'));
+  writeDB(db);
+  console.log(`[Season pointer] Active season changed ${previous} -> ${season}`);
+  res.json({ ok: true, active_season: season, previous });
+});
+
+// ============================================================
 // Banner Background Config
 // ============================================================
 
@@ -3580,8 +3653,7 @@ async function applyMLBApiTakeover(db) {
   // performMLBSync replaces mlbapi rows for each game_id, so re-running a
   // successful week is a no-op — safe to retry after a partial failure.
   const today = new Date().toISOString().split('T')[0];
-  const config = db.google_sheets_config || {};
-  const season = config.season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season];
   let weeksSynced = 0;
   if (sd) {
@@ -3613,7 +3685,7 @@ async function applyMLBApiTakeover(db) {
 
   db.mlb_api_takeover_v1 = true;
   console.log(
-    `[MLB-API takeover] Stripped ${stripped} gsheets-source row(s); backfilled ${weeksSynced} past week(s) from MLB; gsheets auto-sync disabled (re-enable from commissioner UI to use as a fallback).`
+    `[MLB-API takeover] Stripped ${stripped} gsheets-source row(s); backfilled ${weeksSynced} past week(s) from MLB; gsheets auto-sync disabled (re-arm via the API if the MLB feed fails — see RUNBOOK.md).`
   );
   return true;
 }
@@ -7170,7 +7242,10 @@ app.get('/api/google-sheets/config', (req, res) => {
 // POST /api/google-sheets/config
 app.post('/api/google-sheets/config', requireCommissioner, (req, res) => {
   const db = readDB();
-  const { spreadsheet_url, api_key, enabled, season, sync_time } = req.body;
+  // `season` is deliberately NOT accepted here any more — the current-season pointer is
+  // app-wide and lives at db.active_season (POST /api/admin/active-season). Re-arming this
+  // fallback must not be able to repoint the whole app as a side effect.
+  const { spreadsheet_url, api_key, enabled, sync_time } = req.body;
 
   const spreadsheetId = extractSpreadsheetId(spreadsheet_url);
   if (spreadsheet_url && !spreadsheetId) {
@@ -7181,10 +7256,9 @@ app.post('/api/google-sheets/config', requireCommissioner, (req, res) => {
   if (spreadsheetId) db.google_sheets_config.spreadsheet_id = spreadsheetId;
   if (api_key) db.google_sheets_config.api_key = api_key;
   if (typeof enabled === 'boolean') db.google_sheets_config.enabled = enabled;
-  if (season) db.google_sheets_config.season = season;
   if (sync_time) db.google_sheets_config.sync_time = sync_time;
 
-  addAuditEntry(db, 'gsheets_config_update', { enabled, season }, req.get('X-User-Email'));
+  addAuditEntry(db, 'gsheets_config_update', { enabled }, req.get('X-User-Email'));
   writeDB(db);
   scheduleGSheetsSync(); // reconfigure scheduler
 
@@ -7220,7 +7294,7 @@ app.post('/api/google-sheets/sync', requireCommissioner, async (req, res) => {
 app.get('/api/google-sheets/sync-status', (req, res) => {
   const db = readDB();
   const config = db.google_sheets_config || {};
-  const season = config.season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season] || {};
   const recentLogs = (sd.upload_log || [])
     .filter((l) => l.type === 'gsheets_sync')
@@ -7238,8 +7312,7 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
 // GET /api/mlb/sync-status
 app.get('/api/mlb/sync-status', requireCommissioner, (req, res) => {
   const db = readDB();
-  const config = db.google_sheets_config || {};
-  const season = config.season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season] || {};
 
   // Sync runs are recorded in two places: the per-season upload_log (rich — includes
@@ -9549,56 +9622,6 @@ app.get('/api/seasons/:year/roster-audit', requireCommissioner, (req, res) => {
   });
 });
 
-// POST /api/seasons/:year/dedupe-repair-swaps
-// Removes 'repair-...' swaps that duplicate a real (non-repair) swap for the same move
-// (manager + player_out + player_in + week_key). The old auto-repair band-aids (since deleted)
-// recreated some swaps that the real record also covers, leaving doubles. Idempotent and safe:
-// keeps any repair- swap that is the SOLE record of a move (deleting it would erase the move).
-// Reports the removed entries + a before/after total check (totals should not move).
-app.post('/api/seasons/:year/dedupe-repair-swaps', requireCommissioner, (req, res) => {
-  const year = req.params.year;
-  const db = readDB();
-  const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
-
-  const swaps = Array.isArray(sd.swaps) ? sd.swaps : [];
-  const moveKey = (s) => `${s.manager}|${s.player_out || ''}|${s.player_in || ''}|${s.week_key || ''}`;
-  const realMoves = new Set(swaps.filter((s) => !String(s.id).startsWith('repair-')).map(moveKey));
-
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const before = captureScoreSnapshot(sd, todayET).totals;
-
-  const removed = [];
-  sd.swaps = swaps.filter((s) => {
-    if (String(s.id).startsWith('repair-') && realMoves.has(moveKey(s))) {
-      removed.push({
-        id: s.id,
-        manager: s.manager,
-        player_out: s.player_out,
-        player_in: s.player_in,
-        week_key: s.week_key,
-      });
-      return false;
-    }
-    return true;
-  });
-
-  const after = captureScoreSnapshot(sd, todayET).totals;
-  const movedTotals = [];
-  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    const b = (before[m] || {}).total || 0;
-    const a = (after[m] || {}).total || 0;
-    if (Math.abs(a - b) >= 0.01) {
-      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
-    }
-  }
-
-  db.seasons[year] = sd;
-  addAuditEntry(db, 'dedupe_repair_swaps', { year, removed: removed.length }, req.get('X-User-Email'));
-  writeDB(db);
-  res.json({ ok: true, removed, removed_count: removed.length, moved_totals: movedTotals });
-});
-
 // POST /api/seasons/:year/initial-submission  { manager, batters, pitchers }
 // Commissioner set/override of a manager's initial (Pool Play 1) submission, at any
 // time. This is the generic, reusable replacement for the hardcoded "missing initial
@@ -9635,27 +9658,6 @@ app.post('/api/seasons/:year/initial-submission', requireCommissioner, (req, res
   );
   writeDB(db);
   res.json({ ok: true, manager, initial_submission: sd.initial_submissions[manager] });
-});
-
-// POST /api/slack/test-guard-alert  — posts a clearly-labeled TEST score-guard alert to the
-// notifications Slack channel so the commissioner can preview the format. Changes no data.
-app.post('/api/slack/test-guard-alert', requireCommissioner, async (req, res) => {
-  const blockers = [
-    { manager: 'Example Manager A', before: 1419.6, after: 1053.8, delta: -365.8, pct: -0.258 },
-    { manager: 'Example Manager B', before: 1108.2, after: 980.1, delta: -128.1, pct: -0.116 },
-  ];
-  const dateISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const msg =
-    ':test_tube: *TEST — Score guard BLOCKED a compile* — scores NOT saved (drop of 40+ pts).\n' +
-    `Season 2026 • ${dateISO} • trigger: test\n` +
-    `Largest drops:\n${formatSwingLines(blockers)}\n` +
-    '_This is a test — no scores changed. To triage a real one: paste `SCOREFIX` to Claude, or see RUNBOOK.md._';
-  try {
-    await postSlack(msg);
-    res.json({ ok: true, posted: !!SLACK_WEBHOOK_URL, preview: msg });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
 });
 
 // ============================================================
@@ -9879,12 +9881,6 @@ async function fetchMLBPlayerCatalog(season, { refresh = false } = {}) {
   return catalog;
 }
 
-// Back-compat: callers that only need names still work.
-async function fetchMLBPlayerNames(season) {
-  const catalog = await fetchMLBPlayerCatalog(season);
-  return catalog.map((p) => p.fullName);
-}
-
 // Index a catalog by normalized fullName so duplicates (e.g. two "Max Muncy"s) surface as arrays.
 function indexCatalogByName(catalog) {
   const byNorm = new Map();
@@ -10090,121 +10086,6 @@ function buildIdToWmmcName(sd) {
   }
   return map;
 }
-
-// For each WMMC name find the best MLB API match. Returns array of match objects.
-function buildNameMatchReport(wmmcNames, mlbNames) {
-  const mlbSet = new Set(mlbNames);
-  return wmmcNames.map((wmmcName) => {
-    if (mlbSet.has(wmmcName)) {
-      return { wmmc_name: wmmcName, mlb_name: wmmcName, score: 1.0, exact: true, action: 'none' };
-    }
-    let bestName = null,
-      bestScore = 0;
-    for (const mlbName of mlbNames) {
-      const s = nameSimilarity(wmmcName, mlbName);
-      if (s > bestScore) {
-        bestScore = s;
-        bestName = mlbName;
-      }
-    }
-    const score = Math.round(bestScore * 1000) / 1000;
-    return {
-      wmmc_name: wmmcName,
-      mlb_name: bestName,
-      score,
-      exact: false,
-      // >= 0.9: high confidence auto-fix; 0.75–0.89: review first; < 0.75: likely wrong sport/pool entry
-      action: score >= 0.9 ? 'auto' : score >= 0.75 ? 'review' : 'no_match',
-    };
-  });
-}
-
-// GET /api/mlb/name-check?year=2025
-// Compares every player name in the WMMC database against the MLB Stats API canonical list.
-// Returns match report with confidence scores. Nothing is changed.
-app.get('/api/mlb/name-check', requireCommissioner, async (req, res) => {
-  const { year } = req.query;
-  if (!year) return res.status(400).json({ error: 'year is required' });
-
-  const db = readDB();
-  const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
-
-  try {
-    const [mlbNames, wmmcNames] = await Promise.all([
-      fetchMLBPlayerNames(year),
-      Promise.resolve(extractSeasonPlayerNames(sd)),
-    ]);
-
-    const report = buildNameMatchReport(wmmcNames, mlbNames);
-
-    res.json({
-      season: year,
-      wmmc_player_count: wmmcNames.length,
-      mlb_roster_size: mlbNames.length,
-      exact_matches: report.filter((r) => r.exact).length,
-      auto_fixable: report.filter((r) => r.action === 'auto').length,
-      needs_review: report.filter((r) => r.action === 'review').length,
-      no_match: report.filter((r) => r.action === 'no_match').length,
-      // Worst matches first so problems are immediately visible
-      players: report.sort((a, b) => a.score - b.score),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// POST /api/mlb/name-fix
-// Applies name corrections across the entire season database.
-//
-// Two modes:
-//   { year, mappings: [{ from, to }, ...] }        — apply specific corrections you've reviewed
-//   { year, auto_threshold: 0.9 }                  — auto-apply all matches at or above the threshold
-//
-// Always returns what was changed so you can verify before running again.
-app.post('/api/mlb/name-fix', requireCommissioner, async (req, res) => {
-  const { year, mappings, auto_threshold } = req.body || {};
-  if (!year) return res.status(400).json({ error: 'year is required' });
-  if (!mappings && auto_threshold === undefined) {
-    return res.status(400).json({ error: 'Provide either mappings or auto_threshold' });
-  }
-
-  const db = readDB();
-  const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
-
-  let toApply = mappings || [];
-
-  if (auto_threshold !== undefined && !mappings) {
-    try {
-      const [mlbNames, wmmcNames] = await Promise.all([
-        fetchMLBPlayerNames(year),
-        Promise.resolve(extractSeasonPlayerNames(sd)),
-      ]);
-      const report = buildNameMatchReport(wmmcNames, mlbNames);
-      toApply = report
-        .filter((r) => !r.exact && r.score >= auto_threshold && r.mlb_name)
-        .map((r) => ({ from: r.wmmc_name, to: r.mlb_name }));
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
-    }
-  }
-
-  const applied = [];
-  for (const { from, to } of toApply) {
-    if (!from || !to || from === to) continue;
-    const occurrences = renamePlayerInSeason(sd, from, to);
-    applied.push({ from, to, occurrences_updated: occurrences });
-  }
-
-  if (applied.length > 0) {
-    db.seasons[year] = sd;
-    addAuditEntry(db, 'mlb_name_fix', { year, renames: applied.length, detail: applied });
-    writeDB(db);
-  }
-
-  res.json({ ok: true, renames_applied: applied.length, applied });
-});
 
 // Collect all player names that appear in any manager's roster for the given season.
 // "currently rostered" = present in sd.rosters for any week this season.
@@ -12004,8 +11885,7 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
 
   const db = readDB();
   const userEmail = req.get('X-User-Email') || '';
-  const config = db.google_sheets_config || {};
-  const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
+  const year = (req.body && req.body.year) || activeSeason(db);
 
   // Same guard as the 7am auto-post: without usable season data the post renders as a pool-play
   // "Current Period: Season / No scores recorded yet" shell. Fail loudly instead of
@@ -12087,8 +11967,7 @@ app.post('/api/slack/command', (req, res) => {
       const text = (body.text || '').trim().toLowerCase();
 
       const db = readDB();
-      const config = db.google_sheets_config || {};
-      const year = config.season || String(new Date().getFullYear());
+      const year = activeSeason(db);
 
       // Support optional year argument: /wmmc 2024
       const requestedYear = /^\d{4}$/.test(text) ? text : year;
@@ -15097,8 +14976,7 @@ function scheduleWeeklyAutoAdvance() {
   async function runAndReschedule() {
     try {
       const db = readDB();
-      const config = db.google_sheets_config || {};
-      const season = config.season || new Date().getFullYear().toString();
+      const season = activeSeason(db);
       const sd = (db.seasons || {})[season];
 
       if (!sd) {
@@ -15159,8 +15037,7 @@ function scheduleGSheetsSync() {
     console.log(`[GSheets] Running scheduled sync at ${now.toISOString()}`);
 
     const db2 = readDB();
-    const cfg = db2.google_sheets_config || {};
-    const season = cfg.season || now.getFullYear().toString();
+    const season = activeSeason(db2);
 
     syncGoogleSheets(season)
       .then((result) => {
@@ -15581,7 +15458,7 @@ async function fireSeasonWelcomePost(season, todayET) {
 // posts immediately — a welcome post at the wrong hour beats no welcome post at all.
 async function scheduleSeasonWelcomePost(reason) {
   const db = readDB();
-  const season = (db.google_sheets_config || {}).season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season];
   if (!hasScoreboardData(sd)) return;
 
@@ -15637,8 +15514,7 @@ function scheduleScoreboardPost() {
     // data loaded yet). Re-reading fresh and writing the claim first keeps the race window
     // as small as possible.
     const db = readDB();
-    const config = db.google_sheets_config || {};
-    const season = config.season || now.getFullYear().toString();
+    const season = activeSeason(db);
     const sd = (db.seasons || {})[season];
 
     if (db.last_scoreboard_post_date === todayET) {
@@ -15788,7 +15664,7 @@ function detectScheduleWeekForDate(sd, dateISO) {
 function recordSyncStatus(status) {
   try {
     const sdb = readDB();
-    const season = (sdb.google_sheets_config || {}).season || new Date().getFullYear().toString();
+    const season = activeSeason(sdb);
     if (!sdb.seasons || !sdb.seasons[season]) return;
     sdb.seasons[season].last_sync_status = status;
     writeDB(sdb);
@@ -15804,8 +15680,7 @@ function scheduleMLBApiSync() {
     const now = new Date();
     try {
       const db = readDB();
-      const config = db.google_sheets_config || {};
-      const season = config.season || now.getFullYear().toString();
+      const season = activeSeason(db);
       const sd = (db.seasons || {})[season];
 
       if (!sd) {
@@ -16182,6 +16057,15 @@ async function main() {
       console.error('Could not backfill manager googleEmail:', e.message);
     }
 
+    // Lift the current-season pointer out of google_sheets_config. Must run before anything
+    // that resolves a season.
+    try {
+      const dbForPointer = readDB();
+      if (migrateActiveSeasonPointer(dbForPointer)) writeDB(dbForPointer);
+    } catch (e) {
+      console.error('[Season pointer] Migration error (continuing):', e.message);
+    }
+
     // One-shot: cut over to the MLB Stats API as the sole stats source.
     // Strips gsheets-sourced rows, flips gsheets auto-sync off, and
     // backfills every past schedule week via MLB. Gated by a db flag so it
@@ -16200,8 +16084,7 @@ async function main() {
     // next daily refresh.
     try {
       const dbForPool = readDB();
-      const cfg = dbForPool.google_sheets_config || {};
-      const season = cfg.season || new Date().getFullYear().toString();
+      const season = activeSeason(dbForPool);
       const sd = (dbForPool.seasons || {})[season];
       if (sd) {
         const r = await bootstrapPlayerPools(sd, season);

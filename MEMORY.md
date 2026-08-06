@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                            | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-06 | Deleting a dormant fallback is a risk decision, not a cleanup                                    | [MEMORY](#2026-08-06-deleting-a-dormant-fallback-is-a-risk-decision-not-a-cleanup)                                                |
 | 2026-08-06 | Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted                             | [MEMORY](#2026-08-06-repo-wide-prbranchdead-code-audit-and-why-no-endpoint-was-deleted)                                           |
 | 2026-08-05 | Live tab boxscores scrolled inside their column while the page had empty gutters                 | [MEMORY](#2026-08-05-live-tab-boxscores-scrolled-inside-their-column-while-the-page-had-empty-gutters)                            |
 | 2026-08-05 | The Hypothetical Zone, and two MLB sync bugs it uncovered                                        | [MEMORY](#the-hypothetical-zone-and-two-mlb-sync-bugs-it-uncovered-2026-08-05)                                                    |
@@ -92,6 +93,102 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Git identity — run at session start                                                              | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                              | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
 
+## 2026-08-06 — Deleting a dormant fallback is a risk decision, not a cleanup
+
+Follow-on from the audit entry below. The audit's headline finding was "the Google Sheets sync is
+~1,160 dead lines with zero frontend callers — the largest single cleanup available." I offered
+that to the commissioner as a cleanup option, he picked it, and I deleted it. Both halves of that
+sentence were wrong.
+
+### The number was wrong, and the reason generalises
+
+`server.js` has a `// Google Sheets Sync` banner at 6153. I measured the block from the banner to
+the end of `syncGoogleSheets` and called the whole thing importer code. It is not. Living under
+that banner are `buildWeekRostersFromDates` (the canonical roster derivation — the core scoring
+invariant by function), `syncPlayerDatesFromRosterDates`, `recomputeMidWeekAddScores`,
+`repairGhostInitialRosterPlayers` and the three `findManagerForPlayer*` attribution helpers.
+
+Actual importer-only code was ~700 lines, and I only learned that by resolving callers for every
+function in the range. **A section header is not a dependency graph.** Measure a deletion by who
+calls what, never by which comment banner it sits under.
+
+### The bigger miss: unreachable is not unwanted
+
+`RUNBOOK.md` has a "Break glass: re-enable Google Sheets sync" section. It states plainly that the
+sync is a **dormant server-side fallback**, that there is intentionally no UI, and that the
+endpoints and parsers stay in `server.js` so it can be re-armed if the MLB API is ever
+unavailable. I found that section while rewriting docs — _after_ deleting the code it describes.
+
+Everything I had used as evidence of deadness was actually evidence of it being deliberately
+dormant: no UI, no caller, force-disabled at boot. Those were the design, documented in the file
+whose whole job is telling you what to do in an emergency. The MLB Stats API is the single point
+of failure for a stats-scoring app; "it is untested and needs an API key" is an argument for
+exercising a fallback, not for deleting it.
+
+The commissioner pushed back — "why would we remove the break glass path? it's specifically there
+in case of emergency" — and he was right. Restored in full.
+
+### The process failure, which is the part to actually remember
+
+I obtained consent on a framing that later turned out to be false, then kept going. When the RUNBOOK
+section surfaced, the honest move was to stop and re-ask, because "delete dead code" and "remove
+the emergency fallback for our single point of failure" are different questions with different
+answers. Instead I finished the deletion and flagged the tradeoff afterwards, which puts the
+commissioner in the position of having to un-approve something already built.
+
+> **If what you discover mid-task changes what the user was actually agreeing to, stop and
+> re-ask. Flagging it afterwards is not the same thing.**
+
+### What survived, and why it was worth doing anyway
+
+The coupling underneath was the real defect, and it is what nearly cost us the fallback.
+`google_sheets_config.season` was the app-wide current-season pointer — the daily scoreboard post,
+the season welcome post, the 4am MLB sync, the `/wmmc` slash command, the player-pool bootstrap and
+the auto-advance scheduler all resolve from it — and `POST /api/google-sheets/config` was its only
+writer. That is two hazards in one: re-arming the fallback in an emergency could silently repoint
+the whole app, and any cleanup aimed at the importer takes the season pointer with it.
+
+Now: `db.active_season`, an `activeSeason(db)` accessor (falls back to the legacy location, then
+the calendar year, so a pre-migration Upstash restore still resolves correctly), a boot migration,
+and `GET`/`POST /api/admin/active-season` as a real writer that rejects a nonexistent season. The
+gsheets config endpoint no longer accepts `season` at all. The importer is untouched.
+
+### Verifying a fallback means arming it
+
+Testing that the app still boots proves nothing about a path that is off by default. Booted a
+second time with `google_sheets_config` fully populated to confirm `[GSheets] Auto-sync enabled`,
+that `/api/google-sheets/sync-status` responds, and that `{"season":"2025"}` posted to the config
+endpoint leaves `active_season` at `2026`.
+
+That is also how `eslint` earned its keep: the regex that rewrote the 12 read sites had collapsed a
+`const config` declaration the `sync-status` handler still used. It would have 500'd that endpoint
+the moment anyone checked the fallback — during an outage, which is the only time anyone would.
+
+### Housekeeping done in the same session
+
+- **`MEMORY.md` split** (#427). 230 KB / 3,158 lines / 82 entries, read at session start. Entries
+  from 2026-07-29 stay; the older 46 moved to `MEMORY-ARCHIVE.md`; an index of all 82 sits at the
+  top. Cutoff chosen so every entry about the live playoff period stays loaded.
+- **Docs corrected** (#426). `DATA_REPAIRS.md` listed four repairs that no longer exist; both plan
+  docs still said "proposal for review"; `tests/fixtures/README.md` claimed `db.sample.json` was
+  committed "so every Claude session has current league data" — that file has never existed on any
+  branch, the Action's Upstash secrets were never added.
+- **`staging` refreshed.** It was 240 commits behind while `render.yaml` still auto-deploys
+  `wmmc-staging` from it. No unique files, so it was merged and resolved to main's tree; verified
+  the tree hash matches `origin/main` exactly.
+- **57 stale branches deleted** by the commissioner. Agent sessions get HTTP 403 on ref deletion —
+  pushes work, deletes do not. Hand the command over rather than reporting it as done.
+
+### Endpoints: still 13 with no caller, still not dead
+
+The audit below lists them. Re-confirmed the reasoning by reading each: `/api/mlb/apply-corrections`
+fronts `sweepStatCorrections`, which the nightly scheduler calls directly (`server.js:15873`), and
+`resync-dryrun`/`backfill-unscored` shipped the day before the audit. Four genuinely superseded ones
+went: `dedupe-repair-swaps` (its trigger was deleted in #252), `test-guard-alert`, and
+`name-check`/`name-fix` — that last pair worth removing on safety grounds, since `name-fix` does
+fuzzy auto-renames at a caller-supplied threshold with no totals vet while `/api/mlb/roster-fix`
+(#307) does the same job keyed on `sd.mlb_ids` with a before/after totals comparison.
+
 ## 2026-08-06 — Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted
 
 Reviewed all 425 PRs (none open), all 60 remote branches, and cross-referenced every route,
@@ -149,13 +246,21 @@ longer exist), `reseed-approved-boundary-rosters` (the 2026-06-08 clobber), `tes
 
 ### Google Sheets: ~1,160 dead lines, with a live wire through them
 
+> **Both claims in this heading are wrong — see the 2026-08-06 entry above
+> ("Deleting a dormant fallback is a risk decision, not a cleanup").** The importer-only code is
+> ~700 lines, not 1,160: the `// Google Sheets Sync` banner at 6153 also covers
+> `buildWeekRostersFromDates` and the attribution helpers, which are core. And it is not dead —
+> `RUNBOOK.md` documents it as the deliberate break-glass fallback for an MLB API outage. It was
+> deleted on the strength of this paragraph and then restored. Left here, corrected rather than
+> rewritten, because the wrong reasoning is the useful part.
+
 `applyMLBApiTakeover` force-sets `enabled = false` at boot and strips `source: 'gsheets'` rows.
 The engine is still fully present with **zero** frontend callers: server.js:6153–7151 (sync
-engine), 7153–7236 (the four endpoints), 14835–14860 and 15144–15195 (scheduler). Deleting it is
-the largest single cleanup available — but `google_sheets_config.season` is the **app-wide
-current-season pointer** (read in 10 places) and `POST /api/google-sheets/config` is its **only
-writer**. `RUNBOOK.md` already warns about this. Extract the pointer to something like
-`db.active_season` **first**, then delete. Not attempted here.
+engine), 7153–7236 (the four endpoints), 14835–14860 and 15144–15195 (scheduler). But
+`google_sheets_config.season` is the **app-wide current-season pointer** (read in 10 places) and
+`POST /api/google-sheets/config` is its **only writer**. `RUNBOOK.md` already warns about this.
+Extract the pointer to `db.active_season` first — done in #428, which also leaves the importer
+in place.
 
 ### Verified clean — don't re-audit these
 

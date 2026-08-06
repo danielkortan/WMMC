@@ -162,6 +162,13 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 | `POST`   | `/api/managers/:email/password` | Commissioner sets a manager's password.                                    |
 | `DELETE` | `/api/managers/:email/password` | Commissioner clears a manager's password (falls back to `LOGIN_PASSWORD`). |
 
+### Current-season pointer
+
+| Method | Endpoint                   | Description                                                            |
+| ------ | -------------------------- | ---------------------------------------------------------------------- |
+| `GET`  | `/api/admin/active-season` | Which season the automations act on, and which seasons exist.          |
+| `POST` | `/api/admin/active-season` | Repoint them. Body `{ season }`; rejects a season that does not exist. |
+
 ### Google Sheets Sync
 
 | Method | Endpoint                         | Description                             |
@@ -196,7 +203,7 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 2. Enable the **Google Sheets API**.
 3. Create an API key under **APIs & Services → Credentials**.
 4. In your spreadsheet, create tabs named `Week 1 Batting`, `Week 1 Pitching`, `Week 2 Batting`, etc.
-5. Enter the spreadsheet URL and API key in the Commissioner panel under **Stats Data → Google Sheets Auto-Sync**.
+5. Re-arm the sync via the API — there is intentionally no UI. See [RUNBOOK.md](RUNBOOK.md) → "Break glass: re-enable Google Sheets sync".
 
 ## Google Sign-In Setup
 
