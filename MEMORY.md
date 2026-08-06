@@ -247,6 +247,26 @@ Two bugs found while wiring the endpoint, both pre-existing:
   taken minutes earlier (from before an API call) erased them. It now re-reads before the audit
   write. This is the same shape as every clobber in this log — a db read held across slow work.
 
+**`:tickets:` is not a Slack emoji, and only Slack could tell us.** The commissioner spotted it in
+the first live post: two takes rendered 💥 and 💤, the third printed the literal text
+`:tickets: 8 seasons. No Finals.` 🎫 is `:ticket:`, singular. Nothing in the toolchain can catch
+this — it is valid JS, valid mrkdwn, passes every test, and is only wrong once Slack tries to draw
+it. **The lesson is that Slack shortcodes are an external contract with no local validator**, same
+category as a webhook URL or an emoji the workspace has not installed.
+
+The fix is a written-down set, `SLACK_EMOJI`, and three uses of it: a test sweeps every line the
+banks can produce and fails on anything outside it, a second test proves every entry is reachable
+(so a dead entry or a broken rule shows up too), and the Anthropic prompt now lists the exact set
+instead of giving examples. `enforceVettedEmoji` closes the last gap — a written reply that reaches
+for an unlisted shortcode gets it swapped for `:zap:` rather than shipping literal text, because
+the joke is the valuable part and the emoji is not.
+
+Getting the reachability test to pass took a matchup shape I had not thought about: the big-day and
+dead-day lines only fire when no earlier line has already named that manager, so proving they are
+reachable needs a lead held all day, a margin between the nailbiter and blowout bars, and one
+manager hauling while the other sleeps. Worth knowing that those two banks are the easiest to
+accidentally make unreachable.
+
 **Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
 seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
 the quarterfinals. And in the Finals the two games mean opposite things — "this is the closest he

@@ -12,6 +12,8 @@ import {
   tidyCommentaryLine,
   hotTakesCacheKey,
   hotTakesCacheHit,
+  SLACK_EMOJI,
+  enforceVettedEmoji,
 } from '../js/playoffCommentary.js';
 
 const SHORT = {
@@ -264,11 +266,11 @@ describe('buildPlayoffCommentary', () => {
         'Alex Thalacker': history('Alex Thalacker', { neverMadeFinals: true, qfExitCount: 4, finalsAppearances: 0 }),
       },
     });
-    // :tickets: marks the never-made-a-Final rule, :hourglass: the title-drought rule.
-    const histLines = lines.filter((l) => l.startsWith(':tickets:') || l.startsWith(':hourglass:'));
+    // :ticket: marks the never-made-a-Final rule, :hourglass: the title-drought rule.
+    const histLines = lines.filter((l) => l.startsWith(':ticket:') || l.startsWith(':hourglass:'));
     assert.equal(histLines.length, 1, JSON.stringify(lines));
     // 'never-final' outranks 'drought' in the bank, so Alex's line wins.
-    assert.ok(histLines[0].startsWith(':tickets:'), histLines[0]);
+    assert.ok(histLines[0].startsWith(':ticket:'), histLines[0]);
     assert.match(histLines[0], /Alex/);
   });
 
@@ -331,10 +333,10 @@ describe('buildPlayoffCommentary', () => {
       histories: h,
     });
     assert.ok(
-      championship.some((l) => l.startsWith(':tickets:')),
+      championship.some((l) => l.startsWith(':ticket:')),
       JSON.stringify(championship)
     );
-    assert.ok(!thirdPlace.some((l) => l.startsWith(':tickets:')), JSON.stringify(thirdPlace));
+    assert.ok(!thirdPlace.some((l) => l.startsWith(':ticket:')), JSON.stringify(thirdPlace));
   });
 
   it('respects maxLines', () => {
@@ -603,5 +605,137 @@ describe('hotTakesCacheKey / hotTakesCacheHit', () => {
     assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF' }, '2026-08-05', 'SF'), false);
     assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF', lines: ['  '] }, '2026-08-05', 'SF'), false);
     assert.equal(hotTakesCacheHit({ key: '2026-08-05|SF', lines: [null] }, '2026-08-05', 'SF'), false);
+  });
+});
+
+describe('emoji shortcodes', () => {
+  const shortNames = { A: 'A', B: 'B', C: 'C', D: 'D' };
+  const shapes = [
+    { aTotal: 148.4, bTotal: 109.3, aDelta: 48.4, bDelta: 4 }, // flip
+    { aTotal: 400, bTotal: 100, aDelta: 30, bDelta: 0 }, // blowout + dead day
+    { aTotal: 210, bTotal: 200, aDelta: 90, bDelta: 5 }, // nailbiter + big day
+    { aTotal: 110, bTotal: 100, aDelta: 10, bDelta: 0 }, // tie broken
+    { aTotal: 100, bTotal: 100, aDelta: 10, bDelta: 10 }, // level
+    // Lead held all day, margin between the nailbiter and blowout bars, one manager hauling and
+    // the other asleep — the only shape where nothing else has already named them, which is what
+    // the big-day and dead-day lines require.
+    { aTotal: 300, bTotal: 240, aDelta: 50, bDelta: 2 },
+  ];
+
+  const run = (over = {}) =>
+    buildPlayoffCommentary({
+      round: 'SF',
+      roundLabel: 'Semifinals',
+      year: 2026,
+      daysLeft: 4,
+      seed: 0,
+      shortNames,
+      maxLines: 12,
+      ...over,
+    });
+
+  // Slack renders an unrecognised shortcode as literal text. ":tickets:" shipped to the league
+  // that way before this test existed — 🎫 is ":ticket:", singular. Nothing in the code can
+  // catch that: it is valid JS, valid mrkdwn, and only wrong once Slack tries to draw it.
+  it('no generated line ever leads with an unvetted shortcode', () => {
+    const histories = {
+      A: history('A', { neverMadeFinals: true, finalsAppearances: 0, qfExitCount: 5, seasonsPlayed: 9 }),
+      B: history('B', { neverPastQF: true, playoffAppearances: 6 }),
+      C: history('C', { titleCount: 2, lastTitle: 2018, titles: [2015, 2018], runnerUps: [2016, 2017] }),
+      D: history('D', { sfExitCount: 4, lastYearInSemis: 2019, lastTitle: 2025 }),
+    };
+    for (let seed = 0; seed < 60; seed++) {
+      for (const round of ['QF', 'SF', 'Finals']) {
+        for (const label of ['SF1', 'Championship', '3rd Place']) {
+          for (const shape of shapes) {
+            const lines = run({
+              round,
+              roundLabel: round,
+              seed,
+              histories,
+              matchups: [
+                { label, a: 'A', b: 'B', ...shape },
+                { label: 'M2', a: 'C', b: 'D', ...shape },
+              ],
+              dailyTotals: { A: shape.aDelta, B: shape.bDelta, C: shape.aDelta, D: shape.bDelta },
+            });
+            for (const line of lines) {
+              const code = (line.match(/^:[a-z_0-9]+:/) || [])[0];
+              assert.ok(code, `line does not start with a shortcode: ${line}`);
+              assert.ok(SLACK_EMOJI.includes(code), `unvetted shortcode ${code} in: ${line}`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // Each history rule outranks the ones below it, so a broad sweep only ever shows the top few.
+  // These isolate one rule at a time, which is what actually proves every entry in the list is
+  // reachable — and therefore that every entry has been looked at.
+  it('every vetted shortcode is reachable', () => {
+    const seen = new Set();
+    const collect = (lines) => lines.forEach((l) => seen.add((l.match(/^:[a-z_0-9]+:/) || [])[0]));
+
+    for (const shape of shapes) {
+      collect(
+        run({
+          matchups: [{ label: 'SF1', a: 'A', b: 'B', ...shape }],
+          dailyTotals: { A: shape.aDelta, B: shape.bDelta },
+        })
+      );
+    }
+
+    const soloHistories = [
+      ['QF', { qfExitCount: 4 }], // :chart_with_downwards_trend:
+      ['SF', { neverMadeFinals: true, finalsAppearances: 0 }], // :ticket:
+      ['SF', { lastTitle: 2025, titleCount: 1, titles: [2025] }], // :crown: (defending)
+      ['SF', { lastTitle: 2020, titleCount: 2, titles: [2018, 2020] }], // :hourglass: (drought)
+      ['SF', { runnerUps: [2019, 2021], titleCount: 0 }], // :second_place_medal:
+      ['SF', { lastYearInSemis: 2020 }], // :sparkles:
+      ['SF', { sfExitCount: 4, titleCount: 0 }], // :repeat:
+    ];
+    for (const [round, over] of soloHistories) {
+      for (let seed = 0; seed < 6; seed++) {
+        collect(
+          run({
+            round,
+            roundLabel: round,
+            seed,
+            matchups: [{ label: 'M', a: 'A', b: 'B', aTotal: 260, bTotal: 200, aDelta: 30, bDelta: 25 }],
+            histories: { A: history('A', over) },
+          })
+        );
+      }
+    }
+
+    const missing = SLACK_EMOJI.filter((c) => !seen.has(c));
+    assert.deepEqual(missing, [], `unreachable shortcodes (dead entries or a broken rule): ${missing.join(' ')}`);
+  });
+
+  it('leaves a line that already leads with a vetted shortcode alone', () => {
+    assert.equal(enforceVettedEmoji(':boom: Alex went off'), ':boom: Alex went off');
+    assert.equal(enforceVettedEmoji('  :ticket: 8 seasons  '), ':ticket: 8 seasons');
+  });
+
+  it('replaces a shortcode Slack would print as literal text', () => {
+    // The exact bug that shipped: :tickets: is not a Slack shortcode.
+    assert.equal(enforceVettedEmoji(':tickets: 8 seasons. No Finals.'), ':zap: 8 seasons. No Finals.');
+    assert.equal(enforceVettedEmoji(':fire_engine_siren: he is done'), ':zap: he is done');
+  });
+
+  it('adds one to a line that has none', () => {
+    assert.equal(enforceVettedEmoji('Alex leads by 28'), ':zap: Alex leads by 28');
+  });
+
+  it('honours a caller-chosen fallback and drops empty input', () => {
+    assert.equal(enforceVettedEmoji(':nope: x', ':boom:'), ':boom: x');
+    assert.equal(enforceVettedEmoji('   '), '');
+    assert.equal(enforceVettedEmoji(null), '');
+  });
+
+  it('has no duplicates and every entry is well-formed', () => {
+    assert.equal(new Set(SLACK_EMOJI).size, SLACK_EMOJI.length);
+    for (const code of SLACK_EMOJI) assert.match(code, /^:[a-z_0-9]+:$/);
   });
 });

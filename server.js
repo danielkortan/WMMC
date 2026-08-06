@@ -4285,6 +4285,28 @@ function matchupMovement({ label, a, b, aTotal = 0, bTotal = 0, aDelta = 0, bDel
   };
 }
 
+// Every emoji shortcode the banks (and the Anthropic prompt) are allowed to use. Slack renders
+// an unknown shortcode as LITERAL TEXT — a line reading ":tickets: 8 seasons. No Finals." went
+// out to the league that way, because `:tickets:` is not in Slack's set (🎫 is `:ticket:`,
+// singular). Nothing in the code can catch that: it is valid JS, valid mrkdwn, and only wrong
+// once Slack tries to draw it. So the set is written down, and a test asserts every bank line
+// starts with one of these. Add to this list only after confirming the shortcode renders.
+const SLACK_EMOJI = [
+  ':arrows_counterclockwise:',
+  ':zap:',
+  ':coffin:',
+  ':hourglass_flowing_sand:',
+  ':boom:',
+  ':zzz:',
+  ':chart_with_downwards_trend:',
+  ':ticket:',
+  ':crown:',
+  ':hourglass:',
+  ':second_place_medal:',
+  ':sparkles:',
+  ':repeat:',
+];
+
 // ---- Line banks -------------------------------------------------------------
 // Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the short-name
 // formatter the caller supplies, so every name in the post reads the same way.
@@ -4408,11 +4430,11 @@ const historyLines = [
     when: (h, ctx) => h.neverMadeFinals && h.seasonsPlayed >= 4 && ctx.matchupLabel !== '3rd Place',
     texts: [
       (h, n) =>
-        `:tickets: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest the man has ever stood to the thing.`,
+        `:ticket: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest the man has ever stood to the thing.`,
       (h, n) =>
-        `:tickets: ${h.seasonsPlayed} seasons. No Finals. *${n(h.manager)}* has watched this league hand out ${h.seasonsPlayed} trophies from roughly the same seat every time.`,
+        `:ticket: ${h.seasonsPlayed} seasons. No Finals. *${n(h.manager)}* has watched this league hand out ${h.seasonsPlayed} trophies from roughly the same seat every time.`,
       (h, n) =>
-        `:tickets: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it — he keeps buying tickets to the building and leaving at the seventh.`,
+        `:ticket: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it — he keeps buying tickets to the building and leaving at the seventh.`,
     ],
   },
   {
@@ -4420,9 +4442,9 @@ const historyLines = [
     when: (h) => h.neverPastQF && h.playoffAppearances >= 3,
     texts: [
       (h, n) =>
-        `:tickets: *${n(h.manager)} has never won a playoff round.* ${h.playoffAppearances} trips to the bracket. Zero rounds won. Ever.`,
+        `:ticket: *${n(h.manager)} has never won a playoff round.* ${h.playoffAppearances} trips to the bracket. Zero rounds won. Ever.`,
       (h, n) =>
-        `:tickets: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies every year for what appears to be the sole purpose of leaving.`,
+        `:ticket: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies every year for what appears to be the sole purpose of leaving.`,
     ],
   },
   {
@@ -4722,6 +4744,19 @@ function tidyCommentaryLine(line) {
     .trim();
 }
 
+// Force a line to lead with a vetted shortcode. The banks are covered by a test, but a written
+// reply is not — the model is given the list and can still reach for something outside it, and
+// Slack would print that as literal text. Swapping in a neutral one keeps the line (the joke is
+// the valuable part) while guaranteeing it renders. Lines with no shortcode at all get one.
+function enforceVettedEmoji(line, fallbackCode = ':zap:') {
+  const text = String(line || '').trim();
+  if (!text) return '';
+  const match = text.match(/^:[a-z_0-9]+:/);
+  if (match && SLACK_EMOJI.includes(match[0])) return text;
+  const body = match ? text.slice(match[0].length).trim() : text;
+  return `${fallbackCode} ${body}`.trim();
+}
+
 // Cache key for a day's takes. The takes are about ONE day's scoring inside ONE round, so
 // both belong in the key: a new day obviously invalidates them, and so does a round rolling
 // over underneath the same day (the Monday a round ends, "yesterday" belongs to the round
@@ -4815,7 +4850,7 @@ async function generatePlayoffCommentary(facts, { maxLines = 4 } = {}) {
 
 Rules:
 - Write ${Math.min(3, maxLines)} to ${maxLines} separate takes, one per line, nothing else. No heading, no preamble, no numbering, no bullets.
-- Start each line with a Slack emoji shortcode that fits it, e.g. :arrows_counterclockwise: for a lead change, :coffin: for a matchup that is over, :hourglass_flowing_sand: for one that is close, :boom: for a big day, :zzz: for a dead one, :tickets: or :crown: for a career fact.
+- Start each line with one of these Slack emoji shortcodes and NO others — anything else renders as literal text in Slack: ${SLACK_EMOJI.join(' ')}\nSuggested fits: :arrows_counterclockwise: a lead change, :coffin: a matchup that is over, :hourglass_flowing_sand: one that is close, :boom: a big day, :zzz: a dead one, :ticket: or :crown: a career fact.
 - Slack mrkdwn: *bold* is a single asterisk on each side. Never use **double** asterisks.
 - Two sentences per take at most. Vary the shape — do not write four takes with the same rhythm.
 - Use ONLY the numbers and facts below. Do not invent, estimate, extrapolate or round a score. If you want to talk about something that is not listed, do not.
@@ -4878,6 +4913,8 @@ Write the takes now.`;
     // Slack mrkdwn has no **bold**; a model reaching for Markdown habits would print the
     // asterisks literally.
     .map((l) => l.replace(/\*\*(.+?)\*\*/g, '*$1*'))
+    // ...and the same is true of an emoji shortcode Slack does not know.
+    .map((l) => enforceVettedEmoji(l))
     .filter(Boolean)
     .slice(0, maxLines);
 
