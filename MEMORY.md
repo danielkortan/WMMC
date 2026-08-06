@@ -7,91 +7,261 @@ Entries from **2026-07-29** onward live in this file. Older ones are in
 Standing reference sections (Deployment workflow, Git identity, Mobile CSS patterns, Google
 Sign-In) stay here regardless of age. **Search the archive before concluding something is new.**
 
-| Date       | Entry                                                                                            | Where                                                                                                                             |
-| ---------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-08-06 | Deleting a dormant fallback is a risk decision, not a cleanup                                    | [MEMORY](#2026-08-06-deleting-a-dormant-fallback-is-a-risk-decision-not-a-cleanup)                                                |
-| 2026-08-06 | Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted                             | [MEMORY](#2026-08-06-repo-wide-prbranchdead-code-audit-and-why-no-endpoint-was-deleted)                                           |
-| 2026-08-05 | Live tab boxscores scrolled inside their column while the page had empty gutters                 | [MEMORY](#2026-08-05-live-tab-boxscores-scrolled-inside-their-column-while-the-page-had-empty-gutters)                            |
-| 2026-08-05 | The Hypothetical Zone, and two MLB sync bugs it uncovered                                        | [MEMORY](#the-hypothetical-zone-and-two-mlb-sync-bugs-it-uncovered-2026-08-05)                                                    |
-| 2026-08-05 | The two queued "next tasks", and one of them was chasing the wrong thing                         | [MEMORY](#2026-08-05-the-two-queued-next-tasks-and-one-of-them-was-chasing-the-wrong-thing)                                       |
-| 2026-08-05 | The slow scoreboard was `GET /api/seasons`, not the scoring pass                                 | [MEMORY](#2026-08-05-the-slow-scoreboard-was-get-apiseasons-not-the-scoring-pass)                                                 |
-| 2026-08-05 | Redundancy audit: one real boot-time bug, one drift, and a scope correction                      | [MEMORY](#2026-08-05-redundancy-audit-one-real-boot-time-bug-one-drift-and-a-scope-correction)                                    |
-| 2026-08-05 | Open-PR triage: #386 refreshed, #374 retired in favor of a focused round gate                    | [MEMORY](#2026-08-05-open-pr-triage-386-refreshed-374-retired-in-favor-of-a-focused-round-gate)                                   |
-| 2026-08-03 | "End Quarterfinals" 409'd, didn't stick, and carried rosters into SF Week 1                      | [MEMORY](#end-quarterfinals-409d-didnt-stick-and-carried-rosters-into-sf-week-1-2026-08-03)                                       |
-| 2026-08-03 | Round-end Slack post rebuilt: results, margin ordering, matchup-aware roasts, Friday reminder    | [MEMORY](#round-end-slack-post-rebuilt-results-margin-ordering-matchup-aware-roasts-friday-reminder-2026-08-03)                   |
-| 2026-08-03 | Fallback roast bank: doubled, no-repeat within/across periods, article fix                       | [MEMORY](#fallback-roast-bank-doubled-no-repeat-withinacross-periods-article-fix-2026-08-03)                                      |
-| 2026-08-03 | Roster-page elimination roasts: round-by-round sections, league ranks, and a negative-points bug | [MEMORY](#roster-page-elimination-roasts-round-by-round-sections-league-ranks-and-a-negative-points-bug-2026-08-03)               |
-| 2026-08-03 | Article bug had a SECOND class, and production has no ANTHROPIC_API_KEY                          | [MEMORY](#article-bug-had-a-second-class-and-production-has-no-anthropic_api_key-2026-08-03)                                      |
-| 2026-08-03 | Roast repair buttons generalized to every round                                                  | [MEMORY](#roast-repair-buttons-generalized-to-every-round-2026-08-03)                                                             |
-| 2026-08-03 | Day-by-day tally replaced with a per-round summary                                               | [MEMORY](#day-by-day-tally-replaced-with-a-per-round-summary-2026-08-03)                                                          |
-| 2026-08-03 | Round summary became three tables; roasts are now server-authoritative on save                   | [MEMORY](#round-summary-became-three-tables-roasts-are-now-server-authoritative-on-save-2026-08-03)                               |
-| 2026-08-03 | Round sections became three narrative lines over the tables                                      | [MEMORY](#round-sections-became-three-narrative-lines-over-the-tables-2026-08-03)                                                 |
-| 2026-08-03 | The roast API call could 500 instead of falling back                                             | [MEMORY](#the-roast-api-call-could-500-instead-of-falling-back-2026-08-03)                                                        |
-| 2026-07-31 | The duplicate 7am post was never in the code; it was a second webhook holder                     | [MEMORY](#2026-07-31-the-duplicate-7am-post-was-never-in-the-code-it-was-a-second-webhook-holder)                                 |
-| 2026-07-30 | The drift audit's first alert was a false positive (effective-tomorrow adds)                     | [MEMORY](#2026-07-30-the-drift-audits-first-alert-was-a-false-positive-effective-tomorrow-adds)                                   |
-| 2026-07-30 | The pool-play scoreboard shell came back, because the guard checked a proxy                      | [MEMORY](#2026-07-30-the-pool-play-scoreboard-shell-came-back-because-the-guard-checked-a-proxy)                                  |
-| 2026-07-30 | Eliminated managers were still being tagged on Live box scores                                   | [MEMORY](#2026-07-30-eliminated-managers-were-still-being-tagged-on-live-box-scores)                                              |
-| 2026-07-29 | A mid-week swap erased the outgoing player from My Roster's week                                 | [MEMORY](#a-mid-week-swap-erased-the-outgoing-player-from-my-rosters-week-2026-07-29)                                             |
-| 2026-07-29 | Eliminated managers' stale playoff rosters blocked the swap pool                                 | [MEMORY](#eliminated-managers-stale-playoff-rosters-blocked-the-swap-pool-2026-07-29)                                             |
-| 2026-07-29 | `backfillRosterDatesFromSwaps` was clobbering effective-tomorrow drop dates                      | [MEMORY](#2026-07-29-backfillrosterdatesfromswaps-was-clobbering-effective-tomorrow-drop-dates)                                   |
-| 2026-07-29 | Live tab: "live day" replaces the hard midnight cutoff                                           | [MEMORY](#2026-07-29-live-tab-live-day-replaces-the-hard-midnight-cutoff)                                                         |
-| 2026-07-29 | Live board dropped a swapped-out player's points on his final rostered day                       | [MEMORY](#2026-07-29-live-board-dropped-a-swapped-out-players-points-on-his-final-rostered-day)                                   |
-| 2026-07-29 | Live tab: cache the MLB fetch layer, never the roster layer                                      | [MEMORY](#2026-07-29-live-tab-cache-the-mlb-fetch-layer-never-the-roster-layer)                                                   |
-| 2026-07-29 | Duplicate 7am Slack post showing "Current Period: Season"                                        | [MEMORY](#duplicate-7am-slack-post-showing-current-period-season-2026-07-29)                                                      |
-| 2026-07-29 | Season-opening welcome post + confirming the round cadence                                       | [MEMORY](#season-opening-welcome-post-confirming-the-round-cadence-2026-07-29)                                                    |
-| 2026-07-29 | A mid-week trade erased the outgoing manager's drop-day points                                   | [MEMORY](#2026-07-29-a-mid-week-trade-erased-the-outgoing-managers-drop-day-points)                                               |
-| 2026-07-29 | A wrong certified total sat in Slack for three hours with nothing watching                       | [MEMORY](#2026-07-29-a-wrong-certified-total-sat-in-slack-for-three-hours-with-nothing-watching)                                  |
-| 2026-07-28 | Managers can edit/cancel their OWN swap until it takes effect                                    | [archive](MEMORY-ARCHIVE.md#managers-can-editcancel-their-own-swap-until-it-takes-effect-2026-07-28)                              |
-| 2026-07-28 | A scheduled swap must not apply early in the roster VIEWS                                        | [archive](MEMORY-ARCHIVE.md#a-scheduled-swap-must-not-apply-early-in-the-roster-views-2026-07-28)                                 |
-| 2026-07-28 | My Roster scoring blocks redesigned as a Pool Play → playoffs flow                               | [archive](MEMORY-ARCHIVE.md#2026-07-28-my-roster-scoring-blocks-redesigned-as-a-pool-play-playoffs-flow)                          |
-| 2026-07-25 | Today is always a valid swap effective date — game start time, not the calendar                  | [archive](MEMORY-ARCHIVE.md#today-is-always-a-valid-swap-effective-date-game-start-time-not-the-calendar-2026-07-25)              |
-| 2026-07-22 | No login-screen flash on reload for logged-in users                                              | [archive](MEMORY-ARCHIVE.md#2026-07-22-no-login-screen-flash-on-reload-for-logged-in-users)                                       |
-| 2026-07-22 | Pool cleanup Scan→Apply infinite loop: retired phantoms re-reported forever                      | [archive](MEMORY-ARCHIVE.md#2026-07-22-pool-cleanup-scanapply-infinite-loop-retired-phantoms-re-reported-forever)                 |
-| 2026-07-21 | Scheduled swaps (manager, future-only) + commissioner date editing                               | [archive](MEMORY-ARCHIVE.md#scheduled-swaps-manager-future-only-commissioner-date-editing-2026-07-21)                             |
-| 2026-07-21 | IL check "unverified" root cause: sd.mlb_ids coverage, not the MLB API                           | [archive](MEMORY-ARCHIVE.md#2026-07-21-il-check-unverified-root-cause-sdmlb_ids-coverage-not-the-mlb-api)                         |
-| 2026-07-21 | Commissioner To-Do card (PR #365)                                                                | [archive](MEMORY-ARCHIVE.md#2026-07-21-commissioner-to-do-card-pr-365)                                                            |
-| 2026-07-20 | Swap automation: auto-apply on submit + playoff limits + MLB IL verification                     | [archive](MEMORY-ARCHIVE.md#swap-automation-auto-apply-on-submit-playoff-limits-mlb-il-verification-2026-07-20)                   |
-| 2026-07-20 | Live tab playoff bracket view + bracket mobile readability                                       | [archive](MEMORY-ARCHIVE.md#live-tab-playoff-bracket-view-bracket-mobile-readability-2026-07-20)                                  |
-| 2026-07-20 | Banner stuck on PP2 W5 after break: calendar week now wins both ways (PR #356)                   | [archive](MEMORY-ARCHIVE.md#2026-07-20-banner-stuck-on-pp2-w5-after-break-calendar-week-now-wins-both-ways-pr-356)                |
-| 2026-07-17 | All-Star break banner + bracket-first scoreboard (PR #353)                                       | [archive](MEMORY-ARCHIVE.md#2026-07-17-all-star-break-banner-bracket-first-scoreboard-pr-353)                                     |
-| 2026-07-17 | Break-time submission warning + explicit scoreboard expand (PR after #353)                       | [archive](MEMORY-ARCHIVE.md#2026-07-17-break-time-submission-warning-explicit-scoreboard-expand-pr-after-353)                     |
-| 2026-07-15 | Daily Slack post: playoff cadence + bracket matchups                                             | [archive](MEMORY-ARCHIVE.md#daily-slack-post-playoff-cadence-bracket-matchups-2026-07-15)                                         |
-| 2026-07-12 | Mobile scoreboard: Total column restored next to Playoff %                                       | [archive](MEMORY-ARCHIVE.md#2026-07-12-mobile-scoreboard-total-column-restored-next-to-playoff)                                   |
-| 2026-07-12 | Mobile scoreboard polish: aligned score column + odds-table headers                              | [archive](MEMORY-ARCHIVE.md#2026-07-12-mobile-scoreboard-polish-aligned-score-column-odds-table-headers)                          |
-| 2026-07-10 | Swap-chain grouping applied to every roster listing                                              | [archive](MEMORY-ARCHIVE.md#2026-07-10-swap-chain-grouping-applied-to-every-roster-listing)                                       |
-| 2026-07-06 | Playoff odds: Monte-Carlo prediction section, PP2 Weeks 4–5                                      | [archive](MEMORY-ARCHIVE.md#playoff-odds-monte-carlo-prediction-section-pp2-weeks-45-2026-07-06)                                  |
-| 2026-07-06 | Timezone display: server stamps are zone-less UTC; render browser-local with zone abbrev         | [archive](MEMORY-ARCHIVE.md#timezone-display-server-stamps-are-zone-less-utc-render-browser-local-with-zone-abbrev-2026-07-06)    |
-| 2026-07-05 | Swap approve/undo skipped the date-window recompute — phantom +57 + guard-block loop             | [archive](MEMORY-ARCHIVE.md#swap-approveundo-skipped-the-date-window-recompute-phantom-57-guard-block-loop-2026-07-05)            |
-| 2026-07-05 | Swap Log filters: chips → dropdowns + mobile layout fix                                          | [archive](MEMORY-ARCHIVE.md#swap-log-filters-chips-dropdowns-mobile-layout-fix-2026-07-05)                                        |
-| 2026-07-03 | Mobile full-tab redesign                                                                         | [MEMORY](#mobile-full-tab-redesign-established-2026-07-03-pr-335)                                                                 |
-| 2026-07-02 | Season Stats tab: accolades + merged Trends                                                      | [archive](MEMORY-ARCHIVE.md#season-stats-tab-accolades-merged-trends-2026-07-02)                                                  |
-| 2026-06-19 | Scoreboard PP1/PP2 manager-click panels bled into each other                                     | [archive](MEMORY-ARCHIVE.md#scoreboard-pp1pp2-manager-click-panels-bled-into-each-other-2026-06-19)                               |
-| 2026-06-10 | Player-name identity: duplicate-name pool keys + roster-fix purge guard                          | [archive](MEMORY-ARCHIVE.md#player-name-identity-duplicate-name-pool-keys-roster-fix-purge-guard-2026-06-10)                      |
-| 2026-06-10 | Daily rows off the seasons payload — on-demand fetch + server-authoritative                      | [archive](MEMORY-ARCHIVE.md#daily-rows-off-the-seasons-payload-on-demand-fetch-server-authoritative-2026-06-10)                   |
-| 2026-06-10 | GET /api/seasons slimmed + score_snapshots made server-authoritative                             | [archive](MEMORY-ARCHIVE.md#get-apiseasons-slimmed-score_snapshots-made-server-authoritative-2026-06-10)                          |
-| 2026-06-10 | Scoreboard differed per device / fresh browser empty — localStorage quota, not HTTP cache        | [archive](MEMORY-ARCHIVE.md#scoreboard-differed-per-device-fresh-browser-empty-localstorage-quota-not-http-cache-2026-06-10)      |
-| 2026-06-08 | Per-round Manager Submission Status (collapsible, auto-open current period)                      | [archive](MEMORY-ARCHIVE.md#per-round-manager-submission-status-collapsible-auto-open-current-period-2026-06-08)                  |
-| 2026-06-08 | reconcile-boundary-rosters endpoint — prune array-only orphans from a backed roster              | [archive](MEMORY-ARCHIVE.md#reconcile-boundary-rosters-endpoint-prune-array-only-orphans-from-a-backed-roster-2026-06-08)         |
-| 2026-06-08 | Approval conflict check + roster write read/wrote the array, not authoritative sources           | [archive](MEMORY-ARCHIVE.md#approval-conflict-check-roster-write-readwrote-the-array-not-authoritative-sources-2026-06-08)        |
-| 2026-06-08 | "Your view is out of date" 409 on submission approval → submission approved but roster lost      | [archive](MEMORY-ARCHIVE.md#your-view-is-out-of-date-409-on-submission-approval-submission-approved-but-roster-lost-2026-06-08)   |
-| 2026-06-08 | Submission-approval duplicate check wasn't period-scoped → false "already on another roster"     | [archive](MEMORY-ARCHIVE.md#submission-approval-duplicate-check-wasnt-period-scoped-false-already-on-another-roster-2026-06-08)   |
-| 2026-06-08 | Carry-forward repair leaked across period boundaries → orphan PP2 Week-1 rosters                 | [archive](MEMORY-ARCHIVE.md#carry-forward-repair-leaked-across-period-boundaries-orphan-pp2-week-1-rosters-2026-06-08)            |
-| 2026-06-08 | PP2 submission window closed ~a day early — midnight fallback in getPeriodFirstGame              | [archive](MEMORY-ARCHIVE.md#pp2-submission-window-closed-a-day-early-midnight-fallback-in-getperiodfirstgame-2026-06-08)          |
-| 2026-06-08 | `sd.rosters` wiped by a stale full-season save → Best/Worst Slack section vanished, scores froze | [archive](MEMORY-ARCHIVE.md#sdrosters-wiped-by-a-stale-full-season-save-bestworst-slack-section-vanished-scores-froze-2026-06-08) |
-| 2026-06-07 | Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile         | [archive](MEMORY-ARCHIVE.md#scoreboard-manager-detail-group-players-by-period-heal-arrays-so-breakdowns-reconcile-2026-06-07)     |
-| 2026-06-07 | Ghost player caused recurring 4am score-guard block — Joey Auclair / Iván Herrera                | [archive](MEMORY-ARCHIVE.md#ghost-player-caused-recurring-4am-score-guard-block-joey-auclair-ivn-herrera-2026-06-07)              |
-| 2026-06-07 | Roster-date display hardening + duplicate repair-swap dedup                                      | [archive](MEMORY-ARCHIVE.md#roster-date-display-hardening-duplicate-repair-swap-dedup-2026-06-07)                                 |
-| 2026-06-06 | Approving a not-yet-started period's submission was purged by carry-forward repair               | [archive](MEMORY-ARCHIVE.md#approving-a-not-yet-started-periods-submission-was-purged-by-carry-forward-repair-2026-06-06)         |
-| 2026-06-06 | Atomic roster-submission endpoints — stop lost/clobbered submissions                             | [archive](MEMORY-ARCHIVE.md#atomic-roster-submission-endpoints-stop-lostclobbered-submissions-2026-06-06)                         |
-| 2026-06-06 | PP1 submission window gating + delete capability                                                 | [archive](MEMORY-ARCHIVE.md#pp1-submission-window-gating-delete-capability-2026-06-06)                                            |
-| 2026-06-06 | Phase 3 — retire the hardcoded band-aids                                                         | [archive](MEMORY-ARCHIVE.md#phase-3-retire-the-hardcoded-band-aids-2026-06-06)                                                    |
-| 2026-06-06 | Scoring eligibility fixes — cross-manager leak + carry-forward                                   | [archive](MEMORY-ARCHIVE.md#scoring-eligibility-fixes-cross-manager-leak-carry-forward-2026-06-06)                                |
-| 2026-06-06 | Score-swing guard + daily snapshot trail                                                         | [archive](MEMORY-ARCHIVE.md#score-swing-guard-daily-snapshot-trail-2026-06-06)                                                    |
-| 2026-06-05 | Weekly Team Scoring rework                                                                       | [archive](MEMORY-ARCHIVE.md#weekly-team-scoring-rework-2026-06-05)                                                                |
-| 2026-06-04 | Google Sign-In                                                                                   | [MEMORY](#google-sign-in-added-2026-06-04)                                                                                        |
-| 2026-06-04 | Deployment workflow                                                                              | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
-| 2026-06-04 | Git identity — run at session start                                                              | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
-| 2026-06-04 | Mobile CSS patterns                                                                              | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+| Date       | Entry                                                                                             | Where                                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-06 | Playoff daily Slack post: matchup deltas, Claude-written Hot Takes, short manager names           | [MEMORY](#2026-08-06-playoff-daily-slack-post-matchup-deltas-claude-written-hot-takes-short-manager-names)                        |
+| 2026-08-06 | Deleting a dormant fallback is a risk decision, not a cleanup                                     | [MEMORY](#2026-08-06-deleting-a-dormant-fallback-is-a-risk-decision-not-a-cleanup)                                                |
+| 2026-08-06 | Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted                              | [MEMORY](#2026-08-06-repo-wide-prbranchdead-code-audit-and-why-no-endpoint-was-deleted)                                           |
+| 2026-08-05 | Live tab boxscores scrolled inside their column while the page had empty gutters                  | [MEMORY](#2026-08-05-live-tab-boxscores-scrolled-inside-their-column-while-the-page-had-empty-gutters)                            |
+| 2026-08-05 | The Hypothetical Zone, and two MLB sync bugs it uncovered                                         | [MEMORY](#the-hypothetical-zone-and-two-mlb-sync-bugs-it-uncovered-2026-08-05)                                                    |
+| 2026-08-05 | The two queued "next tasks", and one of them was chasing the wrong thing                          | [MEMORY](#2026-08-05-the-two-queued-next-tasks-and-one-of-them-was-chasing-the-wrong-thing)                                       |
+| 2026-08-05 | The slow scoreboard was `GET /api/seasons`, not the scoring pass                                  | [MEMORY](#2026-08-05-the-slow-scoreboard-was-get-apiseasons-not-the-scoring-pass)                                                 |
+| 2026-08-05 | Redundancy audit: one real boot-time bug, one drift, and a scope correction                       | [MEMORY](#2026-08-05-redundancy-audit-one-real-boot-time-bug-one-drift-and-a-scope-correction)                                    |
+| 2026-08-05 | Open-PR triage: #386 refreshed, #374 retired in favor of a focused round gate                     | [MEMORY](#2026-08-05-open-pr-triage-386-refreshed-374-retired-in-favor-of-a-focused-round-gate)                                   |
+| 2026-08-03 | "End Quarterfinals" 409'd, didn't stick, and carried rosters into SF Week 1                       | [MEMORY](#end-quarterfinals-409d-didnt-stick-and-carried-rosters-into-sf-week-1-2026-08-03)                                       |
+| 2026-08-03 | Round-end Slack post rebuilt: results, margin ordering, matchup-aware roasts, Friday reminder     | [MEMORY](#round-end-slack-post-rebuilt-results-margin-ordering-matchup-aware-roasts-friday-reminder-2026-08-03)                   |
+| 2026-08-03 | Fallback roast bank: doubled, no-repeat within/across periods, article fix                        | [MEMORY](#fallback-roast-bank-doubled-no-repeat-withinacross-periods-article-fix-2026-08-03)                                      |
+| 2026-08-03 | Roster-page elimination roasts: round-by-round sections, league ranks, and a negative-points bug  | [MEMORY](#roster-page-elimination-roasts-round-by-round-sections-league-ranks-and-a-negative-points-bug-2026-08-03)               |
+| 2026-08-03 | Article bug had a SECOND class, and production has no ANTHROPIC*API_KEY *(finding 2 superseded)\_ | [MEMORY](#article-bug-had-a-second-class-and-production-has-no-anthropic_api_key-2026-08-03)                                      |
+| 2026-08-03 | Roast repair buttons generalized to every round                                                   | [MEMORY](#roast-repair-buttons-generalized-to-every-round-2026-08-03)                                                             |
+| 2026-08-03 | Day-by-day tally replaced with a per-round summary                                                | [MEMORY](#day-by-day-tally-replaced-with-a-per-round-summary-2026-08-03)                                                          |
+| 2026-08-03 | Round summary became three tables; roasts are now server-authoritative on save                    | [MEMORY](#round-summary-became-three-tables-roasts-are-now-server-authoritative-on-save-2026-08-03)                               |
+| 2026-08-03 | Round sections became three narrative lines over the tables                                       | [MEMORY](#round-sections-became-three-narrative-lines-over-the-tables-2026-08-03)                                                 |
+| 2026-08-03 | The roast API call could 500 instead of falling back                                              | [MEMORY](#the-roast-api-call-could-500-instead-of-falling-back-2026-08-03)                                                        |
+| 2026-07-31 | The duplicate 7am post was never in the code; it was a second webhook holder                      | [MEMORY](#2026-07-31-the-duplicate-7am-post-was-never-in-the-code-it-was-a-second-webhook-holder)                                 |
+| 2026-07-30 | The drift audit's first alert was a false positive (effective-tomorrow adds)                      | [MEMORY](#2026-07-30-the-drift-audits-first-alert-was-a-false-positive-effective-tomorrow-adds)                                   |
+| 2026-07-30 | The pool-play scoreboard shell came back, because the guard checked a proxy                       | [MEMORY](#2026-07-30-the-pool-play-scoreboard-shell-came-back-because-the-guard-checked-a-proxy)                                  |
+| 2026-07-30 | Eliminated managers were still being tagged on Live box scores                                    | [MEMORY](#2026-07-30-eliminated-managers-were-still-being-tagged-on-live-box-scores)                                              |
+| 2026-07-29 | A mid-week swap erased the outgoing player from My Roster's week                                  | [MEMORY](#a-mid-week-swap-erased-the-outgoing-player-from-my-rosters-week-2026-07-29)                                             |
+| 2026-07-29 | Eliminated managers' stale playoff rosters blocked the swap pool                                  | [MEMORY](#eliminated-managers-stale-playoff-rosters-blocked-the-swap-pool-2026-07-29)                                             |
+| 2026-07-29 | `backfillRosterDatesFromSwaps` was clobbering effective-tomorrow drop dates                       | [MEMORY](#2026-07-29-backfillrosterdatesfromswaps-was-clobbering-effective-tomorrow-drop-dates)                                   |
+| 2026-07-29 | Live tab: "live day" replaces the hard midnight cutoff                                            | [MEMORY](#2026-07-29-live-tab-live-day-replaces-the-hard-midnight-cutoff)                                                         |
+| 2026-07-29 | Live board dropped a swapped-out player's points on his final rostered day                        | [MEMORY](#2026-07-29-live-board-dropped-a-swapped-out-players-points-on-his-final-rostered-day)                                   |
+| 2026-07-29 | Live tab: cache the MLB fetch layer, never the roster layer                                       | [MEMORY](#2026-07-29-live-tab-cache-the-mlb-fetch-layer-never-the-roster-layer)                                                   |
+| 2026-07-29 | Duplicate 7am Slack post showing "Current Period: Season"                                         | [MEMORY](#duplicate-7am-slack-post-showing-current-period-season-2026-07-29)                                                      |
+| 2026-07-29 | Season-opening welcome post + confirming the round cadence                                        | [MEMORY](#season-opening-welcome-post-confirming-the-round-cadence-2026-07-29)                                                    |
+| 2026-07-29 | A mid-week trade erased the outgoing manager's drop-day points                                    | [MEMORY](#2026-07-29-a-mid-week-trade-erased-the-outgoing-managers-drop-day-points)                                               |
+| 2026-07-29 | A wrong certified total sat in Slack for three hours with nothing watching                        | [MEMORY](#2026-07-29-a-wrong-certified-total-sat-in-slack-for-three-hours-with-nothing-watching)                                  |
+| 2026-07-28 | Managers can edit/cancel their OWN swap until it takes effect                                     | [archive](MEMORY-ARCHIVE.md#managers-can-editcancel-their-own-swap-until-it-takes-effect-2026-07-28)                              |
+| 2026-07-28 | A scheduled swap must not apply early in the roster VIEWS                                         | [archive](MEMORY-ARCHIVE.md#a-scheduled-swap-must-not-apply-early-in-the-roster-views-2026-07-28)                                 |
+| 2026-07-28 | My Roster scoring blocks redesigned as a Pool Play → playoffs flow                                | [archive](MEMORY-ARCHIVE.md#2026-07-28-my-roster-scoring-blocks-redesigned-as-a-pool-play-playoffs-flow)                          |
+| 2026-07-25 | Today is always a valid swap effective date — game start time, not the calendar                   | [archive](MEMORY-ARCHIVE.md#today-is-always-a-valid-swap-effective-date-game-start-time-not-the-calendar-2026-07-25)              |
+| 2026-07-22 | No login-screen flash on reload for logged-in users                                               | [archive](MEMORY-ARCHIVE.md#2026-07-22-no-login-screen-flash-on-reload-for-logged-in-users)                                       |
+| 2026-07-22 | Pool cleanup Scan→Apply infinite loop: retired phantoms re-reported forever                       | [archive](MEMORY-ARCHIVE.md#2026-07-22-pool-cleanup-scanapply-infinite-loop-retired-phantoms-re-reported-forever)                 |
+| 2026-07-21 | Scheduled swaps (manager, future-only) + commissioner date editing                                | [archive](MEMORY-ARCHIVE.md#scheduled-swaps-manager-future-only-commissioner-date-editing-2026-07-21)                             |
+| 2026-07-21 | IL check "unverified" root cause: sd.mlb_ids coverage, not the MLB API                            | [archive](MEMORY-ARCHIVE.md#2026-07-21-il-check-unverified-root-cause-sdmlb_ids-coverage-not-the-mlb-api)                         |
+| 2026-07-21 | Commissioner To-Do card (PR #365)                                                                 | [archive](MEMORY-ARCHIVE.md#2026-07-21-commissioner-to-do-card-pr-365)                                                            |
+| 2026-07-20 | Swap automation: auto-apply on submit + playoff limits + MLB IL verification                      | [archive](MEMORY-ARCHIVE.md#swap-automation-auto-apply-on-submit-playoff-limits-mlb-il-verification-2026-07-20)                   |
+| 2026-07-20 | Live tab playoff bracket view + bracket mobile readability                                        | [archive](MEMORY-ARCHIVE.md#live-tab-playoff-bracket-view-bracket-mobile-readability-2026-07-20)                                  |
+| 2026-07-20 | Banner stuck on PP2 W5 after break: calendar week now wins both ways (PR #356)                    | [archive](MEMORY-ARCHIVE.md#2026-07-20-banner-stuck-on-pp2-w5-after-break-calendar-week-now-wins-both-ways-pr-356)                |
+| 2026-07-17 | All-Star break banner + bracket-first scoreboard (PR #353)                                        | [archive](MEMORY-ARCHIVE.md#2026-07-17-all-star-break-banner-bracket-first-scoreboard-pr-353)                                     |
+| 2026-07-17 | Break-time submission warning + explicit scoreboard expand (PR after #353)                        | [archive](MEMORY-ARCHIVE.md#2026-07-17-break-time-submission-warning-explicit-scoreboard-expand-pr-after-353)                     |
+| 2026-07-15 | Daily Slack post: playoff cadence + bracket matchups                                              | [archive](MEMORY-ARCHIVE.md#daily-slack-post-playoff-cadence-bracket-matchups-2026-07-15)                                         |
+| 2026-07-12 | Mobile scoreboard: Total column restored next to Playoff %                                        | [archive](MEMORY-ARCHIVE.md#2026-07-12-mobile-scoreboard-total-column-restored-next-to-playoff)                                   |
+| 2026-07-12 | Mobile scoreboard polish: aligned score column + odds-table headers                               | [archive](MEMORY-ARCHIVE.md#2026-07-12-mobile-scoreboard-polish-aligned-score-column-odds-table-headers)                          |
+| 2026-07-10 | Swap-chain grouping applied to every roster listing                                               | [archive](MEMORY-ARCHIVE.md#2026-07-10-swap-chain-grouping-applied-to-every-roster-listing)                                       |
+| 2026-07-06 | Playoff odds: Monte-Carlo prediction section, PP2 Weeks 4–5                                       | [archive](MEMORY-ARCHIVE.md#playoff-odds-monte-carlo-prediction-section-pp2-weeks-45-2026-07-06)                                  |
+| 2026-07-06 | Timezone display: server stamps are zone-less UTC; render browser-local with zone abbrev          | [archive](MEMORY-ARCHIVE.md#timezone-display-server-stamps-are-zone-less-utc-render-browser-local-with-zone-abbrev-2026-07-06)    |
+| 2026-07-05 | Swap approve/undo skipped the date-window recompute — phantom +57 + guard-block loop              | [archive](MEMORY-ARCHIVE.md#swap-approveundo-skipped-the-date-window-recompute-phantom-57-guard-block-loop-2026-07-05)            |
+| 2026-07-05 | Swap Log filters: chips → dropdowns + mobile layout fix                                           | [archive](MEMORY-ARCHIVE.md#swap-log-filters-chips-dropdowns-mobile-layout-fix-2026-07-05)                                        |
+| 2026-07-03 | Mobile full-tab redesign                                                                          | [MEMORY](#mobile-full-tab-redesign-established-2026-07-03-pr-335)                                                                 |
+| 2026-07-02 | Season Stats tab: accolades + merged Trends                                                       | [archive](MEMORY-ARCHIVE.md#season-stats-tab-accolades-merged-trends-2026-07-02)                                                  |
+| 2026-06-19 | Scoreboard PP1/PP2 manager-click panels bled into each other                                      | [archive](MEMORY-ARCHIVE.md#scoreboard-pp1pp2-manager-click-panels-bled-into-each-other-2026-06-19)                               |
+| 2026-06-10 | Player-name identity: duplicate-name pool keys + roster-fix purge guard                           | [archive](MEMORY-ARCHIVE.md#player-name-identity-duplicate-name-pool-keys-roster-fix-purge-guard-2026-06-10)                      |
+| 2026-06-10 | Daily rows off the seasons payload — on-demand fetch + server-authoritative                       | [archive](MEMORY-ARCHIVE.md#daily-rows-off-the-seasons-payload-on-demand-fetch-server-authoritative-2026-06-10)                   |
+| 2026-06-10 | GET /api/seasons slimmed + score_snapshots made server-authoritative                              | [archive](MEMORY-ARCHIVE.md#get-apiseasons-slimmed-score_snapshots-made-server-authoritative-2026-06-10)                          |
+| 2026-06-10 | Scoreboard differed per device / fresh browser empty — localStorage quota, not HTTP cache         | [archive](MEMORY-ARCHIVE.md#scoreboard-differed-per-device-fresh-browser-empty-localstorage-quota-not-http-cache-2026-06-10)      |
+| 2026-06-08 | Per-round Manager Submission Status (collapsible, auto-open current period)                       | [archive](MEMORY-ARCHIVE.md#per-round-manager-submission-status-collapsible-auto-open-current-period-2026-06-08)                  |
+| 2026-06-08 | reconcile-boundary-rosters endpoint — prune array-only orphans from a backed roster               | [archive](MEMORY-ARCHIVE.md#reconcile-boundary-rosters-endpoint-prune-array-only-orphans-from-a-backed-roster-2026-06-08)         |
+| 2026-06-08 | Approval conflict check + roster write read/wrote the array, not authoritative sources            | [archive](MEMORY-ARCHIVE.md#approval-conflict-check-roster-write-readwrote-the-array-not-authoritative-sources-2026-06-08)        |
+| 2026-06-08 | "Your view is out of date" 409 on submission approval → submission approved but roster lost       | [archive](MEMORY-ARCHIVE.md#your-view-is-out-of-date-409-on-submission-approval-submission-approved-but-roster-lost-2026-06-08)   |
+| 2026-06-08 | Submission-approval duplicate check wasn't period-scoped → false "already on another roster"      | [archive](MEMORY-ARCHIVE.md#submission-approval-duplicate-check-wasnt-period-scoped-false-already-on-another-roster-2026-06-08)   |
+| 2026-06-08 | Carry-forward repair leaked across period boundaries → orphan PP2 Week-1 rosters                  | [archive](MEMORY-ARCHIVE.md#carry-forward-repair-leaked-across-period-boundaries-orphan-pp2-week-1-rosters-2026-06-08)            |
+| 2026-06-08 | PP2 submission window closed ~a day early — midnight fallback in getPeriodFirstGame               | [archive](MEMORY-ARCHIVE.md#pp2-submission-window-closed-a-day-early-midnight-fallback-in-getperiodfirstgame-2026-06-08)          |
+| 2026-06-08 | `sd.rosters` wiped by a stale full-season save → Best/Worst Slack section vanished, scores froze  | [archive](MEMORY-ARCHIVE.md#sdrosters-wiped-by-a-stale-full-season-save-bestworst-slack-section-vanished-scores-froze-2026-06-08) |
+| 2026-06-07 | Scoreboard manager-detail: group players by period + heal arrays so breakdowns reconcile          | [archive](MEMORY-ARCHIVE.md#scoreboard-manager-detail-group-players-by-period-heal-arrays-so-breakdowns-reconcile-2026-06-07)     |
+| 2026-06-07 | Ghost player caused recurring 4am score-guard block — Joey Auclair / Iván Herrera                 | [archive](MEMORY-ARCHIVE.md#ghost-player-caused-recurring-4am-score-guard-block-joey-auclair-ivn-herrera-2026-06-07)              |
+| 2026-06-07 | Roster-date display hardening + duplicate repair-swap dedup                                       | [archive](MEMORY-ARCHIVE.md#roster-date-display-hardening-duplicate-repair-swap-dedup-2026-06-07)                                 |
+| 2026-06-06 | Approving a not-yet-started period's submission was purged by carry-forward repair                | [archive](MEMORY-ARCHIVE.md#approving-a-not-yet-started-periods-submission-was-purged-by-carry-forward-repair-2026-06-06)         |
+| 2026-06-06 | Atomic roster-submission endpoints — stop lost/clobbered submissions                              | [archive](MEMORY-ARCHIVE.md#atomic-roster-submission-endpoints-stop-lostclobbered-submissions-2026-06-06)                         |
+| 2026-06-06 | PP1 submission window gating + delete capability                                                  | [archive](MEMORY-ARCHIVE.md#pp1-submission-window-gating-delete-capability-2026-06-06)                                            |
+| 2026-06-06 | Phase 3 — retire the hardcoded band-aids                                                          | [archive](MEMORY-ARCHIVE.md#phase-3-retire-the-hardcoded-band-aids-2026-06-06)                                                    |
+| 2026-06-06 | Scoring eligibility fixes — cross-manager leak + carry-forward                                    | [archive](MEMORY-ARCHIVE.md#scoring-eligibility-fixes-cross-manager-leak-carry-forward-2026-06-06)                                |
+| 2026-06-06 | Score-swing guard + daily snapshot trail                                                          | [archive](MEMORY-ARCHIVE.md#score-swing-guard-daily-snapshot-trail-2026-06-06)                                                    |
+| 2026-06-05 | Weekly Team Scoring rework                                                                        | [archive](MEMORY-ARCHIVE.md#weekly-team-scoring-rework-2026-06-05)                                                                |
+| 2026-06-04 | Google Sign-In                                                                                    | [MEMORY](#google-sign-in-added-2026-06-04)                                                                                        |
+| 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
+| 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
+| 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-06 — Playoff daily Slack post: matchup deltas, Claude-written Hot Takes, short manager names
+
+Commissioner's complaint, mid-semifinals: the daily post's "Barely Competent / Monkeys Trying to
+Fuck a Loose Couch" top-3/bottom-3 manager columns stop meaning anything once the bracket is down
+to four teams — the two columns are just every surviving manager, sorted, with one matchup's
+winners stacked against another's losers. Quarterfinals (eight teams) still reads fine.
+
+**What changed, all in the daily scoreboard post.**
+
+1. **Manager columns are dropped from the semifinals on** (`showManagerColumns`), kept for
+   PP1/PP2/QF. The best/worst PLAYER columns are untouched in every round — they rank individual
+   games, and there are always plenty of those.
+
+2. **Each matchup line carries yesterday's movement** right after the round total:
+   `▸ (8) Daniel — 83 (+3) _(B: 81 | P: 2)_`. `buildPlayoffMatchupsSlackText` gained an optional
+   `dailyTotals`; the Monday wrap-up (`final: true`) never gets it, because a finished round has
+   no "yesterday" worth reporting.
+
+3. **New "🎙️ Hot Takes" section** — lead changes, blowouts, coin-flips, the day's biggest haul
+   and deadest day, plus one career-pattern line. **Claude writes it; a deterministic bank is the
+   floor.** See the correction below — I built the bank first on a wrong premise, and the API path
+   went on top of it afterwards rather than replacing it.
+
+4. **Short manager names on every Slack post** — first name, last initial only when two managers
+   share one (`Ryan S.` / `Ryan C.`).
+
+**The three decisions worth remembering.**
+
+**Deltas are computed once, above the standings, not twice.** `computeDailyHighLow` already
+returns an unsliced `managerTotals`; the post now calls it BEFORE building the matchup block and
+feeds the same map to the matchup lines and to the commentary. A delta on a line and a delta a
+roast talks about are the same number by construction, not by coincidence.
+
+**The lead-change math needs a guard the numbers do not advertise.** "Did the lead change
+overnight" is computed by subtracting yesterday's points back out of the round totals. That is
+only valid while yesterday belongs to the round being reported — on the Monday of a new round,
+yesterday's points sit in the PREVIOUS round, and subtracting them would invent a lead change out
+of nothing. `yesterdayInRound` (against the round's own first/last schedule dates) gates the whole
+feature; outside the window there are no deltas and no commentary, and the post degrades to what
+it was before.
+
+**Short names are applied at the SEND boundary, not in each builder.** `shortenManagerNamesInSlack`
+runs inside `postSlack` / `postScoreboardSlack` / `postScoreboardChannelSlack`, so the prose posts
+(swap notifications, elimination roasts, integrity alerts) inherit it without every template
+learning about it. Two things this got right only on the second pass:
+
+- The `/wmmc` slash command replies to Slack **directly** instead of going through
+  `postScoreboardSlack`, so it needed the pass applied by hand or it would have been the one post
+  in the channel still using full names.
+- `Ryan S..` — a short name ending in an initial, followed by a sentence period. Caught in the
+  live E2E render, not by any test. Fixed in two places, because there are two paths a name can
+  reach a full stop by: `endSentence()` in the commentary templates (which receive short names
+  directly), and a `\.?` swallow in the boundary regex (for prose that still holds full names).
+  A 40-seed × 3-round × 4-shape sweep in `tests/playoffCommentary.test.js` now asserts no line
+  ever contains `..`.
+
+**Where the history came from, and the bug it exposed.** The "does he always lose in the
+quarterfinals" material needs the finished-season record, which lived as a `const` inside app.js
+where the server could not see it. Moved to **`js/history.js`** (canonical, unit-tested, bridged
+onto `window` by js/index.js, deleted from app.js per the modularization rule) and mirrored into
+server.js. Adding a season is now a two-file edit — noted in CLAUDE.md.
+
+Deriving a manager's exit round per season reuses `js/playoffStatus.js`'s own ladder
+(1st-2nd = Finals, 3rd-4th = lost the semi, 5th-8th = lost the quarterfinal, 9th+ = missed it),
+so the commentary and the Hall of Fame agree about what a placing means.
+
+Doing this surfaced a **pre-existing bug I did not fix**: the historical tables spell the
+commissioner `Dan Kortan` while `db.managers` says `Daniel Kortan`, so the Hall of Fame's all-time
+records treat them as two people and split that career in half. `js/history.js` has a
+`HISTORICAL_NAME_ALIASES` map and applies it; the Hall of Fame does not read it yet. Flagged in
+CLAUDE.md as a known bug with the fix already sitting in the module.
+
+**CORRECTION, same day: production DOES have an `ANTHROPIC_API_KEY`.** I built the whole section
+deterministic-only, citing the 2026-08-03 entry's conclusion that the key was unset. The
+commissioner corrected me: it is set. That 2026-08-03 finding was an **inference from an
+observation** — live QF roasts came back verbatim from the static bank, and I concluded the key
+must be missing. The roasts have other reasons to land on the bank (a failed call, a timeout, a
+bad status all fall back silently, and the bank is chosen for 17 of 110 template slots anyway), so
+"output came from the bank" never proved "no key". **The lesson is the shape of the mistake, not
+the fact: I turned an observation about OUTPUT into a conclusion about CONFIGURATION, and then a
+later task inherited it as settled.** Anything about the deployed environment should be checked
+against the Render dashboard, or asked, not inferred from behaviour that has more than one cause.
+
+What changed as a result: `generatePlayoffCommentary` (server.js) writes the takes with Claude and
+falls back to the bank on _every_ failure — no key, network throw, bad status, unreadable body,
+empty reply, or a reply that quotes a score the evidence never contained. Three things made that
+safe to do:
+
+- **The model is handed facts, not data.** `commentaryFactSheet` (pure, in js/playoffCommentary.js)
+  renders exactly what it may talk about — already-shortened names, both totals, both deltas, who
+  led the previous morning, each survivor's career record. No season, no rosters, no path to them.
+- **A reply that invents a score is rejected.** `commentaryMentionsUnknownScore` fails any decimal
+  in the reply that is not in the fact sheet. Decimals only: whole numbers are ordinary prose
+  ("8 seasons", "2 of 3"). This is the one failure that would actually mislead the league, because
+  the section sits three inches under a real scoreboard.
+- **The bank still runs first.** `buildScoreboardBlocks` stays synchronous (the `/wmmc` slash
+  command owes Slack a reply in 3 seconds) and always renders the bank's version, tagged
+  `block_id: wmmc_hot_takes`. `postScoreboardSlack` — the only async caller — swaps that block's
+  text for the written version. A slow or failed call costs the post nothing.
+
+Model is **Sonnet 5**, not the Haiku the elimination roasts use: this reply is several takes at
+once, each anchored to a number printed a few lines above it, so being wrong is more expensive
+than being cheap is valuable.
+
+**One house voice, defined once, applied to every Claude-written roast.** The commissioner named
+the references he wants the roasts to learn from: Stuart Scott, Norm Macdonald on Weekend Update,
+Chris Rock, Shane Gillis. `ROAST_VOICE` (server.js, one const) is interpolated into **all five**
+prompts — the Hot Takes, the elimination roast, the champion roast, the 3rd-place roast, and the
+season-opening draft roast. One constant on purpose: a tone note that lives in one of five prompts
+is how the other four drift, and the league should sound like the same guy all season.
+
+The block asks for each comedian's **technique**, not their catchphrases — anchor swagger and
+simile (Scott), a careful setup landing on a blunt understated punchline and committing to a dumb
+bit (Macdonald), escalating repetition turning into an uncomfortable truth (Rock), loose
+conversational riffing into an oddly specific scenario (Gillis) — plus an explicit "mix them, do
+not do a clean impression of any one". "Be funny like X" without that gets a catchphrase and
+nothing else. It also carries the line about what this league's meanness is: aimed at rosters,
+picks and effort, never at family, looks, health or race, and never signed with a comedian's name.
+
+**The Hot Takes fallback bank was rewritten in the same four voices** (commissioner asked for it
+in the same breath), so a failed API call changes _who wrote the post_, not _how the league
+sounds_. One line per voice per bank, which is why the banks are four long rather than three. The
+banks now carry a comment listing the invariants the tests hold them to — every flip line says
+"Lead change"/"flipped"/"New leader", every blowout and nailbiter interpolates `daysLeftText` and
+the margin, and no line may ever contain `..` — because those are exactly the things a future
+rewrite would break silently.
+
+Still NOT rewritten: the **elimination-roast bank** (110 templates) and the daily worst-player
+banks. Different feature, much bigger diff, and the elimination bank is full of the
+`${roundLabel}` article traps documented on 2026-08-03 — a bulk rewrite there wants its own PR and
+its own read-through, not a ride-along.
+
+**Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
+seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
+the quarterfinals. And in the Finals the two games mean opposite things — "this is the closest he
+has been to a Final" is pointed for a championship-game player and simply false for somebody in
+the 3rd-place game, who already lost his semi. Each history rule is therefore evaluated with its
+candidate's own matchup label in context.
+
+**New: `tests/serverMirrors.test.js`.** This change added two more `js/` ↔ `server.js` duplicate
+pairs to a codebase whose recurring failure mode is exactly that drift. The test reads server.js
+as text and fails if a mirrored block no longer matches its `js/` original. It runs no server code
+(so it does not violate "no tests for server.js"), and it already covers the pre-existing
+`normalizeName` pair. Extending it to `SCORING` / `detectScoreSwings` / the odds engine is the
+obvious next win.
+
+**Verified E2E, not just unit-tested.** Both commentary paths. A synthetic season generator (real manager names, invented
+players) plus a local webhook sink: booted the real `server.js` against a QF / SF / Finals / PP2
+fixture in turn and POSTed `/api/slack/scoreboard`, then read the captured blocks. Confirmed the
+manager columns present in QF and PP2 and absent in SF and Finals, an engineered overnight lead
+change reported as one, a 233-pt blowout reported as one, deltas on every matchup line, pool play
+byte-for-byte unchanged in structure, and the `/wmmc` reply carrying short names. The `Ryan S..`
+bug only ever showed up here — a reminder that for Slack work the render is the test that counts.
+
+For the API path: ran the same fixture with a **present but invalid** key and confirmed a real 401
+from `api.anthropic.com` (so outbound connectivity works from a container, which is also evidence
+Render can reach it) left the post byte-identical to the no-key one. Then drove
+`generatePlayoffCommentary` itself against canned replies with a stubbed `fetch` — clean reply used
+as-is; bullets, `**bold**` and `Ryan S..` cleaned up; an invented `99.7` rejected to the bank; and
+empty / 500 / network-throw / unreadable-body all falling back. Note the _success_ path has never
+run against the real API from here — there is no key in this container — so the first live post is
+the real test of prompt quality, though not of safety.
+
+**Gotcha for the next fixture builder:** `computeEffectiveBattingScore` recomputes a weekly score
+from the daily rows whenever daily rows exist for that week, so a fixture with ONE day of daily
+data reports round totals equal to that single day, no matter what `weekly_score` says. The first
+fixture looked broken for exactly this reason. Give the round at least two dated days (a lump for
+"everything before yesterday" plus yesterday) or the lead-change math has nothing to work with.
 
 ## 2026-08-06 — Deleting a dormant fallback is a risk decision, not a cleanup
 
@@ -961,6 +1131,15 @@ QF exit, PP exit, Finals champion, and Finals runner-up all render correct secti
 the banner at 1280px and 390px.
 
 ## Article bug had a SECOND class, and production has no ANTHROPIC_API_KEY (2026-08-03)
+
+> **SUPERSEDED 2026-08-06 — finding 2 below is WRONG.** Production **does** have an
+> `ANTHROPIC_API_KEY` set; the commissioner confirmed it. The reasoning below ("all four live
+> roasts came back verbatim from the static bank, therefore the key is unset") does not hold: a
+> failed call, a timeout and a bad status all fall back to the bank silently, and the bank is the
+> intended path for 17 of 110 template slots anyway. Bank output never proved a missing key. If
+> the live roasts really are all coming from the bank, the cause is something else — worth
+> checking the Render logs for Anthropic errors rather than the dashboard for a missing variable.
+> Finding 1 (the article bug) is unaffected. See the 2026-08-06 Hot Takes entry.
 
 Ran the regenerate-only probe against live 2026 QF roasts. Two findings.
 

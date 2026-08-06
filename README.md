@@ -15,7 +15,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
 - **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap log with undo (plus approvals for guard-flagged swaps), audit log
-- **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post
+- **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post. Manager names are shortened to first names (with a last initial when two managers share one). During the playoffs the post leads with the bracket matchups, each manager's round total carrying yesterday's movement as a delta, and closes with **Hot Takes** — lead changes, collapses, the day's biggest haul, and the career pattern a survivor is carrying, drawn from the finished-season record in `js/history.js`. Claude writes the takes from a fact sheet of those numbers when `ANTHROPIC_API_KEY` is set (a reply quoting a score the facts don't contain is rejected); a deterministic template bank is the floor when it isn't, or when the call fails. From the semifinals on, the best/worst _manager_ columns are dropped (four teams is not a leaderboard); the best/worst _player_ columns stay all season
 
 ## Tech Stack
 
@@ -42,18 +42,18 @@ npm install
 
 All configuration is via environment variables (no `.env` loader is bundled — set them in your shell or in `render.yaml` for deployments).
 
-| Variable                       | Default        | Description                                                                                  |
-| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------- |
-| `PORT`                         | `3000`         | HTTP port                                                                                    |
-| `LOGIN_PASSWORD`               | `Welcome2Hell` | Global fallback password used when a manager has no per-account password set                 |
-| `DB_PATH`                      | `./db.json`    | Path to the runtime JSON database. On Render, point this at a persistent disk mount.         |
-| `UPSTASH_REDIS_REST_URL`       | _(unset)_      | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.     |
-| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_      | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                             |
-| `SLACK_WEBHOOK_URL`            | _(unset)_      | General notifications channel (swaps, sync errors).                                          |
-| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_      | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`. |
-| `SLACK_SIGNING_SECRET`         | _(unset)_      | Required if you wire up the `/api/slack/command` slash command.                              |
-| `ANTHROPIC_API_KEY`            | _(unset)_      | Optional. Enables AI-generated elimination roasts; unset falls back to a template bank.      |
-| `GOOGLE_CLIENT_ID`             | _(unset)_      | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).               |
+| Variable                       | Default        | Description                                                                                                                                  |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                         | `3000`         | HTTP port                                                                                                                                    |
+| `LOGIN_PASSWORD`               | `Welcome2Hell` | Global fallback password used when a manager has no per-account password set                                                                 |
+| `DB_PATH`                      | `./db.json`    | Path to the runtime JSON database. On Render, point this at a persistent disk mount.                                                         |
+| `UPSTASH_REDIS_REST_URL`       | _(unset)_      | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.                                                     |
+| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_      | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                                                                             |
+| `SLACK_WEBHOOK_URL`            | _(unset)_      | General notifications channel (swaps, sync errors).                                                                                          |
+| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_      | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`.                                                 |
+| `SLACK_SIGNING_SECRET`         | _(unset)_      | Required if you wire up the `/api/slack/command` slash command.                                                                              |
+| `ANTHROPIC_API_KEY`            | _(unset)_      | Optional. Enables AI-written elimination roasts and the daily playoff "Hot Takes"; unset (or any API failure) falls back to a template bank. |
+| `GOOGLE_CLIENT_ID`             | _(unset)_      | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).                                                               |
 
 ### Running
 
@@ -251,9 +251,12 @@ WMMC/
 │                          #   hypothetical.js — What If sandbox engine (pure, read-only)
 │                          #   seeding.js — pool-play seeding rule (real bracket + What If)
 │                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
+│                          #   history.js — finished-season record + per-manager career facts
+│                          #   playoffCommentary.js — daily playoff post "Hot Takes" (server-only caller)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
-└── tests/                 # Tests for pure js/ modules
+└── tests/                 # Tests for pure js/ modules, plus serverMirrors.test.js, which
+                           # fails if server.js drifts from a js/ module it duplicates
 ```
 
 > **Note on ongoing modularization:** The frontend has historically been a single `app.js` file. We're incrementally extracting pure logic (scoring, CSV parsing, utilities) into `js/` modules, with matching tests in `tests/`. Until the migration is complete, both layers co-exist: `index.html` still loads `app.js` directly, and the extracted modules are exercised through `tests/`. Do not duplicate logic between layers — once a function is in `js/`, delete its sibling in `app.js` and call into the module via `<script type="module">`.
