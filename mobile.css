@@ -1421,21 +1421,79 @@
   /* =============================================================
      ROSTER TAB
      ============================================================= */
-  .roster-score-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.6rem;
+  /* Season score rail: on a phone it is the full-width block above the tabs, so
+     bump the small type up to phone-readable sizes. The rows stay compact — the
+     rail exists to give a quick per-round score read, not a full card each. */
+  .sf-pool {
+    padding: 0.85rem 1rem 0.9rem;
   }
 
-  .roster-score-label {
+  .sf-eyebrow,
+  .sf-sub-label {
+    font-size: 0.75rem;
+  }
+
+  .sf-hero-value {
+    font-size: 2.2rem;
+  }
+
+  .sf-pool-compact .sf-hero-value {
+    font-size: 1.7rem;
+  }
+
+  .sf-hero-split,
+  .sf-round-split {
+    font-size: 0.82rem;
+  }
+
+  .sf-sub-split {
+    font-size: 0.78rem;
+    white-space: nowrap;
+  }
+
+  .sf-sub-split .sf-sep {
+    margin: 0 0.28em;
+  }
+
+  .sf-sub {
+    padding: 0.4rem 0.6rem;
+  }
+
+  .sf-sub-value {
+    font-size: 1.4rem;
+  }
+
+  .sf-round {
+    padding: 0.6rem 0.85rem 0.65rem;
+  }
+
+  .sf-round-value {
+    font-size: 1.6rem;
+  }
+
+  .sf-round-vs {
+    font-size: 0.82rem;
+    white-space: normal;
+  }
+
+  .sf-rounds-label {
+    font-size: 0.72rem;
+  }
+
+  .sf-season-over {
+    font-size: 0.75rem;
+  }
+
+  .sf-flag {
+    font-size: 0.7rem;
+  }
+
+  .sf-chip {
     font-size: 0.8rem;
   }
 
-  .roster-score-value {
-    font-size: 1.55rem;
-  }
-
-  .roster-score-detail {
-    font-size: 0.82rem;
+  .sf-chip-note {
+    font-size: 0.74rem;
   }
 
   .roster-tabs {

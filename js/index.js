@@ -10,10 +10,13 @@
 import {
   SCORING,
   SEASON_SCHEDULE,
+  ROUND_LABELS,
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
   enrichTeamWeekly,
+  roundShortLabel,
+  weekLabel,
 } from './scoring.js';
 import {
   esc,
@@ -30,15 +33,42 @@ import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
 import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
+import { checkSwapLimit } from './swaps.js';
+import {
+  periodStartForRound,
+  rosterStatusAsOf,
+  rosterStatusForManager,
+  periodWeekKeys,
+  managerWeekWindow,
+} from './eligibility.js';
+import {
+  buildSnapshot,
+  realRosterForRound,
+  rosterOverrides,
+  roundsPlayed,
+  scoreScenario,
+  scoringDiff,
+  scoringKeys,
+  lastKnownRoster,
+  scenarioStatCoverage,
+  playerSuggestions,
+  playerTypes,
+  explainPlayer,
+} from './hypothetical.js';
+import { seedFromPeriodTotals } from './seeding.js';
+import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
 Object.assign(window, {
   SCORING,
   SEASON_SCHEDULE,
+  ROUND_LABELS,
   convertIP,
   calculateBattingScore,
   calculatePitchingScore,
   enrichTeamWeekly,
+  roundShortLabel,
+  weekLabel,
   esc,
   jsStr,
   parseNum,
@@ -54,4 +84,26 @@ Object.assign(window, {
   oddsWindowForDate,
   formatOddsPct,
   orderWithSwapChains,
+  checkSwapLimit,
+  periodStartForRound,
+  rosterStatusAsOf,
+  rosterStatusForManager,
+  periodWeekKeys,
+  managerWeekWindow,
+  buildSnapshot,
+  realRosterForRound,
+  rosterOverrides,
+  roundsPlayed,
+  scoreScenario,
+  scoringDiff,
+  scoringKeys,
+  lastKnownRoster,
+  scenarioStatCoverage,
+  playerSuggestions,
+  playerTypes,
+  explainPlayer,
+  seedFromPeriodTotals,
+  computePlayoffStatuses,
+  playoffStatusLabel,
+  statusKeyForPosition,
 });

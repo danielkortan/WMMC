@@ -7,14 +7,24 @@ run — it does not re-scan on every boot. Once the season they target is fully 
 the data is confirmed correct, the repair function, its call site, and the hardcoded data can
 be **deleted** (the flag in `db.json` can stay; it's harmless).
 
-| Repair function                  | Gate flag                          | What it does                                                                                                                                                                                                                                                                          | Hardcoded for                                                                      |
-| -------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `repairMissingSwapRecords`       | `swap_records_repair_done`         | Restores specific approved swaps confirmed via Slack but missing from the log, and removes one known erroneous duplicate.                                                                                                                                                             | 2026 season (Daniel Kortan, Austin Johnson, Chris Bentivegna swaps)                |
-| `repairMissingRosterChains`      | `roster_chains_repair_done`        | Restores two initial-submission roster slots and their full swap chains.                                                                                                                                                                                                              | 2026 season (Austin Johnson: Skubal→Alcantara→Baz; Anton Capria: Carpenter→Devers) |
-| `purgeCarriedForwardDropRecords` | `carried_forward_drop_purge_done`  | Purges stat records written for players carried forward into a week after being dropped earlier.                                                                                                                                                                                      | Not season-specific (logic fix)                                                    |
-| `applyMLBApiTakeover`            | `mlb_api_takeover_v1`              | One-time migration from the Google Sheets import model to the MLB Stats API as the source of truth (strips `source: 'gsheets'` rows, disables the gsheets auto-sync).                                                                                                                 | Migration                                                                          |
-| `purgeBoundaryAutoAdvance`       | `boundary_auto_advance_purge_done` | Undoes a period-boundary auto-advance (carry-forward rosters + zero-stat weekly rows + advanced/auto_advanced markers) for the active season. Skips any week with real points.                                                                                                        | 2026 season (PP2 Week 1 carried forward before boundaries were excluded)           |
-| `purgeGhostHerreraFromJoey`      | `ghost_herrera_purge_done`         | Removes Iván Herrera's orphan stat records + date/roster entries from Joey Auclair (all weeks). He was never in Joey's submission/rosters/swaps but scored ~207 pts in raw-stat paths, causing the recurring score-guard block. `repairGhostInitialRosterPlayers` only cleans Week 1. | 2026 season (Joey Auclair / Iván Herrera)                                          |
+| Repair function                  | Gate flag                         | What it does                                                                                                                                                          | Hardcoded for                   |
+| -------------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `purgeCarriedForwardDropRecords` | `carried_forward_drop_purge_done` | Purges stat records written for players carried forward into a week after being dropped earlier.                                                                      | Not season-specific (logic fix) |
+| `applyMLBApiTakeover`            | `mlb_api_takeover_v1`             | One-time migration from the Google Sheets import model to the MLB Stats API as the source of truth (strips `source: 'gsheets'` rows, disables the gsheets auto-sync). | Migration                       |
+
+## Retired (function deleted; the `db.json` flag is left in place)
+
+Kept here so a recurrence starts from "this was already fixed once" rather than a fresh
+investigation. Each was a gated one-shot whose effects are already persisted in `db.json`,
+so deleting it was a no-op at runtime.
+
+| Repair function                 | Gate flag                          | Retired in                                                                            |
+| ------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `repairMissingSwapRecords`      | `swap_records_repair_done`         | #252 (Phase 3b) — replaced by `POST .../initial-submission`                           |
+| `repairMissingRosterChains`     | `roster_chains_repair_done`        | #252 (Phase 3b) — replaced by `POST .../initial-submission`                           |
+| `repairBentivegnaPitcherRoster` | —                                  | #252 (Phase 3b)                                                                       |
+| `purgeBoundaryAutoAdvance`      | `boundary_auto_advance_purge_done` | #423 — the damage it repaired is now structurally prevented by `isPeriodBoundaryWeek` |
+| `purgeGhostHerreraFromJoey`     | `ghost_herrera_purge_done`         | #423 — hardcoded to one manager and one player; settled total verified before removal |
 
 ## Not gated (intentionally every-boot)
 
@@ -24,7 +34,12 @@ be **deleted** (the flag in `db.json` can stay; it's harmless).
 
 ## Removal checklist (per repair, once its season is historical)
 
+The operative rule, learned the hard way in #423: **delete hardcoded, incident-specific
+one-shots; keep generic repairs and structural migrations.** Check the "Not gated" list above
+before proposing to retire anything — `repairCarryForwardRosters` in particular looks like a
+large one-shot and is not one.
+
 1. Delete the function from `server.js` (and its mirror in `app.js`, if any).
 2. Delete the startup call site (and any client-side call).
 3. Leave the `*_repair_done` flag in `db.json` as-is.
-4. Update this file.
+4. Move its row to the **Retired** table above — don't just delete the row.

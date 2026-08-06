@@ -133,6 +133,29 @@ function computeScheduleDates(asgDateStr) {
 
 // fmtDateISO lives in js/utils.js (loaded via window globals by js/index.js).
 
+// Shift an ISO date string by N days: shiftDateISO('2026-07-12', 1) → '2026-07-13'.
+function shiftDateISO(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return fmtDateISO(d);
+}
+
+// The skipped days between two rounds' schedule windows (e.g. the All-Star
+// break week between PP2 Week 5 and QF Week 1). Returns {start, end, label}
+// when at least one full day separates prevWeek.end from nextWeek.start,
+// else null. The schedule stores no explicit break entry — the break IS the
+// gap (computeScheduleDates skips the ASG week), so displays derive it.
+function interRoundBreak(prevWeek, nextWeek, prevRound, nextRound) {
+  if (!prevWeek || !nextWeek || !prevWeek.end || !nextWeek.start) return null;
+  const start = shiftDateISO(prevWeek.end, 1);
+  if (nextWeek.start <= start) return null;
+  return {
+    start,
+    end: shiftDateISO(nextWeek.start, -1),
+    label: prevRound === 'PP2' && nextRound === 'QF' ? 'All-Star Break' : 'League Break',
+  };
+}
+
 // Short display:  "May 5 – 11" or "Jun 30 – Jul 6"
 function fmtShortDate(dateStr) {
   const d = new Date(dateStr + 'T12:00:00');
@@ -277,19 +300,12 @@ function isPeriodWindowConfirmedOpen(sd, period) {
 function computePoolPlaySeeding(seasonData, bracketSize = 8) {
   const managers = getManagers().filter((m) => m.active !== false && m.pool);
   if (managers.length === 0) return null;
-  const poolGroups = {};
-  managers.forEach((m) => {
-    (poolGroups[m.pool] = poolGroups[m.pool] || []).push(m.name);
-  });
 
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
-  const r2 = (x) => Math.round(x * 100) / 100;
 
-  const sc = {};
-  managers.forEach((m) => {
-    sc[m.name] = { manager: m.name, pool: m.pool, pp1Bat: 0, pp1Pit: 0, pp2Bat: 0, pp2Pit: 0 };
-  });
+  const entries = managers.map((m) => ({ manager: m.name, pool: m.pool, pp1Bat: 0, pp1Pit: 0, pp2Bat: 0, pp2Pit: 0 }));
+  const byName = new Map(entries.map((e) => [e.manager, e]));
 
   // Sum per-period batting/pitching through managerWeekSubtotal (drop-aware eligibility,
   // identical to the scoreboard tables) so seeding scores match what managers see.
@@ -298,96 +314,20 @@ function computePoolPlaySeeding(seasonData, bracketSize = 8) {
     managers.forEach((m) => {
       const bat = managerWeekSubtotal(seasonData, m.name, schedWeek, idx, batting, 'batter', 'batters');
       const pit = managerWeekSubtotal(seasonData, m.name, schedWeek, idx, pitching, 'pitcher', 'pitchers');
+      const e = byName.get(m.name);
       if (schedWeek.round === 'PP1') {
-        sc[m.name].pp1Bat += bat;
-        sc[m.name].pp1Pit += pit;
+        e.pp1Bat += bat;
+        e.pp1Pit += pit;
       } else {
-        sc[m.name].pp2Bat += bat;
-        sc[m.name].pp2Pit += pit;
+        e.pp2Bat += bat;
+        e.pp2Pit += pit;
       }
     });
   });
 
-  Object.values(sc).forEach((s) => {
-    s.pp1 = r2(s.pp1Bat + s.pp1Pit);
-    s.pp2 = r2(s.pp2Bat + s.pp2Pit);
-    s.batting = r2(s.pp1Bat + s.pp2Bat);
-    s.pitching = r2(s.pp1Pit + s.pp2Pit);
-    s.total = r2(s.batting + s.pitching);
-    s.isPP1Leader = false;
-    s.isPP2Leader = false;
-    s.isWildcard = false;
-  });
-
-  const pp1Leaders = new Set();
-  const pp2Leaders = new Set();
-  Object.values(poolGroups).forEach((members) => {
-    let b1 = -Infinity,
-      w1 = null,
-      b2 = -Infinity,
-      w2 = null;
-    members.forEach((n) => {
-      const s = sc[n];
-      if (!s) return;
-      if (s.pp1 > b1) {
-        b1 = s.pp1;
-        w1 = n;
-      }
-      if (s.pp2 > b2) {
-        b2 = s.pp2;
-        w2 = n;
-      }
-    });
-    if (w1 && b1 > 0) {
-      pp1Leaders.add(w1);
-      sc[w1].isPP1Leader = true;
-    }
-    if (w2 && b2 > 0) {
-      pp2Leaders.add(w2);
-      sc[w2].isPP2Leader = true;
-    }
-  });
-  Object.values(sc).forEach((s) => {
-    s.periodsWon = (s.isPP1Leader ? 1 : 0) + (s.isPP2Leader ? 1 : 0);
-    s.isPoolWinner = s.periodsWon > 0;
-  });
-
-  // Primary = total (desc); tiebreaker = periods won -> batting -> pitching -> PP2 -> PP1.
-  const cmp = (a, b) =>
-    b.total - a.total ||
-    b.periodsWon - a.periodsWon ||
-    b.batting - a.batting ||
-    b.pitching - a.pitching ||
-    b.pp2 - a.pp2 ||
-    b.pp1 - a.pp1;
-
-  const winners = Object.values(sc)
-    .filter((s) => s.isPoolWinner)
-    .sort(cmp);
-  const wildcardsNeeded = Math.max(0, bracketSize - winners.length);
-  const wildcards = Object.values(sc)
-    .filter((s) => !s.isPoolWinner && s.total > 0)
-    .sort(cmp)
-    .slice(0, wildcardsNeeded);
-  wildcards.forEach((s) => {
-    s.isWildcard = true;
-  });
-
-  // Winners always seeded above wildcards; each group ordered by total (+ tiebreak).
-  const seeds = [...winners, ...wildcards].slice(0, bracketSize);
-  seeds.forEach((s, i) => {
-    s.seed = i + 1;
-  });
-
-  return {
-    seeds,
-    byManager: sc,
-    pp1Leaders,
-    pp2Leaders,
-    allLeaders: new Set([...pp1Leaders, ...pp2Leaders]),
-    wildcardSet: new Set(wildcards.map((s) => s.manager)),
-    qualifierNames: seeds.map((s) => s.manager),
-  };
+  // The seeding RULE itself lives in js/seeding.js so the What If bracket and the real bracket
+  // can never disagree about it (see CLAUDE.md: no duplicated logic between app.js and js/).
+  return seedFromPeriodTotals(entries, { bracketSize });
 }
 
 // Authoritative seeding for a season. Once pool play is finalized the commissioner-confirmed
@@ -599,14 +539,13 @@ function weekIndexFromKey(round, week) {
 // Start date of the PERIOD (round) a week belongs to — the schedule start of that round's first
 // week. Used to scope add/drop carry-forward to within a period so a prior period's players don't
 // leak into a new submission period (PP2/QF/SF/Finals). Returns null for the initial period (PP1),
-// leaving its behavior unchanged. Mirrors the server's periodStartForRound.
-function periodStartForRound(seasonData, round) {
-  if (!round || round === SEASON_SCHEDULE[0].round) return null;
-  const scheduleDates = (seasonData && seasonData.schedule_dates) || [];
-  for (let i = 0; i < SEASON_SCHEDULE.length && i < scheduleDates.length; i++) {
-    if (SEASON_SCHEDULE[i].round === round) return scheduleDates[i] ? scheduleDates[i].start : null;
-  }
-  return null;
+// leaving its behavior unchanged.
+//
+// The rule itself lives in js/eligibility.js (canonical, unit-tested) and reaches us on `window`
+// via js/index.js; this is only the season-shaped adapter for it, so app.js is no longer a third
+// implementation alongside that copy and the server's.
+function periodStartForSeason(seasonData, round) {
+  return periodStartForRound(round, SEASON_SCHEDULE, (seasonData && seasonData.schedule_dates) || []);
 }
 
 // Determine the current scoring period from loaded stats data
@@ -648,16 +587,18 @@ function getCurrentScoringPeriod(seasonData) {
 
   const dates = getScheduleDates();
 
-  // Cap to the current calendar week (ET). If today falls in a week whose
-  // schedule index is earlier than the latest data week, the banner should
-  // reflect where we actually are on the calendar — not data that may have
-  // been partially written for a future week via live-sync or early import.
+  // Sync to the current calendar week (ET). If today falls inside a scheduled
+  // week, that week wins over the latest data week in BOTH directions: cap
+  // back when data was partially written for a future week via live-sync or
+  // early import, and advance forward when a new week has started but its
+  // stats haven't synced yet — e.g. QF Week 1 right after the All-Star break,
+  // when the latest data week is still PP2 Week 5.
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (dates) {
-    for (let i = 0; i < dates.length; i++) {
+    for (let i = 0; i < dates.length && i < SEASON_SCHEDULE.length; i++) {
       const d = dates[i];
       if (d && d.start && d.end && todayET >= d.start && todayET <= d.end) {
-        if (i < latestIdx) {
+        if (i !== latestIdx) {
           latestIdx = i;
           latestRound = SEASON_SCHEDULE[i].round;
           latestWeek = SEASON_SCHEDULE[i].week;
@@ -743,6 +684,60 @@ function getBetweenPeriodsInfo(sd) {
 }
 
 // ============================================================
+// Weekly stat rows, bucketed by round|week and then by manager.
+// ============================================================
+// managerWeekSubtotal is called 256 times to score one scoreboard — 16 scheduled weeks x 8
+// managers x batting/pitching — and each call used to walk the whole weekly array twice looking
+// for its own week. Bucketing once per array turns those scans into a Map lookup. Row ORDER
+// inside each bucket is the array's own order, so every derived list downstream is byte-identical
+// to what the scans produced; this is a lookup change, not a scoring change.
+//
+// Legacy 'PP1P' / 'PP2P' import variants share weeks with their parent round, so they normalize
+// onto the parent's key — the same rule the old inline matchesRoundWeek applied.
+//
+// Cached in a WeakMap on the rows array itself (the pattern _normTeamIndexCache already uses), so
+// a fresh season parse — or any code that REPLACES sd.weekly_batting — silently gets a fresh
+// index. A push changes `length` and rebuilds. The one case neither covers is replacing a row
+// in situ at the same length, which is why editStat calls invalidateWeeklyRowIndex.
+const _weeklyRowIndexCache = new WeakMap();
+const EMPTY_WEEK_BUCKET = { rows: [], byManager: new Map() };
+
+function parentRound(round) {
+  return round && round.length > 1 && round.endsWith('P') ? round.slice(0, -1) : round;
+}
+
+function weeklyRowIndex(rowsArr) {
+  if (!Array.isArray(rowsArr)) return null;
+  const cached = _weeklyRowIndexCache.get(rowsArr);
+  if (cached && cached.length === rowsArr.length) return cached.byWeek;
+
+  const byWeek = new Map();
+  for (const r of rowsArr) {
+    if (!r || !r.week) continue;
+    const key = `${parentRound(r.round)}|${r.week}`;
+    let bucket = byWeek.get(key);
+    if (!bucket) {
+      bucket = { rows: [], byManager: new Map() };
+      byWeek.set(key, bucket);
+    }
+    bucket.rows.push(r);
+    if (r.manager) {
+      const mine = bucket.byManager.get(r.manager);
+      if (mine) mine.push(r);
+      else bucket.byManager.set(r.manager, [r]);
+    }
+  }
+  _weeklyRowIndexCache.set(rowsArr, { length: rowsArr.length, byWeek });
+  return byWeek;
+}
+
+// Drop a cached index after a row is swapped out in place — the only mutation the length check
+// cannot see.
+function invalidateWeeklyRowIndex(rowsArr) {
+  if (Array.isArray(rowsArr)) _weeklyRowIndexCache.delete(rowsArr);
+}
+
+// ============================================================
 // Per-week subtotal for one manager. Single source of truth for the
 // "what stats count toward this manager this week" question used by
 // renderRosterData (the My Roster weekly listing), computeRosterPeriodScores
@@ -757,13 +752,9 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const week = schedWeek.week;
   const weekKey = `${round}|${week}`;
 
-  // Legacy 'PP1P' / 'PP2P' import variants share weeks with their parents.
-  const matchesRoundWeek = (r) => {
-    if (r.week !== week) return false;
-    if (r.round === round) return true;
-    if (r.round && r.round.endsWith('P') && r.round.slice(0, -1) === round) return true;
-    return false;
-  };
+  // Every row for this round+week (legacy 'PP1P'/'PP2P' folded in), looked up once instead of
+  // scanning the whole weekly array twice per call. See weeklyRowIndex.
+  const weekBucket = (weeklyRowIndex(rowsArr) || new Map()).get(`${parentRound(round)}|${week}`) || EMPTY_WEEK_BUCKET;
 
   const scheduleDates = seasonData.schedule_dates || [];
   const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
@@ -821,7 +812,7 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   const weekEnd = scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
   // Scope carry-forward to this week's PERIOD so a prior period's players don't leak into a new
   // submission period (matches the server's managerWeekSubtotal). null for PP1 leaves it unchanged.
-  const periodStart = periodStartForRound(seasonData, round);
+  const periodStart = periodStartForSeason(seasonData, round);
   const activeByDates = [];
   if (allMgrDates) {
     const latestAdd = {};
@@ -865,7 +856,7 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
           s.player_in &&
           s.week_key === weekKey &&
           (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
-          (weekRosterDates[s.player_in] || rowsArr.some((r) => r[playerKey] === s.player_in && matchesRoundWeek(r)))
+          (weekRosterDates[s.player_in] || weekBucket.rows.some((r) => r[playerKey] === s.player_in))
       )
       .map((s) => s.player_in),
   ]);
@@ -873,17 +864,18 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   // Manager-attributed rows first; then null-manager rows for eligible
   // players, deduped by player so a stale ghost row can't double-count
   // alongside an attributed entry.
-  const weekManagerRows = rowsArr.filter((r) => r.manager === managerName && matchesRoundWeek(r));
+  const weekManagerRows = weekBucket.byManager.get(managerName) || [];
   const allWeekRows = weekManagerRows.slice();
-  rowsArr.forEach((r) => {
-    if (
-      matchesRoundWeek(r) &&
-      !r.manager &&
-      eligible.has(r[playerKey]) &&
-      !allWeekRows.some((x) => x[playerKey] === r[playerKey])
-    ) {
-      allWeekRows.push(r);
-    }
+  weekBucket.rows.forEach((r) => {
+    if (r.manager === managerName) return;
+    // A row attributed to ANOTHER manager still counts here when this manager held the player for
+    // part of the week — a mid-week handover (trade / waiver pickup). `manager` is a sticky derived
+    // cache naming whoever held him at compile time, so it cannot arbitrate a contested week; the
+    // date windows can, and manager_scores carries the split the server computed from daily data.
+    const contested = !!(r.manager_scores && Object.prototype.hasOwnProperty.call(r.manager_scores, managerName));
+    if (r.manager && !weekRosterDates[r[playerKey]] && !contested) return;
+    if (!eligible.has(r[playerKey]) || allWeekRows.some((x) => x[playerKey] === r[playerKey])) return;
+    allWeekRows.push(r);
   });
 
   const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
@@ -893,13 +885,26 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
     // player only when they have a row of this type or sit in this type's roster array). The
     // scores still sum to the returned subtotal: array-only players contribute 0.
     const scoreByPlayer = {};
-    for (const r of finalRows) scoreByPlayer[r[playerKey]] = (scoreByPlayer[r[playerKey]] || 0) + (r.weekly_score || 0);
+    for (const r of finalRows) {
+      scoreByPlayer[r[playerKey]] = (scoreByPlayer[r[playerKey]] || 0) + rowScore(r, managerName);
+    }
     const typeRoster = new Set(weekRoster[listKey] || []);
     for (const p of eligible) {
       if (p in scoreByPlayer || typeRoster.has(p)) detailOut.push({ player: p, score: scoreByPlayer[p] || 0 });
     }
   }
-  return finalRows.reduce((s, r) => s + (r.weekly_score || 0), 0);
+  return finalRows.reduce((s, r) => s + rowScore(r, managerName), 0);
+}
+
+// What ONE manager earned from ONE weekly stat row. Normally the row's stored weekly_score — but a
+// player held by two managers inside one week (a mid-week trade) has a single row covering both
+// their windows, so the compile stores the per-manager split on it. Mirrors managerRowScoreForWeek
+// in server.js; the client is not sent daily rows, so it reads the split rather than re-deriving it.
+function rowScore(row, managerName) {
+  if (row.manager_scores && Object.prototype.hasOwnProperty.call(row.manager_scores, managerName)) {
+    return row.manager_scores[managerName] || 0;
+  }
+  return row.weekly_score || 0;
 }
 
 // ============================================================
@@ -1158,7 +1163,7 @@ async function savePool(year, type, pool, teamMap, opts = {}) {
 // denied a swap but it didn't stick and the request came back" bug — and can't clobber unrelated
 // season data. Mirrors the confirmed server swap + new _rev into localStorage. Returns the server
 // payload on success, or null on failure (caller surfaces the error). Part of #275.
-async function persistSwapMutation(year, swapId, method, path, body) {
+async function persistSwapMutation(year, swapId, method, path, body, onError) {
   try {
     const resp = await apiFetch(`/api/seasons/${year}/swaps/${swapId}${path}`, {
       method,
@@ -1166,7 +1171,28 @@ async function persistSwapMutation(year, swapId, method, path, body) {
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      alert(`Swap update failed (${err.error || resp.status}). Please reload and try again.`);
+      // A date edit on an approved swap is vetted by the server's destructive-save guard; offer
+      // the commissioner an explicit override for a legitimate large correction (mirrors the
+      // approve flow's force confirm). Managers have no force — the server rejects it — so they
+      // get the plain error and are pointed at the commissioner instead.
+      if (
+        resp.status === 409 &&
+        err.error === 'destructive_swap_edit_blocked' &&
+        !(body && body.force) &&
+        isLoggedInCommissioner()
+      ) {
+        const reasons = (err.reasons || []).join('\n• ');
+        if (confirm(`This edit looks destructive:\n\n• ${reasons}\n\nApply anyway?`)) {
+          return persistSwapMutation(year, swapId, method, path, { ...(body || {}), force: true });
+        }
+        return null;
+      }
+      // The server sends a plain-English `detail` for the rejections a manager can actually hit
+      // (not yours, already in effect, players not editable, date out of range) — show that rather
+      // than the machine code, inline when the caller has somewhere to put it.
+      const msg = err.detail || err.error || `Swap update failed (${resp.status}). Please reload and try again.`;
+      if (onError) onError(msg);
+      else alert(msg);
       return null;
     }
     const data = await resp.json().catch(() => ({}));
@@ -1310,13 +1336,25 @@ function saveManagers(managers) {
 // Initialization
 // ============================================================
 async function loadData() {
+  // ---- Instant boot from cache (no network) ----
+  // The managers list and the logged-in email are mirrored in localStorage, so we can restore
+  // the session and render from the cached seasons synchronously — before any network round-trip.
+  // This stops a returning user from seeing the login screen flash (the app appearing to "log out
+  // and back in") while the background sync below runs. The sync then refreshes the data underneath
+  // and re-renders only if it actually changed.
+  restoreSessionFromCache();
+
   // ---- Sync from server (shared database) ----
+  let changed = false;
   try {
     const [seasonsResp, managersResp] = await Promise.all([fetch('/api/seasons'), fetch('/api/managers')]);
     if (seasonsResp.ok) {
       const serverSeasons = await seasonsResp.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        setSeasonsLocal(serverSeasons);
+        if (readSeasonsJSON() !== JSON.stringify(serverSeasons)) {
+          setSeasonsLocal(serverSeasons);
+          changed = true;
+        }
         // Fresh data loaded — release the one-shot stale-save reload guard.
         try {
           sessionStorage.removeItem('wmmc_stale_reload');
@@ -1328,7 +1366,10 @@ async function loadData() {
     if (managersResp.ok) {
       const serverManagers = await managersResp.json();
       if (serverManagers && serverManagers.length > 0) {
-        setManagersLocal(serverManagers);
+        if (readManagersJSON() !== JSON.stringify(serverManagers)) {
+          setManagersLocal(serverManagers);
+          changed = true;
+        }
       }
     }
   } catch (e) {
@@ -1396,20 +1437,27 @@ async function loadData() {
     })
     .catch(() => {});
 
-  // Check for existing auth session
-  const savedAuth = localStorage.getItem('wmmc_logged_in_email');
-  if (savedAuth) {
-    const mgr = findManagerByEmail(savedAuth);
-    if (mgr) {
-      LOGGED_IN_EMAIL = savedAuth.toLowerCase();
-      enterApp(mgr);
-    } else {
+  // Finalize the login state now that the server sync has completed. If the session was already
+  // restored from cache above, this only re-renders when the fresh data actually changed. If it
+  // could NOT be restored earlier (e.g. first load on a new device, where the managers list wasn't
+  // cached yet), the sync may now have what we need, so try once more before falling back to login.
+  const wasActiveBeforeSync = !!LOGGED_IN_EMAIL;
+  if (restoreSessionFromCache()) {
+    // If the session was already active from the cache-phase restore, the first paint used cached
+    // data — rebuild the season selector (a brand-new season may not have been cached) and re-render
+    // only when the fresh sync actually changed something. If the session was restored just now
+    // (managers arrived with the sync), enterApp already rendered the fresh data.
+    if (wasActiveBeforeSync && changed) {
+      buildSeasonSelector();
+      init();
+    }
+  } else {
+    // No valid session. Clear any stale saved auth (an email that no longer maps to a manager even
+    // after the fresh sync) and reveal the login screen.
+    const savedAuth = localStorage.getItem('wmmc_logged_in_email');
+    if (savedAuth && !findManagerByEmail(savedAuth)) {
       localStorage.removeItem('wmmc_logged_in_email');
     }
-  }
-
-  // If not logged in, show login screen
-  if (!LOGGED_IN_EMAIL) {
     document.getElementById('login-screen').style.display = 'flex';
   }
 
@@ -1471,6 +1519,28 @@ function findManagerByEmail(email) {
   return managers.find((m) => m.email && m.email.toLowerCase() === email.toLowerCase());
 }
 
+// Restore the logged-in session from the cached managers list (no network) and render from the
+// cached seasons via enterApp. Returns true if a session is active — restored just now, or already
+// restored on an earlier call. Idempotent: enterApp (which renders and starts the polls) runs only
+// on the first successful restore. When the saved email isn't found in the — possibly not-yet-synced
+// — managers list, returns false WITHOUT clearing the saved auth, so loadData can retry after the
+// server sync before deciding the session is genuinely invalid.
+function restoreSessionFromCache() {
+  if (LOGGED_IN_EMAIL) return true;
+  let savedAuth;
+  try {
+    savedAuth = localStorage.getItem('wmmc_logged_in_email');
+  } catch (_) {
+    return false;
+  }
+  if (!savedAuth) return false;
+  const mgr = findManagerByEmail(savedAuth);
+  if (!mgr) return false;
+  LOGGED_IN_EMAIL = savedAuth.toLowerCase();
+  enterApp(mgr);
+  return true;
+}
+
 function enterApp(mgr) {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('user-bar').style.display = 'flex';
@@ -1496,12 +1566,19 @@ function enterApp(mgr) {
   buildSeasonSelector();
   setupNav();
   updateOnlineStatus();
+  loadHypoScenario();
 
   // Restore the tab the user was on before refreshing. The standalone Trends
   // tab merged into Season Stats (the old Weekly Scores tab) — map the legacy
   // saved value so returning users land on the merged tab, not the default.
   let savedTab = localStorage.getItem('wmmc_active_tab');
   if (savedTab === 'trends') savedTab = 'weekly';
+  // A #hash deep link naming a tab (e.g. wmmc.live/#swap-log from a Slack swap notification)
+  // wins over the saved tab, so a link can land directly on that tab after login.
+  // A shared What If link carries its scenario in the hash (#whatif=<encoded>), so the tab name
+  // is the part before the '='. No existing tab id contains one, so this is a no-op for the rest.
+  const hashTab = (window.location.hash || '').replace(/^#/, '').split('=')[0];
+  if (hashTab && document.querySelector(`.nav-btn[data-tab="${hashTab}"]`)) savedTab = hashTab;
   if (savedTab) {
     const targetBtn = document.querySelector(`.nav-btn[data-tab="${savedTab}"]`);
     const targetSection = document.getElementById(savedTab);
@@ -1518,6 +1595,7 @@ function enterApp(mgr) {
   if (savedTab === 'weekly') renderTrends();
   if (savedTab === 'swap-log') renderSwapLog('swap-log-public', false);
   if (savedTab === 'hall-of-fame') renderHallOfFame();
+  if (savedTab === 'whatif') renderWhatIf();
   if (savedTab === 'live') startLivePolling();
 
   // Poll for changes every 45 seconds so logged-in users always see
@@ -1911,12 +1989,19 @@ function buildSeasonSelector() {
   select.value = String(CURRENT_YEAR);
   SELECTED_SEASON = String(CURRENT_YEAR);
 
-  select.addEventListener('change', async () => {
-    SELECTED_SEASON = select.value;
-    await syncFromServer();
-    init();
-  });
+  // Attach the change listener once — buildSeasonSelector may run again after the background sync
+  // (to pick up a season that wasn't in the cache at first paint), and re-adding it would fire the
+  // handler twice per change.
+  if (!_seasonSelectorListenerAttached) {
+    _seasonSelectorListenerAttached = true;
+    select.addEventListener('change', async () => {
+      SELECTED_SEASON = select.value;
+      await syncFromServer();
+      init();
+    });
+  }
 }
+let _seasonSelectorListenerAttached = false;
 
 // ============================================================
 // Version watcher — prompt a reload when a new build is deployed
@@ -2023,10 +2108,23 @@ function setupNav() {
       if (btn.dataset.tab === 'weekly') renderTrends();
       if (btn.dataset.tab === 'swap-log') renderSwapLog('swap-log-public', false);
       if (btn.dataset.tab === 'hall-of-fame') renderHallOfFame();
+      if (btn.dataset.tab === 'whatif') renderWhatIf();
       // Live tab owns its own polling lifecycle — start when entering, stop on leaving.
       if (btn.dataset.tab === 'live') startLivePolling();
       else stopLivePolling();
     });
+  });
+
+  // A shared What If link (#whatif=<scenario>) opened while the app is ALREADY loaded is a
+  // same-document navigation — the page never reloads, so the boot-time hash handling in enterApp
+  // never runs and the link would silently do nothing. Clicking one from Slack while the tab is
+  // already open is the common case, so handle the hash change directly.
+  window.addEventListener('hashchange', () => {
+    const tab = (window.location.hash || '').replace(/^#/, '').split('=')[0];
+    const btn = tab && document.querySelector(`.nav-btn[data-tab="${tab}"]`);
+    if (!btn) return;
+    if (tab === 'whatif') loadHypoScenario();
+    btn.click();
   });
 }
 
@@ -2062,6 +2160,16 @@ let _livePollTimer = null;
 let _liveLastFetchedAt = 0;
 let _liveLastSawLiveGame = 0;
 let _liveViewDate = null; // null = today/live, 'YYYY-MM-DD' = historical date view
+// The game day the live view is currently showing, as resolved by the server (see resolveLiveDay
+// in server.js). This is NOT always the ET calendar date: a slate that started last night holds
+// the view through the following morning, until 2h before the new day's first pitch or noon ET,
+// whichever is earlier. Populated from every /api/mlb/live response; until the first one lands we
+// fall back to the calendar date, which is correct for all but the hold-over window.
+let _liveDayET = null;
+// Epoch ms at which the live day flips to the new calendar date, or null when it already has.
+let _liveRolloverAt = null;
+const _calendarDayET = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const liveDayET = () => _liveDayET || _calendarDayET();
 // Tracks which manager rows have their today's-stats drop-down expanded so the
 // 2-minute poll re-render doesn't collapse the panel under the user.
 const _liveExpandedManagers = new Set();
@@ -2093,7 +2201,7 @@ function renderLiveMatchupCards(matchups, byName, renderPanel, subline) {
       <div class="live-matchup-team ${leader ? 'live-matchup-leader' : ''}" onclick="toggleLiveManagerDetails('${key}','${jsStr(t.name)}')">
         <div class="live-matchup-main">
           <span class="bracket-seed">${t.seed || ''}</span>
-          <span class="live-matchup-name ${nameCls}">${escapeHtml(t.name)}</span>
+          <span class="live-matchup-name ${nameCls}">${esc(t.name)}</span>
           <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span>
           <span class="live-matchup-total">${total}</span>
         </div>
@@ -2111,7 +2219,7 @@ function renderLiveMatchupCards(matchups, byName, renderPanel, subline) {
       const e2 = byName[t2.name] ? (byName[t2.name].round_total ?? 0) : 0;
       const leader = e1 !== e2 ? (e1 > e2 ? t1.name : t2.name) : null;
       return `<div class="live-matchup">
-        <div class="live-matchup-label">${escapeHtml(mu.label)}</div>
+        <div class="live-matchup-label">${esc(mu.label)}</div>
         ${teamHtml(t1, leader === t1.name)}
         ${teamHtml(t2, leader === t2.name)}
       </div>`;
@@ -2146,19 +2254,23 @@ function updateLiveDateNav() {
   const nextBtn = document.getElementById('live-date-next');
   const labelEl = document.getElementById('live-date-label');
   if (!prevBtn || !nextBtn || !labelEl) return;
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Bound the nav by the live day, not the calendar date: during the hold-over window the live
+  // view already IS the previous date, so stepping "forward" to the calendar date would land on a
+  // day whose games haven't started — and the historical endpoint has nothing for it yet.
+  const liveDay = liveDayET();
   if (_liveViewDate === null) {
-    labelEl.textContent = 'Today';
+    // Calling last night's slate "Today" during the hold-over window reads as a bug. Name the
+    // day we are actually showing; it flips back to "Today" at the rollover.
+    labelEl.textContent = _liveRolloverAt ? fmtShortDate(liveDay) : 'Today';
     nextBtn.disabled = true;
   } else {
     labelEl.textContent = _liveViewDate;
-    nextBtn.disabled = _liveViewDate >= todayET;
+    nextBtn.disabled = _liveViewDate >= liveDay;
   }
 }
 
 window.liveDatePrev = function () {
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const from = _liveViewDate || todayET;
+  const from = _liveViewDate || liveDayET();
   const d = new Date(from + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() - 1);
   _liveViewDate = d.toISOString().slice(0, 10);
@@ -2169,12 +2281,12 @@ window.liveDatePrev = function () {
 
 window.liveDateNext = function () {
   if (!_liveViewDate) return;
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const liveDay = liveDayET();
   const d = new Date(_liveViewDate + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() + 1);
   const next = d.toISOString().slice(0, 10);
-  if (next >= todayET) {
-    // Arrived at today — switch back to live polling mode
+  if (next >= liveDay) {
+    // Arrived at the live day — switch back to live polling mode
     _liveViewDate = null;
     updateLiveDateNav();
     startLivePolling();
@@ -2243,8 +2355,8 @@ function renderDailyContent(d) {
       return '<div class="mgr-detail-panel"><div class="live-mgr-detail-empty">No stats recorded for this date.</div></div>';
     }
     const batterRow = (pl) => `<tr>
-      <td>${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td>${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.abs || 0}</td>
       <td class="num-cell">${pl.stats['1b'] || 0}</td>
       <td class="num-cell">${pl.stats['2b'] || 0}</td>
@@ -2257,8 +2369,8 @@ function renderDailyContent(d) {
       <td class="num-cell"><strong>${fmt(pl.score)}</strong></td>
     </tr>`;
     const pitcherRow = (pl) => `<tr>
-      <td>${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td>${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.gs || 0}</td>
       <td class="num-cell">${pl.stats.w || 0}</td>
       <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
@@ -2328,9 +2440,9 @@ function renderDailyContent(d) {
         : 'No data for this date';
     managersEl.innerHTML = `
       <div class="card">
-        <h3>Playoff Matchups <span class="muted">(${escapeHtml(d.date)})</span></h3>
+        <h3>Playoff Matchups <span class="muted">(${esc(d.date)})</span></h3>
         ${renderLiveMatchupCards(dailyMatchups, byName, renderDailyPanel, subline)}
-        <div class="live-matchup-note">Totals are certified ${escapeHtml(aw.round)} scoreboard points through end of ${escapeHtml(d.date)}. Tap a manager for that day&rsquo;s player stats.</div>
+        <div class="live-matchup-note">Totals are certified ${esc(aw.round)} scoreboard points through end of ${esc(d.date)}. Tap a manager for that day&rsquo;s player stats.</div>
       </div>`;
     return;
   }
@@ -2349,7 +2461,7 @@ function renderDailyContent(d) {
       return `
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
-          <td>${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
+          <td>${esc(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
           <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
           <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
@@ -2367,18 +2479,18 @@ function renderDailyContent(d) {
   const roundLabel = aw.round || '';
   managersEl.innerHTML = `
     <div class="card">
-      <h3>Running Standings <span class="muted">(${escapeHtml(d.date)})</span></h3>
+      <h3>Running Standings <span class="muted">(${esc(d.date)})</span></h3>
       <div class="table-wrapper">
         <table class="data-table compact-table">
           <thead><tr>
             <th>#</th><th>Manager</th>
-            <th title="Certified ${escapeHtml(roundLabel)} scoreboard total through end of ${escapeHtml(d.date)}">Total</th>
-            <th title="Rank movement from start to end of ${escapeHtml(d.date)}">&Delta; Rank</th>
-            <th title="Points accumulated on ${escapeHtml(d.date)} only">Daily</th>
+            <th title="Certified ${esc(roundLabel)} scoreboard total through end of ${esc(d.date)}">Total</th>
+            <th title="Rank movement from start to end of ${esc(d.date)}">&Delta; Rank</th>
+            <th title="Points accumulated on ${esc(d.date)} only">Daily</th>
             <th title="Not available for historical dates">Live</th>
             <th title="Not available for historical dates">Done</th>
             <th title="Not available for historical dates">Left</th>
-            <th title="Running weekly score through ${escapeHtml(d.date)}">Weekly</th>
+            <th title="Running weekly score through ${esc(d.date)}">Weekly</th>
           </tr></thead>
           <tbody>${rows || '<tr><td colspan="9" class="empty">No data for this date.</td></tr>'}</tbody>
         </table>
@@ -2394,7 +2506,18 @@ function shouldKeepPolling(data) {
 
 function scheduleNextLivePoll(data) {
   stopLivePolling();
-  if (!shouldKeepPolling(data)) return;
+  if (!shouldKeepPolling(data)) {
+    // Polling is otherwise done for the night, but during the hold-over window the board is
+    // pinned to last night's slate. Wake once at the rollover so a tab left open overnight
+    // flips to the new game day on its own instead of showing yesterday all morning.
+    if (data?.live_day_is_previous && data.rollover_at) {
+      const wait = Date.parse(data.rollover_at) - Date.now();
+      if (Number.isFinite(wait) && wait > 0) {
+        _livePollTimer = setTimeout(() => refreshLive(), wait + 1000);
+      }
+    }
+    return;
+  }
   _livePollTimer = setTimeout(() => {
     if (document.visibilityState === 'visible') refreshLive();
     else scheduleNextLivePoll(data); // tab hidden — re-arm without fetching
@@ -2428,9 +2551,17 @@ function renderLiveContent(d) {
   const managersEl = document.getElementById('live-managers');
   const gamesEl = document.getElementById('live-games');
 
+  // Adopt the server's live day before rendering — the date nav bounds and the
+  // hold-over note both key off it.
+  if (d.live_day) {
+    _liveDayET = d.live_day;
+    _liveRolloverAt = d.live_day_is_previous && d.rollover_at ? Date.parse(d.rollover_at) : null;
+    if (_liveViewDate === null) updateLiveDateNav();
+  }
+
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No active schedule week for today (${d.today}).`;
+    if (statusEl) statusEl.textContent = `No active schedule week for ${d.today}.`;
     if (managersEl) managersEl.innerHTML = '';
     if (gamesEl) gamesEl.innerHTML = '';
     return;
@@ -2451,9 +2582,23 @@ function renderLiveContent(d) {
     } else {
       pollNote = '· polling paused — no live games';
     }
+    // During the hold-over window the board is showing LAST night's slate, which would otherwise
+    // look like a stale page on a morning refresh. Say so, and say when it flips over.
+    let dayNote = '';
+    if (d.live_day_is_previous) {
+      const rollover = d.rollover_at
+        ? new Date(d.rollover_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : null;
+      dayNote = ` · showing ${fmtShortDate(d.live_day)}` + (rollover ? ` until today's games load at ${rollover}` : '');
+    }
+    // fetched_at is when the server actually pulled from MLB, which for a cached snapshot is
+    // older than this response. Call out a noticeably old snapshot rather than letting the
+    // timestamp read as live-to-the-second.
+    const ageNote = d.age_ms > 90_000 ? ` (${Math.round(d.age_ms / 1000)}s old)` : '';
     statusEl.textContent =
       `${s.games_live ?? 0} live · ${s.games_final ?? 0} final · ${s.games_preview ?? 0} upcoming` +
-      (updated ? ` · updated ${updated} ${pollNote}` : '');
+      (updated ? ` · updated ${updated}${ageNote} ${pollNote}` : '') +
+      dayNote;
   }
 
   // Manager standings: round total (incl. live) · weekly · rank delta · daily · today's player counts.
@@ -2498,8 +2643,8 @@ function renderLiveContent(d) {
     }
 
     const batterRow = (pl) => `<tr>
-      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.abs || 0}</td>
       <td class="num-cell">${pl.stats['1b'] || 0}</td>
       <td class="num-cell">${pl.stats['2b'] || 0}</td>
@@ -2513,8 +2658,8 @@ function renderLiveContent(d) {
     </tr>`;
 
     const pitcherRow = (pl) => `<tr>
-      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${escapeHtml(pl.name)}</td>
-      <td>${escapeHtml(pl.team || '')}</td>
+      <td class="${pl.finalToday ? 'player-name-final' : 'player-name-live'}">${esc(pl.name)}</td>
+      <td>${esc(pl.team || '')}</td>
       <td class="num-cell">${pl.stats.gs || 0}</td>
       <td class="num-cell">${pl.stats.w || 0}</td>
       <td class="num-cell">${fmtDec(pl.stats.qs || 0)}</td>
@@ -2581,6 +2726,12 @@ function renderLiveContent(d) {
     const liveMatchups = ['QF', 'SF', 'Finals'].includes(aw.round)
       ? playoffRoundMatchups(getSeasons()[SELECTED_SEASON], aw.round)
       : null;
+    // Once the nightly sync has certified the day on screen, its points are already inside the
+    // certified scoreboard total, so Total stops adding them and the Daily figure is banked
+    // rather than pending. Label it — otherwise Total and Daily look like they disagree, which
+    // is exactly what a double-count would look like.
+    const dayBanked = !!d.live_day_certified;
+    const dayLabel = d.live_day_is_previous ? fmtShortDate(d.today) : 'today';
     if (liveMatchups) {
       const participantNames = new Set(liveMatchups.flatMap((mu) => mu.teams.map((t) => t.name)));
       for (const n of [..._liveExpandedManagers]) {
@@ -2588,13 +2739,16 @@ function renderLiveContent(d) {
       }
       const subline = (r) =>
         r
-          ? `${fmtSignedLive(r.today_score)} today &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
+          ? `${fmtSignedLive(r.today_score)} ${esc(dayLabel)}${dayBanked ? ' (in total)' : ''} &middot; ${r.players_active ?? 0} live &middot; ${r.players_finished ?? 0} done &middot; ${r.players_remaining ?? 0} left &middot; ${(r.running_score ?? 0).toFixed(2)} wk`
           : 'No roster data yet';
+      const matchupNote = dayBanked
+        ? `Totals are the certified ${esc(aw.round)} scoreboard. ${esc(dayLabel)}&rsquo;s points are already certified into it, so these match the Scoreboard exactly.`
+        : `Totals are the certified ${esc(aw.round)} scoreboard plus ${esc(dayLabel)}&rsquo;s points not yet certified into it.`;
       managersEl.innerHTML = `
         <div class="card">
           <h3>Playoff Matchups</h3>
           ${renderLiveMatchupCards(liveMatchups, byName, renderTodayPanel, subline)}
-          <div class="live-matchup-note">Totals are the certified ${escapeHtml(aw.round)} scoreboard plus today&rsquo;s points. Tap a manager for today&rsquo;s player stats.</div>
+          <div class="live-matchup-note">${matchupNote} Tap a manager for ${esc(dayLabel)}&rsquo;s player stats.</div>
         </div>`;
     } else {
       // Drop any expanded managers that no longer appear in the response so the
@@ -2614,7 +2768,7 @@ function renderLiveContent(d) {
           return `
         <tr class="live-mgr-row" onclick="toggleLiveManagerDetails('${key}','${safeMgr}')">
           <td class="rank-cell">${i + 1}</td>
-          <td class="${nameCls}">${escapeHtml(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
+          <td class="${nameCls}">${esc(m.name)} <span class="sb-expand-arrow" id="live-arrow-${key}">${arrow}</span></td>
           <td class="num-cell"><strong>${(m.round_total ?? 0).toFixed(2)}</strong></td>
           <td class="num-cell">${fmtDelta(m.rank_delta)}</td>
           <td class="num-cell">${(m.today_score ?? 0).toFixed(2)}</td>
@@ -2636,9 +2790,9 @@ function renderLiveContent(d) {
           <table class="data-table compact-table">
             <thead><tr>
               <th>#</th><th>Manager</th>
-              <th title="Certified ${escapeHtml(roundLabel)} scoreboard total + today's points (live weekly does not affect this until the next nightly sync)">Total</th>
-              <th title="Rank movement vs the certified scoreboard, given today's points">&Delta; Rank</th>
-              <th title="Points accumulated today only (added to the certified scoreboard total)">Daily</th>
+              <th title="Certified ${esc(roundLabel)} scoreboard total + any of ${esc(dayLabel)}'s points not yet certified into it (live weekly does not affect this until the next nightly sync)">Total</th>
+              <th title="Rank movement vs the certified scoreboard, given ${esc(dayLabel)}'s not-yet-certified points">&Delta; Rank</th>
+              <th title="${dayBanked ? `Points scored ${esc(dayLabel)} — already certified into Total` : `Points scored ${esc(dayLabel)}, added to the certified scoreboard total`}">Daily</th>
               <th title="Rostered players whose team has a live game today">Live</th>
               <th title="Rostered players whose team's games today are final">Done</th>
               <th title="Rostered players whose team has a game today that hasn't started">Left</th>
@@ -2681,11 +2835,14 @@ function renderLiveContent(d) {
       const detail = canExpand
         ? `<div class="live-game-detail" id="live-game-detail-${key}" style="display:${expanded ? '' : 'none'};"></div>`
         : '';
-      return `<div ${rowAttrs}>${stateLabel}<span class="live-game-line">${escapeHtml(scoreLine)}</span>${arrow}</div>${detail}`;
+      return `<div ${rowAttrs}>${stateLabel}<span class="live-game-line">${esc(scoreLine)}</span>${arrow}</div>${detail}`;
     };
+    // "Today" is the live day: during the hold-over window these are last night's games, still
+    // listed under the date they started on (which is how MLB dates them too).
+    const gamesHeading = d.live_day_is_previous ? `${fmtShortDate(today)} Games` : "Today's Games";
     gamesEl.innerHTML = `
       <div class="card">
-        <h3>Today's Games <span class="muted">(${today})</span></h3>
+        <h3>${gamesHeading} <span class="muted">(${today})</span></h3>
         ${todays.length ? todays.map(fmtGame).join('') : '<div class="empty">No games today.</div>'}
       </div>`;
 
@@ -2744,7 +2901,7 @@ async function fetchAndRenderLiveBoxscore(gamePk) {
     target.innerHTML = renderLiveBoxscoreHTML(data);
     target.dataset.loaded = '1';
   } catch (e) {
-    target.innerHTML = `<div class="live-box-loading">Error loading box score: ${escapeHtml(e.message)}</div>`;
+    target.innerHTML = `<div class="live-box-loading">Error loading box score: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2755,13 +2912,13 @@ function renderLiveBoxscoreHTML(d) {
     const pitchers = (d.pitching || {})[sideKey] || [];
 
     const heading = `<div class="live-box-team-header">
-        ${escapeHtml(t.team_name || t.team || sideKey)}
+        ${esc(t.team_name || t.team || sideKey)}
         <span class="muted">${t.runs ?? 0} R · ${t.hits ?? 0} H · ${t.errors ?? 0} E</span>
       </div>`;
 
     const batterRow = (p) => `<tr class="${p.rostered ? 'live-box-rostered' : ''}">
-      <td>${escapeHtml(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${escapeHtml(p.manager)}</span>` : ''}</td>
-      <td>${escapeHtml(p.position || '')}</td>
+      <td>${esc(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${esc(p.manager)}</span>` : ''}</td>
+      <td>${esc(p.position || '')}</td>
       <td class="num-cell">${p.stats.abs || 0}</td>
       <td class="num-cell">${p.stats['1b'] || 0}</td>
       <td class="num-cell">${p.stats['2b'] || 0}</td>
@@ -2775,7 +2932,7 @@ function renderLiveBoxscoreHTML(d) {
     </tr>`;
 
     const pitcherRow = (p) => `<tr class="${p.rostered ? 'live-box-rostered' : ''}">
-      <td>${escapeHtml(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${escapeHtml(p.manager)}</span>` : ''}</td>
+      <td>${esc(p.name)}${p.manager ? ` <span class="live-box-mgr-tag">${esc(p.manager)}</span>` : ''}</td>
       <td class="num-cell">${fmtDec(p.stats.ip || 0)}</td>
       <td class="num-cell">${p.stats.h || 0}</td>
       <td class="num-cell">${p.stats.er || 0}</td>
@@ -2850,22 +3007,23 @@ window.toggleLiveManagerDetails = function (mgrKey, managerName) {
 // (live games or the 30-min grace period) AND the data is older than the poll
 // interval. Otherwise leave the stale data on screen — switching to another tab and
 // back will resume polling.
+//
+// The one exception is a passed rollover: a tab backgrounded overnight is showing a game day
+// that is now over, and background timer throttling means the rollover timer armed by
+// scheduleNextLivePoll may never have fired. Refresh on sight in that case.
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     const liveTab = document.querySelector('.nav-btn.active[data-tab="live"]');
     if (!liveTab) return;
+    if (_liveRolloverAt && Date.now() >= _liveRolloverAt) {
+      refreshLive();
+      return;
+    }
     const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
     const stale = Date.now() - _liveLastFetchedAt > LIVE_POLL_MS;
     if (withinGrace && stale) refreshLive();
   });
-}
-
-function escapeHtml(s) {
-  return String(s ?? '').replace(
-    /[&<>"']/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
-  );
 }
 
 // ============================================================
@@ -3588,26 +3746,27 @@ function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
     return ` <span class="wrs-hist-tag">${parts.join(', ')}</span>`;
   }
 
-  // Whether the player is still rostered as of a period's end (latest add with no later drop).
-  // Used to grey out players dropped within/before the period.
-  function activeAsOf(player, periodEnd) {
-    let latestAdd = null;
-    let latestDrop = null;
-    let hasDates = false;
+  // Roster status of a player within a period: 'active', 'dropped' or 'scheduled' (an add whose
+  // date hasn't arrived yet). Evaluated as of TODAY while the period is still running, so a
+  // scheduled swap doesn't read as already applied — the outgoing player stays ungreyed until
+  // their drop date and the incoming player is flagged as scheduled until their add date. A
+  // finished period is read at its end, a not-yet-started one at its start (an early submission
+  // dated to the period's first day is active there, exactly as before).
+  function periodStatus(player, periodStart, periodEnd) {
+    const asOf =
+      periodEnd && todayISO > periodEnd ? periodEnd : periodStart && todayISO < periodStart ? periodStart : todayISO;
+    const entries = [];
     for (const players of Object.values(detailMgrRosterDates)) {
-      const e = players[player];
-      if (!e) continue;
-      if (e.add_date && (!periodEnd || e.add_date <= periodEnd)) {
-        hasDates = true;
-        if (!latestAdd || e.add_date > latestAdd) latestAdd = e.add_date;
-      }
-      if (e.drop_date && (!periodEnd || e.drop_date <= periodEnd)) {
-        hasDates = true;
-        if (!latestDrop || e.drop_date > latestDrop) latestDrop = e.drop_date;
-      }
+      if (players[player]) entries.push(players[player]);
     }
-    if (!hasDates) return true; // array-only member (original); treat as active
-    return !latestDrop || (latestAdd && latestAdd > latestDrop);
+    // Upper-bounded by the period end (as before) so a later period's dates never leak back. No
+    // lower bound — an out-of-period add/drop is handled by periodPlayerTag's clipping.
+    const scoped = entries.map((e) => ({
+      add_date: e.add_date && (!periodEnd || e.add_date <= periodEnd) ? e.add_date : null,
+      drop_date: e.drop_date && (!periodEnd || e.drop_date <= periodEnd) ? e.drop_date : null,
+    }));
+    const status = rosterStatusAsOf(scoped, { asOf });
+    return status === 'none' ? 'active' : status; // array-only member (original); treat as active
   }
 
   // Order players so a swapped-in player sits directly beneath the player he replaced —
@@ -3640,10 +3799,13 @@ function buildManagerDetailPanelHtml(idPrefix, managerName, filterKey) {
         : orderPlayersWithSwapChains(names, scoreByPlayer)
             .map((name) => {
               const pts = Math.round((scoreByPlayer[name] || 0) * 100) / 100;
-              const active = activeAsOf(name, p.lastEnd);
-              const tag = periodPlayerTag(name, p.firstStart, p.lastEnd);
+              const status = periodStatus(name, p.firstStart, p.lastEnd);
+              const rowCls = status === 'dropped' ? 'dropped-player' : status === 'scheduled' ? 'scheduled-player' : '';
+              const tag =
+                periodPlayerTag(name, p.firstStart, p.lastEnd) +
+                (status === 'scheduled' ? ' <span class="sched-pill">Scheduled</span>' : '');
               const safeName = jsStr(name);
-              return `<tr class="${active ? '' : 'dropped-player'}">
+              return `<tr class="${rowCls}">
         <td>${displayPlayer(name, sd)}${tag}</td>
         <td class="num"><button class="pqv-pts-btn" onclick="showPlayerQuickView('${safeName}','${typeArg}','${safeMgr}')"><strong>${fmt(pts)}</strong></button></td>
       </tr>`;
@@ -3785,7 +3947,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
         totBb += r.bb || 0;
         totPts += r.weekly_score || 0;
         return `<tr>
-        <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
+        <td class="pqv-week">${esc(weekLabel(r.round, r.week))}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
         <td class="num">${r.abs || 0}</td><td class="num">${r['1b'] || 0}</td>
         <td class="num">${r['2b'] || 0}</td><td class="num">${r['3b'] || 0}</td>
         <td class="num">${r.hr || 0}</td><td class="num">${r.r || 0}</td>
@@ -3844,7 +4006,7 @@ window.showPlayerQuickView = function (playerName, type, managerName) {
         totK += r.k || 0;
         totPts += r.weekly_score || 0;
         return `<tr>
-        <td>${r.week || ''}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
+        <td class="pqv-week">${esc(weekLabel(r.round, r.week))}</td>${dates ? `<td class="week-dates">${ds}</td>` : ''}
         <td class="num">${r.gs || 0}</td><td class="num">${r.w || 0}</td>
         <td class="num">${fmtDec(r.qs)}</td>
         <td class="num">${r.cg || 0}</td><td class="num">${r.cgso || 0}</td>
@@ -4240,9 +4402,13 @@ function renderFinalsContent() {
 
 // ---- Matchup Result Card ----
 
-function renderMatchupResultCard(m) {
-  if (!m) return '';
-  const label = m.label ? `<div class="matchup-label">${m.label}</div>` : '';
+// One matchup card, shared by the results lists and the playoff bracket grid.
+// `showLabel` lets the bracket suppress the round label on cards whose column already names the
+// round; `emptyHtml` is what an absent matchup renders as — nothing in a results list, a TBD
+// placeholder in the bracket, where the slot still has to occupy its cell.
+function renderMatchupResultCard(m, { showLabel = true, emptyHtml = '' } = {}) {
+  if (!m) return emptyHtml;
+  const label = showLabel && m.label ? `<div class="matchup-label">${m.label}</div>` : '';
   const w = m.winner;
   return `
     <div class="matchup">
@@ -4487,7 +4653,7 @@ function renderPlayers() {
               const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
               return `
             <tr>
-              <td>${b.week || ''}</td>
+              <td>${esc(weekLabel(b.round, b.week))}</td>
               ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
               <td><strong>${esc(b.manager)}</strong></td>
               <td>${esc(b.batter)}</td>
@@ -4531,7 +4697,7 @@ function renderPlayers() {
               const dateStr = dates && wi >= 0 ? fmtDateRangeShort(dates[wi].start, dates[wi].end) : '';
               return `
             <tr>
-              <td>${p.week || ''}</td>
+              <td>${esc(weekLabel(p.round, p.week))}</td>
               ${dates ? `<td class="week-dates">${dateStr}</td>` : ''}
               <td><strong>${esc(p.manager)}</strong></td>
               <td>${esc(p.pitcher)}</td>
@@ -4593,26 +4759,11 @@ function renderBracket() {
 
   const b = DATA.bracket;
 
-  function matchupHTML(m, showLabel) {
-    if (!m) return '<div class="matchup"><div class="matchup-team"><span class="team-name">TBD</span></div></div>';
-    const label = showLabel && m.label ? `<div class="matchup-label">${m.label}</div>` : '';
-    const w = m.winner;
-    return `
-      <div class="matchup">
-        ${label}
-        <div class="matchup-team ${w === m.manager1 ? 'winner' : ''}">
-          ${m.seed1 ? `<span class="seed">${m.seed1}</span>` : ''}
-          <span class="team-name">${m.manager1}</span>
-          <span class="team-score">${m.score1 != null ? fmt(m.score1) : '-'}</span>
-        </div>
-        <div class="matchup-team ${w === m.manager2 ? 'winner' : ''}">
-          ${m.seed2 ? `<span class="seed">${m.seed2}</span>` : ''}
-          <span class="team-name">${m.manager2}</span>
-          <span class="team-score">${m.score2 != null ? fmt(m.score2) : '-'}</span>
-        </div>
-      </div>
-    `;
-  }
+  const matchupHTML = (m, showLabel) =>
+    renderMatchupResultCard(m, {
+      showLabel,
+      emptyHtml: '<div class="matchup"><div class="matchup-team"><span class="team-name">TBD</span></div></div>',
+    });
 
   container.innerHTML = `<div class="card">
     <h2>Playoff Bracket</h2>
@@ -4729,6 +4880,21 @@ function renderLeagueSchedule() {
 
     // Round separator
     if (s.round !== prevRound) {
+      // Call out the skipped week between rounds (the All-Star break) with its
+      // own dates so the timeline doesn't silently jump from PP2 to the QF.
+      if (prevRound && dates) {
+        const brk = interRoundBreak(dates[i - 1], dates[i], prevRound, s.round);
+        if (brk) {
+          html += `<div class="tl-item tl-break">
+            <div class="tl-marker"></div>
+            <div class="tl-content">
+              <span class="tl-week tl-break-label">${brk.label}</span>
+              <span class="tl-dates">${fmtDateRangeShort(brk.start, brk.end)}</span>
+              <span class="tl-status">Games not scored</span>
+            </div>
+          </div>`;
+        }
+      }
       const roundLabels = {
         PP1: 'Pool Play 1',
         PP2: 'Pool Play 2',
@@ -5069,7 +5235,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     if (bd.total <= 0) return '<span class="bracket-score">-</span>';
     return `<span class="bracket-score-group">
       <span class="bracket-score">${fmt(bd.total)}</span>
-      <span class="bracket-score-detail">${fmt(bd.bat)}B / ${fmt(bd.pit)}P</span>
+      <span class="bracket-score-detail"><span class="bracket-score-detail-label">B:</span>&nbsp;${fmt(bd.bat)} <span class="bracket-score-detail-label">P:</span>&nbsp;${fmt(bd.pit)}</span>
     </span>`;
   }
 
@@ -5173,6 +5339,51 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   html += '</div></div></div>';
   return html;
+}
+
+// Playoff scoreboard sections render the round's head-to-head matchups — the same pairs as the
+// Playoff Bracket card and the Live tab — instead of a league-wide ranked table. Once the bracket
+// starts only its participants can score, so an "overall" list of every manager is noise. Totals
+// are the same periodScores() rows the table used, so no number moves. `seedRank` breaks ties on
+// a finalized round; while a round is live the highlight is only "currently ahead".
+function renderPlayoffMatchupCards(matchups, scores, seedRank, isFinalized) {
+  const byName = {};
+  scores.forEach((s) => (byName[s.manager] = s));
+  const rowOf = (name) => byName[name] || { batting: 0, pitching: 0, total: 0 };
+
+  const teamHtml = (t, cls) => {
+    const r = rowOf(t.name);
+    return `<div class="matchup-team ${cls}">
+      ${t.seed ? `<span class="seed">${t.seed}</span>` : ''}
+      <span class="team-name">${esc(t.name)}<span class="matchup-team-sub">B ${fmt(r.batting)} &middot; P ${fmt(r.pitching)}</span></span>
+      <span class="team-score">${fmt(r.total)}</span>
+    </div>`;
+  };
+
+  const cards = matchups
+    .map((mu) => {
+      const [t1, t2] = mu.teams;
+      const a = rowOf(t1.name).total;
+      const b = rowOf(t2.name).total;
+      // A finalized round marks the official winner (seed tiebreak included); a live round just
+      // flags whoever currently leads, and nobody while the two are level.
+      const ahead = isFinalized
+        ? roundMatchupWinner(t1.name, a, t2.name, b, seedRank)
+        : a === b
+          ? null
+          : a > b
+            ? t1.name
+            : t2.name;
+      const cls = isFinalized ? 'winner' : 'matchup-leader';
+      return `<div class="matchup">
+        <div class="matchup-label">${esc(mu.label)}</div>
+        ${teamHtml(t1, ahead === t1.name ? cls : '')}
+        ${teamHtml(t2, ahead === t2.name ? cls : '')}
+      </div>`;
+    })
+    .join('');
+
+  return `<div class="matchup-results-grid">${cards}</div>`;
 }
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
@@ -5605,6 +5816,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
       return tbl;
     };
 
+    // Playoff rounds are head-to-head, so each section shows just that round's matchups. The
+    // ranked table is only the fallback for a round whose pairings aren't determined yet (the
+    // prior round isn't finalized), where there is nothing to pair managers up by.
+    const playoffSeedRank = seedRankLookup(seasonData);
+    const finalizedRounds = new Set(seasonData.finalized_rounds || []);
+
     html += `<div class="card scoreboard-card">`;
     [
       { key: 'qf', has: hasQF, label: 'Quarterfinals', round: ['QF'] },
@@ -5613,6 +5830,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     ].forEach(({ key, has, label, round }) => {
       if (!has) return;
       const open = currentSectionId === key;
+      const scores = periodScores(round);
+      const matchups = playoffRoundMatchups(seasonData, round[0]);
+      const body = matchups
+        ? renderPlayoffMatchupCards(matchups, scores, playoffSeedRank, finalizedRounds.has(round[0]))
+        : renderPlayoffTable(scores);
       html += `
         <div class="sb-section${open ? '' : ' sb-section-collapsed'}" id="sb-section-${key}">
           <div class="sb-section-header" onclick="toggleScoreboardSection('${key}')">
@@ -5620,7 +5842,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
             <span class="sb-section-arrow">▾</span>
           </div>
           <div class="sb-period" id="sb-${key}" style="display:${open ? 'block' : 'none'}">
-            ${renderPlayoffTable(periodScores(round))}
+            ${body}
           </div>
         </div>`;
     });
@@ -6738,8 +6960,17 @@ function dayBeforeISO(dateStr) {
 // Back-fill missing add/drop dates in roster_dates from approved swap records.
 // Runs on every commissioner roster render so existing swaps (approved before this
 // feature existed) also get their dates populated automatically.
+//
+// The swap record's own add_date/drop_date are authoritative when present — the server stamps
+// them at submission/approval and they do NOT always straddle swap_date. When the outgoing or
+// incoming player's team has already played today, or the manager scheduled the swap for a
+// future date, the swap takes effect TOMORROW: add_date = swap_date + 1 and drop_date =
+// swap_date. Only pre-add_date/drop_date legacy records fall back to the swap_date-derived
+// window (out keeps credit through the day BEFORE swap_date; in starts ON swap_date), and only
+// those get the self-heal for entries that stored the raw swap_date as the drop date.
 function backfillRosterDatesFromSwaps(seasonData) {
   if (!seasonData || !seasonData.swaps) return false;
+  const isISO = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
   let changed = false;
   for (const swap of seasonData.swaps) {
     if (swap.status !== 'approved' || !swap.week_key || !swap.swap_date || !swap.manager) continue;
@@ -6749,15 +6980,19 @@ function backfillRosterDatesFromSwaps(seasonData) {
       seasonData.roster_dates[swap.manager][swap.week_key] = {};
     }
     const wkDates = seasonData.roster_dates[swap.manager][swap.week_key];
+    const legacyDrop = dayBeforeISO(swap.swap_date);
     if (swap.player_out) {
-      // The outgoing player keeps credit through the day BEFORE the swap takes
-      // effect; the incoming player starts ON swap_date. Storing swap_date as the
-      // drop_date double-counts the swap day for both players, so use the adjacent
-      // date — and self-heal legacy entries that stored the raw swap_date.
-      const effectiveDrop = dayBeforeISO(swap.swap_date);
+      const stamped = isISO(swap.drop_date) ? swap.drop_date : null;
+      const effectiveDrop = stamped || legacyDrop;
       if (!wkDates[swap.player_out]) wkDates[swap.player_out] = {};
       const cur = wkDates[swap.player_out].drop_date;
-      if ((!cur || cur === swap.swap_date) && cur !== effectiveDrop) {
+      // Fill when absent. Overwrite only to undo a known-bad value: the legacy raw-swap_date
+      // entry (no stamped drop date), or a drop date this backfill itself mis-derived as
+      // swap_date - 1 on an effective-tomorrow swap. A commissioner's manual edit to any other
+      // date is left alone.
+      const stale = cur === swap.swap_date && !stamped;
+      const misDerived = !!stamped && cur === legacyDrop && stamped !== legacyDrop;
+      if ((!cur || stale || misDerived) && cur !== effectiveDrop) {
         wkDates[swap.player_out].drop_date = effectiveDrop;
         changed = true;
       }
@@ -6765,7 +7000,7 @@ function backfillRosterDatesFromSwaps(seasonData) {
     if (swap.player_in) {
       if (!wkDates[swap.player_in]) wkDates[swap.player_in] = {};
       if (!wkDates[swap.player_in].add_date) {
-        wkDates[swap.player_in].add_date = swap.swap_date;
+        wkDates[swap.player_in].add_date = isISO(swap.add_date) ? swap.add_date : swap.swap_date;
         changed = true;
       }
     }
@@ -7220,8 +7455,10 @@ function playerDroppedBeforeWeek(seasonData, weekKeyToStart, mgr, player, weekKe
 }
 
 // Map of `${round}|${week}` -> week start date, used by the drop-eligibility checks.
-function buildWeekKeyToStart() {
-  const scheduleDates = getScheduleDates();
+// Defaults to the season the user is viewing; pass a season explicitly when computing for a
+// DIFFERENT season than SELECTED_SEASON (the Hall of Fame does this — it walks every season).
+function buildWeekKeyToStart(seasonData) {
+  const scheduleDates = seasonData ? seasonData.schedule_dates || null : getScheduleDates();
   const map = {};
   SEASON_SCHEDULE.forEach((s, i) => {
     if (scheduleDates && scheduleDates[i]) map[`${s.round}|${s.week}`] = scheduleDates[i].start;
@@ -7390,6 +7627,10 @@ function setupMyRoster() {
     titleEl.textContent = loggedInMgr.name + "'s Roster";
     document.getElementById('roster-content').innerHTML =
       '<div class="card"><p style="color:var(--text-muted);">Your account is currently inactive. Contact the commissioner to be reactivated.</p></div>';
+    // The rail is persistent DOM, so it has to be emptied explicitly on this path —
+    // renderRosterData (its only other writer) never runs for an inactive manager.
+    const inactiveRail = document.getElementById('roster-score-rail');
+    if (inactiveRail) inactiveRail.innerHTML = '';
     return;
   }
 
@@ -7516,6 +7757,335 @@ function buildCustomDropdown(container, options, selectedValue, onChange) {
   };
 }
 
+// ============================================================
+// My Roster — season scoring flow (Pool Play panel + playoff track)
+// ============================================================
+//
+// Replaces the old flat row of stat cards. Pool play is one panel: the combined
+// total as the hero number with PP1 and PP2 nested underneath as its two halves,
+// plus a qualification chip. When the season has reached the bracket, a connector
+// flows down into a QF -> SF -> Finals track, each node carrying that round's
+// score and whether the manager advanced, went out, or is still playing.
+//
+// Round keys that roll up into one flow node. Historical seasons store the finals
+// and 3rd-place weeks under their own round names (F1/F2, 3PWK1/3PWK2) and older
+// imports use the 'PP1P'/'PP2P' variants, so each node sums every alias it owns.
+const FLOW_ROUND_ALIASES = {
+  PP1: ['PP1', 'PP1P'],
+  PP2: ['PP2', 'PP2P'],
+  QF: ['QF'],
+  SF: ['SF'],
+  Finals: ['Finals', 'F1', 'F2'],
+  Third: ['3PWK1', '3PWK2'],
+};
+
+// Sum a set of computeRosterPeriodScores entries. Returns null when none of the
+// keys have data, so callers can distinguish "not played yet" from "scored zero".
+function sumFlowPeriods(periodScores, keys) {
+  let bat = 0,
+    pit = 0,
+    found = false;
+  keys.forEach((k) => {
+    const s = periodScores[k];
+    if (!s) return;
+    found = true;
+    bat += s.batting || 0;
+    pit += s.pitching || 0;
+  });
+  if (!found) return null;
+  bat = Math.round(bat * 100) / 100;
+  pit = Math.round(pit * 100) / 100;
+  return { batting: bat, pitching: pit, total: Math.round((bat + pit) * 100) / 100 };
+}
+
+// Final pass over a built track: promote the last node to its podium state and give
+// every node its result label. Runs after the whole track is known because a
+// semifinal loss reads "Lost" (not "Eliminated") when a 3rd-place game follows it.
+function labelFlowStates(flow) {
+  const rounds = flow.rounds;
+  const last = rounds[rounds.length - 1];
+  const thirdGame = !!last && last.label === '3rd Place Game';
+  if (last && last.key === 'Finals') {
+    if (last.state === 'won') last.state = thirdGame ? 'third' : 'champion';
+    else if (last.state === 'lost' && !thirdGame) last.state = 'runner-up';
+  }
+  const FLAGS = {
+    won: 'Advanced',
+    lost: 'Eliminated',
+    champion: 'Champion',
+    'runner-up': 'Runner-Up',
+    third: '3rd Place',
+    live: 'In progress',
+    upcoming: 'Upcoming',
+    locked: 'TBD',
+    out: 'Out',
+    played: '',
+  };
+  rounds.forEach((r, i) => {
+    if (r.state === 'lost' && thirdGame) r.flag = i === rounds.length - 1 ? '4th Place' : 'Lost';
+    else r.flag = FLAGS[r.state] || '';
+  });
+  return flow;
+}
+
+// Derive the whole flow for one manager.
+//
+// Scoring invariant: every number rendered here still comes from
+// computeRosterPeriodScores (i.e. managerWeekSubtotal over the date-windowed,
+// period-scoped rosters) — the same values the old stat cards showed. The only
+// additional reads are the opponent's round total and who advanced, which come
+// from roundBreakdown/roundMatchupWinner — the Playoff Bracket card's own source —
+// so this panel can never disagree with the bracket about a result. Nothing here
+// writes to seasonData.
+function buildRosterScoreFlow(managerName, seasonData, periodScores) {
+  const pp1 = sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.PP1);
+  const pp2 = sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.PP2);
+  const flow = {
+    pool: sumFlowPeriods(periodScores, [...FLOW_ROUND_ALIASES.PP1, ...FLOW_ROUND_ALIASES.PP2]) || {
+      batting: 0,
+      pitching: 0,
+      total: 0,
+    },
+    pp1,
+    pp2,
+    hasPoolData: !!(pp1 || pp2),
+    status: null,
+    rounds: [],
+    showPlayoffs: false,
+    eliminatedInPool: false,
+  };
+
+  // ---- Historical season: the bracket snapshot is the record ----
+  if (DATA && DATA.team_weekly) {
+    const b = (DATA && DATA.bracket) || null;
+    const seedIdx = b && Array.isArray(b.seeds) ? b.seeds.findIndex((s) => s.manager === managerName) : -1;
+    const seed = seedIdx >= 0 ? seedIdx + 1 : null;
+    if (b) {
+      flow.status =
+        seed != null
+          ? { kind: 'qualified', label: `Qualified · #${seed} seed` }
+          : { kind: 'missed', label: 'Missed the playoffs' };
+      flow.eliminatedInPool = seed == null;
+      flow.showPlayoffs = seed != null;
+    }
+    if (!b || seed == null) return flow;
+
+    const inMatch = (m) => !!m && (m.manager1 === managerName || m.manager2 === managerName);
+    const mkHist = (key, label, m, score) => {
+      if (!inMatch(m)) return { key, label, score, state: score ? 'played' : 'out' };
+      const meFirst = m.manager1 === managerName;
+      return {
+        key,
+        label,
+        score,
+        state: m.winner === managerName ? 'won' : 'lost',
+        opponent: meFirst ? m.manager2 : m.manager1,
+        opponentScore: meFirst ? m.score2 : m.score1,
+      };
+    };
+    const find = (list) => (list || []).find(inMatch) || null;
+
+    flow.rounds.push(mkHist('QF', 'Quarterfinals', find(b.qf_matchups), sumFlowPeriods(periodScores, ['QF'])));
+    flow.rounds.push(mkHist('SF', 'Semifinals', find(b.sf_matchups), sumFlowPeriods(periodScores, ['SF'])));
+
+    // The final slot is whichever game they actually played — the championship or,
+    // for a semifinal loser, the 3rd-place game (its own weeks in team_weekly).
+    flow.rounds.push(
+      inMatch(b.consolation)
+        ? mkHist('Finals', '3rd Place Game', b.consolation, sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.Third))
+        : mkHist('Finals', 'Finals', b.finals, sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES.Finals))
+    );
+    return labelFlowStates(flow);
+  }
+
+  if (!seasonData || seasonData.status === 'completed') return flow;
+
+  // ---- Active season ----
+  const finalized = new Set(seasonData.finalized_rounds || []);
+  const ppFinal = finalized.has('PP');
+  const seeding = getSeeding(seasonData);
+  const seedEntry = seeding ? seeding.seeds.find((s) => s.manager === managerName) : null;
+  const seed = seedEntry ? seedEntry.seed : null;
+  const inField = !!(seeding && seeding.qualifierNames.includes(managerName));
+
+  if (seeding && flow.hasPoolData) {
+    const wonPP1 = !!(seeding.pp1Leaders && seeding.pp1Leaders.has(managerName));
+    const wonPP2 = !!(seeding.pp2Leaders && seeding.pp2Leaders.has(managerName));
+    const isWildcard = !!(seeding.wildcardSet && seeding.wildcardSet.has(managerName));
+    const note =
+      wonPP1 && wonPP2
+        ? 'Won both pool periods'
+        : wonPP1
+          ? 'Won Pool Play 1'
+          : wonPP2
+            ? 'Won Pool Play 2'
+            : isWildcard
+              ? 'Wild card'
+              : '';
+    if (ppFinal) {
+      flow.status = inField
+        ? { kind: 'qualified', label: `Qualified · #${seed} seed`, note }
+        : { kind: 'missed', label: 'Missed the playoffs' };
+    } else {
+      flow.status = inField
+        ? { kind: 'projected', label: `Projected · #${seed} seed`, note }
+        : { kind: 'projected-out', label: 'Outside the playoff field' };
+    }
+  }
+  flow.eliminatedInPool = ppFinal && !!seeding && !inField;
+
+  const rosterLookup = buildRosterLookup(seasonData);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const seedRank = seedRankLookup(seasonData);
+
+  // The manager's matchup in a playoff round, or null when the round's participants
+  // aren't determined yet (prior round not finalized) or they aren't in it.
+  const myMatchup = (round) => {
+    const matchups = playoffRoundMatchups(seasonData, round);
+    if (!matchups) return null;
+    for (const m of matchups) {
+      const i = m.teams.findIndex((t) => t.name === managerName);
+      if (i >= 0) return { label: m.label, opponent: m.teams[1 - i].name };
+    }
+    return null;
+  };
+
+  let knockedOut = flow.eliminatedInPool;
+  [
+    { key: 'QF', label: 'Quarterfinals' },
+    { key: 'SF', label: 'Semifinals' },
+    { key: 'Finals', label: 'Finals' },
+  ].forEach((r) => {
+    const score = sumFlowPeriods(periodScores, FLOW_ROUND_ALIASES[r.key]);
+    const mine = myMatchup(r.key);
+    if (!mine) {
+      flow.rounds.push({ key: r.key, label: r.label, score, state: knockedOut ? 'out' : score ? 'played' : 'locked' });
+      return;
+    }
+    const isThird = mine.label === '3rd Place';
+    const label = r.key === 'Finals' && isThird ? '3rd Place Game' : r.label;
+    const opponentScore = roundBreakdown(seasonData, mine.opponent, r.key, rosterLookup, weekKeyToStart).total;
+    if (!finalized.has(r.key)) {
+      flow.rounds.push({
+        key: r.key,
+        label,
+        score,
+        state: score && score.total ? 'live' : 'upcoming',
+        opponent: mine.opponent,
+        opponentScore,
+      });
+      return;
+    }
+    const myTotal = roundBreakdown(seasonData, managerName, r.key, rosterLookup, weekKeyToStart).total;
+    const won = roundMatchupWinner(managerName, myTotal, mine.opponent, opponentScore, seedRank) === managerName;
+    if (!won) knockedOut = true;
+    flow.rounds.push({
+      key: r.key,
+      label,
+      score,
+      state: won ? 'won' : 'lost',
+      opponent: mine.opponent,
+      opponentScore,
+    });
+  });
+
+  flow.showPlayoffs = !flow.eliminatedInPool && (ppFinal || flow.rounds.some((r) => r.score));
+  return labelFlowStates(flow);
+}
+
+// Render the flow built above into the roster page's right-hand score rail. Pure
+// presentation — no data derivation here.
+//
+// The rail is a narrow vertical column (see .roster-layout / .score-rail in styles.css),
+// so everything is a one-or-two-line row rather than a wide card: pool play stacks its
+// total over PP1/PP2, and the playoff rounds stack beneath it as compact score rows.
+// Once the bracket is underway pool play is settled history, so it renders in a compact
+// mode (smaller total, no Bat/Pit on the PP1/PP2 rows) and stops out-shouting the round
+// that is actually being played.
+function renderRosterScoreFlow(flow) {
+  if (!flow.hasPoolData && !flow.rounds.some((r) => r.score)) return '';
+
+  const split = (s) => (s ? `Bat ${fmt(s.batting)}<span class="sf-sep">·</span>Pit ${fmt(s.pitching)}` : '');
+
+  const CHIP_TEXT = {
+    qualified: '✓',
+    projected: '◎',
+    missed: '✕',
+    'projected-out': '◌',
+  };
+  const chip = flow.status
+    ? `<span class="sf-chip sf-chip-${flow.status.kind}">
+         <span class="sf-chip-mark" aria-hidden="true">${CHIP_TEXT[flow.status.kind] || ''}</span>
+         <span class="sf-chip-text">${esc(flow.status.label)}${
+           flow.status.note ? `<span class="sf-chip-note">${esc(flow.status.note)}</span>` : ''
+         }</span>
+       </span>`
+    : '';
+
+  // Pool play recedes once it can no longer change: the bracket has scores, or seeding
+  // is final (qualified/missed) — as opposed to a still-projected seed mid-pool-play.
+  const settledStatus = flow.status && (flow.status.kind === 'qualified' || flow.status.kind === 'missed');
+  const poolCompact = !!(settledStatus || flow.rounds.some((r) => r.score));
+
+  const sub = (label, s) => `<div class="sf-sub${s ? '' : ' sf-sub-empty'}">
+      <span class="sf-sub-label">${label}</span>
+      <span class="sf-sub-value">${s ? fmt(s.total) : '—'}</span>
+      <span class="sf-sub-split">${split(s)}</span>
+    </div>`;
+
+  let html = '<div class="score-rail">';
+
+  html += `<div class="sf-pool${poolCompact ? ' sf-pool-compact' : ''}">
+    <div class="sf-pool-head">
+      <span class="sf-eyebrow">Pool Play</span>
+      ${chip}
+    </div>
+    <div class="sf-hero">
+      <span class="sf-hero-value">${fmt(flow.pool.total)}</span>
+      <span class="sf-hero-split">${split(flow.pool)}</span>
+    </div>
+    <div class="sf-subs">
+      ${sub('Pool Play 1', flow.pp1)}
+      ${sub('Pool Play 2', flow.pp2)}
+    </div>
+  </div>`;
+
+  if (flow.eliminatedInPool) {
+    html += `<div class="sf-season-over">Season Over</div>`;
+    return html + '</div>';
+  }
+
+  if (!flow.showPlayoffs) return html + '</div>';
+
+  const WON_STATES = new Set(['won', 'champion', 'third']);
+  html += '<div class="sf-rounds"><div class="sf-rounds-label">Playoffs</div><div class="sf-rounds-list">';
+  flow.rounds.forEach((r) => {
+    let vs = '';
+    if (r.opponent) {
+      const verb = WON_STATES.has(r.state) ? 'def.' : r.state === 'lost' || r.state === 'runner-up' ? 'lost to' : 'vs';
+      vs = `<div class="sf-round-vs">${verb} <span class="sf-round-opp">${esc(r.opponent)}</span>${
+        r.opponentScore != null ? ` <span class="sf-round-oppscore">${fmt(r.opponentScore)}</span>` : ''
+      }</div>`;
+    }
+    // A round with no score yet drops the Bat/Pit line entirely so the placeholder
+    // row stays a single line instead of reserving space for a score it doesn't have.
+    html += `<div class="sf-round sf-state-${r.state}${r.score ? '' : ' sf-round-empty'}">
+      <div class="sf-round-head">
+        <span class="sf-eyebrow">${esc(r.label)}</span>
+        ${r.flag ? `<span class="sf-flag">${esc(r.flag)}</span>` : ''}
+      </div>
+      <div class="sf-round-body">
+        <span class="sf-round-value">${r.score ? fmt(r.score.total) : '—'}</span>
+        ${r.score ? `<span class="sf-round-split">${split(r.score)}</span>` : ''}
+      </div>
+      ${vs}
+    </div>`;
+  });
+  html += '</div></div>';
+
+  return html + '</div>';
+}
+
 function renderRosterData(managerName, isCommissioner) {
   const container = document.getElementById('roster-content');
   const seasons = getSeasons();
@@ -7548,12 +8118,74 @@ function renderRosterData(managerName, isCommissioner) {
             : roast.round === 'Finals'
               ? 'Finals'
               : roast.round;
-    html += `<div class="roast-banner">
+    // page_context is the longer, page-only follow-up (Pool Play standings + player
+    // highlights) added alongside the punchy joke that also goes to Slack — Slack keeps
+    // just roast.text since the combined post already stacks one roast per manager.
+    // Paragraphs are joined with a blank line server-side; render each as its own <p>.
+    // Blank lines separate sections; single newlines separate the lines within one. A section
+    // may open with a `[[Section label]]` marker (buildRoastPageContext emits one per round
+    // the manager played — Pool Play, Quarterfinals…); pull it out and render it as a heading
+    // chip, then hang that round's tables (scoring days, top performers, bottom performers)
+    // underneath it from roast.page_tables, keyed by the same label.
+    //
+    // Sections without a marker, and roasts stored before page_tables existed, render exactly
+    // as they always did — the tables are additive, never required.
+    const asLines = (s) => esc(s).replace(/\n/g, '<br>');
+    const roastTables = roast.page_tables && typeof roast.page_tables === 'object' ? roast.page_tables : {};
+    const tableHtml = (t) => {
+      // A column with an empty header still gets a <th> so the header row and the body stay
+      // aligned; it just renders blank (used for the H/P position tag).
+      const head = t.columns.map((c) => `<th>${esc(c)}</th>`).join('');
+      const body = t.rows
+        .map(
+          (r) =>
+            `<tr class="${r.low ? 'roast-table-low' : ''}">${r.cells
+              .map((c, i) => `<td${i === 0 ? ' class="roast-table-name"' : ''}>${esc(String(c ?? ''))}</td>`)
+              .join('')}</tr>`
+        )
+        .join('');
+      return `<div class="roast-table"><div class="roast-table-title">${esc(t.title)}</div><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    };
+    const tablesFor = (label) => {
+      const ts = roastTables[label];
+      return Array.isArray(ts) && ts.length ? `<div class="roast-tables">${ts.map(tableHtml).join('')}</div>` : '';
+    };
+    const contextHtml = roast.page_context
+      ? `<div class="roast-context">${roast.page_context
+          .split('\n\n')
+          .map((p) => {
+            const m = p.match(/^\[\[([^\]]+)\]\]\s*([\s\S]*)$/);
+            return m
+              ? `<p><span class="roast-context-label">${esc(m[1])}</span>${asLines(m[2])}</p>${tablesFor(m[1])}`
+              : `<p>${asLines(p)}</p>`;
+          })
+          .join('')}</div>`
+      : '';
+    // outcome distinguishes the standard "you're out" roast from the Finals-round podium
+    // roasts (champion, runner-up, 3rd place — the three next-year pool captains) — those
+    // aren't a Hall of Shame entry, they get their own icon/label/tint (see
+    // .roast-banner.roast-champion/.roast-runner-up/.roast-third in styles.css).
+    const outcome = roast.outcome || 'eliminated';
+    const PODIUM_BANNER = {
+      champion: {
+        cls: 'roast-champion',
+        flame: '🏆',
+        label: 'CHAMPION &mdash; Whit Merrifield Memorial Cup Winner (sort of a big deal)',
+      },
+      runner_up: { cls: 'roast-runner-up', flame: '🥈', label: 'RUNNER-UP &mdash; So Close, Yet So Far' },
+      third: { cls: 'roast-third', flame: '🥉', label: '3RD PLACE &mdash; A Real Accomplishment*' },
+    };
+    const podium = PODIUM_BANNER[outcome];
+    const bannerClass = podium ? `roast-banner ${podium.cls}` : 'roast-banner';
+    const flame = podium ? podium.flame : '🔥';
+    const label = podium ? podium.label : `HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}`;
+    html += `<div class="${bannerClass}">
       <div class="roast-header">
-        <span class="roast-flame">🔥</span>
-        <span class="roast-label">HALL OF SHAME &mdash; Eliminated in ${esc(roundLabel)}</span>
+        <span class="roast-flame">${flame}</span>
+        <span class="roast-label">${label}</span>
       </div>
       <div class="roast-text">${esc(roast.text)}</div>
+      ${contextHtml}
     </div>`;
   }
 
@@ -7569,55 +8201,13 @@ function renderRosterData(managerName, isCommissioner) {
     }
   }
 
-  // ---- Scoring Summary Cards ----
-  // Order: Pool Play Total, Pool Play 1, Pool Play 2, then any playoff rounds with data.
-  html += '<div class="roster-score-grid">';
-
-  const pp1 = periodScores['PP1'] || { batting: 0, pitching: 0, total: 0 };
-  const pp2 = periodScores['PP2'] || { batting: 0, pitching: 0, total: 0 };
-  const ppTotalBat = Math.round((pp1.batting + pp2.batting) * 100) / 100;
-  const ppTotalPit = Math.round((pp1.pitching + pp2.pitching) * 100) / 100;
-  const ppTotal = Math.round((ppTotalBat + ppTotalPit) * 100) / 100;
-  const hasPPData = ppTotal > 0 || periodScores['PP1'] || periodScores['PP2'];
-
-  if (hasPPData) {
-    html += `<div class="roster-score-card roster-score-total">
-      <div class="roster-score-label">Pool Play Total</div>
-      <div class="roster-score-value">${fmt(ppTotal)}</div>
-      <div class="roster-score-detail">Bat: ${fmt(ppTotalBat)} | Pit: ${fmt(ppTotalPit)}</div>
-    </div>`;
-  }
-
-  [
-    { key: 'PP1', label: 'Pool Play 1' },
-    { key: 'PP2', label: 'Pool Play 2' },
-  ].forEach((p) => {
-    const s = periodScores[p.key];
-    if (s) {
-      html += `<div class="roster-score-card">
-        <div class="roster-score-label">${p.label}</div>
-        <div class="roster-score-value">${fmt(s.total)}</div>
-        <div class="roster-score-detail">Bat: ${fmt(s.batting)} | Pit: ${fmt(s.pitching)}</div>
-      </div>`;
-    }
-  });
-
-  [
-    { key: 'QF', label: 'Quarterfinals' },
-    { key: 'SF', label: 'Semifinals' },
-    { key: 'Finals', label: 'Finals' },
-  ].forEach((p) => {
-    const s = periodScores[p.key];
-    if (s) {
-      html += `<div class="roster-score-card">
-        <div class="roster-score-label">${p.label}</div>
-        <div class="roster-score-value">${fmt(s.total)}</div>
-        <div class="roster-score-detail">Bat: ${fmt(s.batting)} | Pit: ${fmt(s.pitching)}</div>
-      </div>`;
-    }
-  });
-
-  html += '</div>';
+  // ---- Season Scoring Rail ----
+  // The per-round score blocks live in the right-hand rail (#roster-score-rail, under the
+  // manager picker), not inline above the tabs. The rail is a persistent node — it also
+  // holds the commissioner's custom dropdown, whose state must survive a re-render — so it
+  // is written directly here rather than through `container`'s innerHTML below.
+  const rail = document.getElementById('roster-score-rail');
+  if (rail) rail.innerHTML = renderRosterScoreFlow(buildRosterScoreFlow(managerName, seasonData, periodScores));
 
   // Preserve the active tab when re-rendering
   const activeTabBtn = document.querySelector('.roster-tab.active');
@@ -7650,6 +8240,9 @@ function renderRosterData(managerName, isCommissioner) {
   html += `</div>`;
 
   container.innerHTML = html;
+  // The Swaps tab's "All Swaps" list is the shared swap log scoped to this manager — it renders
+  // into its container after the innerHTML above, and keeps its own expand/filter state.
+  renderSwapLog(ROSTER_SWAP_LOG_ID, false, managerName);
   // Initialize type-to-search inputs after DOM is rendered
   setupPlayerSearchInputs();
   setupSwapPlayerSearch();
@@ -7741,6 +8334,10 @@ function computeCumulativeRankings(batCumulative, pitCumulative) {
 function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   const isActive = !!(seasonData && seasonData.status === 'active');
   const isHistorical = !!(DATA && DATA.batting_weekly);
+  // Every roster view reads its date windows AS OF today, so a scheduled (future-dated) swap
+  // never reads as already applied: the outgoing player stays on the roster — and keeps
+  // scoring — until their drop date, and the incoming player shows as scheduled until theirs.
+  const todayISO = isoDateET(new Date());
 
   const batting = isHistorical ? DATA.batting_weekly || [] : seasonData.weekly_batting || [];
   const pitching = isHistorical ? DATA.pitching_weekly || [] : seasonData.weekly_pitching || [];
@@ -7816,7 +8413,28 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
   // First week's start date is the season boundary: swaps recorded before this date are pre-season
   const seasonStartDate = scheduleDates && scheduleDates[0] ? scheduleDates[0].start : null;
 
-  // Get inline date tag for a player in a given week
+  // Which list a player belongs in. Needed to put a player the (derived) roster arrays dropped
+  // early — a scheduled swap's outgoing player — back into the right table. Mirrors the pool-based
+  // classification in rebuildRosterArraysFromDates, falling back to the arrays and the stat rows.
+  const batPool = new Set(seasonData ? seasonData.batters_pool || [] : []);
+  const pitPool = new Set(seasonData ? seasonData.pitchers_pool || [] : []);
+  function poolTypeOf(player) {
+    const inBat = batPool.has(player);
+    const inPit = pitPool.has(player);
+    if (inBat && !inPit) return 'batters';
+    if (inPit && !inBat) return 'pitchers';
+    const mgrRoster = (isActive && seasonData.rosters && seasonData.rosters[managerName]) || {};
+    for (const wr of Object.values(mgrRoster)) {
+      if ((wr.batters || []).includes(player)) return 'batters';
+      if ((wr.pitchers || []).includes(player)) return 'pitchers';
+    }
+    if (batting.some((b) => b.batter === player)) return 'batters';
+    if (pitching.some((p) => p.pitcher === player)) return 'pitchers';
+    return null;
+  }
+
+  // Get inline date tag for a player in a given week. A date still in the future belongs to a
+  // SCHEDULED swap, so it reads in the future tense ("Drops Jul 30") — the move has not happened.
   function playerDateTag(player, weekKey, weekIdx) {
     if (!scheduleDates || !scheduleDates[weekIdx]) return '';
     const weekDates = scheduleDates[weekIdx];
@@ -7830,28 +8448,34 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       seasonData.roster_dates[managerName][weekKey][player];
 
     const tags = [];
+    let scheduled = false;
+    const tagFor = (verbPast, verbFuture, date) => {
+      if (date > todayISO) scheduled = true;
+      return `${date > todayISO ? verbFuture : verbPast} ${fmtShortDate(date)}`;
+    };
     if (rd && rd.add_date) {
-      tags.push(`Added ${fmtShortDate(rd.add_date)}`);
+      tags.push(tagFor('Added', 'Adds', rd.add_date));
     } else {
       const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
-      if (addSwap && addSwap.swap_date) tags.push(`Added ${fmtShortDate(addSwap.swap_date)}`);
+      if (addSwap && addSwap.swap_date) tags.push(tagFor('Added', 'Adds', addSwap.swap_date));
     }
     if (rd && rd.drop_date) {
-      tags.push(`Dropped ${fmtShortDate(rd.drop_date)}`);
+      tags.push(tagFor('Dropped', 'Drops', rd.drop_date));
     } else {
       const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
-      if (dropSwap && dropSwap.swap_date) tags.push(`Dropped ${fmtShortDate(dropSwap.swap_date)}`);
+      if (dropSwap && dropSwap.swap_date) tags.push(tagFor('Dropped', 'Drops', dropSwap.swap_date));
     }
     if (tags.length === 0) {
       return ` <span class="roster-date-tag">${fmtDateRangeShort(weekDates.start, weekDates.end)}</span>`;
     }
-    return ` <span class="roster-date-tag roster-date-swap">${tags.join(' · ')}</span>`;
+    const cls = `roster-date-tag roster-date-swap${scheduled ? ' roster-date-scheduled' : ''}`;
+    return ` <span class="${cls}">${tags.join(' · ')}</span>`;
   }
 
   // For a dropped player, show the date range they were rostered (e.g. "5/4–5/6") in the
   // same grey-box style as the "not rostered" tag.  Falls back to "not rostered" only when
   // no date information is available at all.
-  function notRosteredTag(player, poolType) {
+  function notRosteredTag(player, poolType, round) {
     if (!isActive || !seasonData.rosters || !seasonData.rosters[managerName]) {
       return ' <span class="wrs-hist-tag">not rostered</span>';
     }
@@ -7882,18 +8506,28 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         }
       }
       if (openAdd !== null) spans.push([openAdd, null]);
-      if (spans.length > 0) {
-        const label = spans
+      // A new submission period starts fresh from its submission — a player carried forward
+      // from an earlier period shouldn't display their out-of-period add date, and a span that
+      // closed entirely before this period began doesn't belong here at all. Clamp/filter to
+      // the period this round belongs to (mirrors periodStart scoping used for carry-forward
+      // eligibility elsewhere in this file).
+      const periodStart = periodStartForSeason(seasonData, round);
+      const scopedSpans = periodStart
+        ? spans.filter(([, d]) => !d || d >= periodStart).map(([a, d]) => [a < periodStart ? periodStart : a, d])
+        : spans;
+      if (scopedSpans.length > 0) {
+        const label = scopedSpans
           .map(([a, d]) => (d ? `${fmtSlashDate(a)}–${fmtSlashDate(d)}` : `${fmtSlashDate(a)}–`))
           .join(', ');
         return ` <span class="wrs-hist-tag">${label}</span>`;
       }
     }
 
-    // Fall back to week-schedule-based date range
+    // Fall back to week-schedule-based date range, scoped to this round's period.
     const mgrRoster = seasonData.rosters[managerName];
     const rosteredWeekIndices = [];
     SEASON_SCHEDULE.forEach((s, i) => {
+      if (round && s.round !== round) return;
       const wk = `${s.round}|${s.week}`;
       const wr = mgrRoster[wk];
       const arr = poolType ? wr && (wr[poolType] || []) : wr && (wr.batters || []).concat(wr.pitchers || []);
@@ -7946,15 +8580,29 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     }
   }
 
-  let html = '';
+  // Determine the "current" week from today's date + the season schedule (falling back to the
+  // latest week that has data). The open section then tracks the real calendar week rather than
+  // just the last week we happen to have stats for.
+  let currentWeekKey = null;
+  if (isActive) {
+    const cur = getCurrentScheduleRound(seasonData);
+    if (cur && cur.weekKey && weeksToShow.includes(cur.weekKey)) currentWeekKey = cur.weekKey;
+  }
+  if (!currentWeekKey) currentWeekKey = latestDataWeek;
 
-  // Show weeks in chronological order, latest week with data expanded
+  // Build each week's section HTML into a map keyed by weekKey; the grouped/nested layout is
+  // assembled from these below (Pool Play → PP1/PP2 → week; playoff weeks flat).
+  const weekHtml = {};
+  const weekTotals = {};
+
+  // Show weeks in chronological order, the current week expanded
   weeksToShow.forEach((weekKey) => {
+    let html = '';
     const [round, week] = weekKey.split('|');
     const schedEntry = SEASON_SCHEDULE.find((s) => s.round === round && s.week === week);
     const label = schedEntry ? schedEntry.label : `${round} - ${week}`;
     const weekIdx = SEASON_SCHEDULE.findIndex((s) => s.round === round && s.week === week);
-    const isCurrent = weekKey === latestDataWeek;
+    const isCurrent = weekKey === currentWeekKey;
 
     // Get roster for this week
     let weekRoster = isActive ? getWeekRoster(seasonData, managerName, round, week) : { batters: [], pitchers: [] };
@@ -8000,11 +8648,45 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
         pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
       };
     }
+    // A SCHEDULED swap is recorded (and applied to the derived roster arrays) the moment it is
+    // submitted, even though its dates are in the future. Re-derive both ends from the date
+    // windows AS OF today so the swap doesn't take effect early in this view:
+    //   pendingDrop — outgoing player, still rostered and still scoring until their drop date.
+    //                 applySwapToSeason already pulled them out of the week's array, so put them
+    //                 back; roster_dates is the source of truth, the arrays are a derived cache.
+    //   pendingAdd  — incoming player, already in the array but not on the roster until their
+    //                 add date. Listed (so the move is visible) but not counted as active.
+    const periodStartThisRound = periodStartForSeason(seasonData, round);
+    const statusAsOfToday = (player) => {
+      const entries = [];
+      for (const wkDates of Object.values((isActive && (seasonData.roster_dates || {})[managerName]) || {})) {
+        if (wkDates[player]) entries.push(wkDates[player]);
+      }
+      return rosterStatusAsOf(entries, { periodStart: periodStartThisRound, asOf: todayISO });
+    };
+    const pendingDrop = new Set();
+    const pendingAdd = new Set();
+    if (isActive) {
+      for (const [p, d] of Object.entries(weekRosterDates)) {
+        if (d.drop_date && d.drop_date > todayISO && statusAsOfToday(p) === 'active') pendingDrop.add(p);
+        if (d.add_date && d.add_date > todayISO && statusAsOfToday(p) === 'scheduled') pendingAdd.add(p);
+      }
+    }
+    if (pendingDrop.size > 0) {
+      const restore = (listKey) =>
+        [...pendingDrop].filter((p) => poolTypeOf(p) === listKey && !weekRoster[listKey].includes(p));
+      weekRoster = {
+        batters: weekRoster.batters.concat(restore('batters')),
+        pitchers: weekRoster.pitchers.concat(restore('pitchers')),
+      };
+    }
+
     // Players dropped during this week (drop_date present in current weekRosterDates) are treated
-    // as historical/greyed-out, the same as players dropped in a previous week.
+    // as historical/greyed-out, the same as players dropped in a previous week — unless the drop
+    // is still scheduled, in which case they are simply on the roster.
     const droppedThisWeek = new Set(
       Object.entries(weekRosterDates)
-        .filter(([, d]) => d.drop_date)
+        .filter(([p, d]) => d.drop_date && !pendingDrop.has(p))
         .map(([p]) => p)
     );
 
@@ -8086,18 +8768,42 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       const row = rows.find((r) => r[key] === name);
       return row ? row.weekly_score || 0 : 0;
     };
-    const droppedBatters = [...historicalBatters].filter(
-      (p) =>
-        (!weekRoster.batters.includes(p) || droppedThisWeek.has(p)) &&
-        allWeekBatting.some((b) => b.batter === p) &&
-        playerWeekScore(allWeekBatting, 'batter', p) > 0
-    );
-    const droppedPitchers = [...historicalPitchers].filter(
-      (p) =>
-        (!weekRoster.pitchers.includes(p) || droppedThisWeek.has(p)) &&
-        allWeekPitching.some((pt) => pt.pitcher === p) &&
-        playerWeekScore(allWeekPitching, 'pitcher', p) > 0
-    );
+
+    // …but a player who was genuinely on the roster for part of this week belongs in the week's
+    // table whether or not those days produced anything. A swap that lands mid-week leaves the
+    // outgoing player rostered for the days before it; the points gate above dropped them from
+    // the view entirely when their in-window games were blank — or when the sync never wrote a
+    // weekly row for them at all — so a swapped-out player vanished from the very week they were
+    // swapped out of, even though the scoreboard still listed them. Read the window from this
+    // week's roster_dates entry (the source of truth), falling back to the approved swap that
+    // moved them, and keep the player when that window overlaps the week at all.
+    const weekEnd = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+    function rosteredDuringWeek(player) {
+      const rd = weekRosterDates[player];
+      const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
+      const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
+      if (!rd && !addSwap && !dropSwap) return false;
+      const addDate = (rd && rd.add_date) || (addSwap && addSwap.swap_date) || null;
+      const dropDate = (rd && rd.drop_date) || (dropSwap && dropSwap.swap_date) || null;
+      // A drop recorded before the season started is a pre-season orphan, not a window.
+      if (seasonStartDate && dropDate && dropDate < seasonStartDate) return false;
+      if (addDate && weekEnd && addDate > weekEnd) return false;
+      if (dropDate && weekStart && dropDate < weekStart) return false;
+      return true;
+    }
+    // The eligibility sets span both lists (roster_dates keys are type-agnostic), so a
+    // statless player is only placed by their own pool type.
+    const droppedBatters = [...historicalBatters].filter((p) => {
+      if (weekRoster.batters.includes(p) && !droppedThisWeek.has(p)) return false;
+      const scored = allWeekBatting.some((b) => b.batter === p) && playerWeekScore(allWeekBatting, 'batter', p) > 0;
+      return scored || (poolTypeOf(p) === 'batters' && rosteredDuringWeek(p));
+    });
+    const droppedPitchers = [...historicalPitchers].filter((p) => {
+      if (weekRoster.pitchers.includes(p) && !droppedThisWeek.has(p)) return false;
+      const scored =
+        allWeekPitching.some((pt) => pt.pitcher === p) && playerWeekScore(allWeekPitching, 'pitcher', p) > 0;
+      return scored || (poolTypeOf(p) === 'pitchers' && rosteredDuringWeek(p));
+    });
 
     // Compute weekly rankings for this week
     const weekRanks = computeWeeklyRankings(
@@ -8208,7 +8914,8 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     };
 
     // ---- Batters for this week ----
-    const activeBatCount = weekRoster.batters.filter((p) => !droppedThisWeek.has(p)).length;
+    // A scheduled add is listed but not yet counted — the roster is still the pre-swap one.
+    const activeBatCount = weekRoster.batters.filter((p) => !droppedThisWeek.has(p) && !pendingAdd.has(p)).length;
     html += `<div class="wrs-group-label">BATTERS (${activeBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
     // Build batter stat lookup for this week
@@ -8241,13 +8948,16 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       allBattersThisWeek.forEach((p) => (batScoreByPlayer[p] = (batStatMap[p] || {}).weekly_score || 0));
       orderWithSwapChains([...allBattersThisWeek], batScoreByPlayer, approvedSwaps, managerName).forEach((batter) => {
         const s = batStatMap[batter] || {};
-        const onRoster = weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
+        const isScheduled = pendingAdd.has(batter);
+        const onRoster = !isScheduled && weekRoster.batters.includes(batter) && !droppedThisWeek.has(batter);
         const wkRank = weekRanks.batRanks[batter];
         const { batCum, periodRankings: pRankings } = getRoundData(round, week);
         const cumScore = batCum[batter] || 0;
         const cumRank = pRankings.batRanks[batter];
-        html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(batter, seasonData)}${onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters')}</td>`;
+        html += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        const batTag =
+          isScheduled || onRoster ? playerDateTag(batter, weekKey, weekIdx) : notRosteredTag(batter, 'batters', round);
+        html += `<td>${displayPlayer(batter, seasonData)}${batTag}</td>`;
         const ds = getEffBatStats(batter) || s;
         html += batStatCell(s, 'abs', ds.abs || 0);
         html += batStatCell(s, '1b', ds['1b'] || 0);
@@ -8281,7 +8991,7 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     }
 
     // ---- Pitchers for this week ----
-    const activePitCount = weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p)).length;
+    const activePitCount = weekRoster.pitchers.filter((p) => !droppedThisWeek.has(p) && !pendingAdd.has(p)).length;
     html += `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${activePitCount}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
     const pitStatMap = {};
@@ -8308,13 +9018,18 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
       allPitchersThisWeek.forEach((p) => (pitScoreByPlayer[p] = (pitStatMap[p] || {}).weekly_score || 0));
       orderWithSwapChains([...allPitchersThisWeek], pitScoreByPlayer, approvedSwaps, managerName).forEach((pitcher) => {
         const s = pitStatMap[pitcher] || {};
-        const onRoster = weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
+        const isScheduled = pendingAdd.has(pitcher);
+        const onRoster = !isScheduled && weekRoster.pitchers.includes(pitcher) && !droppedThisWeek.has(pitcher);
         const wkRank = weekRanks.pitRanks[pitcher];
         const { pitCum, periodRankings: pRankingsPit } = getRoundData(round, week);
         const cumScore = pitCum[pitcher] || 0;
         const cumRank = pRankingsPit.pitRanks[pitcher];
-        html += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        html += `<td>${displayPlayer(pitcher, seasonData)}${onRoster ? playerDateTag(pitcher, weekKey, weekIdx) : notRosteredTag(pitcher, 'pitchers')}</td>`;
+        html += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        const pitTag =
+          isScheduled || onRoster
+            ? playerDateTag(pitcher, weekKey, weekIdx)
+            : notRosteredTag(pitcher, 'pitchers', round);
+        html += `<td>${displayPlayer(pitcher, seasonData)}${pitTag}</td>`;
         const ps = getEffPitStats(pitcher) || s;
         html += pitStatCell(s, 'gs', ps.gs || 0);
         html += pitStatCell(s, 'w', ps.w || 0);
@@ -8350,9 +9065,80 @@ function buildPerWeekRoster(managerName, isCommissioner, seasonData) {
     </div>`;
 
     html += '</div></div>'; // .wrs-body, .wrs-section
+
+    weekHtml[weekKey] = html;
+    weekTotals[weekKey] = weekTotal;
   });
 
-  return html;
+  // ---- Assemble the grouped / nested layout ----
+  // Pool Play nests two levels deep: Pool Play → Pool Play 1 / Pool Play 2 → each week.
+  // Playoff rounds (QF/SF/Finals) render their weeks flat. Everything starts collapsed except
+  // the branch that contains the current week (the current week's body is already open inside
+  // weekHtml; here we open its ancestor groups so it's reachable).
+  const pp1Weeks = weeksToShow.filter((wk) => wk.startsWith('PP1|'));
+  const pp2Weeks = weeksToShow.filter((wk) => wk.startsWith('PP2|'));
+  const playoffWeeks = weeksToShow.filter((wk) => !wk.startsWith('PP1|') && !wk.startsWith('PP2|'));
+
+  const sumWeeks = (wks) => Math.round(wks.reduce((s, wk) => s + (weekTotals[wk] || 0), 0) * 100) / 100;
+
+  // A collapsible group wrapper. Reuses the .wrs-header/.wrs-body markup (and toggleWeeklyScoring)
+  // so the arrow, open state, and styling match the week sections.
+  function wrsGroup(id, label, pts, open, extraClass, innerHtml) {
+    const openCls = open ? ' wrs-open' : '';
+    const disp = open ? 'block' : 'none';
+    const ptsHtml = pts > 0 ? `${fmt(pts)} PTS` : '';
+    return `<div class="wrs-section wrs-group ${extraClass}">
+      <div class="wrs-header wrs-group-header${openCls}" onclick="toggleWeeklyScoring('${id}')">
+        <span class="wrs-header-label">${label}</span>
+        <span class="wrs-header-pts">${ptsHtml}</span>
+      </div>
+      <div class="wrs-body" id="wrs-body-${id}" style="display:${disp};">${innerHtml}</div>
+    </div>`;
+  }
+
+  let out = '';
+
+  const poolWeeks = pp1Weeks.concat(pp2Weeks);
+  if (poolWeeks.length > 0) {
+    let poolInner = '';
+    if (pp1Weeks.length > 0) {
+      const inner = pp1Weeks.map((wk) => weekHtml[wk]).join('');
+      poolInner += wrsGroup(
+        'grp_pp1',
+        'Pool Play 1',
+        sumWeeks(pp1Weeks),
+        pp1Weeks.includes(currentWeekKey),
+        'wrs-group-l2',
+        inner
+      );
+    }
+    if (pp2Weeks.length > 0) {
+      const inner = pp2Weeks.map((wk) => weekHtml[wk]).join('');
+      poolInner += wrsGroup(
+        'grp_pp2',
+        'Pool Play 2',
+        sumWeeks(pp2Weeks),
+        pp2Weeks.includes(currentWeekKey),
+        'wrs-group-l2',
+        inner
+      );
+    }
+    out += wrsGroup(
+      'grp_pool',
+      'Pool Play',
+      sumWeeks(poolWeeks),
+      poolWeeks.includes(currentWeekKey),
+      'wrs-group-l1',
+      poolInner
+    );
+  }
+
+  // Playoff weeks render flat; each week's open/collapsed state is already baked into weekHtml.
+  playoffWeeks.forEach((wk) => {
+    out += weekHtml[wk];
+  });
+
+  return out;
 }
 
 // Compute per-scoring-period totals for a manager
@@ -8611,12 +9397,39 @@ window.togglePeriodSection = function (periodKey) {
 
 // ---- Player Swaps Section ----
 const SWAP_REASONS = ['Free Swap (one per round)', 'IL Swap', 'Drop Swap', 'Trade Swap'];
+
+// Outcome of the most recent swap submission ({ type: 'success'|'error', text }). The swap form is
+// re-rendered after an auto-applied swap (and again when daily stats land), which rebuilds the
+// #swap-form-success/-error elements — so the confirmation is baked into the form render from this
+// variable instead of written to a DOM node a re-render would wipe. Cleared on the next submission.
+let _swapFormNotice = null;
 const COMMISSIONER_SWAP_REASONS = [...SWAP_REASONS, 'Commissioner Swap'];
 
 function getSeasonSwaps(seasonData) {
   if (DATA && DATA.swaps) return DATA.swaps; // historical
   if (seasonData && seasonData.swaps) return seasonData.swaps; // active
   return [];
+}
+
+// Tomorrow (ET) as an ISO date — the earliest a manager may schedule a swap for, since only a
+// date strictly after today schedules one (today means "apply now").
+function tomorrowET() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return isoDateET(d);
+}
+
+// Last calendar day of a round — the latest a manager may schedule a swap for, since a new period
+// starts fresh from its own submission. Client twin of the server's scheduleRoundEndDate.
+function scheduleRoundEnd(seasonData, round) {
+  const dates = (seasonData && seasonData.schedule_dates) || [];
+  let end = null;
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
+    if (SEASON_SCHEDULE[i].round === round && dates[i] && dates[i].end) {
+      if (!end || dates[i].end > end) end = dates[i].end;
+    }
+  }
+  return end;
 }
 
 // Schedule week whose date window contains today (ET). During a gap between weeks (e.g. the
@@ -8634,6 +9447,9 @@ function currentScheduleWeekKey() {
   }
   return `${SEASON_SCHEDULE[idx].round}|${SEASON_SCHEDULE[idx].week}`;
 }
+
+// Container id for the My Roster copy of the swap log (manager-scoped).
+const ROSTER_SWAP_LOG_ID = 'roster-swap-log';
 
 function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
   const isActive = !!(seasonData && seasonData.status === 'active');
@@ -8677,107 +9493,80 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const roster = getAllRosteredPlayers(seasonData, managerName);
 
     // Build available (non-rostered) players from pool.
-    // Uses roster_dates add/drop dates as the primary signal: a player is currently
-    // taken by a manager when their most recent date event was an add (not a drop).
-    // Falls back to latest-week roster array for players with no date entries.
+    // roster_dates add/drop windows are the source of truth (rosterStatusForManager); the per-week
+    // roster arrays are a derived cache and are only a fallback, scoped to this period's weeks.
     // backfillRosterDatesFromSwaps is called before this so old approved swaps
     // also get their drop_dates populated.
-    const orderedWks = SEASON_SCHEDULE.map((s) => `${s.round}|${s.week}`);
+    const swapTodayET = isoDateET(new Date());
 
-    // Current scoring period start — a new submission period (PP2/QF/SF/Finals) starts fresh from
-    // its own submission, so "currently rostered" must only consider this period's adds/drops.
-    // Without this, a prior period's holdover (an old add with no drop) reads as still-rostered and
-    // wrongly appears in Player Out / out of the available pool. null for PP1 leaves it unchanged.
-    const swapTodayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-    const swapSchedDates = seasonData.schedule_dates || [];
-    let swapCurRound = null;
-    for (let i = 0; i < SEASON_SCHEDULE.length && i < swapSchedDates.length; i++) {
-      if (swapSchedDates[i] && swapSchedDates[i].start && swapSchedDates[i].start <= swapTodayET) {
-        swapCurRound = SEASON_SCHEDULE[i].round;
-      }
-    }
-    const curPeriodStart = periodStartForRound(seasonData, swapCurRound);
+    // The period the swap belongs to. Uses the same round detection as the rest of the swap form
+    // (and as the server, which stamps the round on submission) so that in a gap between rounds —
+    // e.g. after the QF has ended while SF lineups are going in — availability is judged against
+    // the round the swap is actually charged to, not the one that just finished.
+    const swapCurRound = getCurrentScheduleRound(seasonData).round;
 
-    // Returns true if `player` is currently on THIS manager's active roster
-    // (most recent roster_dates action was an add, or no dates but in latest week).
-    const isStillActiveForMgr = (player) => {
-      const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[managerName]) || {};
-      let latestAdd = null;
-      let latestDrop = null;
-      for (const weekDates of Object.values(mgrDates)) {
-        const entry = weekDates[player];
-        if (!entry) continue;
-        if (
-          entry.add_date &&
-          (!curPeriodStart || entry.add_date >= curPeriodStart) &&
-          (!latestAdd || entry.add_date > latestAdd)
-        ) {
-          latestAdd = entry.add_date;
-        }
-        if (
-          entry.drop_date &&
-          (!curPeriodStart || entry.drop_date >= curPeriodStart) &&
-          (!latestDrop || entry.drop_date > latestDrop)
-        ) {
-          latestDrop = entry.drop_date;
-        }
-      }
-      if (latestAdd || latestDrop) {
-        return !latestDrop || (latestAdd && latestAdd > latestDrop);
-      }
-      const mgrRoster = (seasonData.rosters && seasonData.rosters[managerName]) || {};
-      const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
-      if (!latest) return false;
-      const wr = mgrRoster[latest];
-      return (wr.batters || []).includes(player) || (wr.pitchers || []).includes(player);
-    };
+    // A new submission period (PP2/QF/SF/Finals) starts fresh from its own submission, so
+    // "currently rostered" must only consider this period's adds/drops; null for PP1 leaves that
+    // period unchanged. The array fallback is period-scoped for the same reason: a manager
+    // eliminated in an earlier round still has that round's roster array on file, and reading it
+    // would keep their old players out of the available pool for everyone still playing.
+    const curPeriodStart = periodStartForSeason(seasonData, swapCurRound);
+    const curPeriodWks = periodWeekKeys(swapCurRound, SEASON_SCHEDULE);
+
+    const swapRosterStatus = (mgr, player) =>
+      rosterStatusForManager(player, {
+        rosterDates: (seasonData.roster_dates || {})[mgr],
+        rosters: (seasonData.rosters || {})[mgr],
+        periodStart: curPeriodStart,
+        asOf: swapTodayET,
+        weekKeys: curPeriodWks,
+      });
+
+    // Returns true if `player` is on THIS manager's roster TODAY. Evaluating as of today keeps a
+    // scheduled swap from taking effect early in this list: the outgoing player stays selectable
+    // until their drop date, and an incoming player isn't offered until their add date lands.
+    const isStillActiveForMgr = (player) => swapRosterStatus(managerName, player) === 'active';
 
     // Filter to currently active players only so previously dropped players
     // don't appear in the Player Out list.
     const currentBatters = roster.batters.filter(isStillActiveForMgr);
     const currentPitchers = roster.pitchers.filter(isStillActiveForMgr);
 
-    const isCurrentlyTaken = (player) => {
-      for (const [mgr, mgrRoster] of Object.entries(seasonData.rosters || {})) {
-        const mgrDates = (seasonData.roster_dates && seasonData.roster_dates[mgr]) || {};
-        let latestAdd = null;
-        let latestDrop = null;
-        for (const weekDates of Object.values(mgrDates)) {
-          const entry = weekDates[player];
-          if (!entry) continue;
-          if (
-            entry.add_date &&
-            (!curPeriodStart || entry.add_date >= curPeriodStart) &&
-            (!latestAdd || entry.add_date > latestAdd)
-          ) {
-            latestAdd = entry.add_date;
-          }
-          if (
-            entry.drop_date &&
-            (!curPeriodStart || entry.drop_date >= curPeriodStart) &&
-            (!latestDrop || entry.drop_date > latestDrop)
-          ) {
-            latestDrop = entry.drop_date;
-          }
-        }
-        if (latestAdd || latestDrop) {
-          // Dates available: active only when most recent action was an add
-          if (!latestDrop || (latestAdd && latestAdd > latestDrop)) return true;
-        } else {
-          // No date entries: fall back to the manager's latest week roster array
-          const latest = orderedWks.filter((wk) => mgrRoster[wk]).pop();
-          if (!latest) continue;
-          const wr = mgrRoster[latest];
-          if ((wr.batters || []).includes(player) || (wr.pitchers || []).includes(player)) return true;
-        }
-      }
-      return false;
-    };
+    // Managers come from the canonical commissioner list (db.managers); roster-data keys are
+    // unioned in so a name present only in rosters/roster_dates can still hold a player.
+    const swapMgrNames = Array.from(
+      new Set([
+        ...getManagers().map((m) => m.name),
+        ...Object.keys(seasonData.rosters || {}),
+        ...Object.keys(seasonData.roster_dates || {}),
+      ])
+    );
+
+    // A player is unavailable only while some manager holds them RIGHT NOW: on a roster today
+    // ('active'), or already claimed by a scheduled swap whose add date hasn't landed yet
+    // ('scheduled') — taking them would collide when that swap takes effect.
+    const isCurrentlyTaken = (player) =>
+      swapMgrNames.some((mgr) => {
+        const st = swapRosterStatus(mgr, player);
+        return st === 'active' || st === 'scheduled';
+      });
     const availBatters = (seasonData.batters_pool || []).filter((b) => !isCurrentlyTaken(b)).sort();
     const availPitchers = (seasonData.pitchers_pool || []).filter((p) => !isCurrentlyTaken(p)).sort();
 
+    // Effective-date field: prefilled with the date the swap WOULD take effect if submitted
+    // as-is (the auto path — today, bumped to tomorrow once a selected player's team has
+    // started; refreshSwapAutoEffectiveDate keeps it live as players are picked). Today always
+    // means "apply now" and is always accepted — the players' teams' game start times, not the
+    // calendar, decide whether that lands today or tomorrow. Only a date STRICTLY AFTER today
+    // schedules the swap, and managers may only schedule FORWARD (no backdating) and no further
+    // than the end of the current round (the server enforces both; period boundaries start fresh
+    // from a new submission, so scheduling across one is invalid).
+    const _swapEffToday = isoDateET(new Date());
+    const _swapEffMax = scheduleRoundEnd(seasonData, getCurrentScheduleRound(seasonData).round);
+
     html += `<div class="swap-form-card">
-      <h3>Request a Swap</h3>
+      <h3>Make a Swap</h3>
+      <p class="text-muted" style="margin-bottom:0.75rem;">Swaps take effect immediately when submitted. If either player's team has already started playing today, the swap becomes effective tomorrow. You can also schedule the swap for a future date. Swap limits and IL status are checked automatically.</p>
       <div class="swap-form-grid">
         <div class="swap-form-field" style="grid-column:1 / -1;">
           <label>Player Type</label>
@@ -8788,7 +9577,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         </div>
         <div class="swap-form-field">
           <label for="swap-player-out">Player Out (from your roster)</label>
-          <select id="swap-player-out" class="form-select">
+          <select id="swap-player-out" class="form-select" onchange="refreshSwapAutoEffectiveDate()">
             <option value="">Select player to swap out...</option>
             ${currentBatters
               .sort()
@@ -8811,12 +9600,17 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
             ${SWAP_REASONS.map((r) => `<option value="${r}">${r}</option>`).join('')}
           </select>
         </div>
+        <div class="swap-form-field">
+          <label for="swap-effective-date">Effective Date</label>
+          <input type="date" id="swap-effective-date" class="form-input" value="${_swapEffToday}" data-auto-date="${_swapEffToday}" min="${_swapEffToday}"${_swapEffMax ? ` max="${_swapEffMax}"` : ''}>
+          <small class="text-muted" style="font-size:0.75rem;">Shows when the swap will take effect — today applies it now (tomorrow instead if a game has already started), or pick a later date to schedule it.</small>
+        </div>
       </div>
       <div style="margin-top:0.75rem;">
-        <button class="btn btn-primary" onclick="submitSwapRequest('${jsStr(managerName)}', event)">Submit Request</button>
+        <button class="btn btn-primary" onclick="submitSwapRequest('${jsStr(managerName)}', event)">Submit Swap</button>
       </div>
-      <p id="swap-form-error" class="error-text" style="display:none;margin-top:0.5rem;"></p>
-      <p id="swap-form-success" class="success-text" style="display:none;margin-top:0.5rem;"></p>
+      <p id="swap-form-error" class="error-text" style="display:${_swapFormNotice && _swapFormNotice.type === 'error' ? 'block' : 'none'};margin-top:0.5rem;">${_swapFormNotice && _swapFormNotice.type === 'error' ? esc(_swapFormNotice.text) : ''}</p>
+      <p id="swap-form-success" class="success-text" style="display:${_swapFormNotice && _swapFormNotice.type === 'success' ? 'block' : 'none'};margin-top:0.5rem;">${_swapFormNotice && _swapFormNotice.type === 'success' ? esc(_swapFormNotice.text) : ''}</p>
     </div>`;
 
     // Store roster data as data attributes for the type toggle to use
@@ -8927,37 +9721,14 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     html += `</div>`;
   }
 
-  // All Swaps table (compact)
+  // All Swaps — the same click-to-expand log as the league-wide Swap Log tab, scoped to this
+  // manager. Populated by renderSwapLog(ROSTER_SWAP_LOG_ID, ...) once the container is in the DOM
+  // (renderRosterData does it right after setting innerHTML).
   html += `<div class="swap-list-section">
-    <h3>All Swaps</h3>`;
-  if (mySwaps.length > 0) {
-    const sorted = [...mySwaps].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-    html += '<div class="table-wrapper"><table class="data-table compact-table swap-table"><thead><tr>';
-    html += '<th>Player In</th><th>Player Out</th><th>Reason</th><th>Date</th><th>Status</th>';
-    html += '</tr></thead><tbody>';
-    sorted.forEach((s) => {
-      const status = s.status || 'approved';
-      const badgeClass =
-        status === 'approved'
-          ? 'swap-badge-approved'
-          : status === 'pending'
-            ? 'swap-badge-pending'
-            : 'swap-badge-denied';
-      const badgeLabel = status.charAt(0).toUpperCase() + status.slice(1);
-      const date = s.swap_date || serverTimestampLocalDate(s.timestamp);
-      html += `<tr>`;
-      html += `<td>${s.player_in ? displayPlayer(s.player_in, seasonData) : '—'}</td>`;
-      html += `<td>${s.player_out ? displayPlayer(s.player_out, seasonData) : '—'}</td>`;
-      html += `<td>${esc(s.reason || '')}</td>`;
-      html += `<td>${date}</td>`;
-      html += `<td><span class="swap-badge ${badgeClass}">${badgeLabel}</span></td>`;
-      html += `</tr>`;
-    });
-    html += '</tbody></table></div>';
-  } else {
-    html += '<p class="text-muted">No swaps recorded.</p>';
-  }
-  html += '</div>';
+    <h3>All Swaps</h3>
+    <p class="text-muted" style="margin-bottom:0.75rem;">Click any swap to see its full details.</p>
+    <div id="${ROSTER_SWAP_LOG_ID}"></div>
+  </div>`;
 
   // ---- Initial Player Submission ----
   if (isActive) {
@@ -9394,60 +10165,27 @@ window.swapTypeToggle = function (type) {
       data.pitchers.map((p) => `<option value="${p}">${dp(p)}</option>`).join('');
     clearSwapInSearch();
   }
+  window.refreshSwapAutoEffectiveDate(); // both selections were reset — back to the no-player baseline
 };
 
-// Determine which schedule round the current date falls in (or the most recent active round)
+// Determine which schedule round the current date falls in. Between weeks (e.g. the All-Star
+// break or a round gap) this returns the UPCOMING round — that's the roster a swap made in the
+// gap affects, so that's the round it's charged against. The server recomputes this
+// authoritatively at swap submission (currentScheduleRound in server.js — keep in step).
+// The swap-limit rules themselves (checkSwapLimit) live in js/swaps.js.
 function getCurrentScheduleRound(sd) {
   const dates = sd.schedule_dates;
   if (!dates || dates.length === 0) return { round: 'PP1', weekKey: null };
   const today = fmtDateISO(new Date());
-  // Find matching week
-  for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+  for (let i = 0; i < SEASON_SCHEDULE.length && i < dates.length; i++) {
     const d = dates[i];
-    if (!d) continue;
-    if (today >= d.start && today <= d.end) {
+    if (d && today <= d.end) {
       return { round: SEASON_SCHEDULE[i].round, weekKey: `${SEASON_SCHEDULE[i].round}|${SEASON_SCHEDULE[i].week}` };
     }
   }
-  // Before first week: use PP1
-  if (dates[0] && today < dates[0].start) return { round: 'PP1', weekKey: `PP1|Week 1` };
-  // After last week: use Finals
+  // After the last week: use the final round.
   const last = SEASON_SCHEDULE[SEASON_SCHEDULE.length - 1];
   return { round: last.round, weekKey: `${last.round}|${last.week}` };
-}
-
-// Check swap limits for a manager submitting a swap request.
-// Returns null if OK, or an error string if the limit is exceeded.
-function checkSwapLimit(sd, managerName, reason) {
-  const { round } = getCurrentScheduleRound(sd);
-
-  // Only count approved or pending swaps (not denied) for this manager in this round
-  const managerSwaps = (sd.swaps || []).filter(
-    (s) => s.manager === managerName && (s.status === 'approved' || s.status === 'pending') && s.round === round
-  );
-
-  // Pool Play: unlimited Drop/IL/Trade, but only 1 Free Swap per PP-round
-  if (round === 'PP1' || round === 'PP2') {
-    if (reason === 'Free Swap (one per round)') {
-      const used = managerSwaps.filter((s) => s.reason === 'Free Swap (one per round)').length;
-      if (used >= 1) {
-        return `You have already used your Free Swap for ${round === 'PP1' ? 'Pool Play 1' : 'Pool Play 2'}. You may still use Drop, IL, or Trade swaps.`;
-      }
-    }
-    return null; // Drop/IL/Trade unlimited during pool play
-  }
-
-  // Playoffs (QF, SF, Finals): each type limited to 1 per round
-  if (round === 'QF' || round === 'SF' || round === 'Finals') {
-    const used = managerSwaps.filter((s) => s.reason === reason).length;
-    if (used >= 1) {
-      const roundLabel = round === 'QF' ? 'Quarterfinals' : round === 'SF' ? 'Semifinals' : 'Finals';
-      return `You have already used a "${reason}" swap during the ${roundLabel}. Each swap type may only be used once per playoff round.`;
-    }
-    return null;
-  }
-
-  return null;
 }
 
 // Look up a player's MLB team abbreviation from the season's team maps.
@@ -9496,12 +10234,35 @@ async function computeSwapEffectiveDates(sd, playerOut, playerIn) {
   return { effective_date: todayStr, drop_date: yesterdayStr, add_date: todayStr, teams_started: [] };
 }
 
+// Keep the swap form's Effective Date input showing the date the swap WOULD take effect if
+// submitted as-is (the auto path): today, or tomorrow once either selected player's team has
+// started playing. Called whenever a player selection changes. Only overwrites the input while
+// it still holds the previous auto value (or is empty) — a date the user picked themselves is
+// never clobbered. data-auto-date always tracks the latest auto value so submitSwapRequest can
+// tell "left as suggested" (auto path) apart from "changed" (scheduled swap).
+window.refreshSwapAutoEffectiveDate = async function () {
+  const effEl = document.getElementById('swap-effective-date');
+  if (!effEl) return;
+  const sd = getSeasons()[SELECTED_SEASON];
+  if (!sd) return;
+  const playerOut = (document.getElementById('swap-player-out') || {}).value || '';
+  const playerIn = (document.getElementById('swap-player-in') || {}).value || '';
+  const prevAuto = effEl.dataset.autoDate || '';
+  const { effective_date: autoDate } = await computeSwapEffectiveDates(sd, playerOut, playerIn);
+  // Re-look-up after the await: the form may have re-rendered while the check was in flight.
+  const el = document.getElementById('swap-effective-date');
+  if (!el) return;
+  el.dataset.autoDate = autoDate;
+  if (!el.value || el.value === prevAuto) el.value = autoDate;
+};
+
 // Submit a swap request
 window.submitSwapRequest = async function (managerName, ev) {
   const errEl = document.getElementById('swap-form-error');
   const succEl = document.getElementById('swap-form-success');
   errEl.style.display = 'none';
   succEl.style.display = 'none';
+  _swapFormNotice = null;
 
   // Double-submit guard: computeSwapEffectiveDates below awaits a live-schedule network call, leaving
   // a window where a second click fired a second identical request (the "commissioner got the swap
@@ -9524,10 +10285,30 @@ window.submitSwapRequest = async function (managerName, ev) {
     const playerOut = document.getElementById('swap-player-out').value;
     const playerIn = document.getElementById('swap-player-in').value;
     const reason = document.getElementById('swap-reason').value;
+    // The date input is prefilled with the auto effective date (data-auto-date, kept fresh by
+    // refreshSwapAutoEffectiveDate). Only a date STRICTLY AFTER today schedules the swap. Today
+    // is never a "scheduled" date — it means "apply now", which is the auto path: the selected
+    // players' teams' game start times decide whether that lands today or tomorrow. So today is
+    // always submittable, even if data-auto-date has drifted (a re-render, a stale game-start
+    // check, or the manager typing the date back in).
+    const effEl = document.getElementById('swap-effective-date');
+    const todayET = isoDateET(new Date());
+    const effValue = (effEl && effEl.value) || '';
+    const requestedEff = effValue > todayET && effValue !== (effEl.dataset.autoDate || '') ? effValue : '';
     const swapDate = new Date().toISOString().split('T')[0];
 
     if (!playerOut || !playerIn || !reason) {
       errEl.textContent = 'All fields are required.';
+      errEl.style.display = 'block';
+      return;
+    }
+
+    // Only backdating is blocked — today is allowed (it applies the swap now, subject to the
+    // game-start rule). The server re-validates and lets only the commissioner pick past dates,
+    // via the Swap Log editor.
+    if (effValue && effValue < todayET) {
+      errEl.textContent =
+        'The effective date cannot be in the past — keep today to apply the swap now, or pick a later date to schedule it.';
       errEl.style.display = 'block';
       return;
     }
@@ -9542,22 +10323,34 @@ window.submitSwapRequest = async function (managerName, ev) {
 
     if (!sd.swaps) sd.swaps = [];
 
-    // Check swap limits for this round
-    const limitError = checkSwapLimit(sd, managerName, reason);
+    const { round, weekKey } = getCurrentScheduleRound(sd);
+
+    // Pre-check the swap limits for this round (js/swaps.js) for fast feedback; the server
+    // re-validates authoritatively at submission and blocks ineligible swaps the same way.
+    const limitError = checkSwapLimit(sd.swaps, managerName, reason, round);
     if (limitError) {
       errEl.textContent = limitError;
       errEl.style.display = 'block';
       return;
     }
 
-    const { round, weekKey } = getCurrentScheduleRound(sd);
-
-    // Determine effective add/drop dates from the live game schedule.
-    const { effective_date, drop_date, add_date, teams_started } = await computeSwapEffectiveDates(
-      sd,
-      playerOut,
-      playerIn
-    );
+    // Determine effective add/drop dates: a scheduled swap uses the chosen date (add on the
+    // date, drop the day before — the game-started rule is irrelevant for a future date);
+    // otherwise ask the live game schedule. The server recomputes both cases authoritatively.
+    let eff;
+    if (requestedEff) {
+      const d = new Date(requestedEff + 'T12:00:00');
+      d.setDate(d.getDate() - 1);
+      eff = {
+        effective_date: requestedEff,
+        drop_date: d.toISOString().split('T')[0],
+        add_date: requestedEff,
+        teams_started: [],
+      };
+    } else {
+      eff = await computeSwapEffectiveDates(sd, playerOut, playerIn);
+    }
+    const { effective_date, drop_date, add_date, teams_started } = eff;
 
     const swap = {
       email: LOGGED_IN_EMAIL,
@@ -9573,6 +10366,7 @@ window.submitSwapRequest = async function (managerName, ev) {
       round: round,
       week_key: weekKey,
     };
+    if (requestedEff) swap.requested_effective_date = requestedEff;
 
     // Post only the swap object to the dedicated endpoint — avoids the whole-season
     // payload that previously failed silently when the JSON was large or auth was stale.
@@ -9585,10 +10379,10 @@ window.submitSwapRequest = async function (managerName, ev) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.error || `Server error (${resp.status})`);
       }
-      const { swap: savedSwap, _rev } = await resp.json();
+      const { swap: savedSwap, _rev, pending_review: pendingReview } = await resp.json();
 
       // Mirror the confirmed server swap into localStorage so the view is consistent. Dedupe by id:
-      // if the server returned an already-existing pending swap (duplicate guard), don't add a second
+      // if the server returned an already-existing swap (duplicate guard), don't add a second
       // local copy.
       const freshSeasons = getSeasons();
       const freshSd = freshSeasons[SELECTED_SEASON];
@@ -9599,17 +10393,38 @@ window.submitSwapRequest = async function (managerName, ev) {
         setSeasonsLocal(freshSeasons);
       }
 
-      succEl.textContent = 'Swap request submitted!';
-      succEl.style.display = 'block';
+      // An auto-applied swap rebuilt rosters/roster_dates/weekly scores server-side — pull down the
+      // authoritative season so the roster view reflects the swap immediately (same pattern as the
+      // commissioner approve flow).
+      if (!pendingReview) {
+        try {
+          const fresh = await fetch('/api/seasons');
+          if (fresh.ok) {
+            const srv = await fresh.json();
+            if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+          }
+        } catch (_) {
+          /* offline — local view may lag until reload */
+        }
+      }
+
+      // Bake the confirmation into the form render (via _swapFormNotice) BEFORE re-rendering:
+      // the re-render replaces the whole form DOM (and renders again when daily stats land), so
+      // a message written directly to the old elements would be wiped instantly.
+      _swapFormNotice = {
+        type: 'success',
+        text: pendingReview
+          ? 'Swap submitted — it was flagged for commissioner review and will take effect once approved.'
+          : `Swap ${requestedEff ? 'scheduled' : 'applied'}! ${playerOut} out, ${playerIn} in — effective ${
+              (savedSwap && (savedSwap.effective_date || savedSwap.add_date)) || 'today'
+            }.`,
+      };
+      renderRosterData(managerName, isLoggedInCommissioner());
     } catch (e) {
-      errEl.textContent = `Swap not submitted — ${e.message}. Please try again or contact the commissioner.`;
+      errEl.textContent = `Swap not applied — ${e.message}`;
       errEl.style.display = 'block';
       return;
     }
-
-    // Re-render entire roster view
-    const isComm = isLoggedInCommissioner();
-    renderRosterData(managerName, isComm);
   } finally {
     clearSubmitting();
   }
@@ -9837,6 +10652,14 @@ window.editSwapInline = function (swapId) {
         <label>Swap Date</label>
         <input type="date" id="edit-date-${swapId}" class="form-select" value="${swap.swap_date || ''}">
       </div>
+      <div class="swap-form-field">
+        <label>Drop Date (player out)</label>
+        <input type="date" id="edit-drop-${swapId}" class="form-select" value="${swap.drop_date || ''}">
+      </div>
+      <div class="swap-form-field">
+        <label>Add Date (player in)</label>
+        <input type="date" id="edit-add-${swapId}" class="form-select" value="${swap.add_date || ''}">
+      </div>
     </div>
     <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
       <button class="btn btn-sm btn-primary" onclick="saveSwapEdit('${swapId}')">Save Changes</button>
@@ -9852,14 +10675,20 @@ window.saveSwapEdit = async function (swapId) {
   const newIn = document.getElementById(`edit-in-${swapId}`).value;
   const newReason = document.getElementById(`edit-reason-${swapId}`).value;
   const newDate = document.getElementById(`edit-date-${swapId}`).value;
+  const newDrop = (document.getElementById(`edit-drop-${swapId}`) || {}).value || '';
+  const newAdd = (document.getElementById(`edit-add-${swapId}`) || {}).value || '';
 
-  // Atomic edit of the swap record's own fields (no roster rebuild — matches prior behavior).
-  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', {
+  // Atomic edit of the swap's own fields. For a pending swap this is record-only (approve reads
+  // the dates later); the server re-applies roster windows if the swap is already approved.
+  const body = {
     player_out: newOut,
     player_in: newIn,
     reason: newReason,
     swap_date: newDate,
-  });
+  };
+  if (newDrop) body.drop_date = newDrop;
+  if (newAdd) body.add_date = newAdd;
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body);
   if (!result) return;
 
   rerenderCurrentRosterView();
@@ -10049,6 +10878,9 @@ function showCommissionerPanel() {
   document.getElementById('season-setup-title').textContent = `${SELECTED_SEASON} Initial Player Pool`;
 
   setupCommTabs();
+  renderCommissionerTodo();
+  refreshTodoAudit();
+  refreshTodoSyncStatus();
   renderBannerBgSection();
   renderPendingSwapRequests();
   backfillSubmissionTimestamps();
@@ -10085,8 +10917,9 @@ function setupCommTabs() {
 const _swapLogState = {};
 function getSwapLogState(containerId) {
   if (!_swapLogState[containerId]) {
-    // manager/type: '' = "All" (no filtering).
-    _swapLogState[containerId] = { manager: '', type: '', expanded: new Set(), editable: false };
+    // manager/type: '' = "All" (no filtering). scopeManager pins the log to a single manager
+    // (the My Roster copy) — unlike the `manager` filter it is not user-changeable.
+    _swapLogState[containerId] = { manager: '', type: '', expanded: new Set(), editable: false, scopeManager: null };
   }
   return _swapLogState[containerId];
 }
@@ -10116,8 +10949,21 @@ function serverTimestampLocalDate(ts) {
   return d ? fmtDateISO(d) : '';
 }
 
+// True while an approved swap's add date is still in the future — the swap is recorded but has
+// not taken effect yet, so both rosters are still the pre-swap ones.
+function swapIsScheduled(s) {
+  if (!s || s.status !== 'approved') return false;
+  const effective = s.add_date || s.requested_effective_date || s.effective_date;
+  return !!effective && effective > isoDateET(new Date());
+}
+
 function swapStatusBadge(s) {
-  if (s.status === 'approved') return '<span class="swap-badge swap-badge-approved">Approved</span>';
+  if (s.status === 'approved') {
+    const scheduled = swapIsScheduled(s)
+      ? ` <span class="swap-badge swap-badge-scheduled">Scheduled ${fmtShortDate(s.add_date || s.requested_effective_date || s.effective_date)}</span>`
+      : '';
+    return `<span class="swap-badge swap-badge-approved">Approved</span>${scheduled}`;
+  }
   if (s.status === 'denied') return '<span class="swap-badge swap-badge-denied">Denied</span>';
   if (s.status === 'undone') return '<span class="swap-badge swap-badge-denied">Undone</span>';
   return '<span class="swap-badge swap-badge-pending">Pending</span>';
@@ -10153,22 +10999,79 @@ function swapDetailHtml(s, sd, containerId, editable) {
   if (s.round) items += row('Round', esc(s.round));
   if (s.week_key) items += row('Week', esc(s.week_key.replace('|', ' · ')));
   if (s.swap_date) items += row('Requested', esc(s.swap_date));
-  if (s.drop_date) items += row('Drop Date', esc(s.drop_date));
-  if (s.add_date) items += row('Add Date', esc(s.add_date));
+  // Commissioner: drop/add dates are inline-editable for pending/approved swaps (a date edit on
+  // an approved swap moves the live roster windows server-side and recomputes scores). Denied/
+  // undone swaps have no live windows, so their dates stay read-only history.
+  const dateEditable = editable && (s.status === 'approved' || s.status === 'pending');
+  const dateVal = (field, value) =>
+    dateEditable
+      ? `<input type="date" class="swap-detail-date-input" value="${esc(value || '')}" onclick="event.stopPropagation()" onchange="saveSwapLogDate('${containerId}','${s.id}','${field}', this.value)">`
+      : esc(value || '—');
+  if (s.drop_date || dateEditable) items += row('Drop Date', dateVal('drop_date', s.drop_date));
+  if (s.add_date || dateEditable) items += row('Add Date', dateVal('add_date', s.add_date));
   if (s.effective_date) items += row('Effective', esc(s.effective_date));
+  if (s.requested_effective_date) items += row('Scheduled For', esc(s.requested_effective_date));
   if (s.teams_started && s.teams_started.length) {
     items += row('Teams Already Playing', esc(s.teams_started.join(', ')));
   }
   // Commissioner-only Undo for an approved swap: cleanly reverses it (removes the added player,
   // restores the original) rather than stacking a reverse swap. See POST /swaps/:id/undo.
-  let actions = '';
-  if (s.status === 'approved' && isLoggedInCommissioner()) {
-    actions = `<div class="swap-detail-actions" style="margin-top:0.6rem;">
+  const actions =
+    s.status === 'approved' && isLoggedInCommissioner()
+      ? `<div class="swap-detail-actions">
         <button class="btn btn-sm btn-danger" onclick="undoSwap('${jsStr(s.id)}')">Undo swap</button>
-        <span class="text-muted" style="font-size:0.8rem;margin-left:0.5rem;">Removes ${esc(s.player_in || '')}, restores ${esc(s.player_out || '')}.</span>
+        <span class="swap-detail-actions-note">Removes ${esc(s.player_in || '')}, restores ${esc(s.player_out || '')}.</span>
+      </div>`
+      : managerSwapActionsHtml(s, sd, containerId);
+  return `<div class="swap-detail-panel">${items}${actions}</div>`;
+}
+
+// A manager owns their swap right up until it takes effect: while it is still SCHEDULED they can
+// change the effective date or the reason, or cancel it outright. Once the add date arrives the
+// roster windows are live and only the commissioner can change it — the server enforces exactly
+// this (swapModifyGuard); these controls just mirror it. Changing the PLAYERS means cancelling and
+// resubmitting, so the swap limit and IL checks re-run on the submission path.
+function managerSwapActionsHtml(s, sd, containerId) {
+  const me = (findManagerByEmail(LOGGED_IN_EMAIL || '') || {}).name;
+  if (!me || s.manager !== me || s.status !== 'approved') return '';
+
+  const editId = `sched-edit-${containerId}-${s.id}`;
+  if (!swapIsScheduled(s)) {
+    return `<div class="swap-detail-actions">
+        <span class="swap-detail-actions-note">This swap has already taken effect — ask the commissioner if it needs to change.</span>
       </div>`;
   }
-  return `<div class="swap-detail-panel">${items}${actions}</div>`;
+
+  const effective = s.add_date || s.requested_effective_date || s.effective_date;
+  const minDate = tomorrowET(); // strictly forward, same rule the submission path enforces
+  const maxDate = scheduleRoundEnd(sd, s.round || (getCurrentScheduleRound(sd) || {}).round);
+  const reasonOpts = SWAP_REASONS.map(
+    (r) => `<option value="${esc(r)}"${r === s.reason ? ' selected' : ''}>${esc(r)}</option>`
+  ).join('');
+
+  return `<div class="swap-detail-actions">
+      <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();toggleScheduledSwapEdit('${editId}')">Edit swap</button>
+      <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();cancelScheduledSwap('${containerId}','${jsStr(s.id)}')">Cancel swap</button>
+      <span class="swap-detail-actions-note">Scheduled for ${esc(effective)} — you can change or cancel it until then.</span>
+    </div>
+    <div class="swap-sched-edit" id="${editId}" style="display:none;" onclick="event.stopPropagation()">
+      <div class="swap-sched-edit-fields">
+        <label>
+          <span>Effective Date</span>
+          <input type="date" class="form-input" id="${editId}-date" value="${esc(effective || '')}" min="${esc(minDate)}"${maxDate ? ` max="${esc(maxDate)}"` : ''}>
+        </label>
+        <label>
+          <span>Reason</span>
+          <select class="form-select" id="${editId}-reason">${reasonOpts}</select>
+        </label>
+      </div>
+      <div class="swap-sched-edit-actions">
+        <button class="btn btn-sm btn-primary" onclick="saveScheduledSwap('${containerId}','${jsStr(s.id)}')">Save changes</button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleScheduledSwapEdit('${editId}')">Close</button>
+        <span class="swap-detail-actions-note">To swap different players, cancel this swap and submit a new one.</span>
+      </div>
+      <p class="error-text" id="${editId}-error" style="display:none;"></p>
+    </div>`;
 }
 
 // Render a labeled filter dropdown; the empty value means "All" (no filtering).
@@ -10185,18 +11088,25 @@ function swapFilterSelectHtml(containerId, label, kind, allValues, selected, all
 // Render the swap log into `containerId`. When `editable` is true (commissioner),
 // the reason cell becomes an inline dropdown; otherwise it is read-only. The same
 // details are available to everyone via the click-to-expand row.
-function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommissioner()) {
+// `scopeManager` pins the log to one manager's swaps — the My Roster copy, which shows the same
+// rows and the same expandable detail panel as the league-wide log, minus the Manager column
+// and its filter.
+function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommissioner(), scopeManager = null) {
   const container = document.getElementById(containerId);
   if (!container) return;
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
-  const allSwaps = sd && sd.swaps ? [...sd.swaps] : [];
+  const emailMap = (DATA && DATA.email_map) || {};
+  const managerOf = (s) => s.manager || emailMap[s.email] || s.email || '';
+  let allSwaps = [...getSeasonSwaps(sd)];
 
   const state = getSwapLogState(containerId);
   state.editable = editable;
+  state.scopeManager = scopeManager;
+  if (scopeManager) allSwaps = allSwaps.filter((s) => managerOf(s) === scopeManager);
 
   if (allSwaps.length === 0) {
-    container.innerHTML = '<p class="text-muted">No swap history yet.</p>';
+    container.innerHTML = `<p class="text-muted">${scopeManager ? 'No swaps recorded.' : 'No swap history yet.'}</p>`;
     return;
   }
 
@@ -10208,7 +11118,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
   });
 
   // Available filter values from the full swap set.
-  const allManagers = [...new Set(allSwaps.map((s) => s.manager).filter(Boolean))].sort();
+  const allManagers = [...new Set(allSwaps.map(managerOf).filter(Boolean))].sort();
   const allTypes = [...new Set(allSwaps.map((s) => s.reason || SWAP_NO_REASON_LABEL))].sort();
 
   // Drop a saved selection that no longer matches any swap (e.g. after a season switch).
@@ -10217,11 +11127,13 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
 
   const typeOf = (s) => s.reason || SWAP_NO_REASON_LABEL;
   const filtered = allSwaps.filter(
-    (s) => (!state.manager || s.manager === state.manager) && (!state.type || typeOf(s) === state.type)
+    (s) => (!state.manager || managerOf(s) === state.manager) && (!state.type || typeOf(s) === state.type)
   );
 
   let html = '<div class="swap-log-filters">';
-  html += swapFilterSelectHtml(containerId, 'Manager', 'manager', allManagers, state.manager, 'All managers');
+  if (!scopeManager) {
+    html += swapFilterSelectHtml(containerId, 'Manager', 'manager', allManagers, state.manager, 'All managers');
+  }
   html += swapFilterSelectHtml(containerId, 'Type', 'type', allTypes, state.type, 'All types');
   html += '</div>';
 
@@ -10231,8 +11143,11 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
     return;
   }
 
+  const cols = scopeManager ? 6 : 7;
   html +=
-    '<table class="data-table swap-log-table"><thead><tr><th style="width:1.5rem;"></th><th>Manager</th><th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
+    '<table class="data-table swap-log-table"><thead><tr><th style="width:1.5rem;"></th>' +
+    (scopeManager ? '' : '<th>Manager</th>') +
+    '<th>Out</th><th>In</th><th>Date</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
   filtered.forEach((s) => {
     const date = serverTimestampLocalDate(s.timestamp) || s.swap_date || '';
     const outTxt = displayPlayer(s.player_out || '—', sd);
@@ -10250,7 +11165,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
     }
     html += `<tr class="swap-log-row${isOpen ? ' swap-log-row-open' : ''}" onclick="toggleSwapDetail('${containerId}','${s.id}')">
       <td class="swap-log-caret">${isOpen ? '▾' : '▸'}</td>
-      <td>${esc(s.manager || '—')}</td>
+      ${scopeManager ? '' : `<td>${esc(managerOf(s) || '—')}</td>`}
       <td>${outTxt}</td>
       <td>${inTxt}</td>
       <td style="white-space:nowrap;font-size:0.82rem;">${date}</td>
@@ -10258,7 +11173,7 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
       <td style="font-size:0.82rem;color:var(--text-muted);">${reasonCell}</td>
     </tr>`;
     html += `<tr class="swap-log-detail-row" id="swap-detail-${containerId}-${s.id}" style="display:${isOpen ? '' : 'none'};">
-      <td colspan="7">${swapDetailHtml(s, sd, containerId, editable)}</td>
+      <td colspan="${cols}">${swapDetailHtml(s, sd, containerId, editable)}</td>
     </tr>`;
   });
   html += '</tbody></table>';
@@ -10288,14 +11203,125 @@ window.swapLogSetFilter = function (containerId, kind, value) {
   const state = getSwapLogState(containerId);
   if (kind === 'manager') state.manager = value;
   else state.type = value;
-  renderSwapLog(containerId, state.editable);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
 };
 
 window.saveSwapLogReason = async function (containerId, swapId, newReason) {
   const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', { reason: newReason });
   if (!result) return;
   const state = getSwapLogState(containerId);
-  renderSwapLog(containerId, state.editable);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
+};
+
+// Commissioner: edit a swap's drop/add date from the Swap Log detail panel. Changing the add
+// date also moves the informational effective date (they are equal by construction). On an
+// approved swap the server re-applies the roster windows and recomputes scores, so pull the
+// authoritative season down afterwards (same pattern as the auto-apply submission flow).
+window.saveSwapLogDate = async function (containerId, swapId, field, value) {
+  const state = getSwapLogState(containerId);
+  if (!value) {
+    renderSwapLog(containerId, state.editable, state.scopeManager); // restore the old value in the input
+    return;
+  }
+  const body = { [field]: value };
+  if (field === 'add_date') body.effective_date = value;
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body);
+  if (result) await refreshSeasonsFromServer();
+  renderSwapLog(containerId, state.editable, state.scopeManager);
+};
+
+// ---- Manager: change or cancel a swap that hasn't taken effect yet ----
+// The server owns the rules (swapModifyGuard: your own swap, still scheduled); these handlers just
+// drive the inline form in the swap-log detail panel and refresh the views the change moves.
+
+window.toggleScheduledSwapEdit = function (editId) {
+  const el = document.getElementById(editId);
+  if (!el) return;
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+};
+
+// Pull the authoritative season down after a swap mutation: the server re-applies the roster
+// windows and recomputes scores, so the local copy is stale until we re-fetch (same pattern as
+// the auto-apply submission and commissioner approve flows).
+async function refreshSeasonsFromServer() {
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (fresh.ok) {
+      const srv = await fresh.json();
+      if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
+    }
+  } catch (_) {
+    /* offline — local view may lag until reload */
+  }
+}
+
+// Re-render whatever swap log the action came from plus the roster page beneath it, so the
+// per-week tables and the swap row both reflect the change without a reload.
+function refreshAfterSwapChange(containerId) {
+  const state = getSwapLogState(containerId);
+  renderSwapLog(containerId, state.editable, state.scopeManager);
+  const me = findManagerByEmail(LOGGED_IN_EMAIL || '');
+  if (me && document.getElementById('roster-content')) renderRosterData(me.name, isLoggedInCommissioner());
+  if (document.getElementById('swap-log-public')) renderSwapLog('swap-log-public', false);
+}
+
+window.saveScheduledSwap = async function (containerId, swapId) {
+  const editId = `sched-edit-${containerId}-${swapId}`;
+  const dateEl = document.getElementById(`${editId}-date`);
+  const reasonEl = document.getElementById(`${editId}-reason`);
+  const errEl = document.getElementById(`${editId}-error`);
+  const showErr = (msg) => {
+    if (!errEl) return alert(msg);
+    errEl.textContent = msg;
+    errEl.style.display = 'block';
+  };
+  if (errEl) errEl.style.display = 'none';
+
+  const body = {};
+  if (dateEl && dateEl.value) body.add_date = dateEl.value;
+  if (reasonEl && reasonEl.value) body.reason = reasonEl.value;
+  if (!Object.keys(body).length) return;
+  // Mirror the server's forward-only rule so the common mistake gets an answer without a round trip.
+  if (body.add_date && body.add_date <= isoDateET(new Date())) {
+    return showErr(
+      'A scheduled swap must stay in the future. To apply it right away, cancel it and submit a new swap effective today.'
+    );
+  }
+
+  const result = await persistSwapMutation(SELECTED_SEASON, swapId, 'PUT', '', body, showErr);
+  if (!result) return;
+  await refreshSeasonsFromServer();
+  refreshAfterSwapChange(containerId);
+};
+
+window.cancelScheduledSwap = async function (containerId, swapId) {
+  const sd = getSeasons()[SELECTED_SEASON];
+  const swap = ((sd && sd.swaps) || []).find((s) => String(s.id) === String(swapId));
+  if (!swap) return;
+  if (
+    !confirm(
+      `Cancel this scheduled swap? ${swap.player_out} stays on your roster, ${swap.player_in} is removed, ` +
+        'and the swap goes back into your allotment for this round.'
+    )
+  ) {
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/swaps/${swapId}/undo`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || err.error || `Cancel failed (${resp.status}). Please reload and try again.`);
+      return;
+    }
+  } catch (e) {
+    alert(`Cancel failed — ${e.message}. Please reload and try again.`);
+    return;
+  }
+  await refreshSeasonsFromServer();
+  refreshAfterSwapChange(containerId);
 };
 
 // ---- MLB API Sync Log (Commissioner Tab: Stats Data) ----
@@ -10594,6 +11620,10 @@ window.debugMLBPlayer = function () {
 function renderPendingSwapRequests() {
   const container = document.getElementById('pending-swaps-list');
   if (!container) return;
+
+  // The to-do card counts the same pending items — keep it in step with every
+  // re-render of this list (approve/deny actions included).
+  renderCommissionerTodo();
 
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -11135,6 +12165,12 @@ function renderScheduleDatesPreview() {
   SEASON_SCHEDULE.forEach((s, i) => {
     const d = dates[i];
     if (!d) return;
+    if (i > 0 && SEASON_SCHEDULE[i - 1].round !== s.round) {
+      const brk = interRoundBreak(dates[i - 1], d, SEASON_SCHEDULE[i - 1].round, s.round);
+      if (brk) {
+        html += `<tr class="schedule-break-row"><td>—</td><td>${brk.label}</td><td>${fmtDateRangeShort(brk.start, brk.end)}</td></tr>`;
+      }
+    }
     html += `<tr><td>${i + 1}</td><td>${s.label}</td><td>${fmtDateRangeShort(d.start, d.end)}</td></tr>`;
   });
   html += '</tbody></table>';
@@ -11541,6 +12577,8 @@ window.savePlayerStats = function (manager, statType, playerName, weekKey) {
     } else {
       sd.weekly_batting.push(record);
     }
+    // A replacement at the same length is invisible to the row index's length check.
+    invalidateWeeklyRowIndex(sd.weekly_batting);
 
     // Recompute total_score for this batter
     let total = 0;
@@ -11600,6 +12638,8 @@ window.savePlayerStats = function (manager, statType, playerName, weekKey) {
     } else {
       sd.weekly_pitching.push(record);
     }
+    // A replacement at the same length is invisible to the row index's length check.
+    invalidateWeeklyRowIndex(sd.weekly_pitching);
   }
 
   // Auto-add to roster for this week if not already
@@ -11798,6 +12838,7 @@ window.selectSwapPlayerIn = function (playerName) {
     resultsDiv.innerHTML = '';
     resultsDiv.style.display = 'none';
   }
+  window.refreshSwapAutoEffectiveDate();
 };
 
 // ---- Initial Player Submission Handlers ----
@@ -12503,6 +13544,53 @@ window.updateCommRosterWeekView = function (managerName) {
     };
   }
 
+  // A SCHEDULED (future-dated) swap is recorded — and applied to the derived roster arrays — the
+  // moment it is submitted. Re-derive both ends from the date windows AS OF TODAY so it doesn't
+  // take effect early here either (same rule as buildPerWeekRoster):
+  //   commPendingDrop — outgoing player, still rostered and still scoring until their drop date.
+  //   commPendingAdd  — incoming player, listed but not on the roster until their add date.
+  const commToday = isoDateET(new Date());
+  const commPeriodStart = periodStartForSeason(sd, round);
+  const commStatusAsOfToday = (player) => {
+    const entries = [];
+    for (const wkDates of Object.values(commMgrRosterDates)) {
+      if (wkDates[player]) entries.push(wkDates[player]);
+    }
+    return rosterStatusAsOf(entries, { periodStart: commPeriodStart, asOf: commToday });
+  };
+  const commPendingDrop = new Set();
+  const commPendingAdd = new Set();
+  for (const [p, d] of Object.entries(rosterDates)) {
+    if (d.drop_date && d.drop_date > commToday && commStatusAsOfToday(p) === 'active') commPendingDrop.add(p);
+    if (d.add_date && d.add_date > commToday && commStatusAsOfToday(p) === 'scheduled') commPendingAdd.add(p);
+  }
+  // Which list a player belongs in — needed both to restore a pending drop into the right table
+  // and to place a statless player who was only rostered for part of the week.
+  const commBatPool = new Set(sd.batters_pool || []);
+  const commPitPool = new Set(sd.pitchers_pool || []);
+  const commPoolTypeOf = (player) => {
+    const inBat = commBatPool.has(player);
+    const inPit = commPitPool.has(player);
+    if (inBat && !inPit) return 'batters';
+    if (inPit && !inBat) return 'pitchers';
+    for (const wr of Object.values(commMgrRosters)) {
+      if ((wr.batters || []).includes(player)) return 'batters';
+      if ((wr.pitchers || []).includes(player)) return 'pitchers';
+    }
+    if (batting.some((b) => b.batter === player)) return 'batters';
+    if (pitching.some((p) => p.pitcher === player)) return 'pitchers';
+    return null;
+  };
+  if (commPendingDrop.size > 0) {
+    // The arrays are a derived cache — put the still-rostered player back where roster_dates says.
+    const restore = (listKey) =>
+      [...commPendingDrop].filter((p) => commPoolTypeOf(p) === listKey && !roster[listKey].includes(p));
+    roster = {
+      batters: roster.batters.concat(restore('batters')),
+      pitchers: roster.pitchers.concat(restore('pitchers')),
+    };
+  }
+
   // Build the complete set of batters/pitchers who were on the roster at ANY point this week.
   // Sources: current roster (pool-filtered) + roster_dates (commissioner add/drop) + approved swaps.
   // Swap-added players are only included if they have actual stats or a roster_dates entry —
@@ -12567,10 +13655,11 @@ window.updateCommRosterWeekView = function (managerName) {
       allWeekPitching.push(p);
     }
   });
-  // Players dropped during this week (drop_date in current rosterDates) are treated as historical.
+  // Players dropped during this week (drop_date in current rosterDates) are treated as historical —
+  // unless the drop is still scheduled, in which case they are simply on the roster.
   const commDroppedThisWeek = new Set(
     Object.entries(rosterDates)
-      .filter(([, d]) => d.drop_date)
+      .filter(([p, d]) => d.drop_date && !commPendingDrop.has(p))
       .map(([p]) => p)
   );
 
@@ -12580,18 +13669,34 @@ window.updateCommRosterWeekView = function (managerName) {
     const row = rows.find((r) => r[key] === name);
     return row ? row.weekly_score || 0 : 0;
   };
-  const droppedBatters = [...historicalBatters].filter(
-    (p) =>
-      (!roster.batters.includes(p) || commDroppedThisWeek.has(p)) &&
-      allWeekBatting.some((b) => b.batter === p) &&
-      commPlayerWeekScore(allWeekBatting, 'batter', p) > 0
-  );
-  const droppedPitchers = [...historicalPitchers].filter(
-    (p) =>
-      (!roster.pitchers.includes(p) || commDroppedThisWeek.has(p)) &&
-      allWeekPitching.some((pt) => pt.pitcher === p) &&
-      commPlayerWeekScore(allWeekPitching, 'pitcher', p) > 0
-  );
+  // …unless they were actually on the roster for part of this week, in which case they belong in
+  // the week's table with or without points — same rule as buildPerWeekRoster (a mid-week swap
+  // leaves the outgoing player rostered for the days before it, and a blank stat line, or no
+  // weekly row at all, must not erase them from the week they were swapped out of).
+  const commWeekEnd = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
+  const commRosteredDuringWeek = (player) => {
+    const rd = rosterDates[player];
+    const addSwap = approvedSwaps.find((s) => s.player_in === player && s.week_key === weekKey);
+    const dropSwap = approvedSwaps.find((s) => s.player_out === player && s.week_key === weekKey);
+    if (!rd && !addSwap && !dropSwap) return false;
+    const addDate = (rd && rd.add_date) || (addSwap && addSwap.swap_date) || null;
+    const dropDate = (rd && rd.drop_date) || (dropSwap && dropSwap.swap_date) || null;
+    if (seasonStartDate && dropDate && dropDate < seasonStartDate) return false;
+    if (addDate && commWeekEnd && addDate > commWeekEnd) return false;
+    if (dropDate && weekStart && dropDate < weekStart) return false;
+    return true;
+  };
+  const droppedBatters = [...historicalBatters].filter((p) => {
+    if (roster.batters.includes(p) && !commDroppedThisWeek.has(p)) return false;
+    const scored = allWeekBatting.some((b) => b.batter === p) && commPlayerWeekScore(allWeekBatting, 'batter', p) > 0;
+    return scored || (commPoolTypeOf(p) === 'batters' && commRosteredDuringWeek(p));
+  });
+  const droppedPitchers = [...historicalPitchers].filter((p) => {
+    if (roster.pitchers.includes(p) && !commDroppedThisWeek.has(p)) return false;
+    const scored =
+      allWeekPitching.some((pt) => pt.pitcher === p) && commPlayerWeekScore(allWeekPitching, 'pitcher', p) > 0;
+    return scored || (commPoolTypeOf(p) === 'pitchers' && commRosteredDuringWeek(p));
+  });
 
   function getPlayerDates(player) {
     const rd = rosterDates[player];
@@ -12605,6 +13710,18 @@ window.updateCommRosterWeekView = function (managerName) {
     };
   }
 
+  // The span a no-longer-active player was rostered for inside THIS week. No add_date here means
+  // they carried in from an earlier week, so the span opens at the week start — it used to render
+  // as a bare "?", which is now common enough to matter (every mid-week swap produces one).
+  function commDroppedSpanTag(player) {
+    const dates = getPlayerDates(player);
+    if (!dates.add_date && !dates.drop_date) return ' <span class="wrs-hist-tag">not rostered</span>';
+    const start = dates.add_date || weekStart;
+    const startLabel = start ? fmtSlashDate(start) : '?';
+    const endLabel = dates.drop_date ? fmtSlashDate(dates.drop_date) : 'now';
+    return ` <span class="wrs-hist-tag">${startLabel}–${endLabel}</span>`;
+  }
+
   function commDateTag(player) {
     const dates = getPlayerDates(player);
     const weekDates = scheduleDates && scheduleDates[weekIdx] ? scheduleDates[weekIdx] : null;
@@ -12612,7 +13729,10 @@ window.updateCommRosterWeekView = function (managerName) {
     const end = dates.drop_date || (weekDates ? weekDates.end : null);
     if (!start || !end) return '';
     const hasSwap = !!(dates.add_date || dates.drop_date);
-    return ` <span class="roster-date-tag${hasSwap ? ' roster-date-swap' : ''}">${fmtDateRangeShort(start, end)}</span>`;
+    // A date still ahead of today belongs to a scheduled swap that hasn't taken effect.
+    const scheduled = dates.add_date > commToday || dates.drop_date > commToday;
+    const cls = `roster-date-tag${hasSwap ? ' roster-date-swap' : ''}${scheduled ? ' roster-date-scheduled' : ''}`;
+    return ` <span class="${cls}">${fmtDateRangeShort(start, end)}</span>`;
   }
 
   // ---- Batters Table ----
@@ -12635,7 +13755,8 @@ window.updateCommRosterWeekView = function (managerName) {
     .filter((b) => historicalBatters.has(b.batter))
     .reduce((s, b) => s + (b.weekly_score || 0), 0);
 
-  const commActiveBatCount = roster.batters.filter((p) => !commDroppedThisWeek.has(p)).length;
+  // A scheduled add is listed but not yet counted — the roster is still the pre-swap one.
+  const commActiveBatCount = roster.batters.filter((p) => !commDroppedThisWeek.has(p) && !commPendingAdd.has(p)).length;
   let batHtml = `<div class="wrs-group-label">BATTERS (${commActiveBatCount}) <span class="wrs-group-pts">${fmt(Math.round(batTotal * 100) / 100)} pts</span></div>`;
 
   if (allBattersThisWeek.size > 0) {
@@ -12650,19 +13771,20 @@ window.updateCommRosterWeekView = function (managerName) {
     allBattersThisWeek.forEach((p) => (commBatScoreByPlayer[p] = (batStatMap[p] || {}).weekly_score || 0));
     orderWithSwapChains([...allBattersThisWeek], commBatScoreByPlayer, approvedSwaps, managerName).forEach((batter) => {
       const s = batStatMap[batter] || {};
-      const onRoster = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
+      // canDrop keys off raw array membership so a commissioner can still cancel a scheduled add;
+      // onRoster is the as-of-today status that drives the greying and the date tag.
+      const canDrop = roster.batters.includes(batter) && !commDroppedThisWeek.has(batter);
+      const isScheduled = commPendingAdd.has(batter);
+      const onRoster = canDrop && !isScheduled;
       const wkRank = weekRanks.batRanks[batter];
       const cumScore = commBatCum[batter] || 0;
       const cumRank = cumRankings.batRanks[batter];
       const safeB = jsStr(batter);
       const manual = (f) => ((s.manual_fields || []).includes(f) ? ' stat-manual' : '');
       const pDates = getPlayerDates(batter);
-      const batDroppedTag =
-        pDates.add_date || pDates.drop_date
-          ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
-          : ' <span class="wrs-hist-tag">not rostered</span>';
-      batHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-      batHtml += `<td>${displayPlayer(batter, sd)}${onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
+      const batDroppedTag = commDroppedSpanTag(batter);
+      batHtml += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+      batHtml += `<td>${displayPlayer(batter, sd)}${isScheduled || onRoster ? commDateTag(batter) : batDroppedTag}</td>`;
       batHtml += `<td class="num${manual('abs')}">${s.abs || 0}</td>`;
       batHtml += `<td class="num${manual('1b')}">${s['1b'] || 0}</td>`;
       batHtml += `<td class="num${manual('2b')}">${s['2b'] || 0}</td>`;
@@ -12678,7 +13800,7 @@ window.updateCommRosterWeekView = function (managerName) {
       batHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
       batHtml += `<td style="white-space:nowrap;">`;
       batHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','batting','${safeB}','${weekKey}')">Edit</button> `;
-      if (onRoster) {
+      if (canDrop) {
         batHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Drop</button> `;
       }
       batHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','batters','${safeB}','${weekKey}')">Remove</button>`;
@@ -12722,7 +13844,9 @@ window.updateCommRosterWeekView = function (managerName) {
     .filter((p) => historicalPitchers.has(p.pitcher))
     .reduce((s, p) => s + (p.weekly_score || 0), 0);
 
-  const commActivePitCount = roster.pitchers.filter((p) => !commDroppedThisWeek.has(p)).length;
+  const commActivePitCount = roster.pitchers.filter(
+    (p) => !commDroppedThisWeek.has(p) && !commPendingAdd.has(p)
+  ).length;
   let pitHtml = `<div class="wrs-group-label" style="margin-top:0.75rem;">PITCHERS (${commActivePitCount}) <span class="wrs-group-pts">${fmt(Math.round(pitTotal * 100) / 100)} pts</span></div>`;
 
   if (allPitchersThisWeek.size > 0) {
@@ -12737,19 +13861,18 @@ window.updateCommRosterWeekView = function (managerName) {
     orderWithSwapChains([...allPitchersThisWeek], commPitScoreByPlayer, approvedSwaps, managerName).forEach(
       (pitcher) => {
         const s = pitStatMap[pitcher] || {};
-        const onRoster = roster.pitchers.includes(pitcher) && !commDroppedThisWeek.has(pitcher);
+        const canDrop = roster.pitchers.includes(pitcher) && !commDroppedThisWeek.has(pitcher);
+        const isScheduled = commPendingAdd.has(pitcher);
+        const onRoster = canDrop && !isScheduled;
         const wkRank = weekRanks.pitRanks[pitcher];
         const cumScore = commPitCum[pitcher] || 0;
         const cumRank = cumRankings.pitRanks[pitcher];
         const safeP = jsStr(pitcher);
         const manual = (f) => ((s.manual_fields || []).includes(f) ? ' stat-manual' : '');
         const pDates = getPlayerDates(pitcher);
-        const pitDroppedTag =
-          pDates.add_date || pDates.drop_date
-            ? ` <span class="wrs-hist-tag">${pDates.add_date ? fmtSlashDate(pDates.add_date) : '?'}–${pDates.drop_date ? fmtSlashDate(pDates.drop_date) : 'now'}</span>`
-            : ' <span class="wrs-hist-tag">not rostered</span>';
-        pitHtml += `<tr${onRoster ? '' : ' class="wrs-hist-row"'}>`;
-        pitHtml += `<td>${displayPlayer(pitcher, sd)}${onRoster ? commDateTag(pitcher) : pitDroppedTag}</td>`;
+        const pitDroppedTag = commDroppedSpanTag(pitcher);
+        pitHtml += `<tr${isScheduled ? ' class="wrs-sched-row"' : onRoster ? '' : ' class="wrs-hist-row"'}>`;
+        pitHtml += `<td>${displayPlayer(pitcher, sd)}${isScheduled || onRoster ? commDateTag(pitcher) : pitDroppedTag}</td>`;
         pitHtml += `<td class="num${manual('gs')}">${s.gs || 0}</td>`;
         pitHtml += `<td class="num${manual('w')}">${s.w || 0}</td>`;
         pitHtml += `<td class="num${manual('qs')}">${s.qs != null ? fmtDec(s.qs) : 0}</td>`;
@@ -12767,7 +13890,7 @@ window.updateCommRosterWeekView = function (managerName) {
         pitHtml += `<td class="num rank-cell">${cumRank ? cumRank.rank + '/' + cumRank.total : '-'}</td>`;
         pitHtml += `<td style="white-space:nowrap;">`;
         pitHtml += `<button class="btn btn-sm btn-outline" onclick="editPlayerStats('${safeMgr}','pitching','${safeP}','${weekKey}')">Edit</button> `;
-        if (onRoster) {
+        if (canDrop) {
           pitHtml += `<button class="btn btn-sm btn-danger" onclick="removeFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Drop</button> `;
         }
         pitHtml += `<button class="btn btn-sm btn-warning" onclick="hardRemoveFromRoster('${safeMgr}','pitchers','${safeP}','${weekKey}')">Remove</button>`;
@@ -12979,7 +14102,7 @@ window.removeFromRoster = function (manager, type, player, weekKey) {
 // Permanently removes a player from the roster AND erases their stats for the week.
 // Use when a player was erroneously rostered (e.g. pre-season submission later changed)
 // and their attributed stats need to be purged entirely, not just marked as dropped.
-window.hardRemoveFromRoster = function (manager, type, player, weekKey) {
+window.hardRemoveFromRoster = async function (manager, type, player, weekKey) {
   if (
     !confirm(
       `Remove ${player} and all their stats for this week from ${manager}'s roster?\n\nThis deletes their stats permanently and cannot be undone.`
@@ -12988,35 +14111,53 @@ window.hardRemoveFromRoster = function (manager, type, player, weekKey) {
     return;
   }
 
+  // Persist the removal through the atomic endpoint, NOT the full-season save. A hard remove is a
+  // deletion, and the server's stale-save guards re-append any roster_dates entry / weekly stat row
+  // missing from a full-season payload — silently resurrecting the removed player after a refresh.
+  // The endpoint deletes them on the server's authoritative copy so the removal actually sticks.
+  let removed = false;
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roster-remove`, {
+      method: 'POST',
+      body: JSON.stringify({ manager, weekKey, player, type }),
+    });
+    if (resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      adoptRev(data._rev);
+      removed = true;
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      alert(`Remove failed (${err.error || resp.status}). Please reload and try again.`);
+    }
+  } catch (e) {
+    alert(`Remove failed — ${e.message}. Please reload and try again.`);
+  }
+  if (!removed) return;
+
+  // Mirror the server's mutation into the local cache so the view updates without a reload.
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
-  const [round, week] = weekKey.split('|');
-
-  // Remove from roster array
-  if (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey] && sd.rosters[manager][weekKey][type]) {
-    sd.rosters[manager][weekKey][type] = sd.rosters[manager][weekKey][type].filter((p) => p !== player);
+  if (sd) {
+    const [round, week] = weekKey.split('|');
+    if (sd.rosters && sd.rosters[manager] && sd.rosters[manager][weekKey] && sd.rosters[manager][weekKey][type]) {
+      sd.rosters[manager][weekKey][type] = sd.rosters[manager][weekKey][type].filter((p) => p !== player);
+    }
+    if (sd.weekly_batting) {
+      sd.weekly_batting = sd.weekly_batting.filter(
+        (b) => !(b.batter === player && b.round === round && b.week === week && (b.manager === manager || !b.manager))
+      );
+    }
+    if (sd.weekly_pitching) {
+      sd.weekly_pitching = sd.weekly_pitching.filter(
+        (p) => !(p.pitcher === player && p.round === round && p.week === week && (p.manager === manager || !p.manager))
+      );
+    }
+    if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
+      delete sd.roster_dates[manager][weekKey][player];
+    }
+    setSeasonsLocal(seasons);
   }
 
-  // Remove batting stats attributed to this manager OR unattributed, for this player+week
-  if (sd.weekly_batting) {
-    sd.weekly_batting = sd.weekly_batting.filter(
-      (b) => !(b.batter === player && b.round === round && b.week === week && (b.manager === manager || !b.manager))
-    );
-  }
-
-  // Remove pitching stats attributed to this manager OR unattributed, for this player+week
-  if (sd.weekly_pitching) {
-    sd.weekly_pitching = sd.weekly_pitching.filter(
-      (p) => !(p.pitcher === player && p.round === round && p.week === week && (p.manager === manager || !p.manager))
-    );
-  }
-
-  // Remove roster_dates entry so the player doesn't reappear via the dates path
-  if (sd.roster_dates && sd.roster_dates[manager] && sd.roster_dates[manager][weekKey]) {
-    delete sd.roster_dates[manager][weekKey][player];
-  }
-
-  saveSeason(SELECTED_SEASON, sd);
   renderRosterData(manager, true);
 };
 
@@ -13210,6 +14351,154 @@ function renderPlayerPoolDisplay() {
 // POST /api/mlb/roster-fix (apply). The fix auto-renames/id-claims rostered names
 // with an unambiguous catalog match, retires history-referenced phantom pool
 // entries, and purges orphans; duplicate-name id picks stay manual.
+
+// ---- Commissioner To-Do ----
+// One aggregated "needs your attention" card at the top of the commissioner panel,
+// so pending work isn't scattered across sub-tabs, badges, and buried tools. Items:
+//   - pending swap requests and roster submissions awaiting approval (from season data)
+//   - player-name audit findings — missing MLB ids, misspellings, phantom pool
+//     entries (background GET /api/mlb/roster-audit, cached per page load per season
+//     since the audit fetches the MLB catalog; re-checked after a cleanup apply)
+//   - daily MLB sync gone stale during a scheduled week (from GET /api/mlb/sync-status)
+// Each item deep-links to the tool that resolves it. The async sources are
+// best-effort: a failed fetch just leaves that item off the list. To add a new item
+// type, push onto `items` in renderCommissionerTodo (sync) or follow the cache +
+// re-render pattern (async).
+const _todoAuditCache = {}; // year -> { fixable, manual }
+const _todoSyncCache = {}; // year -> { newestTs } (null newestTs = no runs recorded)
+
+function renderCommissionerTodo() {
+  const el = document.getElementById('comm-todo-card');
+  if (!el) return;
+  const sd = getSeasons()[SELECTED_SEASON];
+  if (!sd) {
+    el.style.display = 'none';
+    return;
+  }
+  const items = [];
+  const link = (label, onclick) => `<a onclick="${onclick}">${label}</a>`;
+
+  const pendingSwaps = (sd.swaps || []).filter((s) => s.status === 'pending').length;
+  if (pendingSwaps) {
+    items.push(
+      `⚠️ <strong>${pendingSwaps}</strong> pending swap request${pendingSwaps === 1 ? '' : 's'} — ` +
+        link('Review', "goToCommTab('comm-tab-swaps','pending-swaps-list')")
+    );
+  }
+
+  const periods = ['pp1', 'pp2', 'qf', 'sf', 'finals'];
+  const pendingSubs = getManagers().reduce(
+    (n, m) => n + periods.filter((p) => (getPeriodSub(sd, p, m.name) || {}).status === 'pending').length,
+    0
+  );
+  if (pendingSubs) {
+    items.push(
+      `⚠️ <strong>${pendingSubs}</strong> roster submission${pendingSubs === 1 ? '' : 's'} awaiting approval — ` +
+        link('Review', "goToCommTab('comm-tab-swaps','pending-swaps-list')")
+    );
+  }
+
+  const audit = _todoAuditCache[SELECTED_SEASON];
+  if (audit && audit.fixable + audit.manual > 0) {
+    const total = audit.fixable + audit.manual;
+    const detail = [
+      audit.fixable ? `${audit.fixable} auto-fixable` : null,
+      audit.manual ? `${audit.manual} manual review` : null,
+    ]
+      .filter(Boolean)
+      .join(', ');
+    items.push(
+      `🏷️ <strong>${total}</strong> player name${total === 1 ? '' : 's'} need${total === 1 ? 's' : ''} attention ` +
+        `(${detail}) — missing MLB ids, misspellings, or phantom pool entries. ` +
+        link('Open Pool &amp; Name Cleanup', 'goToPoolCleanup()')
+    );
+  }
+
+  const sync = _todoSyncCache[SELECTED_SEASON];
+  if (sync && sd.status === 'active' && todayInsideScheduledWeek(sd)) {
+    const ageMs = sync.newestTs ? Date.now() - parseServerTimestamp(sync.newestTs).getTime() : Infinity;
+    if (ageMs > 36 * 60 * 60 * 1000) {
+      const last = sync.newestTs ? `last run ${fmtServerTimestamp(sync.newestTs)}` : 'no runs recorded yet';
+      items.push(
+        `🔄 Daily MLB stat sync looks stale (${last}) — ` +
+          link('Check MLB API Sync', "goToCommTab('comm-tab-stats-data','mlb-sync-controls')")
+      );
+    }
+  }
+
+  el.innerHTML =
+    `<h2>Commissioner To-Do</h2>` +
+    (items.length
+      ? `<ul class="comm-todo-list">${items.map((i) => `<li class="comm-todo-item">${i}</li>`).join('')}</ul>`
+      : `<p class="comm-todo-allclear">✅ All clear — nothing needs your attention.</p>`);
+  el.style.display = 'block';
+}
+
+// Async to-do sources: fetch once per page load per season, then re-render the card.
+async function refreshTodoAudit(force = false) {
+  const year = SELECTED_SEASON;
+  if (!force && _todoAuditCache[year]) return;
+  try {
+    const resp = await apiFetch(`/api/mlb/roster-audit?year=${year}`);
+    if (!resp.ok) return;
+    const a = await resp.json();
+    _todoAuditCache[year] = {
+      fixable:
+        (a.needs_id_assignment || []).length + (a.unrostered_auto || []).length + (a.unrostered_replace || []).length,
+      manual: (a.duplicate_review || []).length + (a.rostered_review || []).length,
+    };
+    renderCommissionerTodo();
+  } catch {
+    /* best-effort: leave the item off the list */
+  }
+}
+
+async function refreshTodoSyncStatus() {
+  const year = SELECTED_SEASON;
+  if (_todoSyncCache[year]) return;
+  try {
+    const resp = await apiFetch('/api/mlb/sync-status');
+    if (!resp.ok) return;
+    const s = await resp.json();
+    const newestTs = (s.recent_logs || []).reduce(
+      (max, l) => (l.timestamp && (!max || l.timestamp > max) ? l.timestamp : max),
+      null
+    );
+    _todoSyncCache[year] = { newestTs };
+    renderCommissionerTodo();
+  } catch {
+    /* best-effort: leave the item off the list */
+  }
+}
+
+// True when today (ET) falls inside one of the season's scheduled weeks — the sync
+// staleness check is meaningless during the All-Star break or off-season.
+function todayInsideScheduledWeek(sd) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return (sd.schedule_dates || []).some((w) => w && w.start && w.end && today >= w.start && today <= w.end);
+}
+
+// To-do link target: activate a commissioner sub-tab and scroll to an element in it.
+window.goToCommTab = function (tabId, anchorId) {
+  const btn = document.querySelector(`.comm-tab-btn[data-comm-tab="${tabId}"]`);
+  if (btn) btn.click();
+  const anchor = anchorId && document.getElementById(anchorId);
+  if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+// To-do link target: open the Season Setup sub-tab, expand the collapsed Initial
+// Player Pool section, kick off the read-only scan, and land on the cleanup card.
+window.goToPoolCleanup = function () {
+  const tabBtn = document.querySelector('.comm-tab-btn[data-comm-tab="comm-tab-season-setup"]');
+  if (tabBtn) tabBtn.click();
+  const body = document.getElementById('season-setup-body');
+  const toggle = document.getElementById('season-setup-toggle');
+  if (body && toggle && body.style.display === 'none') toggle.click();
+  window.scanPoolCleanup();
+  const results = document.getElementById('pool-cleanup-results');
+  if (results) results.scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
+
 window.scanPoolCleanup = async function () {
   const out = document.getElementById('pool-cleanup-results');
   const applyBtn = document.getElementById('pool-cleanup-apply-btn');
@@ -13313,6 +14602,8 @@ window.applyPoolCleanup = async function () {
     }
     const out2 = document.getElementById('pool-cleanup-results');
     if (out2) out2.innerHTML = html;
+    // Re-audit so the to-do card clears (or narrows to what's still manual).
+    refreshTodoAudit(true);
   } catch (e) {
     const outErr = document.getElementById('pool-cleanup-results');
     if (outErr) outErr.innerHTML = `<p class="error-text">Apply failed — ${esc(e.message)}</p>`;
@@ -13338,6 +14629,55 @@ function findManagerForPlayer(seasonData, playerName, type) {
     }
   }
   return null;
+}
+
+// Bracket-stage labels, used by the roast repair actions and the Hall of Fame season card.
+// Distinct from the `ROUND_LABELS` in js/scoring.js, which is keyed by SCORING round (PP1/PP2
+// separately) — a bracket stage is keyed by playoff round, where Pool Play is one thing.
+const BRACKET_STAGE_LABELS = { PP: 'Pool Play', QF: 'Quarterfinals', SF: 'Semifinals', Finals: 'Finals' };
+
+// The two commissioner roast-repair buttons, for any round that has already been roasted.
+// Both exist for the same reason: the roast bank and the page-context builder change over
+// time, and a round that was roasted under the old code has no other way back. Regenerate
+// touches only the stored roasts (roster pages); repost also sends the combined message.
+function roastRepairToolsHtml(round) {
+  const label = BRACKET_STAGE_LABELS[round] || round;
+  const repostWhat =
+    round === 'PP'
+      ? 'reposts the combined playoff-field + Hall of Shame message'
+      : 'reposts the combined results + Hall of Shame message';
+  return `<div style="margin-top:0.5rem;">
+      <button class="btn btn-sm btn-secondary" onclick="regenerateRoundRoasts('${round}')">Regenerate Roasts (No Slack Post)</button>
+      <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every ${esc(label)} roast in place. Does NOT post to Slack &mdash; roasts just update on managers' roster pages.</span>
+    </div>
+    <div style="margin-top:0.5rem;">
+      <button class="btn btn-sm btn-secondary" onclick="repostRoundRoasts('${round}')">Regenerate &amp; Repost Roasts to Slack</button>
+      <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every ${esc(label)} roast and ${repostWhat} to the scoreboard channel.</span>
+    </div>`;
+}
+
+// Who this round's Hall of Shame is. `sd.eliminated` is the authoritative record — every
+// finalize/dump path writes it, and it reflects any commissioner correction made since —
+// so a repair action reads it rather than recomputing the bracket, which could disagree.
+// Stored roasts are folded in as a fallback for the window where a dump wrote roasts but
+// the eliminated map didn't land; podium finishers are excluded (they have their own set).
+function eliminatedInRound(sd, round) {
+  const set = new Set();
+  for (const [m, r] of Object.entries((sd && sd.eliminated) || {})) if (r === round) set.add(m);
+  for (const [m, r] of Object.entries((sd && sd.roasts) || {})) {
+    if (r && r.round === round && (r.outcome || 'eliminated') === 'eliminated') set.add(m);
+  }
+  return [...set].sort();
+}
+
+// Finals only: the three podium finishers (next year's pool-selection captains), read back
+// from their stored roast `outcome` so a repost can never reshuffle who was crowned.
+const PODIUM_ORDER = { champion: 0, runner_up: 1, third: 2 };
+function podiumRolesFromRoasts(sd) {
+  return Object.entries((sd && sd.roasts) || {})
+    .filter(([, r]) => r && r.round === 'Finals' && PODIUM_ORDER[r.outcome] !== undefined)
+    .map(([manager, r]) => ({ manager, outcome: r.outcome }))
+    .sort((a, b) => PODIUM_ORDER[a.outcome] - PODIUM_ORDER[b.outcome]);
 }
 
 function renderWeeklyUploadSections() {
@@ -13407,8 +14747,11 @@ function renderWeeklyUploadSections() {
         </div>
         <div class="upload-week-body" id="upload-week-body-${i}" style="display:${isExpanded ? 'block' : 'none'};">`;
 
-    // Advance Players button (not for the first week)
-    if (hasPriorWeek) {
+    // Advance Players button (not for the first week, and never across a period boundary —
+    // PP2/QF/SF/Finals Week 1 is owned by that period's submissions, so carrying the previous
+    // round's rosters in would hand every manager, eliminated ones included, a roster they
+    // never submitted. See the CORE SCORING INVARIANT in CLAUDE.md.)
+    if (hasPriorWeek && !isPeriodBoundaryWeek(i)) {
       const alreadyAdvanced = (sd.advanced_weeks || []).includes(i);
       const autoAdvanced = (sd.auto_advanced_weeks || []).includes(i);
       const btnDisabled = alreadyAdvanced ? 'disabled style="opacity:0.5;cursor:not-allowed;"' : '';
@@ -13421,6 +14764,10 @@ function renderWeeklyUploadSections() {
         <button class="btn btn-sm btn-secondary" onclick="advancePlayers(${i})" ${btnDisabled}>Advance Players</button>
         <span class="text-muted" style="font-size:0.78rem;">${statusText}</span>
         <span id="advance-status-${i}"></span>
+      </div>`;
+    } else if (hasPriorWeek) {
+      html += `<div style="margin:0.5rem 0;">
+        <span class="text-muted" style="font-size:0.78rem;">Starts a new submission period &mdash; rosters come from each manager's ${esc(s.round)} submission, not carried forward from ${SEASON_SCHEDULE[i - 1].label}.</span>
       </div>`;
     }
 
@@ -13448,23 +14795,18 @@ function renderWeeklyUploadSections() {
       // Week 10 (PP2 Week 5) - End Pool Play
       const ppFinalized = finalized.includes('PP');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${ppFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('PP', ${i})" ${ppFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${ppFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('PP')" ${ppFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${ppFinalized ? 'Pool Play Ended' : 'End Pool Play'}
         </button>
         ${ppFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Pool Play finalized. Managers advanced to Quarterfinals.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize pool play and advance managers to playoffs.</span>'}
       </div>`;
-      if (ppFinalized) {
-        html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-secondary" onclick="repostPoolPlayRoasts()">Regenerate &amp; Repost Roasts to Slack</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls every Pool Play roast and reposts the combined playoff-field + Hall of Shame message to the scoreboard channel.</span>
-        </div>`;
-      }
+      if (ppFinalized) html += roastRepairToolsHtml('PP');
     } else if (i === 11) {
       // Week 12 (QF Week 2) - End Quarterfinals
       const qfFinalized = finalized.includes('QF');
       const qfDumped = (sd.losers_dumped || []).includes('QF');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${qfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('QF', ${i})" ${qfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${qfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('QF')" ${qfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${qfFinalized ? 'Quarterfinals Ended' : 'End Quarterfinals'}
         </button>
         ${qfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Quarterfinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize quarterfinals and advance winners to semifinals.</span>'}
@@ -13472,17 +14814,18 @@ function renderWeeklyUploadSections() {
       if (qfFinalized && !qfDumped) {
         html += `<div style="margin-top:0.5rem;">
           <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('QF')">Advance SF Winners &amp; Dump QF Loser Rosters</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes QF losers from SF submissions, marks them eliminated, and generates roasts.</span>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes QF losers from SF submissions, marks them eliminated, generates roasts, and posts the Hall of Shame to Slack.</span>
         </div>`;
       } else if (qfDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">QF loser rosters dumped. Roasts generated.</span></div>`;
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">QF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
+        html += roastRepairToolsHtml('QF');
       }
     } else if (i === 13) {
       // Week 14 (SF Week 2) - End Semifinals
       const sfFinalized = finalized.includes('SF');
       const sfDumped = (sd.losers_dumped || []).includes('SF');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF', ${i})" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF')" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${sfFinalized ? 'Semifinals Ended' : 'End Semifinals'}
         </button>
         ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to finals.</span>'}
@@ -13490,20 +14833,31 @@ function renderWeeklyUploadSections() {
       if (sfFinalized && !sfDumped) {
         html += `<div style="margin-top:0.5rem;">
           <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('SF')">Advance Finals Teams &amp; Dump SF Loser Rosters</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, and generates roasts.</span>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, generates roasts, and posts the Hall of Shame to Slack.</span>
         </div>`;
       } else if (sfDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated.</span></div>`;
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
+        html += roastRepairToolsHtml('SF');
       }
     } else if (i === 15) {
       // Week 16 (Finals Week 2) - End Finals
       const finalsFinalized = finalized.includes('Finals');
+      const finalsDumped = (sd.losers_dumped || []).includes('Finals');
       html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals', ${i})" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
+        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals')" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${finalsFinalized ? 'Season Complete' : 'End Finals'}
         </button>
         ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
       </div>`;
+      if (finalsFinalized && !finalsDumped) {
+        html += `<div style="margin-top:0.5rem;">
+          <button class="btn btn-sm btn-danger" onclick="crownChampionAndRoastFinals()">Crown Champion &amp; Roast Runner-up/4th</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Marks the runner-up and 4th-place manager eliminated, generates their roasts, and posts the season-ending Hall of Shame to Slack.</span>
+        </div>`;
+      } else if (finalsDumped) {
+        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Champion crowned. Runner-up/4th roasted.</span></div>`;
+        html += roastRepairToolsHtml('Finals');
+      }
     }
 
     // Clear week data button (only when data exists)
@@ -13599,22 +14953,38 @@ window.clearWeekData = async function (weekIndex) {
   }
 };
 
-// Advance Players: copy per-week rosters from prior week to current week for all managers.
-// Creates zero-stat records for all advanced players. Marks the week as advanced to prevent re-clicking.
-window.advancePlayers = function (weekIndex) {
-  const seasons = getSeasons();
-  const sd = seasons[SELECTED_SEASON];
-  if (!sd || weekIndex < 1) return;
+// True when week `i` is the first week of a new scoring period (PP2/QF/SF/Finals Week 1).
+// Mirror of server.js' isPeriodBoundaryWeek — keep the two in step.
+function isPeriodBoundaryWeek(i) {
+  return (
+    i > 0 && SEASON_SCHEDULE[i] && SEASON_SCHEDULE[i - 1] && SEASON_SCHEDULE[i].round !== SEASON_SCHEDULE[i - 1].round
+  );
+}
+
+// Copy per-week rosters from the prior week into `weekIndex` for all active managers and create
+// the zero-stat weekly rows those players need, marking the week advanced so it can't run twice.
+//
+// Pure mutator on the `sd` it is handed — the CALLER owns the save. That split is the fix for the
+// round-advance clobber: finalizeRound used to read its own getSeasons() snapshot, then call an
+// advancePlayers that read a SECOND independent snapshot, mutated it and saved it, after which
+// finalizeRound saved its now-stale first snapshot on top. Two full-season payloads from one
+// click, the later one missing the rosters the earlier one had just written — which rewound the
+// local cache, tripped the server's destructive-save guard ("roster shrank B 4→0"), and left
+// finalized_rounds unwritten. One snapshot, one save.
+//
+// Returns { ok, advanced, reason }; reason is 'boundary' | 'already' | 'invalid' when ok is false.
+function applyAdvancePlayers(sd, weekIndex) {
+  if (!sd || weekIndex < 1) return { ok: false, advanced: 0, reason: 'invalid' };
+
+  // CORE SCORING INVARIANT: a new submission period starts fresh from its own submission —
+  // players never carry across a period boundary. Advancing into PP2/QF/SF/Finals Week 1 would
+  // give every manager holding a prior-round roster (eliminated managers included) players they
+  // never submitted, which is exactly what purge-orphan-boundary-rosters exists to clean up.
+  if (isPeriodBoundaryWeek(weekIndex)) return { ok: false, advanced: 0, reason: 'boundary' };
 
   // Prevent double-click
   if (!sd.advanced_weeks) sd.advanced_weeks = [];
-  if (sd.advanced_weeks.includes(weekIndex)) {
-    const statusEl = document.getElementById(`advance-status-${weekIndex}`);
-    if (statusEl) {
-      statusEl.innerHTML = `<span class="text-muted" style="font-size:0.78rem;"> Players already advanced for this week.</span>`;
-    }
-    return;
-  }
+  if (sd.advanced_weeks.includes(weekIndex)) return { ok: false, advanced: 0, reason: 'already' };
 
   migrateRostersToWeekly(sd);
 
@@ -13735,20 +15105,56 @@ window.advancePlayers = function (weekIndex) {
 
   // Mark this week as advanced
   sd.advanced_weeks.push(weekIndex);
-  saveSeason(SELECTED_SEASON, sd);
+  return { ok: true, advanced, reason: null };
+}
 
-  const statusEl = document.getElementById(`advance-status-${weekIndex}`);
-  if (statusEl) {
-    statusEl.innerHTML =
-      advanced > 0
-        ? `<span class="success-text" style="font-size:0.78rem;"> Advanced ${advanced} manager roster${advanced > 1 ? 's' : ''}.</span>`
-        : `<span class="text-muted" style="font-size:0.78rem;"> All rosters already set for this week.</span>`;
+// Commissioner "Advance Players" button: read one snapshot, apply, save it, report.
+window.advancePlayers = async function (weekIndex) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const setStatus = (cls, txt) => {
+    const el = document.getElementById(`advance-status-${weekIndex}`);
+    if (el) el.innerHTML = `<span class="${cls}" style="font-size:0.78rem;"> ${txt}</span>`;
+  };
+
+  const result = applyAdvancePlayers(sd, weekIndex);
+  if (!result.ok) {
+    if (result.reason === 'already') setStatus('text-muted', 'Players already advanced for this week.');
+    else if (result.reason === 'boundary') {
+      setStatus(
+        'text-muted',
+        `${esc(SEASON_SCHEDULE[weekIndex].round)} starts a new submission period — rosters come from each manager's submission, not from the previous round.`
+      );
+    }
+    return;
   }
+
+  // saveSeason already alerts (and reloads) on a rejected save; leave the status line alone so a
+  // failure never reads as a success.
+  if (!(await saveSeason(SELECTED_SEASON, sd))) return;
+
+  setStatus(
+    result.advanced > 0 ? 'success-text' : 'text-muted',
+    result.advanced > 0
+      ? `Advanced ${result.advanced} manager roster${result.advanced > 1 ? 's' : ''}.`
+      : 'All rosters already set for this week.'
+  );
   renderWeeklyUploadSections();
 };
 
-// Finalize a round (End Pool Play, End QF, End SF, End Finals)
-window.finalizeRound = function (roundKey, weekIndex) {
+// Finalize a round (End Pool Play, End QF, End SF, End Finals).
+//
+// Every branch mutates ONE `sd` snapshot and writes it with ONE awaited save. Nothing re-renders
+// until that save is confirmed, so a rejected save leaves the button live and honest instead of
+// showing a finalized round the server never accepted.
+//
+// The next round is deliberately NOT roster-advanced here. QF/SF/Finals Week 1 each open a new
+// submission period, and players never carry across a period boundary (CORE SCORING INVARIANT) —
+// those rosters come from each manager's submission for the round. The follow-up "Advance
+// winners & dump loser rosters" button is what prunes the losers and posts the round-end Slack.
+window.finalizeRound = async function (roundKey) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
@@ -13761,49 +15167,37 @@ window.finalizeRound = function (roundKey, weekIndex) {
   // Lock in the playoff seeds at the moment pool play is confirmed. From here on the bracket
   // and qualification read this snapshot, so a later pool-play stat correction can't silently
   // reseed an in-progress playoff.
+  let qualifiers = [];
+  let nonQualifiers = [];
   if (roundKey === 'PP') {
     const snapshot = buildSeedingSnapshot(sd);
     if (snapshot) sd.confirmed_seeding = snapshot;
     // Mark pool-play non-qualifiers as eliminated and queue roasts
-    const qualifiers = getQFQualifiers(sd) || [];
+    qualifiers = getQFQualifiers(sd) || [];
     const allManagers = getManagers().map((m) => m.name);
-    const nonQualifiers = allManagers.filter((m) => !qualifiers.includes(m));
+    nonQualifiers = allManagers.filter((m) => !qualifiers.includes(m));
     if (!sd.eliminated) sd.eliminated = {};
     nonQualifiers.forEach((m) => {
       if (!sd.eliminated[m]) sd.eliminated[m] = 'PP';
     });
-    saveSeason(SELECTED_SEASON, sd);
-    renderWeeklyUploadSections();
-    init();
+  }
+
+  if (!(await saveSeason(SELECTED_SEASON, sd))) return; // saveSeason already alerted/reloaded
+
+  renderWeeklyUploadSections();
+  init();
+
+  if (roundKey === 'PP' && nonQualifiers.length > 0) {
     // Generate roasts in the background — sequentially, so concurrent generate-roast
     // read-modify-writes can't clobber each other's stored roast — then post ONE combined
     // Slack message (playoff field + QF matchups, then the roasts) to the scoreboard
     // channel and re-render so roasts appear. `qualifiers` is already seed-ordered.
-    (async () => {
-      for (const m of nonQualifiers) {
-        await generateRoastForManager(m, 'PP');
-      }
-      if (nonQualifiers.length > 0) await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers);
-      renderWeeklyUploadSections();
-    })();
-    return;
+    for (const m of nonQualifiers) {
+      await generateRoastForManager(m, 'PP');
+    }
+    await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers);
+    renderWeeklyUploadSections();
   }
-
-  // Auto-advance players to next round if applicable
-  if (roundKey === 'PP' && weekIndex < SEASON_SCHEDULE.length - 1) {
-    // Advance all managers to QF Week 1 (index 10)
-    window.advancePlayers(10);
-  } else if (roundKey === 'QF' && weekIndex < SEASON_SCHEDULE.length - 1) {
-    // Advance to SF Week 1 (index 12)
-    window.advancePlayers(12);
-  } else if (roundKey === 'SF' && weekIndex < SEASON_SCHEDULE.length - 1) {
-    // Advance to Finals Week 1 (index 14)
-    window.advancePlayers(14);
-  }
-
-  saveSeason(SELECTED_SEASON, sd);
-  renderWeeklyUploadSections();
-  init();
 };
 
 // Remove losing managers' next-round submissions, mark them eliminated, trigger roasts.
@@ -13813,30 +15207,18 @@ window.dumpPlayoffLosers = async function (round) {
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  if (!sd.eliminated) sd.eliminated = {};
-  if (!sd.period_submissions) sd.period_submissions = {};
+  const nextPeriod = round === 'QF' ? 'sf' : round === 'SF' ? 'finals' : null;
+  if (!nextPeriod) return;
 
-  let losers = [];
+  let losers;
   if (round === 'QF') {
     const qfQualifiers = getQFQualifiers(sd) || [];
     const sfParticipants = getSFParticipants(sd) || [];
     losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
-    const sfSubs = sd.period_submissions.sf || {};
-    losers.forEach((m) => {
-      delete sfSubs[m];
-      sd.eliminated[m] = 'QF';
-    });
-    sd.period_submissions.sf = sfSubs;
-  } else if (round === 'SF') {
+  } else {
     const sfParticipants = getSFParticipants(sd) || [];
     const finalsParticipants = getFinalsParticipants(sd) || [];
     losers = sfParticipants.filter((m) => !finalsParticipants.includes(m));
-    const finalsSubs = sd.period_submissions.finals || {};
-    losers.forEach((m) => {
-      delete finalsSubs[m];
-      sd.eliminated[m] = 'SF';
-    });
-    sd.period_submissions.finals = finalsSubs;
   }
 
   if (losers.length === 0) {
@@ -13844,24 +15226,129 @@ window.dumpPlayoffLosers = async function (round) {
     return;
   }
 
-  sd.losers_dumped = sd.losers_dumped || [];
-  sd.losers_dumped.push(round);
+  // Submissions are server-authoritative: the full-season save always keeps the server's copy of
+  // initial_submissions/period_submissions, so deleting them off a local `sd` and saving it was a
+  // no-op — the losers' next-round submissions survived every "dump". Remove them through the
+  // atomic endpoint instead, which is the only path that actually persists.
+  for (const m of losers) {
+    if (!(await removeSubmissionRemote(nextPeriod, m))) return; // already alerted
+  }
 
-  saveSeason(SELECTED_SEASON, sd);
+  // Re-read AFTER the deletions: removeSubmissionRemote rewrites the local cache and adopts a new
+  // _rev, so the pre-delete snapshot above is stale and would be rejected (or would re-mirror the
+  // submissions it just removed).
+  const fresh = getSeasons();
+  const freshSd = fresh[SELECTED_SEASON];
+  if (!freshSd) return;
+  if (!freshSd.eliminated) freshSd.eliminated = {};
+  losers.forEach((m) => {
+    freshSd.eliminated[m] = round;
+  });
+  freshSd.losers_dumped = freshSd.losers_dumped || [];
+  if (!freshSd.losers_dumped.includes(round)) freshSd.losers_dumped.push(round);
+
+  if (!(await saveSeason(SELECTED_SEASON, freshSd))) return; // saveSeason already alerted/reloaded
+
   for (const m of losers) {
     await generateRoastForManager(m, round);
   }
-  alert(`Dumped ${losers.length} loser roster${losers.length > 1 ? 's' : ''}: ${losers.join(', ')}`);
+  // Post the round's eliminations to Slack the same way Pool Play does — one combined
+  // message with a roast per eliminated manager. `qualifiers` (the PP playoff-field
+  // summary) doesn't apply here; the server only builds that block for round === 'PP'.
+  const posted = await postCombinedRoastsToSlack(round, null, losers);
+  alert(
+    `Dumped ${losers.length} loser roster${losers.length > 1 ? 's' : ''}: ${losers.join(', ')}.` +
+      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
+  );
   renderWeeklyUploadSections();
   init();
 };
 
-// Call the server to generate and store a roast for an eliminated manager.
-async function generateRoastForManager(manager, round) {
+// Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
+// bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
+// bookkeeping — the runner-up genuinely did lose the Championship), generate roasts for
+// ALL FOUR participants, and post the combined "season is over" Slack message. Only 4th
+// place gets the plain elimination banner — the top 3 finishers (champion, runner-up, 3rd)
+// are next year's pool-selection captains, so they get the podium treatment (silver/gold/
+// bronze banner + captain reminder) instead of "Hall of Shame", even though the runner-up
+// and 4th place lost the same round. There's no next round to prune submissions from, so
+// this is a separate action rather than folded into finalizeRound('Finals', ...).
+window.crownChampionAndRoastFinals = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const matchups = playoffRoundMatchups(sd, 'Finals');
+  if (!matchups) {
+    alert('Finals participants not determined yet — make sure QF and SF are finalized.');
+    return;
+  }
+
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const seedRank = seedRankLookup(sd);
+  const winnerOf = (a, b) =>
+    roundMatchupWinner(
+      a,
+      roundBreakdown(sd, a, 'Finals', rosterLookup, weekKeyToStart).total,
+      b,
+      roundBreakdown(sd, b, 'Finals', rosterLookup, weekKeyToStart).total,
+      seedRank
+    );
+
+  const [champA, champB] = matchups[0].teams.map((t) => t.name);
+  const [thirdA, thirdB] = matchups[1].teams.map((t) => t.name);
+  const champion = winnerOf(champA, champB);
+  const runnerUp = champion === champA ? champB : champA;
+  const third = winnerOf(thirdA, thirdB);
+  const fourth = third === thirdA ? thirdB : thirdA;
+
+  // Top-3 podium finishers — captains for next year's pool selection — get the podium
+  // roast/banner treatment. Only 4th place is a plain elimination.
+  const podiumRoles = [];
+  if (champion) podiumRoles.push({ manager: champion, outcome: 'champion' });
+  if (runnerUp) podiumRoles.push({ manager: runnerUp, outcome: 'runner_up' });
+  if (third) podiumRoles.push({ manager: third, outcome: 'third' });
+
+  const losers = [fourth].filter(Boolean);
+  if (losers.length === 0 && podiumRoles.length === 0) {
+    alert('Could not determine Finals results — make sure scores are uploaded.');
+    return;
+  }
+
+  if (!sd.eliminated) sd.eliminated = {};
+  // Bracket bookkeeping: the runner-up and 4th place both genuinely lost the Championship/
+  // 3rd-place game this round, regardless of which roast banner they get.
+  [runnerUp, fourth].filter(Boolean).forEach((m) => {
+    sd.eliminated[m] = 'Finals';
+  });
+  sd.losers_dumped = sd.losers_dumped || [];
+  sd.losers_dumped.push('Finals');
+  saveSeason(SELECTED_SEASON, sd);
+
+  for (const m of losers) {
+    await generateRoastForManager(m, 'Finals');
+  }
+  for (const w of podiumRoles) {
+    await generateRoastForManager(w.manager, 'Finals', w.outcome);
+  }
+  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, podiumRoles);
+  alert(
+    `Champion: ${champion}. Runner-up: ${runnerUp}. 3rd place: ${third}. 4th place: ${fourth}.` +
+      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
+  );
+  renderWeeklyUploadSections();
+  init();
+};
+
+// Call the server to generate and store a roast. `outcome` defaults to the standard
+// "you're eliminated" roast; pass 'champion', 'runner_up', or 'third' for the Finals-round
+// podium roasts (all three are next year's pool-selection captains).
+async function generateRoastForManager(manager, round, outcome) {
   try {
     await apiFetch(`/api/seasons/${SELECTED_SEASON}/generate-roast`, {
       method: 'POST',
-      body: JSON.stringify({ manager, round }),
+      body: JSON.stringify({ manager, round, outcome: outcome || 'eliminated' }),
     });
     // Re-sync seasons from server so roasts appear immediately
     const fresh = await fetch('/api/seasons');
@@ -13881,13 +15368,15 @@ async function generateRoastForManager(manager, round) {
 // (seed-ordered) and `eliminated` are fallbacks the server uses if the finalize save
 // hasn't landed yet; the server generates any missing roast itself before posting.
 // `regenerate` re-rolls every stored roast for the round (used by the repost button).
+// `podium` (Finals only) is an array of {manager, outcome:'champion'|'runner_up'|'third'}
+// — gets its own "word for the podium" section instead of the Hall of Shame one.
 // Non-fatal on failure (e.g. Slack webhook not configured) — finalization already succeeded
 // and the roasts still show on the roster pages. Returns true when the post went out.
-async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate) {
+async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenerate, podium) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/slack`, {
       method: 'POST',
-      body: JSON.stringify({ round, qualifiers, eliminated, regenerate }),
+      body: JSON.stringify({ round, qualifiers, eliminated, regenerate, podium }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
@@ -13901,21 +15390,65 @@ async function postCombinedRoastsToSlack(round, qualifiers, eliminated, regenera
   }
 }
 
-// Commissioner repair action: re-roll every Pool Play roast server-side and repost the
-// combined Slack message (playoff field + Hall of Shame). Covers the failure modes of the
-// original post — a roast lost to a stale save, or the whole batch coming from the static
-// fallback — without having to re-finalize anything.
-window.repostPoolPlayRoasts = async function () {
+// Commissioner repair action: re-roll every stored roast for a round server-side WITHOUT
+// posting to Slack — for refreshing roasts after the roast bank or the page-context builder
+// changes, without sending a second round-end message to the channel. Reuses the same
+// per-manager generate-roast call the elimination dump uses, and preserves each manager's
+// stored `outcome`, so a champion is re-roasted as a champion and not eliminated.
+window.regenerateRoundRoasts = async function (round) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
-  if (!confirm('Re-roll every Pool Play roast and repost the combined Slack message?')) return;
 
-  const qualifiers = getQFQualifiers(sd) || [];
-  const nonQualifiers = getManagers()
-    .map((m) => m.name)
-    .filter((m) => !qualifiers.includes(m));
-  const ok = await postCombinedRoastsToSlack('PP', qualifiers, nonQualifiers, true);
+  const label = BRACKET_STAGE_LABELS[round] || round;
+  const losers = eliminatedInRound(sd, round);
+  const podium = round === 'Finals' ? podiumRolesFromRoasts(sd) : [];
+  const total = losers.length + podium.length;
+  if (total === 0) {
+    alert(`No ${label} roasts on file to regenerate.`);
+    return;
+  }
+  if (!confirm(`Regenerate ${total} ${label} roast${total === 1 ? '' : 's'}? This does NOT post anything to Slack.`)) {
+    return;
+  }
+
+  // Sequential: each generate-roast is a read-modify-write of db.json, so concurrent calls
+  // would clobber each other's stored roast.
+  for (const m of losers) {
+    await generateRoastForManager(m, round);
+  }
+  for (const w of podium) {
+    await generateRoastForManager(w.manager, round, w.outcome);
+  }
+  alert(`Regenerated ${total} ${label} roast${total === 1 ? '' : 's'}. Nothing was posted to Slack.`);
+  renderWeeklyUploadSections();
+};
+
+// Commissioner repair action: re-roll every roast for a round server-side AND repost the
+// combined Slack message (playoff field or round results, then the Hall of Shame). Covers
+// the failure modes of the original post — a roast lost to a stale save, the whole batch
+// coming from the static fallback, or the roast build having changed since — without having
+// to re-finalize anything. Posts a NEW message; it cannot edit the original.
+window.repostRoundRoasts = async function (round) {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const label = BRACKET_STAGE_LABELS[round] || round;
+  const losers = eliminatedInRound(sd, round);
+  const podium = round === 'Finals' ? podiumRolesFromRoasts(sd) : [];
+  if (losers.length + podium.length === 0) {
+    alert(`No ${label} roasts on file to repost.`);
+    return;
+  }
+  if (!confirm(`Re-roll every ${label} roast and post a NEW combined message to the scoreboard channel?`)) {
+    return;
+  }
+
+  // `qualifiers` only feeds the PP playoff-field summary; the server builds the playoff
+  // rounds' opener from the real matchup scores and ignores it.
+  const qualifiers = round === 'PP' ? getQFQualifiers(sd) || [] : null;
+  const ok = await postCombinedRoastsToSlack(round, qualifiers, losers, true, podium.length ? podium : undefined);
 
   // Re-sync so the regenerated roasts show on roster pages immediately.
   try {
@@ -14533,103 +16066,79 @@ const WMMC_TOTAL_SEASONS_THROUGH_2025 = 8;
 // Per-manager season overrides for managers who didn't play every historical season
 const WMMC_SEASON_OVERRIDES = { 'Stephen Farmer': 2, 'Joey Auclair': 7, 'Edgar Rivas': 6 };
 
-// Compute full 1-12 standings from a live season's data.
-// Returns { champion, runnerUp, third, standings: { 'Name': position } } or null if not enough data.
-function computeFullStandings(sd, mgrs) {
-  const bat = sd.weekly_batting || [],
-    pit = sd.weekly_pitching || [];
-  function rs(mgr, round) {
-    return (
-      bat.filter((b) => b.manager === mgr && b.round === round).reduce((s, b) => s + (b.weekly_score || 0), 0) +
-      pit.filter((p) => p.manager === mgr && p.round === round).reduce((s, p) => s + (p.weekly_score || 0), 0)
-    );
-  }
+// Every manager's finishing status for a season — settled placings for the eliminated, a
+// live "current round" status for anyone still alive. Returns the shape described in
+// js/playoffStatus.js (entries / standings / currentRound / complete / podium), or null when
+// the league has no managers.
+//
+// Scoring invariant: managers come from the commissioner page (getManagers) and nowhere else;
+// who qualified and who advanced come from the canonical bracket helpers (getSeeding /
+// getSFParticipants / getFinalsParticipants), and every round total comes from roundBreakdown
+// — i.e. the date-windowed, period-scoped rosters, never the sticky `manager` field on a stat
+// row. That's the same source the Playoff Bracket card reads, so the Hall of Fame can't
+// disagree with the bracket about a result. Nothing here writes to seasonData.
+function hofPlayoffStatuses(sd) {
+  if (!sd) return null;
+  const managerNames = getManagers()
+    .filter((m) => m.active !== false)
+    .map((m) => m.name);
+  if (managerNames.length === 0) return null;
 
-  const activeMgrs = mgrs.filter((m) => m.active !== false);
-  const pools = {};
-  activeMgrs.forEach((m) => {
-    if (m.pool) {
-      if (!pools[m.pool]) pools[m.pool] = [];
-      pools[m.pool].push(m.name);
-    }
-  });
+  const finalized = sd.finalized_rounds || [];
+  const seeding = getSeeding(sd);
+  const qualifiers = (seeding && seeding.qualifierNames) || [];
 
+  // Pool-play totals order the non-qualifiers. Computed live even when a confirmed seeding
+  // snapshot exists — the snapshot fixes WHO qualified, not what anyone scored.
   const ppTotals = {};
-  activeMgrs.forEach((m) => {
-    ppTotals[m.name] = rs(m.name, 'PP1') + rs(m.name, 'PP2');
-  });
+  const poolPlay = computePoolPlaySeeding(sd);
+  if (poolPlay) Object.values(poolPlay.byManager).forEach((s) => (ppTotals[s.manager] = s.total));
 
-  // Pool winners seeded first, then remaining by total PP
-  const ppWinners = new Set();
-  Object.values(pools).forEach((members) => {
-    const byPP1 = members.slice().sort((a, b) => rs(b, 'PP1') - rs(a, 'PP1'));
-    const byPP2 = members.slice().sort((a, b) => rs(b, 'PP2') - rs(a, 'PP2'));
-    if (byPP1[0]) ppWinners.add(byPP1[0]);
-    if (byPP2[0]) ppWinners.add(byPP2[0]);
-  });
-
-  const allNames = activeMgrs.map((m) => m.name);
-  const seeded = [
-    ...[...ppWinners].sort((a, b) => ppTotals[b] - ppTotals[a]),
-    ...allNames.filter((n) => !ppWinners.has(n)).sort((a, b) => ppTotals[b] - ppTotals[a]),
-  ].slice(0, 8);
-
-  if (seeded.length < 8) return null;
-
-  const nonPlayoff = allNames.filter((n) => !seeded.includes(n)).sort((a, b) => ppTotals[b] - ppTotals[a]);
-
-  // QF: 1v8, 4v5, 3v6, 2v7
-  const qfL = [];
-  const qfW = [
-    [seeded[0], seeded[7]],
-    [seeded[3], seeded[4]],
-    [seeded[2], seeded[5]],
-    [seeded[1], seeded[6]],
-  ].map(([a, b]) => {
-    const winner = rs(a, 'QF') >= rs(b, 'QF') ? a : b;
-    qfL.push(winner === a ? b : a);
-    return winner;
-  });
-
-  // SF
-  const sfW = [],
-    sfL = [];
-  [
-    [qfW[0], qfW[1]],
-    [qfW[2], qfW[3]],
-  ].forEach(([a, b]) => {
-    const winner = rs(a, 'SF') >= rs(b, 'SF') ? a : b;
-    sfW.push(winner);
-    sfL.push(winner === a ? b : a);
-  });
-
-  if (!sfW[0] || !sfW[1]) return null;
-
-  // Finals + 3rd-place game (SF losers)
-  const champion = rs(sfW[0], 'Finals') >= rs(sfW[1], 'Finals') ? sfW[0] : sfW[1];
-  const runnerUp = champion === sfW[0] ? sfW[1] : sfW[0];
-  const third = sfL.length === 2 ? (rs(sfL[0], 'Finals') >= rs(sfL[1], 'Finals') ? sfL[0] : sfL[1]) : null;
-  const fourth = third ? (third === sfL[0] ? sfL[1] : sfL[0]) : null;
-
-  const standings = {};
-  standings[champion] = 1;
-  if (runnerUp) standings[runnerUp] = 2;
-  if (third) standings[third] = 3;
-  if (fourth) standings[fourth] = 4;
-
-  // QF losers: 5th–8th by QF score descending (highest = 5th)
-  qfL
-    .sort((a, b) => rs(b, 'QF') - rs(a, 'QF'))
-    .forEach((n, i) => {
-      standings[n] = 5 + i;
+  // Round totals are only needed for rounds already in the books: they order the managers
+  // eliminated in that round and decide the Finals / 3rd-place games.
+  const rosterLookup = buildRosterLookup(sd);
+  const weekKeyToStart = buildWeekKeyToStart(sd);
+  const roundTotals = {};
+  ['QF', 'SF', 'Finals'].forEach((round) => {
+    if (!finalized.includes(round)) return;
+    const totals = {};
+    qualifiers.forEach((n) => {
+      totals[n] = roundBreakdown(sd, n, round, rosterLookup, weekKeyToStart).total;
     });
-
-  // Non-playoff: 9th–12th by total PP score descending (highest = 9th)
-  nonPlayoff.forEach((n, i) => {
-    standings[n] = 9 + i;
+    roundTotals[round] = totals;
   });
 
-  return { champion, runnerUp, third, standings };
+  return computePlayoffStatuses({
+    managers: managerNames,
+    qualifiers,
+    sfParticipants: getSFParticipants(sd),
+    finalsParticipants: getFinalsParticipants(sd),
+    finalized,
+    ppTotals,
+    roundTotals,
+  });
+}
+
+// The season currently in progress, as a Hall of Fame row. Null until pool play is finalized
+// (before that nobody has been eliminated and the field is only a projection) and again once
+// the Finals are in the books (from then on it's a finished result like any other, and
+// getHofAllResults picks it up). It never wins the reigning-champion banner, and it feeds the
+// all-time records only through its settled finishes — see hofRecordResults.
+function getHofLiveResult() {
+  const lastHistoricalYear = Math.max(...WMMC_HISTORICAL_RESULTS.map((r) => Number(r.year)));
+  const seasons = getSeasons();
+  const years = Object.keys(seasons)
+    .filter((y) => Number(y) > lastHistoricalYear && seasons[y] && seasons[y].status === 'active')
+    .sort((a, b) => Number(b) - Number(a));
+
+  for (const year of years) {
+    const sd = seasons[year];
+    const finalized = sd.finalized_rounds || [];
+    if (!finalized.includes('PP') || finalized.includes('Finals')) continue;
+    const statuses = hofPlayoffStatuses(sd);
+    if (statuses && statuses.entries.length) return { year, ...statuses };
+  }
+  return null;
 }
 
 function buildHofRecords(results) {
@@ -14761,7 +16270,6 @@ function getHofAllResults() {
   // Only auto-compute results for seasons AFTER the last historical year.
   const lastHistoricalYear = Math.max(...WMMC_HISTORICAL_RESULTS.map((r) => Number(r.year)));
   const seasons = getSeasons();
-  const mgrs = getManagers();
   const computed = [];
 
   Object.entries(seasons)
@@ -14786,10 +16294,13 @@ function getHofAllResults() {
         if (champion) result = { year, champion, runnerUp, third };
       }
 
-      // Active season with finalized Finals — compute full 1-12 standings
+      // Finalized Finals — resolve the full 1-12 standings from the bracket
       if (!result && sd.finalized_rounds && sd.finalized_rounds.includes('Finals')) {
-        const full = computeFullStandings(sd, mgrs);
-        if (full) result = { year, ...full };
+        const full = hofPlayoffStatuses(sd);
+        if (full && full.complete) {
+          const { champion, runnerUp, third, standings } = full;
+          result = { year, champion, runnerUp, third, standings };
+        }
       }
 
       if (result) computed.push(result);
@@ -14798,13 +16309,1445 @@ function getHofAllResults() {
   return [...WMMC_HISTORICAL_RESULTS, ...computed].sort((a, b) => Number(a.year) - Number(b.year));
 }
 
+// The two <tr>s for the season in progress: a summary line for the year, plus the expandable
+// per-manager standing. Eliminated managers hold the round they went out in and their settled
+// placing; managers still alive carry the round they're playing right now, marked live and
+// ranked by seed above the field they've already knocked out. Returns '' when no season is
+// mid-playoffs.
+function hofLiveSeasonRowsHtml(live) {
+  if (!live) return '';
+
+  const key = `live-${live.year}`;
+  const roundLabel = BRACKET_STAGE_LABELS[live.currentRound] || live.currentRound || '';
+  const aliveCount = live.entries.filter((e) => e.live).length;
+  const summary =
+    live.currentRound === 'PP'
+      ? 'Pool play under way — the playoff field isn’t set yet'
+      : `${roundLabel} under way · ${aliveCount} manager${aliveCount === 1 ? '' : 's'} still alive`;
+
+  const rows = live.entries
+    .map((e) => {
+      const posLabel = e.position != null ? e.position : '—';
+      const seedBadge = e.seed ? `<span class="hof-seed" title="#${e.seed} seed">${e.seed}</span>` : '';
+      const status = e.live
+        ? `<span class="hof-status-live">${esc(e.status)}</span>`
+        : `<span class="hof-status-out">${esc(e.status)}</span>`;
+      return `<tr><td class="num">${posLabel}</td><td>${seedBadge}${esc(e.name)}</td><td>${status}</td></tr>`;
+    })
+    .join('');
+
+  return `<tr class="hof-live-row">
+      <td><strong>${esc(live.year)}</strong> <span class="hof-live-badge">In Progress</span></td>
+      <td colspan="3" class="text-muted">${summary}</td>
+      <td><button class="btn btn-sm btn-secondary" onclick="toggleHofStandings('${key}')" id="hof-toggle-btn-${key}">Full &#9650;</button></td>
+    </tr>
+    <tr id="hof-standings-${key}"><td colspan="5" style="padding:0 0.5rem 0.5rem;">
+      <table class="data-table" style="margin:0;">
+        <thead><tr><th>#</th><th>Manager</th><th>Round</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </td></tr>`;
+}
+
+// What the All-Time Records table counts. Finished seasons contribute everything; a season in
+// progress contributes only the finishes that are already SETTLED — a manager's placing is
+// locked the moment the round that knocked them out ends (seeded within that round by its
+// score: the lowest pool-play total is 12th, the lowest quarterfinal score 8th, and so on), so
+// it counts from then on. Managers still alive contribute nothing until their round finishes,
+// and the in-progress season awards no title until the Finals are in the books.
+function hofRecordResults(allResults, live) {
+  if (!live || !live.standings || Object.keys(live.standings).length === 0) return allResults;
+  return [...allResults, { year: live.year, standings: live.standings, inProgress: true }];
+}
+
+// ============================================================
+// HYPOTHETICAL ZONE ("What If")
+// ============================================================
+// A sandbox for the question managers keep asking: what would the standings look like if the
+// scoring were different? It is READ-ONLY BY CONSTRUCTION — no endpoint here writes, no season
+// object is mutated, nothing reaches db.json. The scenario lives in localStorage and in the URL.
+//
+// Reality is the baseline, never a recomputation of it: the engine takes the roster slots the REAL
+// scoring path produced (managerWeekSubtotal, which owns the roster-window invariant) together
+// with the score it credited, and derives only the DELTA a different point table would cause. So
+// the "Real" column is always the live scoreboard's own number, and an unmodified scenario shows
+// zero movement by construction. See js/hypothetical.js for the full rationale.
+
+const HYPO_STORAGE_KEY = 'wmmc_hypothetical';
+let HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} }, rosters: {} };
+let HYPO_SNAPSHOT = null;
+let HYPO_SNAPSHOT_KEY = null;
+let HYPO_RECOMPUTE_TIMER = null;
+let HYPO_EXPANDED = null; // manager whose player-level breakdown is open
+let HYPO_LAB_MANAGER = null; // Roster Lab: manager being edited
+let HYPO_LAB_ROUND = null; // Roster Lab: period being edited
+let HYPO_SWAP_OPEN = null; // Roster Lab: { player, type } whose swap picker is open
+
+function loadHypoScenario() {
+  // The URL wins over stored state so a shared link always opens the scenario it encodes.
+  const fromHash = /[#&]whatif=([^&]+)/.exec(window.location.hash || '');
+  if (fromHash) {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(fromHash[1])))));
+      if (parsed && typeof parsed === 'object') {
+        HYPO_SCENARIO = {
+          scoring: { batting: {}, pitching: {}, ...(parsed.scoring || {}) },
+          rosters: parsed.rosters || {},
+        };
+        return;
+      }
+    } catch (_) {
+      // A corrupt link falls through to stored state rather than blanking the tab.
+    }
+  }
+  try {
+    const raw = localStorage.getItem(HYPO_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      HYPO_SCENARIO = {
+        scoring: { batting: {}, pitching: {}, ...((parsed || {}).scoring || {}) },
+        rosters: (parsed || {}).rosters || {},
+      };
+    }
+  } catch (_) {
+    /* a scenario is disposable — never let bad stored state break the tab */
+  }
+}
+
+function saveHypoScenario() {
+  try {
+    localStorage.setItem(HYPO_STORAGE_KEY, JSON.stringify(HYPO_SCENARIO));
+  } catch (_) {
+    /* quota — the scenario just won't survive a reload */
+  }
+}
+
+// Resolve every manager's roster slots for the season through the REAL eligibility path, so the
+// sandbox inherits the roster-window invariant instead of restating it. Cached per season +
+// data revision: this is the same work the scoreboard does, and it must not re-run per keystroke.
+function buildHypoSnapshot(year) {
+  const seasons = getSeasons();
+  const sd = seasons[year];
+  if (!sd) return null;
+
+  const managers = getManagers().filter((m) => m.active !== false);
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const scheduleDates = sd.schedule_dates || [];
+  const daily = getDailyStatsCached(year);
+  const slots = [];
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const weekKey = `${schedWeek.round}|${schedWeek.week}`;
+    const wd = scheduleDates[idx] || null;
+    managers.forEach((m) => {
+      const mgrWeekDates = ((sd.roster_dates || {})[m.name] || {})[weekKey] || {};
+      [
+        ['batting', batting, 'batter', 'batters'],
+        ['pitching', pitching, 'pitcher', 'pitchers'],
+      ].forEach(([type, rows, playerKey, listKey]) => {
+        const detail = [];
+        managerWeekSubtotal(sd, m.name, schedWeek, idx, rows, playerKey, listKey, detail);
+        detail.forEach((d) => {
+          // This manager's own slice of the week — what splits a mid-week handover so each side
+          // is re-scored over only the days they actually held the player.
+          const win = managerWeekWindow(mgrWeekDates[d.player], {
+            weekStart: wd && wd.start,
+            weekEnd: wd && wd.end,
+          });
+          slots.push({
+            manager: m.name,
+            round: schedWeek.round,
+            week: schedWeek.week,
+            weekIdx: idx,
+            player: d.player,
+            type,
+            realScore: d.score,
+            addDate: (win && win.start) || null,
+            dropDate: (win && win.end) || null,
+          });
+        });
+      });
+    });
+  });
+
+  // Pools drive the hypothetical playoff picture. Only pooled managers are seeded, exactly as in
+  // the real bracket.
+  const pools = {};
+  managers.forEach((m) => {
+    if (m.pool) pools[m.name] = m.pool;
+  });
+
+  return buildSnapshot({
+    slots,
+    dailyBatting: (daily && daily.batting) || [],
+    dailyPitching: (daily && daily.pitching) || [],
+    weeklyBatting: batting,
+    weeklyPitching: pitching,
+    scheduleDates,
+    playerDates: sd.player_dates || {},
+    managers: managers.map((m) => m.name),
+    schedule: SEASON_SCHEDULE,
+    pools,
+  });
+}
+
+function hypoSnapshot(year) {
+  const sd = getSeasons()[year];
+  const key = `${year}|${(sd && sd._rev) || ''}|${getDailyStatsCached(year) ? 'daily' : 'weekly'}`;
+  if (!HYPO_SNAPSHOT || HYPO_SNAPSHOT_KEY !== key) {
+    HYPO_SNAPSHOT = buildHypoSnapshot(year);
+    HYPO_SNAPSHOT_KEY = key;
+  }
+  return HYPO_SNAPSHOT;
+}
+
+function hypoScoringValue(side, key) {
+  const override = (HYPO_SCENARIO.scoring || {})[side] || {};
+  if (key in override) return override[key];
+  return SCORING[side][key] != null ? SCORING[side][key] : 0;
+}
+
+function setHypoScoringValue(side, key, raw) {
+  if (!HYPO_SCENARIO.scoring[side]) HYPO_SCENARIO.scoring[side] = {};
+  const real = SCORING[side][key] != null ? SCORING[side][key] : 0;
+  const num = Number(raw);
+  const value = Number.isFinite(num) ? num : 0;
+  // Storing only genuine differences keeps "is this the identity scenario?" honest — a slider
+  // dragged back to its real value leaves no trace.
+  if (value === real) delete HYPO_SCENARIO.scoring[side][key];
+  else HYPO_SCENARIO.scoring[side][key] = value;
+  saveHypoScenario();
+  scheduleHypoRecompute();
+}
+
+function resetHypoScenario() {
+  HYPO_SCENARIO = { scoring: { batting: {}, pitching: {} }, rosters: {} };
+  saveHypoScenario();
+  renderWhatIf();
+}
+
+// Recompute is debounced so dragging through values doesn't rescore on every keystroke, and only
+// the output halves are repainted — repainting the inputs would steal focus mid-edit.
+function scheduleHypoRecompute() {
+  clearTimeout(HYPO_RECOMPUTE_TIMER);
+  HYPO_RECOMPUTE_TIMER = setTimeout(() => {
+    renderHypoOutputs();
+    renderHypoBadges();
+  }, 120);
+}
+
+// Score once, paint both output panels from the same result. The Roster Lab and the standings must
+// never disagree, which they could if each ran its own pass.
+function renderHypoOutputs() {
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const result = snapshot ? scoreScenario(snapshot, HYPO_SCENARIO) : null;
+  renderRosterLab(snapshot, result);
+  renderPlayerExplorer();
+  renderHypoResults(result);
+}
+
+function hypoShareLink() {
+  const encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(HYPO_SCENARIO)))));
+  return `${window.location.origin}${window.location.pathname}#whatif=${encoded}`;
+}
+
+function copyHypoLink() {
+  const link = hypoShareLink();
+  const done = (ok) => {
+    const el = document.getElementById('whatif-share-status');
+    if (el) el.textContent = ok ? 'Link copied' : link;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(
+      () => done(true),
+      () => done(false)
+    );
+  } else {
+    done(false);
+  }
+}
+
+const hypoDelta = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
+const hypoDeltaClass = (n) => (n > 0 ? 'hypo-up' : n < 0 ? 'hypo-down' : 'hypo-flat');
+
+function hypoScoringInputs(side, keys, unscored) {
+  const cell = (key, isNew) => {
+    const value = hypoScoringValue(side, key);
+    const real = SCORING[side][key] != null ? SCORING[side][key] : 0;
+    const changed = value !== real;
+    return `<tr class="${changed ? 'hypo-row-changed' : ''}">
+      <td class="hypo-stat-key">${esc(key)}${isNew ? ' <span class="hypo-new-tag">unscored</span>' : ''}</td>
+      <td><input type="number" step="0.05" class="hypo-input" data-side="${side}" data-key="${esc(key)}" value="${value}" aria-label="${esc(key)} points"></td>
+      <td class="hypo-badge-cell" id="hypo-badge-${side}-${esc(key)}">${changed ? `<span class="hypo-badge">${fmt(real)} &rarr; ${fmt(value)}</span>` : ''}</td>
+    </tr>`;
+  };
+  return `<table class="data-table compact-table hypo-scoring-table">
+    <thead><tr><th>Stat</th><th>Points</th><th></th></tr></thead>
+    <tbody>
+      ${keys.map((k) => cell(k, false)).join('')}
+      ${unscored.map((k) => cell(k, true)).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderHypoBadges() {
+  for (const side of ['batting', 'pitching']) {
+    for (const key of Object.keys(SCORING[side])) {
+      const el = document.getElementById(`hypo-badge-${side}-${key}`);
+      if (!el) continue;
+      const value = hypoScoringValue(side, key);
+      const real = SCORING[side][key];
+      el.innerHTML = value !== real ? `<span class="hypo-badge">${fmt(real)} &rarr; ${fmt(value)}</span>` : '';
+      const row = el.closest('tr');
+      if (row) row.classList.toggle('hypo-row-changed', value !== real);
+    }
+  }
+  const keys = scoringKeys();
+  for (const [side, list] of [
+    ['batting', keys.batting.unscored],
+    ['pitching', keys.pitching.unscored],
+  ]) {
+    for (const key of list) {
+      const el = document.getElementById(`hypo-badge-${side}-${key}`);
+      if (!el) continue;
+      const value = hypoScoringValue(side, key);
+      el.innerHTML = value !== 0 ? `<span class="hypo-badge">0 &rarr; ${fmt(value)}</span>` : '';
+      const row = el.closest('tr');
+      if (row) row.classList.toggle('hypo-row-changed', value !== 0);
+    }
+  }
+}
+
+// Which slice of the season the standings table is ranking. A season total conflates competitions
+// that are actually separate: pool play decides seeding, and each playoff round is its own contest.
+// "Who would have scored the most in the quarterfinals" is not answerable from a season column, so
+// the table scopes to one round at a time.
+//
+// Pool Play (PP1 + PP2 combined) is offered as its own scope because that combined total is exactly
+// what the seeding rule ranks on — see js/seeding.js.
+let HYPO_STANDINGS_SCOPE = 'season';
+
+const HYPO_SCOPES = [
+  { key: 'season', label: 'Season', rounds: null },
+  { key: 'PP', label: 'Pool Play', rounds: ['PP1', 'PP2'] },
+  { key: 'PP1', label: 'Pool Play 1', rounds: ['PP1'] },
+  { key: 'PP2', label: 'Pool Play 2', rounds: ['PP2'] },
+  { key: 'QF', label: 'Quarterfinals', rounds: ['QF'] },
+  { key: 'SF', label: 'Semifinals', rounds: ['SF'] },
+  { key: 'Finals', label: 'Finals', rounds: ['Finals'] },
+];
+
+// Totals for one manager within a scope, summed from the per-period figures the engine returns.
+function hypoScopeTotals(entry, rounds) {
+  if (!rounds) return { real: entry.real, hypothetical: entry.hypothetical, delta: entry.delta };
+  let real = 0;
+  let hypothetical = 0;
+  for (const p of entry.periods) {
+    if (!rounds.includes(p.round)) continue;
+    real += p.real;
+    hypothetical += p.hypothetical;
+  }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return { real: r2(real), hypothetical: r2(hypothetical), delta: r2(hypothetical - real) };
+}
+
+// The standings for a scope, re-ranked within it. A manager eliminated before this round has no
+// rows for it and would rank last on zero points, which reads as "he scored nothing" rather than
+// "he wasn't there" — so managers with no data in the scope are dropped instead.
+function hypoScopedStandings(result, rounds) {
+  const rows = result.standings
+    .map((s) => {
+      const played = !rounds || s.periods.some((p) => rounds.includes(p.round));
+      return { manager: s.manager, played, ...hypoScopeTotals(s, rounds) };
+    })
+    .filter((r) => r.played);
+
+  rows.sort((a, b) => b.hypothetical - a.hypothetical || a.manager.localeCompare(b.manager));
+  const realOrder = [...rows].sort((a, b) => b.real - a.real || a.manager.localeCompare(b.manager));
+  const realRank = new Map(realOrder.map((r, i) => [r.manager, i + 1]));
+  rows.forEach((r, i) => {
+    r.rank = i + 1;
+    r.realRank = realRank.get(r.manager);
+    r.rankDelta = r.realRank - r.rank;
+  });
+  return rows;
+}
+
+// Only offer a scope the season actually has rows for — an unplayed Finals tab is a dead end.
+function hypoAvailableScopes(result) {
+  const rounds = new Set();
+  for (const s of result.standings) for (const p of s.periods) if (p.real || p.hypothetical) rounds.add(p.round);
+  return HYPO_SCOPES.filter((sc) => !sc.rounds || sc.rounds.some((r) => rounds.has(r)));
+}
+
+// ---- Playoff Picture ----
+// Pool play is scored by POOL, and the field is filled by a specific rule. Showing a flat list of
+// totals hides both. This renders the pools the way the league actually decides them — each pool's
+// PP1 and PP2 leaders, then the wildcards that fill the rest — followed by the bracket those seeds
+// produce under the scenario.
+
+// Badges for a manager's standing in the field, marked GAINED or LOST against what really
+// happened. A hypothetical that flips a pool crown or a wild card is the headline result — showing
+// only the end state would leave the reader to diff two tables in their head.
+function hypoSeedBadges(entry, seeding, realSeeding) {
+  const real = realSeeding && realSeeding.byManager[entry.manager];
+  const badges = [];
+  const mark = (label, now, was, winStyle) => {
+    if (!now && !was) return;
+    const cls = winStyle ? 'hypo-badge hypo-badge-win' : 'hypo-badge';
+    if (now && !was) badges.push(`<span class="${cls} hypo-badge-gain">${label} &uarr; gained</span>`);
+    else if (!now && was) badges.push(`<span class="hypo-badge hypo-badge-lost">${label} &darr; lost</span>`);
+    else badges.push(`<span class="${cls}">${label}</span>`);
+  };
+  mark('PP1 winner', entry.isPP1Leader, !!(real && real.isPP1Leader), true);
+  mark('PP2 winner', entry.isPP2Leader, !!(real && real.isPP2Leader), true);
+  const gainedCrown =
+    (entry.isPP1Leader && !(real && real.isPP1Leader)) || (entry.isPP2Leader && !(real && real.isPP2Leader));
+  const wcNow = seeding.wildcardSet.has(entry.manager);
+  const wcWas = !!(realSeeding && realSeeding.wildcardSet.has(entry.manager));
+  // A wild card given up because this manager won their pool is not a loss worth flagging.
+  if (!(wcWas && !wcNow && gainedCrown)) mark('Wild card', wcNow, wcWas, false);
+  return badges.join(' ');
+}
+
+function renderHypoPools(seeding, realSeeding) {
+  const pools = {};
+  for (const entry of Object.values(seeding.byManager)) {
+    (pools[entry.pool] = pools[entry.pool] || []).push(entry);
+  }
+  const seedOf = new Map(seeding.qualifierNames.map((n, i) => [n, i + 1]));
+  const realSeedOf = new Map((realSeeding ? realSeeding.qualifierNames : []).map((n, i) => [n, i + 1]));
+
+  const flips = [];
+  if (realSeeding) {
+    for (const entry of Object.values(seeding.byManager)) {
+      const real = realSeeding.byManager[entry.manager];
+      if (!real) continue;
+      if (entry.isPP1Leader && !real.isPP1Leader) flips.push(`${entry.manager} takes Pool Play 1`);
+      if (!entry.isPP1Leader && real.isPP1Leader) flips.push(`${entry.manager} loses Pool Play 1`);
+      if (entry.isPP2Leader && !real.isPP2Leader) flips.push(`${entry.manager} takes Pool Play 2`);
+      if (!entry.isPP2Leader && real.isPP2Leader) flips.push(`${entry.manager} loses Pool Play 2`);
+      const wcNow = seeding.wildcardSet.has(entry.manager);
+      const wcWas = realSeeding.wildcardSet.has(entry.manager);
+      // Losing a wild card BY WINNING THE POOL is a promotion, not a demotion — reporting it as a
+      // loss reads exactly backwards. Only mention the wild card when the pool crown didn't change.
+      const gainedCrown = (entry.isPP1Leader && !real.isPP1Leader) || (entry.isPP2Leader && !real.isPP2Leader);
+      const lostCrown = (!entry.isPP1Leader && real.isPP1Leader) || (!entry.isPP2Leader && real.isPP2Leader);
+      if (wcNow && !wcWas && !lostCrown) flips.push(`${entry.manager} takes a wild card`);
+      if (!wcNow && wcWas && !gainedCrown) flips.push(`${entry.manager} loses a wild card`);
+    }
+  }
+
+  let html = flips.length
+    ? `<p class="hypo-playoffs hypo-playoffs-changed">Pool play changes hands &mdash; ${flips
+        .map(esc)
+        .join(' &middot; ')}</p>`
+    : '';
+
+  html += `<p class="upload-hint hypo-rule">
+    <strong>How the field is decided.</strong> Each pool crowns a <strong>Pool Play 1 winner</strong>
+    (most PP1 points in that pool) and a <strong>Pool Play 2 winner</strong> (most PP2 points) — one
+    manager can be both. Every pool winner is seeded above every non-winner. The remaining spots go
+    to the highest-scoring managers who won neither period, as <strong>wild cards</strong>. Within
+    each group the order is total points, then periods won, then batting, pitching, PP2, PP1.
+  </p>`;
+
+  for (const pool of Object.keys(pools).sort()) {
+    const rows = pools[pool].slice().sort((a, b) => b.total - a.total);
+    html += `<h4 class="hypo-pool-title">${esc(formatPool(pool))}</h4>
+      <div class="table-wrapper"><table class="data-table compact-table hypo-pool-table">
+        <thead><tr><th>Manager</th><th>PP1</th><th>PP2</th><th>Total</th><th>Seed</th><th></th></tr></thead>
+        <tbody>`;
+    for (const e of rows) {
+      const seed = seedOf.get(e.manager);
+      const realSeed = realSeedOf.get(e.manager);
+      const moved = seed !== realSeed;
+      html += `<tr class="${seed ? 'hypo-qualified' : ''}">
+        <td>${esc(e.manager)}</td>
+        <td class="hypo-num${e.isPP1Leader ? ' hypo-strong' : ''}">${fmt(e.pp1)}</td>
+        <td class="hypo-num${e.isPP2Leader ? ' hypo-strong' : ''}">${fmt(e.pp2)}</td>
+        <td class="hypo-num hypo-strong">${fmt(e.total)}</td>
+        <td class="hypo-num">${
+          seed
+            ? `${seed}${moved ? ` <span class="${realSeed ? 'hypo-up' : 'hypo-up'}">(was ${realSeed || 'out'})</span>` : ''}`
+            : `<span class="hypo-flat">&ndash;${realSeed ? ` <span class="hypo-down">(was ${realSeed})</span>` : ''}</span>`
+        }</td>
+        <td>${hypoSeedBadges(e, seeding, realSeeding)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+function hypoMatchupSide(side, round, carriedBy) {
+  if (!side) return '<span class="hypo-flat">TBD</span>';
+  const score = side.score == null ? '<span class="hypo-flat">no roster</span>' : `<strong>${fmt(side.score)}</strong>`;
+  const carried = carriedBy.get(`${side.name}\u0000${round}`);
+  const tag = carried
+    ? ` <span class="hypo-new-tag" title="This manager never played this round. Their last real roster (${esc(
+        ROUND_LABELS[carried] || carried
+      )}) is assumed — change it in the Roster Lab.">${esc(roundShortLabel(carried))} roster</span>`
+    : '';
+  return `<span class="hypo-seed-chip">${side.seed}</span> ${esc(side.name)} &middot; ${score}${tag}`;
+}
+
+function renderHypoBracket(bracket, carried, unplayedRounds) {
+  if (!bracket) return '<p class="upload-hint">Not enough managers are seeded to build a bracket.</p>';
+  const carriedBy = new Map((carried || []).map((c) => [`${c.manager}\u0000${c.round}`, c.fromRound]));
+
+  let html = '';
+  for (const round of bracket.rounds) {
+    html += `<h4 class="hypo-pool-title">${esc(round.label)}</h4><div class="hypo-matchups">`;
+    for (const m of round.matchups) {
+      const winner = m.winner ? m.winner.name : null;
+      html += `<div class="hypo-matchup${m.undecided ? ' hypo-matchup-open' : ''}">
+        <div class="hypo-matchup-label">${esc(m.label)}</div>
+        <div class="hypo-matchup-side${winner && m.a && winner === m.a.name ? ' hypo-matchup-winner' : ''}">${hypoMatchupSide(
+          m.a,
+          round.round,
+          carriedBy
+        )}</div>
+        <div class="hypo-matchup-side${winner && m.b && winner === m.b.name ? ' hypo-matchup-winner' : ''}">${hypoMatchupSide(
+          m.b,
+          round.round,
+          carriedBy
+        )}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  if (bracket.champion) {
+    html += `<p class="hypo-playoffs hypo-playoffs-changed">Champion under this scenario: <strong>${esc(
+      bracket.champion
+    )}</strong>${bracket.thirdPlace ? ` &middot; 3rd place: ${esc(bracket.thirdPlace)}` : ''}</p>`;
+  }
+
+  if (carriedBy.size) {
+    html += `<p class="upload-hint hypo-rule">A manager promoted into a round they never played is
+      assumed to have run back their last real roster, priced against that round's actual stats.
+      Those sides are tagged with the round the roster came from. It is an assumption, not a record
+      &mdash; change it in the Roster Lab and the bracket follows.</p>`;
+  }
+
+  if (bracket.missing.length) {
+    // Two different reasons a side can't be scored, and conflating them would be misleading: the
+    // ROUND hasn't been played by anyone yet, or this manager has no roster history to carry.
+    const unplayed = new Set(unplayedRounds || []);
+    const byRound = {};
+    for (const m of bracket.missing) (byRound[m.round] = byRound[m.round] || []).push(m.manager);
+
+    const notYet = Object.keys(byRound).filter((r) => unplayed.has(r));
+    const noRoster = Object.entries(byRound).filter(([r]) => !unplayed.has(r));
+
+    if (notYet.length) {
+      html += `<p class="hypo-warning">The bracket stops at the ${notYet
+        .map((r) => esc(ROUND_LABELS[r] || r))
+        .join(' and ')} — nobody has played ${
+        notYet.length > 1 ? 'those rounds' : 'that round'
+      } yet, so there are no stats to score it with under any scenario.</p>`;
+    }
+    if (noRoster.length) {
+      const parts = noRoster.map(
+        ([round, names]) => `${[...new Set(names)].map(esc).join(', ')} in the ${esc(ROUND_LABELS[round] || round)}`
+      );
+      html += `<p class="hypo-warning">No roster to score: ${parts.join(
+        '; '
+      )}. They have no earlier roster to carry forward either — add one in the Roster Lab above and the bracket will carry on.</p>`;
+    }
+  }
+
+  return html;
+}
+
+function renderHypoResults(result) {
+  const container = document.getElementById('whatif-results');
+  if (!container) return;
+
+  if (!result) {
+    container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
+    return;
+  }
+
+  const changes = scoringDiff(HYPO_SCENARIO.scoring);
+  const rosterCount = rosterOverrides(HYPO_SCENARIO).length;
+
+  // Resolve the round scope first: the headline counts movement within the table being shown, not
+  // across the season, or it would contradict the rows underneath it.
+  const scopes = hypoAvailableScopes(result);
+  if (!scopes.some((sc) => sc.key === HYPO_STANDINGS_SCOPE)) HYPO_STANDINGS_SCOPE = 'season';
+  const scope = scopes.find((sc) => sc.key === HYPO_STANDINGS_SCOPE) || scopes[0];
+  const rows = hypoScopedStandings(result, scope.rounds);
+
+  let html = '';
+
+  if (result.identity) {
+    html += `<p class="upload-hint">These are the real standings. Change a point value or a roster above to see what would have happened.</p>`;
+  } else {
+    const moved = rows.filter((s) => s.rankDelta !== 0).length;
+    const bits = [];
+    if (changes.length) bits.push(`${changes.length} scoring change${changes.length === 1 ? '' : 's'}`);
+    if (rosterCount) bits.push(`${rosterCount} roster change${rosterCount === 1 ? '' : 's'}`);
+    bits.push(
+      moved
+        ? `${moved} manager${moved === 1 ? '' : 's'} change position in the ${esc(scope.label.toLowerCase())}`
+        : `nobody changes position in the ${esc(scope.label.toLowerCase())}`
+    );
+    html += `<p class="upload-hint">${bits.join(' &middot; ')}</p>`;
+  }
+
+  // An approximate slot is one scored from unclipped weekly totals for a player who was added or
+  // dropped mid-week. Saying so is the point: a sandbox that hides its error bars is worse than
+  // one that has none.
+  if (!result.fidelity.exact) {
+    html += `<p class="hypo-warning">Estimated for ${result.fidelity.approximateSlots} mid-week roster slot${
+      result.fidelity.approximateSlots === 1 ? '' : 's'
+    } — daily stats are still loading, so those players are scored on their full week.</p>`;
+  }
+
+  // Round scope selector. Same chip pattern as the Roster Lab's round tabs, so the two panels read
+  // as one tool.
+  html += `<div class="hypo-round-tabs hypo-scope-tabs">
+    ${scopes
+      .map(
+        (sc) =>
+          `<button class="hypo-round-tab${sc.key === scope.key ? ' active' : ''}" data-scope="${esc(sc.key)}">${esc(
+            sc.label
+          )}</button>`
+      )
+      .join('')}
+  </div>`;
+
+  html += `<p class="upload-hint">${
+    scope.rounds
+      ? `Ranked on ${esc(scope.label)} points only &mdash; ${rows.length} manager${rows.length === 1 ? '' : 's'} played this round.`
+      : 'Ranked on the full season.'
+  }</p>`;
+
+  // A round showing no movement is ambiguous, so say which kind of nothing it is: the stat never
+  // happened here, or it is recorded in the weekly totals but absent from the per-game rows the
+  // scorer reads. The second is a data gap, and reporting it as "no change" would be misleading.
+  if (!result.identity && rows.length && rows.every((r) => r.delta === 0)) {
+    const snapshot = hypoSnapshot(SELECTED_SEASON);
+    const scopeRounds = scope.rounds || [...new Set(SEASON_SCHEDULE.map((w) => w.round))];
+    const coverage = snapshot ? scenarioStatCoverage(snapshot, HYPO_SCENARIO, scopeRounds) : [];
+    const notes = [];
+    for (const change of coverage) {
+      const scored = change.rounds.reduce((a, r) => a + r.scored, 0);
+      const recorded = change.rounds.reduce((a, r) => a + r.recorded, 0);
+      if (scored !== 0) continue;
+      notes.push(
+        recorded > 0
+          ? `<strong>${esc(change.key)}</strong> is recorded in the weekly totals for ${esc(
+              scope.label
+            )} (${fmt(recorded)}) but is missing from the per-game rows this tool scores, so changing its value cannot move this round. That is a gap in the stored daily data, not a scoring result.`
+          : `No <strong>${esc(change.key)}</strong> was recorded in ${esc(
+              scope.label
+            )} at all, so changing its value has nothing to act on here.`
+      );
+    }
+    if (notes.length) html += `<p class="hypo-warning">${notes.join(' ')}</p>`;
+  }
+
+  html += `<div class="table-wrapper"><table class="data-table hypo-standings">
+    <thead><tr><th></th><th>Manager</th><th>Real</th><th>What If</th><th>&Delta;</th><th>Move</th></tr></thead>
+    <tbody>`;
+  rows.forEach((s) => {
+    const move = s.rankDelta > 0 ? `&uarr; ${s.rankDelta}` : s.rankDelta < 0 ? `&darr; ${-s.rankDelta}` : '&ndash;';
+    html += `<tr class="hypo-standings-row" data-manager="${esc(s.manager)}">
+      <td class="hypo-rank">${s.rank}</td>
+      <td>${esc(s.manager)}</td>
+      <td class="hypo-num">${fmt(s.real)}</td>
+      <td class="hypo-num hypo-strong">${fmt(s.hypothetical)}</td>
+      <td class="hypo-num ${hypoDeltaClass(s.delta)}">${hypoDelta(s.delta)}</td>
+      <td class="hypo-num ${hypoDeltaClass(s.rankDelta)}">${move}</td>
+    </tr>`;
+    if (HYPO_EXPANDED === s.manager) {
+      // Scope the player breakdown to the same rounds, so the rows sum to the total on this line.
+      const movers = result.playerRounds
+        .filter((p) => p.manager === s.manager && (!scope.rounds || scope.rounds.includes(p.round)))
+        .reduce((acc, p) => {
+          const key = `${p.player}|${p.type}`;
+          const e = acc.get(key) || { player: p.player, real: 0, hypothetical: 0, delta: 0 };
+          e.real += p.real;
+          e.hypothetical += p.hypothetical;
+          e.delta += p.delta;
+          acc.set(key, e);
+          return acc;
+        }, new Map());
+      const list = [...movers.values()]
+        .filter((p) => Math.round(p.delta * 100) !== 0)
+        .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+        .slice(0, 15);
+      const detailRows = list.length
+        ? list
+            .map(
+              (p) =>
+                `<tr><td>${displayPlayer(p.player, getSeasons()[SELECTED_SEASON])}</td><td class="hypo-num">${fmt(
+                  Math.round(p.real * 100) / 100
+                )}</td><td class="hypo-num">${fmt(Math.round(p.hypothetical * 100) / 100)}</td><td class="hypo-num ${hypoDeltaClass(
+                  p.delta
+                )}">${hypoDelta(Math.round(p.delta * 100) / 100)}</td></tr>`
+            )
+            .join('')
+        : '<tr><td colspan="4" class="upload-hint">No player on this roster is affected by these changes.</td></tr>';
+      html += `<tr class="hypo-detail-row"><td colspan="6">
+        <table class="data-table compact-table">
+          <thead><tr><th>Player</th><th>Real</th><th>What If</th><th>&Delta;</th></tr></thead>
+          <tbody>${detailRows}</tbody>
+        </table>
+      </td></tr>`;
+    }
+  });
+  html += '</tbody></table></div>';
+
+  container.innerHTML = html;
+
+  container.querySelectorAll('[data-scope]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_STANDINGS_SCOPE = btn.dataset.scope;
+      renderHypoResults(result);
+    });
+  });
+
+  container.querySelectorAll('.hypo-standings-row').forEach((row) => {
+    row.addEventListener('click', () => {
+      const name = row.dataset.manager;
+      HYPO_EXPANDED = HYPO_EXPANDED === name ? null : name;
+      renderHypoResults(result);
+    });
+  });
+
+  renderHypoPlayoffs(result);
+}
+
+function renderHypoPlayoffs(result) {
+  const el = document.getElementById('whatif-playoffs');
+  if (!el) return;
+  const po = result && result.playoffs;
+  if (!po || !po.seeding) {
+    el.innerHTML = '<p class="upload-hint">Pools are not configured for this season, so there is no field to seed.</p>';
+    return;
+  }
+
+  let html = '';
+  if (po.changed) {
+    const parts = [];
+    if (po.in.length) parts.push(`<strong>In:</strong> ${po.in.map(esc).join(', ')}`);
+    if (po.out.length) parts.push(`<strong>Out:</strong> ${po.out.map(esc).join(', ')}`);
+    if (!parts.length) parts.push('the same managers qualify, but the seeding order changes');
+    html += `<p class="hypo-playoffs hypo-playoffs-changed">Playoff picture changes &mdash; ${parts.join(' &middot; ')}</p>`;
+  } else if (!result.identity) {
+    html += `<p class="hypo-playoffs">The same managers qualify, in the same order.</p>`;
+  }
+
+  html += renderHypoPools(po.seeding, po.realSeeding);
+  html += renderHypoBracket(po.bracket, po.carried, po.unplayedRounds);
+  el.innerHTML = html;
+}
+
+// ---- Roster Lab ----
+// Start a player who was really on the bench. Start a player who was never rostered at all. Build
+// a roster for a round you never reached. Every one of those is the same operation: replace a
+// manager's roster for one PERIOD, then rescore.
+//
+// The view is deliberately two columns — what they ACTUALLY had beside what the scenario gives
+// them — because the whole value of a hypothetical is the comparison. A single mutated list would
+// show the answer while hiding what it is an answer to.
+
+const HYPO_ROUNDS = () => [...new Set(SEASON_SCHEDULE.map((s) => s.round))];
+
+function hypoLabManager() {
+  const managers = getManagers().filter((m) => m.active !== false);
+  if (!managers.length) return null;
+  if (HYPO_LAB_MANAGER && managers.some((m) => m.name === HYPO_LAB_MANAGER)) return HYPO_LAB_MANAGER;
+  // Default to the signed-in manager — the person asking "what if" is usually asking about
+  // themselves.
+  const me = managers.find((m) => (m.email || '').toLowerCase() === (LOGGED_IN_EMAIL || '').toLowerCase());
+  return me ? me.name : managers[0].name;
+}
+
+function hypoLabRound() {
+  const rounds = HYPO_ROUNDS();
+  return HYPO_LAB_ROUND && rounds.includes(HYPO_LAB_ROUND) ? HYPO_LAB_ROUND : rounds[0];
+}
+
+// The roster the scenario is currently using for this period: the override if one exists,
+// otherwise the real roster (which is what the lab opens with).
+function hypoEffectiveRoster(snapshot, manager, round) {
+  const override = ((HYPO_SCENARIO.rosters || {})[manager] || {})[round];
+  if (override) return { batters: (override.batters || []).slice(), pitchers: (override.pitchers || []).slice() };
+  const real = realRosterForRound(snapshot, manager, round);
+  if (real.batters.length || real.pitchers.length) return real;
+  // A round they never played: start from the last roster they actually fielded, the same default
+  // the bracket uses, so the lab opens on something to edit rather than an empty column.
+  const carried = lastKnownRoster(snapshot, manager, round);
+  return carried ? { batters: carried.batters.slice(), pitchers: carried.pitchers.slice() } : real;
+}
+
+function setHypoRoster(manager, round, roster) {
+  if (!HYPO_SCENARIO.rosters) HYPO_SCENARIO.rosters = {};
+  if (!HYPO_SCENARIO.rosters[manager]) HYPO_SCENARIO.rosters[manager] = {};
+  HYPO_SCENARIO.rosters[manager][round] = { batters: roster.batters.slice(), pitchers: roster.pitchers.slice() };
+  saveHypoScenario();
+  renderHypoOutputs();
+}
+
+function clearHypoRoster(manager, round) {
+  if (((HYPO_SCENARIO.rosters || {})[manager] || {})[round]) {
+    delete HYPO_SCENARIO.rosters[manager][round];
+    if (Object.keys(HYPO_SCENARIO.rosters[manager]).length === 0) delete HYPO_SCENARIO.rosters[manager];
+    saveHypoScenario();
+  }
+  renderHypoOutputs();
+}
+
+function hypoRemovePlayer(manager, round, type, player) {
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const roster = hypoEffectiveRoster(snapshot, manager, round);
+  const key = type === 'batting' ? 'batters' : 'pitchers';
+  roster[key] = roster[key].filter((p) => p !== player);
+  setHypoRoster(manager, round, roster);
+}
+
+// Replace one player with another IN PLACE, so the swapped-in name keeps the outgoing player's
+// position in the list and the two columns still line up row for row.
+function hypoSwapPlayer(manager, round, type, outPlayer, inPlayer) {
+  if (!inPlayer || inPlayer === outPlayer) {
+    HYPO_SWAP_OPEN = null;
+    renderHypoOutputs();
+    return;
+  }
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const roster = hypoEffectiveRoster(snapshot, manager, round);
+  const key = type === 'batting' ? 'batters' : 'pitchers';
+  const idx = roster[key].indexOf(outPlayer);
+  const already = roster[key].indexOf(inPlayer);
+  if (already !== -1) roster[key].splice(already, 1);
+  if (idx === -1) roster[key].push(inPlayer);
+  else roster[key][idx > already && already !== -1 ? idx - 1 : idx] = inPlayer;
+  HYPO_SWAP_OPEN = null;
+  setHypoRoster(manager, round, roster);
+}
+
+function hypoAddPlayer(manager, round, type, player) {
+  if (!player) return;
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  const roster = hypoEffectiveRoster(snapshot, manager, round);
+  const key = type === 'batting' ? 'batters' : 'pitchers';
+  if (!roster[key].includes(player)) roster[key].push(player);
+  setHypoRoster(manager, round, roster);
+}
+
+// How many suggestions any player search offers at once. The pools are seeded from MLB's whole
+// active catalog, so an unranked list is ~1,300 names of mostly-irrelevant players — and rendering
+// that many <option> nodes is what makes a native datalist crawl. Showing the top scorers instead
+// covers essentially everyone a manager would consider, and typing still searches the full league.
+const HYPO_SUGGESTION_LIMIT = 50;
+
+// Candidates for a roster add box, ranked by points within the round being edited. Scoping to the
+// round matters: a player with no stat line that period would silently score zero and look broken.
+function hypoPlayerOptions(snapshot, round, type, query) {
+  return playerSuggestions(snapshot, { type, round, query, limit: HYPO_SUGGESTION_LIMIT });
+}
+
+// Replace a datalist's options in place. Called on every keystroke, so it keeps the node count at
+// the suggestion limit rather than growing a list the browser then has to filter itself.
+function hypoFillDatalist(id, suggestions) {
+  const list = document.getElementById(id);
+  if (!list) return;
+  list.innerHTML = suggestions.map((p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`).join('');
+}
+
+function hypoRosterColumn(title, subtitle, rows, opts) {
+  const { removable = false, manager, round, empty } = opts || {};
+  const sd = getSeasons()[SELECTED_SEASON];
+  const section = (label, type) => {
+    const list = rows.filter((r) => r.type === type);
+    if (!list.length) return `<div class="hypo-roster-section"><h4>${label}</h4><p class="upload-hint">None</p></div>`;
+    return `<div class="hypo-roster-section"><h4>${label}</h4>
+      <table class="data-table compact-table hypo-roster-table"><tbody>
+      ${list
+        .map((r) => {
+          // In the editable column the NAME is the control: click it to swap this player out for
+          // someone else. A bare × only ever removed, which is not what a manager is actually
+          // asking — "who would I have started instead" is a replacement, not a deletion.
+          const nameCell = removable
+            ? `<button class="hypo-swap-name" data-swap="${esc(r.player)}" data-type="${type}" title="Click to swap this player out">${displayPlayer(
+                r.player,
+                sd
+              )}</button>`
+            : displayPlayer(r.player, sd);
+          const open = HYPO_SWAP_OPEN && HYPO_SWAP_OPEN.player === r.player && HYPO_SWAP_OPEN.type === type;
+          return `<tr class="${r.muted ? 'hypo-roster-muted' : ''}${r.added ? ' hypo-roster-added' : ''}${
+            open ? ' hypo-roster-swapping' : ''
+          }">
+            <td>${nameCell}${r.tag ? ` <span class="hypo-new-tag">${r.tag}</span>` : ''}</td>
+            <td class="hypo-num">${fmt(r.points)}</td>
+            ${
+              removable
+                ? `<td class="hypo-roster-action"><button class="hypo-x" data-remove="${esc(r.player)}" data-type="${type}" title="Remove from this hypothetical roster">&times;</button></td>`
+                : ''
+            }
+          </tr>${
+            open
+              ? `<tr class="hypo-swap-row"><td colspan="3">
+                  <label>Swap <strong>${esc(r.player)}</strong> for
+                    <input type="text" id="hypo-swap-input" list="hypo-list-${type}" placeholder="Top scorers — or type a name">
+                  </label>
+                  <button class="btn btn-sm btn-secondary" id="hypo-swap-cancel">Cancel</button>
+                </td></tr>`
+              : ''
+          }`;
+        })
+        .join('')}
+      </tbody></table></div>`;
+  };
+  const total = rows.reduce((s, r) => s + r.points, 0);
+  const body = rows.length
+    ? section('Batters', 'batting') + section('Pitchers', 'pitching')
+    : `<p class="upload-hint hypo-roster-empty">${empty || 'Nothing here.'}</p>`;
+  return `<div class="hypo-roster-col" data-manager="${esc(manager || '')}" data-round="${esc(round || '')}">
+    <div class="hypo-roster-head"><h3>${title}</h3><span class="upload-hint">${subtitle}</span></div>
+    ${body}
+    <div class="hypo-roster-total"><span>Total</span><strong>${fmt(Math.round(total * 100) / 100)}</strong></div>
+  </div>`;
+}
+
+function renderRosterLab(snapshot, result) {
+  const container = document.getElementById('whatif-roster-lab');
+  if (!container) return;
+  if (!snapshot || !result) {
+    container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
+    return;
+  }
+
+  const managers = getManagers().filter((m) => m.active !== false);
+  const manager = hypoLabManager();
+  const round = hypoLabRound();
+  if (!manager) {
+    container.innerHTML = '<p class="upload-hint">No managers configured.</p>';
+    return;
+  }
+
+  const played = roundsPlayed(snapshot, manager);
+  const realRoster = realRosterForRound(snapshot, manager, round);
+  const effective = hypoEffectiveRoster(snapshot, manager, round);
+  const hasOverride = !!((HYPO_SCENARIO.rosters || {})[manager] || {})[round];
+  const didPlay = played.has(round);
+
+  const prRows = result.playerRounds.filter((p) => p.manager === manager && p.round === round);
+  const prFor = (player, type) => prRows.find((p) => p.player === player && p.type === type);
+
+  // LEFT — what actually happened. Never edited, never reordered.
+  const actualRows = [];
+  for (const [type, list] of [
+    ['batting', realRoster.batters],
+    ['pitching', realRoster.pitchers],
+  ]) {
+    for (const player of list) {
+      const pr = prFor(player, type);
+      const dropped = !(type === 'batting' ? effective.batters : effective.pitchers).includes(player);
+      actualRows.push({
+        player,
+        type,
+        points: pr ? pr.real : 0,
+        muted: dropped,
+        tag: dropped ? 'benched' : '',
+      });
+    }
+  }
+
+  // RIGHT — what the scenario gives them, in the roster's own order. A swap writes the replacement
+  // into the outgoing player's slot (see hypoSwapPlayer), so the two columns still line up row for
+  // row and you can read a substitution straight across. Sorting added players to the bottom would
+  // undo exactly that.
+  const hypoRows = [];
+  for (const [type, list] of [
+    ['batting', effective.batters],
+    ['pitching', effective.pitchers],
+  ]) {
+    for (const player of list) {
+      const pr = prFor(player, type);
+      const isNew = !(type === 'batting' ? realRoster.batters : realRoster.pitchers).includes(player);
+      hypoRows.push({
+        player,
+        type,
+        points: pr ? pr.hypothetical : 0,
+        added: isNew,
+        tag: isNew ? 'added' : '',
+      });
+    }
+  }
+
+  const actualTotal = actualRows.reduce((s, r) => s + r.points, 0);
+  const hypoTotal = hypoRows.reduce((s, r) => s + r.points, 0);
+  const diff = Math.round((hypoTotal - actualTotal) * 100) / 100;
+
+  let html = `<div class="hypo-lab-controls">
+    <label>Manager
+      <select id="hypo-lab-manager">
+        ${managers.map((m) => `<option value="${esc(m.name)}"${m.name === manager ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}
+      </select>
+    </label>
+    <div class="hypo-round-tabs">
+      ${HYPO_ROUNDS()
+        .map(
+          (r) =>
+            `<button class="hypo-round-tab${r === round ? ' active' : ''}${played.has(r) ? '' : ' hypo-round-unplayed'}" data-round="${esc(r)}">${esc(
+              ROUND_LABELS[r] || r
+            )}${played.has(r) ? '' : ' *'}</button>`
+        )
+        .join('')}
+    </div>
+    ${hasOverride ? `<button class="btn btn-sm btn-secondary" id="hypo-lab-reset-round">Restore real roster</button>` : ''}
+  </div>`;
+
+  if (!didPlay) {
+    html += `<p class="hypo-warning">${esc(manager)} never reached the ${esc(
+      ROUND_LABELS[round] || round
+    )} — there is no real roster to compare against. Add players below to score the round they didn't play. Those points are a projection of what those players did that period, not a record of anything that happened.</p>`;
+  }
+
+  html += `<div class="hypo-roster-grid">
+    ${hypoRosterColumn('Actually rostered', didPlay ? 'What really happened' : 'Did not play this round', actualRows, {
+      manager,
+      round,
+      empty: `${esc(manager)} had no roster for this round.`,
+    })}
+    ${hypoRosterColumn(
+      'What If roster',
+      hasOverride ? 'Your changes' : didPlay ? 'Same roster as real — edit to compare' : 'Nothing entered yet',
+      hypoRows,
+      {
+        removable: true,
+        manager,
+        round,
+        empty: 'Empty roster — nobody scores.',
+      }
+    )}
+  </div>`;
+
+  html += `<div class="hypo-roster-summary ${hypoDeltaClass(diff)}">
+    ${didPlay ? `Real ${fmt(Math.round(actualTotal * 100) / 100)} &rarr; ` : ''}What If ${fmt(
+      Math.round(hypoTotal * 100) / 100
+    )} <strong>(${hypoDelta(diff)})</strong> for the ${esc(ROUND_LABELS[round] || round)}
+  </div>`;
+
+  const batOptions = hypoPlayerOptions(snapshot, round, 'batting');
+  const pitOptions = hypoPlayerOptions(snapshot, round, 'pitching');
+  const opt = (p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`;
+
+  if (!batOptions.length && !pitOptions.length) {
+    // No stat rows exist for this round at all — usually a playoff round that hasn't been played
+    // yet. There is nothing to score anyone against, so offering a search box would be a dead end.
+    html += `<p class="upload-hint hypo-no-candidates">No stats have been recorded for the ${esc(
+      ROUND_LABELS[round] || round
+    )} yet, so there is nothing to score a roster against for this round.</p>`;
+  } else {
+    html += `<div class="hypo-add-row">
+      <label>Add a batter <input type="text" id="hypo-add-batting" list="hypo-list-batting" placeholder="Top scorers — or type a name"></label>
+      <datalist id="hypo-list-batting">${batOptions.map(opt).join('')}</datalist>
+      <label>Add a pitcher <input type="text" id="hypo-add-pitching" list="hypo-list-pitching" placeholder="Top scorers — or type a name"></label>
+      <datalist id="hypo-list-pitching">${pitOptions.map(opt).join('')}</datalist>
+    </div>
+    <p class="upload-hint">Showing this round's top ${HYPO_SUGGESTION_LIMIT} scorers. Start typing to search every player.</p>`;
+  }
+
+  container.innerHTML = html;
+
+  const mgrSelect = document.getElementById('hypo-lab-manager');
+  if (mgrSelect) {
+    mgrSelect.addEventListener('change', () => {
+      HYPO_LAB_MANAGER = mgrSelect.value;
+      HYPO_SWAP_OPEN = null;
+      renderHypoOutputs();
+    });
+  }
+  container.querySelectorAll('.hypo-round-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_LAB_ROUND = btn.dataset.round;
+      HYPO_SWAP_OPEN = null;
+      renderHypoOutputs();
+    });
+  });
+  const resetRound = document.getElementById('hypo-lab-reset-round');
+  if (resetRound) resetRound.addEventListener('click', () => clearHypoRoster(manager, round));
+  container.querySelectorAll('.hypo-x').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_SWAP_OPEN = null;
+      hypoRemovePlayer(manager, round, btn.dataset.type, btn.dataset.remove);
+    });
+  });
+
+  container.querySelectorAll('.hypo-swap-name').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const same =
+        HYPO_SWAP_OPEN && HYPO_SWAP_OPEN.player === btn.dataset.swap && HYPO_SWAP_OPEN.type === btn.dataset.type;
+      HYPO_SWAP_OPEN = same ? null : { player: btn.dataset.swap, type: btn.dataset.type };
+      renderHypoOutputs();
+      const input = document.getElementById('hypo-swap-input');
+      if (input) input.focus();
+    });
+  });
+
+  const swapInput = document.getElementById('hypo-swap-input');
+  if (swapInput && HYPO_SWAP_OPEN) {
+    const { player: outPlayer, type: swapType } = HYPO_SWAP_OPEN;
+    const commitSwap = () => hypoSwapPlayer(manager, round, swapType, outPlayer, swapInput.value.trim());
+    swapInput.addEventListener('change', commitSwap);
+    swapInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') commitSwap();
+      if (ev.key === 'Escape') {
+        HYPO_SWAP_OPEN = null;
+        renderHypoOutputs();
+      }
+    });
+    swapInput.addEventListener('input', () => {
+      hypoFillDatalist(`hypo-list-${swapType}`, hypoPlayerOptions(snapshot, round, swapType, swapInput.value));
+    });
+  }
+  const swapCancel = document.getElementById('hypo-swap-cancel');
+  if (swapCancel) {
+    swapCancel.addEventListener('click', () => {
+      HYPO_SWAP_OPEN = null;
+      renderHypoOutputs();
+    });
+  }
+  for (const type of ['batting', 'pitching']) {
+    const input = document.getElementById(`hypo-add-${type}`);
+    if (!input) continue;
+    const commit = () => {
+      const name = input.value.trim();
+      if (!name) return;
+      input.value = '';
+      hypoAddPlayer(manager, round, type, name);
+    };
+    input.addEventListener('change', commit);
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') commit();
+    });
+    // Re-rank the offered names against what has been typed so far, keeping the option list at the
+    // cap instead of handing the browser the whole league to filter.
+    input.addEventListener('input', () => {
+      hypoFillDatalist(`hypo-list-${type}`, hypoPlayerOptions(snapshot, round, type, input.value));
+    });
+  }
+}
+
+// ---- Player Explorer ----
+// Look up ANY player with recorded stats — rostered or not — and see what he actually did, what he
+// was worth under the real rubric, and what he'd be worth under the current scenario. This is the
+// panel that answers "what if I'd started him" without building a scenario at all.
+
+let HYPO_EXPLORER_TYPE = 'batting';
+let HYPO_EXPLORER_PLAYER = null;
+
+// The stat columns worth showing per side. Deliberately a subset — a game log is for reading, and
+// every stored field would make it a spreadsheet.
+const EXPLORER_COLUMNS = {
+  batting: [
+    ['1b', '1B'],
+    ['2b', '2B'],
+    ['3b', '3B'],
+    ['hr', 'HR'],
+    ['r', 'R'],
+    ['rbi', 'RBI'],
+    ['sb', 'SB'],
+    ['bb', 'BB'],
+  ],
+  pitching: [
+    ['ip', 'IP'],
+    ['h', 'H'],
+    ['er', 'ER'],
+    ['bb', 'BB'],
+    ['k', 'K'],
+    ['w', 'W'],
+    ['qs', 'QS'],
+  ],
+};
+
+function renderPlayerExplorer() {
+  const container = document.getElementById('whatif-explorer');
+  if (!container) return;
+  // Always read the CURRENT snapshot rather than one captured when a handler was bound: the daily
+  // stats land asynchronously, and a stale closure would keep showing "no game log" after they do.
+  const snapshot = hypoSnapshot(SELECTED_SEASON);
+  if (!snapshot) {
+    container.innerHTML = '<p class="upload-hint">No season data loaded yet.</p>';
+    return;
+  }
+
+  const type = HYPO_EXPLORER_TYPE;
+  const sd = getSeasons()[SELECTED_SEASON];
+  const suggestions = playerSuggestions(snapshot, { type, limit: HYPO_SUGGESTION_LIMIT });
+
+  let html = `<div class="hypo-lab-controls">
+    <div class="hypo-round-tabs">
+      <button class="hypo-round-tab${type === 'batting' ? ' active' : ''}" data-xtype="batting">Batters</button>
+      <button class="hypo-round-tab${type === 'pitching' ? ' active' : ''}" data-xtype="pitching">Pitchers</button>
+    </div>
+    <label>Player
+      <input type="text" id="hypo-explorer-search" list="hypo-explorer-list" placeholder="Search any player…" value="${esc(
+        HYPO_EXPLORER_PLAYER || ''
+      )}">
+    </label>
+    <datalist id="hypo-explorer-list">${suggestions
+      .map((p) => `<option value="${esc(p.name)}">${fmt(p.points)} pts</option>`)
+      .join('')}</datalist>
+  </div>
+  <p class="upload-hint hypo-suggest-note">Showing the season's top ${HYPO_SUGGESTION_LIMIT} ${
+    type === 'batting' ? 'batters' : 'pitchers'
+  } by points. Start typing to search every player who recorded a stat.</p>`;
+
+  if (!HYPO_EXPLORER_PLAYER) {
+    // No extra prompt here — the card intro and the suggestion note above already say it, and on a
+    // phone three stacked paragraphs push the search box off the screen.
+    container.innerHTML = html;
+    wireExplorerControls(container, snapshot);
+    return;
+  }
+
+  const info = explainPlayer(snapshot, HYPO_EXPLORER_PLAYER, type, HYPO_SCENARIO);
+
+  if (!info.rounds.length) {
+    html += `<p class="hypo-warning">No ${type === 'batting' ? 'batting' : 'pitching'} stats recorded for “${esc(
+      HYPO_EXPLORER_PLAYER
+    )}” this season.${
+      playerTypes(snapshot, HYPO_EXPLORER_PLAYER).length
+        ? ' Try the other tab — he has stats on the other side of the ball.'
+        : ''
+    }</p>`;
+    container.innerHTML = html;
+    wireExplorerControls(container, snapshot);
+    return;
+  }
+
+  const owners = info.owners.length
+    ? info.owners
+        .map((o) => `${esc(o.manager)} <span class="upload-hint">(${o.rounds.map(roundShortLabel).join(', ')})</span>`)
+        .join(' &middot; ')
+    : '<span class="upload-hint">Never rostered by anyone — a free agent all season.</span>';
+
+  html += `<div class="hypo-explorer-head">
+    <div>
+      <h3>${displayPlayer(info.player, sd)}</h3>
+      <div class="hypo-explorer-owners">Rostered by: ${owners}</div>
+    </div>
+    <div class="hypo-explorer-totals">
+      <div><span>Worth (real)</span><strong>${fmt(info.total.real)}</strong></div>
+      <div><span>Worth (What If)</span><strong>${fmt(info.total.hypothetical)}</strong></div>
+      <div class="${hypoDeltaClass(info.total.delta)}"><span>&Delta;</span><strong>${hypoDelta(info.total.delta)}</strong></div>
+    </div>
+  </div>`;
+
+  // "Worth" is what his own stat line is worth; "Credited" is what a manager was actually given for
+  // him. They differ whenever he was held for only part of a period — keeping the two apart is what
+  // stops this table from implying a free agent scored for somebody.
+  const labMgr = hypoLabManager();
+  html += `<div class="table-wrapper"><table class="data-table compact-table hypo-explorer-table">
+    <thead><tr><th>Round</th><th>Wks</th><th>Worth (real)</th><th>Worth (What If)</th><th>&Delta;</th><th>Credited</th><th></th></tr></thead>
+    <tbody>`;
+  for (const r of info.rounds) {
+    html += `<tr>
+      <td>${esc(ROUND_LABELS[r.round] || r.round)}</td>
+      <td class="hypo-num">${r.weeks}</td>
+      <td class="hypo-num">${fmt(r.real)}</td>
+      <td class="hypo-num hypo-strong">${fmt(r.hypothetical)}</td>
+      <td class="hypo-num ${hypoDeltaClass(r.delta)}">${hypoDelta(r.delta)}</td>
+      <td class="hypo-num">${r.credited ? fmt(r.credited) : '&ndash;'}</td>
+      <td><button class="btn btn-sm btn-secondary hypo-try" data-round="${esc(r.round)}">Try in ${esc(
+        roundShortLabel(r.round)
+      )}</button></td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>
+    <p class="upload-hint">“Worth” is what this player's own stat line is worth. “Credited” is what a manager was actually given for him — lower when he was only rostered for part of the period. <strong>Try in…</strong> puts him on ${esc(
+      labMgr || 'the selected manager'
+    )}'s Roster Lab roster for that round.</p>`;
+
+  if (info.hasGameLog) {
+    const cols = EXPLORER_COLUMNS[type];
+    html += `<h4 class="hypo-log-title">Game log</h4>
+      <div class="table-wrapper"><table class="data-table compact-table hypo-explorer-table">
+      <thead><tr><th>Date</th><th>Week</th>${cols
+        .map(([, label]) => `<th class="hypo-num">${label}</th>`)
+        .join('')}<th class="hypo-num">Real</th><th class="hypo-num">What If</th></tr></thead><tbody>`;
+    for (const g of info.log) {
+      html += `<tr>
+        <td>${esc(g.date)}</td>
+        <td>${esc(weekLabel(g.round, g.week))}</td>
+        ${cols.map(([key]) => `<td class="hypo-num">${g.stats[key] ? fmtDec(g.stats[key]) : '&ndash;'}</td>`).join('')}
+        <td class="hypo-num">${fmt(g.real)}</td>
+        <td class="hypo-num ${hypoDeltaClass(g.delta)}">${fmt(g.hypothetical)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  } else {
+    html += `<p class="upload-hint">Per-game log loads with the daily stats — one moment.</p>`;
+  }
+
+  container.innerHTML = html;
+  wireExplorerControls(container, snapshot);
+}
+
+function wireExplorerControls(container, snapshot) {
+  container.querySelectorAll('[data-xtype]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      HYPO_EXPLORER_TYPE = btn.dataset.xtype;
+      // A name only valid on the other side of the ball would render as "no stats" — clear it
+      // unless this player genuinely has rows for the newly selected type.
+      if (HYPO_EXPLORER_PLAYER && !playerTypes(snapshot, HYPO_EXPLORER_PLAYER).includes(HYPO_EXPLORER_TYPE)) {
+        HYPO_EXPLORER_PLAYER = null;
+      }
+      renderPlayerExplorer();
+    });
+  });
+
+  const search = document.getElementById('hypo-explorer-search');
+  if (search) {
+    const commit = () => {
+      const name = search.value.trim();
+      HYPO_EXPLORER_PLAYER = name || null;
+      // A name typed for the wrong tab is a common miss — switch sides automatically when the
+      // player only exists on the other one.
+      if (name) {
+        const types = playerTypes(snapshot, name);
+        if (types.length && !types.includes(HYPO_EXPLORER_TYPE)) HYPO_EXPLORER_TYPE = types[0];
+      }
+      renderPlayerExplorer();
+    };
+    search.addEventListener('change', commit);
+    search.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') commit();
+    });
+    // Re-rank against the typed text without re-rendering the panel — the datalist stays capped,
+    // and a partially typed name never has to be matched against the whole league in the DOM.
+    search.addEventListener('input', () => {
+      hypoFillDatalist(
+        'hypo-explorer-list',
+        playerSuggestions(snapshot, { type: HYPO_EXPLORER_TYPE, query: search.value, limit: HYPO_SUGGESTION_LIMIT })
+      );
+    });
+  }
+
+  container.querySelectorAll('.hypo-try').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const manager = hypoLabManager();
+      if (!manager || !HYPO_EXPLORER_PLAYER) return;
+      HYPO_LAB_ROUND = btn.dataset.round;
+      hypoAddPlayer(manager, btn.dataset.round, HYPO_EXPLORER_TYPE, HYPO_EXPLORER_PLAYER);
+    });
+  });
+}
+
+function renderWhatIf() {
+  const container = document.getElementById('whatif-content');
+  if (!container) return;
+
+  const keys = scoringKeys();
+
+  container.innerHTML = `
+    <div class="hypo-banner">
+      <strong>Hypothetical Zone</strong>
+      <span>Nothing here touches league data. Change the numbers, see what would have happened.</span>
+    </div>
+
+    <div class="card hypo-card">
+      <div class="hypo-toolbar">
+        <h2>Scoring Lab</h2>
+        <div class="hypo-actions">
+          <button class="btn btn-secondary" id="hypo-reset">Reset to reality</button>
+          <button class="btn btn-secondary" id="hypo-share">Copy share link</button>
+          <span class="upload-hint" id="whatif-share-status"></span>
+        </div>
+      </div>
+      <p class="upload-hint">
+        Change what any stat is worth and the standings below rescore instantly. The three batting
+        stats and one pitching stat marked <em>unscored</em> are recorded in our data but worth
+        nothing today &mdash; set a value to see what would happen if they counted.
+      </p>
+      <div class="hypo-scoring-grid">
+        <div>
+          <h3>Batting</h3>
+          ${hypoScoringInputs('batting', keys.batting.scored, keys.batting.unscored)}
+        </div>
+        <div>
+          <h3>Pitching</h3>
+          ${hypoScoringInputs('pitching', keys.pitching.scored, keys.pitching.unscored)}
+        </div>
+      </div>
+    </div>
+
+    <div class="card hypo-card">
+      <div class="hypo-toolbar">
+        <h2>Roster Lab</h2>
+      </div>
+      <p class="upload-hint">
+        Swap who you started for a whole period and see it against what you actually had. Rounds
+        marked <strong>*</strong> are ones that manager never reached &mdash; you can still enter a
+        roster there to see what it would have scored.
+      </p>
+      <div id="whatif-roster-lab"></div>
+    </div>
+
+    <div class="card hypo-card">
+      <div class="hypo-toolbar">
+        <h2>Player Explorer</h2>
+      </div>
+      <p class="upload-hint">
+        Look up anyone who recorded a stat this season &mdash; they don't have to have been on
+        anyone's roster. See what they were worth, what they'd be worth under your scoring, and who
+        actually had them.
+      </p>
+      <div id="whatif-explorer"></div>
+    </div>
+
+    <div class="card hypo-card">
+      <h2>What If Standings</h2>
+      <div id="whatif-results"></div>
+    </div>
+
+    <div class="card hypo-card">
+      <h2>Playoff Picture</h2>
+      <p class="upload-hint">
+        How pool play would shake out under this scenario &mdash; by pool, with the period winners
+        and wild cards &mdash; and the bracket those seeds produce.
+      </p>
+      <div id="whatif-playoffs"></div>
+    </div>
+  `;
+
+  container.querySelectorAll('.hypo-input').forEach((input) => {
+    input.addEventListener('input', () => setHypoScoringValue(input.dataset.side, input.dataset.key, input.value));
+  });
+  const resetBtn = document.getElementById('hypo-reset');
+  if (resetBtn) resetBtn.addEventListener('click', resetHypoScenario);
+  const shareBtn = document.getElementById('hypo-share');
+  if (shareBtn) shareBtn.addEventListener('click', copyHypoLink);
+
+  renderHypoOutputs();
+
+  // Daily rows make mid-week roster slots exact rather than estimated. They are fetched on demand
+  // and cached (the Trends tab uses the same cache), so the tab paints immediately on weekly rows
+  // and sharpens once they land.
+  ensureDailyStats(SELECTED_SEASON, () => {
+    HYPO_SNAPSHOT_KEY = null;
+    renderHypoOutputs();
+  });
+}
+
 function renderHallOfFame() {
   const container = document.getElementById('hall-of-fame-content');
   if (!container) return;
 
   const allResults = getHofAllResults();
-  const records = buildHofRecords(allResults);
-  const hasAvg = allResults.some((r) => r.standings);
+  const live = getHofLiveResult();
+  const recordResults = hofRecordResults(allResults, live);
+  const records = buildHofRecords(recordResults);
+  const hasAvg = recordResults.some((r) => r.standings);
   const sorted = hofSortedManagers(records, 'wins', false);
   const lastResult = allResults[allResults.length - 1];
 
@@ -14831,6 +17774,11 @@ function renderHallOfFame() {
   html += '<div class="table-wrapper"><table class="data-table">';
   html +=
     '<thead><tr><th>Year</th><th>&#127942; Champion</th><th>2nd Place</th><th>3rd Place</th><th></th></tr></thead><tbody>';
+
+  // The season in progress sits on top, expanded by default — it's the row people are
+  // actually watching. Its placings fill in round by round as managers are eliminated.
+  html += hofLiveSeasonRowsHtml(live);
+
   [...allResults].reverse().forEach((r) => {
     const hasStandings = !!r.standings;
     const toggleBtn = `<button class="btn btn-sm btn-secondary" onclick="toggleHofStandings('${r.year}')" id="hof-toggle-btn-${r.year}">${hasStandings ? 'Full &#9660;' : ''}</button>`;
@@ -14846,12 +17794,7 @@ function renderHallOfFame() {
         .sort((a, b) => a[1] - b[1])
         .map(([name, pos]) => {
           const posLabel = pos === 1 ? '&#127942;' : pos <= 3 ? `<strong>${pos}</strong>` : pos;
-          let round;
-          if (pos <= 2) round = 'Finals';
-          else if (pos <= 4) round = 'Consolation';
-          else if (pos <= 8) round = 'Quarterfinals';
-          else round = 'Did Not Qualify';
-          return `<tr><td class="num">${posLabel}</td><td>${name}</td><td>${round}</td></tr>`;
+          return `<tr><td class="num">${posLabel}</td><td>${esc(name)}</td><td>${playoffStatusLabel(statusKeyForPosition(pos))}</td></tr>`;
         })
         .join('');
       html += `<tr id="hof-standings-${r.year}" style="display:none;"><td colspan="5" style="padding:0 0.5rem 0.5rem;">
@@ -14866,8 +17809,7 @@ function renderHallOfFame() {
 
   // All-time records table — shows all 12 finishing positions
   html += '<div class="card" style="margin-top:1rem;"><h2>All-Time Records</h2>';
-  html +=
-    '<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Click a column header to sort. Position counts based on seasons with full standings data.</p>';
+  html += `<p class="text-muted" style="font-size:0.85rem;margin-bottom:0.5rem;">Click a column header to sort. Position counts based on seasons with full standings data${live ? ', including the finishes already settled in the season in progress' : ''}.</p>`;
   html += '<div class="table-wrapper"><table class="data-table hof-records-table" id="hof-table"><thead><tr>';
   html += '<th>#</th><th>Manager</th>';
   for (let p = 1; p <= 12; p++) {
@@ -14883,6 +17825,8 @@ function renderHallOfFame() {
 
   container.innerHTML = html;
   container._hasAvg = hasAvg;
+  // Cached so a column re-sort doesn't recompute the whole season's bracket math.
+  container._recordResults = recordResults;
 }
 
 function positionSuffix(n) {
@@ -14898,7 +17842,10 @@ function ordinal(n) {
 window.toggleHofStandings = function (year) {
   const row = document.getElementById('hof-standings-' + year);
   if (!row) return;
-  row.style.display = row.style.display === 'none' ? '' : 'none';
+  const opening = row.style.display === 'none';
+  row.style.display = opening ? '' : 'none';
+  const btn = document.getElementById('hof-toggle-btn-' + year);
+  if (btn) btn.innerHTML = opening ? 'Full &#9650;' : 'Full &#9660;';
 };
 
 let _hofSortCol = 'wins';
@@ -14919,7 +17866,9 @@ window.sortHOF = function (col) {
 
   const container = document.getElementById('hall-of-fame-content');
   const hasAvg = container ? container._hasAvg : false;
-  const records = buildHofRecords(getHofAllResults());
+  const records = buildHofRecords(
+    (container && container._recordResults) || hofRecordResults(getHofAllResults(), getHofLiveResult())
+  );
   const sorted = hofSortedManagers(records, _hofSortCol, _hofSortAsc);
   tbody.innerHTML = sorted.map((m, i) => hofManagerRowHtml(m, i, hasAvg)).join('');
 };

@@ -14,8 +14,8 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext y='54' font-size='56'%3E%E2%9A%BE%3C/text%3E%3C/svg%3E"
     />
-    <link rel="stylesheet" href="styles.css?v=96d0187b" />
-    <link rel="stylesheet" href="mobile.css?v=1021eb10" />
+    <link rel="stylesheet" href="styles.css?v=c1c5fe16" />
+    <link rel="stylesheet" href="mobile.css?v=feea1b55" />
     <!-- Apply the saved theme before first paint so dark-mode users don't see a
          light flash. The authoritative value is the per-account preference loaded
          after login (app.js); this is just the locally cached copy. -->
@@ -26,6 +26,18 @@
         }
       } catch (e) {
         /* localStorage unavailable — default light */
+      }
+      // Decide login-screen visibility before first paint. A returning user with a saved
+      // session must never see the login screen flash while app.js restores from cache and
+      // the background sync runs, so hide it up front; app.js reveals it again only if the
+      // saved session turns out invalid. Logged-out visitors keep the default (visible) so
+      // the form shows instantly without waiting for the app to boot.
+      try {
+        if (localStorage.getItem('wmmc_logged_in_email')) {
+          document.documentElement.classList.add('wmmc-has-session');
+        }
+      } catch (e) {
+        /* localStorage unavailable — default to showing the login screen */
       }
     </script>
   </head>
@@ -90,6 +102,7 @@
       <button class="nav-btn" data-tab="weekly">Season Stats</button>
       <button class="nav-btn" data-tab="league-info">League Info</button>
       <button class="nav-btn" data-tab="hall-of-fame">Hall of Fame</button>
+      <button class="nav-btn" data-tab="whatif">What If</button>
       <button class="nav-btn nav-btn-commissioner" data-tab="commissioner" id="commissioner-nav-btn">
         Commissioner<span id="comm-pending-badge" style="display: none"></span>
       </button>
@@ -196,16 +209,32 @@
         <div id="hall-of-fame-content"></div>
       </section>
 
+      <!-- Hypothetical Zone — sandbox only, never reads or writes league data -->
+      <section id="whatif" class="tab-content">
+        <div id="whatif-content"></div>
+      </section>
+
       <!-- Rosters -->
+      <!-- Two columns on desktop: the Roster/Team Stats/Swaps tabs on the left, a narrow
+           score rail on the right holding the manager picker and the per-round score
+           blocks. The rail is a persistent node (it owns the commissioner's custom
+           dropdown), so renderRosterData writes #roster-score-rail separately from
+           #roster-content instead of rebuilding the whole panel. Below 1100px the rail
+           stacks above the tabs (see .roster-layout in styles.css). -->
       <section id="my-roster" class="tab-content">
-        <div id="roster-manager-bar" class="card" style="display: none">
-          <div class="roster-manager-bar-inner">
-            <h2 id="roster-title">Roster</h2>
-            <div id="roster-manager-dropdown" class="custom-dd" style="display: none"></div>
+        <div id="roster-panel" class="roster-layout">
+          <div class="roster-main">
+            <div id="roster-content"></div>
           </div>
-        </div>
-        <div id="roster-panel">
-          <div id="roster-content"></div>
+          <aside class="roster-rail">
+            <div id="roster-manager-bar" class="card" style="display: none">
+              <div class="roster-manager-bar-inner">
+                <h2 id="roster-title">Roster</h2>
+                <div id="roster-manager-dropdown" class="custom-dd" style="display: none"></div>
+              </div>
+            </div>
+            <div id="roster-score-rail"></div>
+          </aside>
         </div>
       </section>
 
@@ -226,6 +255,9 @@
             <h2>Commissioner Home</h2>
             <p>Logged in as <strong id="commissioner-name"></strong></p>
           </div>
+
+          <!-- Aggregated "needs your attention" list, populated by renderCommissionerTodo() -->
+          <div id="comm-todo-card" class="card" style="display: none"></div>
 
           <!-- Commissioner Sub-tabs -->
           <div class="comm-tabs">
@@ -552,8 +584,8 @@
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <!-- Module entry runs first (defer is implicit for type=module) and attaches
          shared helpers to window. app.js then consumes them as bare globals. -->
-    <script type="module" src="js/index.js?v=936e8a4d"></script>
-    <script type="module" src="js/mobile.js?v=bc5fe10e"></script>
-    <script src="app.js?v=48c571ba" defer></script>
+    <script type="module" src="js/index.js?v=59548e54"></script>
+    <script type="module" src="js/mobile.js?v=00d4fd30"></script>
+    <script src="app.js?v=a801ca38" defer></script>
   </body>
 </html>
