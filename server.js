@@ -4798,22 +4798,41 @@ async function ensureFreshHotTakes(year, facts, opts = {}) {
   const sd = (db.seasons || {})[year];
   if (!sd) return null;
 
-  if (!opts.force && hotTakesCacheHit(sd.hot_takes, facts.dayISO, facts.round)) {
-    return sd.hot_takes.lines;
+  const key = hotTakesCacheKey(facts.dayISO, facts.round);
+  const cached = sd.hot_takes;
+  const hit = hotTakesCacheHit(cached, facts.dayISO, facts.round);
+  if (!opts.force && hit) {
+    console.log(
+      `[Hot Takes] Reusing today's ${cached.lines.length} take(s) for ${year} ${facts.round} ${facts.dayISO}`
+    );
+    return cached.lines;
   }
 
-  const lines = await generatePlayoffCommentary(facts);
+  // A forced re-roll has to actually move, and it would not by default: the static bank is
+  // seeded off the date so a repost tells the same joke, which is right for a retry and wrong
+  // for "give me different ones". Count re-rolls and nudge the seed by that count, so each
+  // press lands on a different template while staying deterministic (the same re-roll number
+  // on the same day always gives the same text). The Anthropic path varies on its own.
+  const rerolls = opts.force && hit ? (Number(cached.rerolls) || 0) + 1 : 0;
+  const seeded = rerolls ? { ...facts, seed: (Number(facts.seed) || 0) + rerolls } : facts;
+
+  const { lines, source } = await generatePlayoffCommentary(seeded);
   if (!lines || !lines.length) return null;
 
   sd.hot_takes = {
-    key: hotTakesCacheKey(facts.dayISO, facts.round),
+    key,
     date: facts.dayISO,
     round: facts.round,
     lines,
+    source,
+    rerolls,
     generated_at: new Date().toISOString(),
   };
   writeDB(db);
-  console.log(`[Hot Takes] Stored ${lines.length} take(s) for ${year} ${facts.round} ${facts.dayISO}`);
+  console.log(
+    `[Hot Takes] Stored ${lines.length} take(s) for ${year} ${facts.round} ${facts.dayISO} ` +
+      `— source: ${source}${rerolls ? `, re-roll #${rerolls}` : ''}`
+  );
   return lines;
 }
 
@@ -4839,12 +4858,23 @@ const hotTakesText = (lines) => `*${HOT_TAKES_HEADING}*\n${lines.join('\n\n')}`;
 // inventing a number that looks like a score, is checked for explicitly before the reply is
 // used. That check is why this is worth doing at all: the section sits directly beneath a
 // scoreboard, and a made-up total next to a real one is worse than no joke.
+// Returns { lines, source }, where source is 'written' (Claude) or 'bank' (the static
+// fallback) plus the reason it fell back. Callers only use `lines`; the source exists so the
+// logs can answer "why is the post in the bank's voice", which used to be unanswerable — the
+// no-key path returned silently, so a missing key and a broken key looked identical from
+// outside. Anything that ends in the bank now says why, once, at the point it happens.
 async function generatePlayoffCommentary(facts, { maxLines = 4 } = {}) {
   const fallback = buildPlayoffCommentary(facts);
-  if (!ANTHROPIC_API_KEY || !facts) return fallback;
+  const bank = (reason) => {
+    console.log(`[Hot Takes] Using the static bank: ${reason}`);
+    return { lines: fallback, source: `bank (${reason})` };
+  };
+
+  if (!facts) return bank('no facts to write from');
+  if (!ANTHROPIC_API_KEY) return bank('ANTHROPIC_API_KEY is not set on this service');
 
   const factSheet = commentaryFactSheet(facts);
-  if (!factSheet) return fallback;
+  if (!factSheet) return bank('the facts did not render (no usable matchups)');
 
   const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup, a private fantasy baseball league of long-time friends. Write the "Hot Takes" section of this morning's scoreboard post: what yesterday DID to the playoff bracket.
 
@@ -4882,13 +4912,14 @@ Write the takes now.`;
       signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
     });
   } catch (e) {
-    console.error('[Hot Takes] Anthropic call failed:', e.name, e.message);
-    return fallback;
+    console.error(`[Hot Takes] Anthropic call failed (model ${PLAYOFF_COMMENTARY_MODEL}):`, e.name, e.message);
+    return bank(`the API call threw (${e.name})`);
   }
 
   if (!resp.ok) {
-    console.error('[Hot Takes] Anthropic error:', resp.status, await resp.text().catch(() => ''));
-    return fallback;
+    const body = await resp.text().catch(() => '');
+    console.error(`[Hot Takes] Anthropic HTTP ${resp.status} (model ${PLAYOFF_COMMENTARY_MODEL}):`, body.slice(0, 500));
+    return bank(`the API returned HTTP ${resp.status}`);
   }
 
   let data;
@@ -4896,15 +4927,15 @@ Write the takes now.`;
     data = await resp.json();
   } catch (e) {
     console.error('[Hot Takes] Anthropic returned an unreadable body:', e.message);
-    return fallback;
+    return bank('the API response body could not be parsed');
   }
 
   const raw = data && data.content && data.content[0] && data.content[0].text;
-  if (!raw) return fallback;
+  if (!raw) return bank('the API returned an empty reply');
 
   if (commentaryMentionsUnknownScore(raw, factSheet)) {
-    console.error('[Hot Takes] Reply quoted a score that is not in the facts — using the static bank instead.');
-    return fallback;
+    console.error('[Hot Takes] Reply quoted a score absent from the facts:', String(raw).slice(0, 300));
+    return bank('the reply quoted a score that is not in the facts');
   }
 
   const lines = String(raw)
@@ -4918,7 +4949,9 @@ Write the takes now.`;
     .filter(Boolean)
     .slice(0, maxLines);
 
-  return lines.length ? lines : fallback;
+  if (!lines.length) return bank('nothing usable survived parsing the reply');
+  console.log(`[Hot Takes] Written by ${PLAYOFF_COMMENTARY_MODEL}: ${lines.length} take(s).`);
+  return { lines, source: 'written' };
 }
 
 const ROUND_LABELS = {
@@ -13122,6 +13155,76 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// GET /api/admin/anthropic-check — is the Anthropic key on THIS service actually usable?
+//
+// Exists because "the post is in the bank's voice" has many causes and the logs only tell you
+// after a post has gone out. This asks the API directly with a one-token request and reports
+// exactly what came back. It never returns the key — only whether one is configured, its
+// length and last four characters, which is enough to tell "unset" from "set to the wrong
+// thing" from "set correctly but rejected" without putting a secret in an HTTP response.
+app.get('/api/admin/anthropic-check', requireCommissioner, async (req, res) => {
+  const model = (req.query && req.query.model) || PLAYOFF_COMMENTARY_MODEL;
+  const key = ANTHROPIC_API_KEY;
+  const keyInfo = {
+    configured: !!key,
+    length: key ? key.length : 0,
+    endsWith: key ? key.slice(-4) : null,
+    looksLikeAnthropicKey: /^sk-ant-/.test(key || ''),
+  };
+
+  if (!key) {
+    return res.json({
+      ok: false,
+      reason: 'ANTHROPIC_API_KEY is not set on this service',
+      key: keyInfo,
+      model,
+    });
+  }
+
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model, max_tokens: 4, messages: [{ role: 'user', content: 'Reply with the word OK.' }] }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (e) {
+    // A throw here is the network itself — egress blocked, DNS, TLS — not the API saying no.
+    return res.json({
+      ok: false,
+      reason: `the request never reached the API (${e.name}: ${e.message})`,
+      key: keyInfo,
+      model,
+    });
+  }
+
+  const bodyText = await resp.text().catch(() => '');
+  if (!resp.ok) {
+    return res.json({
+      ok: false,
+      reason: `the API returned HTTP ${resp.status}`,
+      status: resp.status,
+      body: bodyText.slice(0, 500),
+      key: keyInfo,
+      model,
+    });
+  }
+
+  let reply = null;
+  try {
+    const data = JSON.parse(bodyText);
+    reply = data && data.content && data.content[0] && data.content[0].text;
+  } catch {
+    /* fall through — a 200 with an unreadable body is still a working key */
+  }
+  res.json({ ok: true, model, reply: reply || null, key: keyInfo });
 });
 
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
