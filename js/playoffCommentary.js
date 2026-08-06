@@ -29,6 +29,10 @@ const NAILBITER_MARGIN = 25;
 const BIG_DAY_POINTS = 40;
 // ...and a shutout day has to be under this to be worth mocking.
 const DEAD_DAY_POINTS = 5;
+// Inside this many days of the round ending, "what does he need per day to catch up" stops
+// being trivia and starts being the story. Earlier than that the number is meaningless — a
+// 200-pt gap with 12 days left is a rounding error to a manager scoring 60 a day.
+const RUN_IN_DAYS = 5;
 
 // One decimal, with the redundant ".0" dropped — matches the Slack scoreboard's own
 // formatter so a number never appears twice in one post wearing two different faces.
@@ -120,6 +124,71 @@ export const SLACK_EMOJI = [
   ':sparkles:',
   ':repeat:',
 ];
+
+// What the trailing side needs per remaining day, against what he has actually been managing.
+// The second half is the point: "needs 23.3 a day" means nothing until you know he is averaging
+// 8.2, at which case it means it is over. Returns null when the maths is not meaningful — no
+// margin, no days left, or no scoring history to compare against.
+export function catchUpPace({ margin = 0, daysLeft = null, trailerTotal = 0, daysElapsed = 0 } = {}) {
+  if (!(margin > 0) || !(daysLeft > 0) || !(daysElapsed > 0)) return null;
+  const needPerDay = Math.round((margin / daysLeft) * 10) / 10;
+  const actualPerDay = Math.round((trailerTotal / daysElapsed) * 10) / 10;
+  const multiple = actualPerDay > 0 ? Math.round((needPerDay / actualPerDay) * 10) / 10 : Infinity;
+  return {
+    needPerDay,
+    actualPerDay,
+    // How many times his own pace he has to find. Infinity when he has scored nothing at all.
+    multiple,
+    // The ratio in words, because a ratio is exactly the sort of thing that gets misread in one
+    // direction and turned into a joke that is factually backwards. "0.1x his own pace" means he
+    // is cruising, and a reader skimming for a punchline will see a small number and write a
+    // eulogy. State the conclusion so nobody has to infer it.
+    verdict:
+      multiple === Infinity
+        ? 'he has scored nothing at all this round, so any target is out of reach'
+        : multiple <= 1
+          ? 'comfortably inside what he has been doing anyway — this gap is not the problem it looks like'
+          : multiple <= 2
+            ? 'a real stretch, but within reach of a good weekend'
+            : 'far beyond anything he has managed this round — this is over barring a miracle',
+  };
+}
+
+// How many takes today has actually earned. A quiet day should produce a short post, not three
+// lines of padding — the surest way to make the section ignorable is to print the same volume
+// whether or not anything happened. Two is the floor (the matchup state is always worth saying
+// once), three the ceiling.
+export function commentaryBudget({
+  round = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  histories = {},
+  underperformers = [],
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return 0;
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return 0;
+
+  let events = 0;
+  // A lead change is worth two on its own: it is the whole story of the day.
+  if (moves.some((m) => m.flipped)) events += 2;
+  if (moves.some((m) => m.brokeTie)) events += 1;
+  if (moves.some((m) => m.margin >= BLOWOUT_MARGIN)) events += 1;
+  if (moves.some((m) => m.margin <= NAILBITER_MARGIN)) events += 1;
+  // A gap that closed or opened sharply is a story even without a flip.
+  if (moves.some((m) => Math.abs(m.swing) >= BIG_DAY_POINTS)) events += 1;
+
+  const inRound = Object.entries(dailyTotals || {}).filter(([m]) => moves.some((x) => x.a === m || x.b === m));
+  if (inRound.some(([, p]) => Number(p) >= BIG_DAY_POINTS)) events += 1;
+  if (inRound.length >= 2 && inRound.some(([, p]) => Number(p) <= DEAD_DAY_POINTS)) events += 1;
+
+  if (daysLeft != null && daysLeft <= RUN_IN_DAYS && moves.some((m) => m.margin > 0)) events += 1;
+  if ((underperformers || []).length) events += 1;
+  if (Object.values(histories || {}).some(Boolean)) events += 1;
+
+  return events >= 4 ? 3 : 2;
+}
 
 // ---- Line banks -------------------------------------------------------------
 // Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the short-name
@@ -464,8 +533,10 @@ export function commentaryFactSheet({
   matchups = [],
   dailyTotals = {},
   daysLeft = null,
+  daysElapsed = 0,
   histories = {},
   shortNames = {},
+  underperformers = [],
 } = {}) {
   if (!['QF', 'SF', 'Finals'].includes(round)) return null;
   const n = (name) => shortNames[name] || name || '';
@@ -508,6 +579,51 @@ export function commentaryFactSheet({
   if (dayRows.length) {
     out.push('', "YESTERDAY'S SCORING, best to worst:");
     for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)}`);
+  }
+
+  // Bracket-wide, so a take can say "best in the bracket" or "worst of the four" without the
+  // model having to work it out from the matchup list and get it wrong.
+  const totals = [];
+  for (const m of moves) {
+    totals.push({ name: m.a, total: m.aTotal });
+    totals.push({ name: m.b, total: m.bTotal });
+  }
+  totals.sort((x, y) => y.total - x.total);
+  if (totals.length > 2) {
+    out.push('', 'ROUND TOTALS ACROSS THE WHOLE BRACKET, best to worst:');
+    for (const t of totals) out.push(`- ${n(t.name)}: ${fmtPts(t.total)}`);
+  }
+
+  // Only near the end, where the number means something. Earlier it is noise dressed as maths.
+  if (daysLeft != null && daysLeft <= RUN_IN_DAYS && daysElapsed > 0) {
+    const runIn = [];
+    for (const m of moves) {
+      if (!m.trailerNow || !(m.margin > 0)) continue;
+      const trailerTotal = m.trailerNow === m.a ? m.aTotal : m.bTotal;
+      const pace = catchUpPace({ margin: m.margin, daysLeft, trailerTotal, daysElapsed });
+      if (!pace) continue;
+      runIn.push(
+        `- ${m.label}: ${n(m.trailerNow)} needs ${fmtPts(pace.needPerDay)} per day over the last ` +
+          `${daysLeft} day${daysLeft === 1 ? '' : 's'} to draw level, against the ` +
+          `${fmtPts(pace.actualPerDay)} per day he has averaged this round. Verdict: ${pace.verdict}.`
+      );
+    }
+    if (runIn.length) {
+      out.push('', `THE RUN-IN (${daysLeft} day${daysLeft === 1 ? '' : 's'} left, ${daysElapsed} scored so far):`);
+      out.push(...runIn);
+    }
+  }
+
+  // Players going backwards, with the two rates that make it a fact rather than an opinion.
+  const slumps = (underperformers || []).filter((u) => u && u.player && u.manager);
+  if (slumps.length) {
+    out.push('', 'PLAYERS GOING BACKWARDS (per-game scoring this round vs earlier in the season):');
+    for (const u of slumps) {
+      out.push(
+        `- ${u.player} (${n(u.manager)}, ${u.type}): ${fmtPts(u.roundPerGame)} per game this round ` +
+          `vs ${fmtPts(u.priorPerGame)} before it, over ${u.games} game${u.games === 1 ? '' : 's'}.`
+      );
+    }
   }
 
   const careerLines = [];

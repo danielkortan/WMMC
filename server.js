@@ -4251,6 +4251,10 @@ const NAILBITER_MARGIN = 25;
 const BIG_DAY_POINTS = 40;
 // ...and a shutout day has to be under this to be worth mocking.
 const DEAD_DAY_POINTS = 5;
+// Inside this many days of the round ending, "what does he need per day to catch up" stops
+// being trivia and starts being the story. Earlier than that the number is meaningless — a
+// 200-pt gap with 12 days left is a rounding error to a manager scoring 60 a day.
+const RUN_IN_DAYS = 5;
 
 // One decimal, with the redundant ".0" dropped — matches the Slack scoreboard's own
 // formatter so a number never appears twice in one post wearing two different faces.
@@ -4342,6 +4346,71 @@ const SLACK_EMOJI = [
   ':sparkles:',
   ':repeat:',
 ];
+
+// What the trailing side needs per remaining day, against what he has actually been managing.
+// The second half is the point: "needs 23.3 a day" means nothing until you know he is averaging
+// 8.2, at which case it means it is over. Returns null when the maths is not meaningful — no
+// margin, no days left, or no scoring history to compare against.
+function catchUpPace({ margin = 0, daysLeft = null, trailerTotal = 0, daysElapsed = 0 } = {}) {
+  if (!(margin > 0) || !(daysLeft > 0) || !(daysElapsed > 0)) return null;
+  const needPerDay = Math.round((margin / daysLeft) * 10) / 10;
+  const actualPerDay = Math.round((trailerTotal / daysElapsed) * 10) / 10;
+  const multiple = actualPerDay > 0 ? Math.round((needPerDay / actualPerDay) * 10) / 10 : Infinity;
+  return {
+    needPerDay,
+    actualPerDay,
+    // How many times his own pace he has to find. Infinity when he has scored nothing at all.
+    multiple,
+    // The ratio in words, because a ratio is exactly the sort of thing that gets misread in one
+    // direction and turned into a joke that is factually backwards. "0.1x his own pace" means he
+    // is cruising, and a reader skimming for a punchline will see a small number and write a
+    // eulogy. State the conclusion so nobody has to infer it.
+    verdict:
+      multiple === Infinity
+        ? 'he has scored nothing at all this round, so any target is out of reach'
+        : multiple <= 1
+          ? 'comfortably inside what he has been doing anyway — this gap is not the problem it looks like'
+          : multiple <= 2
+            ? 'a real stretch, but within reach of a good weekend'
+            : 'far beyond anything he has managed this round — this is over barring a miracle',
+  };
+}
+
+// How many takes today has actually earned. A quiet day should produce a short post, not three
+// lines of padding — the surest way to make the section ignorable is to print the same volume
+// whether or not anything happened. Two is the floor (the matchup state is always worth saying
+// once), three the ceiling.
+function commentaryBudget({
+  round = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  histories = {},
+  underperformers = [],
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return 0;
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return 0;
+
+  let events = 0;
+  // A lead change is worth two on its own: it is the whole story of the day.
+  if (moves.some((m) => m.flipped)) events += 2;
+  if (moves.some((m) => m.brokeTie)) events += 1;
+  if (moves.some((m) => m.margin >= BLOWOUT_MARGIN)) events += 1;
+  if (moves.some((m) => m.margin <= NAILBITER_MARGIN)) events += 1;
+  // A gap that closed or opened sharply is a story even without a flip.
+  if (moves.some((m) => Math.abs(m.swing) >= BIG_DAY_POINTS)) events += 1;
+
+  const inRound = Object.entries(dailyTotals || {}).filter(([m]) => moves.some((x) => x.a === m || x.b === m));
+  if (inRound.some(([, p]) => Number(p) >= BIG_DAY_POINTS)) events += 1;
+  if (inRound.length >= 2 && inRound.some(([, p]) => Number(p) <= DEAD_DAY_POINTS)) events += 1;
+
+  if (daysLeft != null && daysLeft <= RUN_IN_DAYS && moves.some((m) => m.margin > 0)) events += 1;
+  if ((underperformers || []).length) events += 1;
+  if (Object.values(histories || {}).some(Boolean)) events += 1;
+
+  return events >= 4 ? 3 : 2;
+}
 
 // ---- Line banks -------------------------------------------------------------
 // Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the short-name
@@ -4686,8 +4755,10 @@ function commentaryFactSheet({
   matchups = [],
   dailyTotals = {},
   daysLeft = null,
+  daysElapsed = 0,
   histories = {},
   shortNames = {},
+  underperformers = [],
 } = {}) {
   if (!['QF', 'SF', 'Finals'].includes(round)) return null;
   const n = (name) => shortNames[name] || name || '';
@@ -4730,6 +4801,51 @@ function commentaryFactSheet({
   if (dayRows.length) {
     out.push('', "YESTERDAY'S SCORING, best to worst:");
     for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)}`);
+  }
+
+  // Bracket-wide, so a take can say "best in the bracket" or "worst of the four" without the
+  // model having to work it out from the matchup list and get it wrong.
+  const totals = [];
+  for (const m of moves) {
+    totals.push({ name: m.a, total: m.aTotal });
+    totals.push({ name: m.b, total: m.bTotal });
+  }
+  totals.sort((x, y) => y.total - x.total);
+  if (totals.length > 2) {
+    out.push('', 'ROUND TOTALS ACROSS THE WHOLE BRACKET, best to worst:');
+    for (const t of totals) out.push(`- ${n(t.name)}: ${fmtPts(t.total)}`);
+  }
+
+  // Only near the end, where the number means something. Earlier it is noise dressed as maths.
+  if (daysLeft != null && daysLeft <= RUN_IN_DAYS && daysElapsed > 0) {
+    const runIn = [];
+    for (const m of moves) {
+      if (!m.trailerNow || !(m.margin > 0)) continue;
+      const trailerTotal = m.trailerNow === m.a ? m.aTotal : m.bTotal;
+      const pace = catchUpPace({ margin: m.margin, daysLeft, trailerTotal, daysElapsed });
+      if (!pace) continue;
+      runIn.push(
+        `- ${m.label}: ${n(m.trailerNow)} needs ${fmtPts(pace.needPerDay)} per day over the last ` +
+          `${daysLeft} day${daysLeft === 1 ? '' : 's'} to draw level, against the ` +
+          `${fmtPts(pace.actualPerDay)} per day he has averaged this round. Verdict: ${pace.verdict}.`
+      );
+    }
+    if (runIn.length) {
+      out.push('', `THE RUN-IN (${daysLeft} day${daysLeft === 1 ? '' : 's'} left, ${daysElapsed} scored so far):`);
+      out.push(...runIn);
+    }
+  }
+
+  // Players going backwards, with the two rates that make it a fact rather than an opinion.
+  const slumps = (underperformers || []).filter((u) => u && u.player && u.manager);
+  if (slumps.length) {
+    out.push('', 'PLAYERS GOING BACKWARDS (per-game scoring this round vs earlier in the season):');
+    for (const u of slumps) {
+      out.push(
+        `- ${u.player} (${n(u.manager)}, ${u.type}): ${fmtPts(u.roundPerGame)} per game this round ` +
+          `vs ${fmtPts(u.priorPerGame)} before it, over ${u.games} game${u.games === 1 ? '' : 's'}.`
+      );
+    }
   }
 
   const careerLines = [];
@@ -4816,6 +4932,89 @@ function hotTakesCacheHit(cached, dayISO, round) {
   );
 }
 
+// A player has to have played this many games in the round before a slump is a slump rather than
+// a small sample, and his prior rate has to clear this or he was never contributing in the first
+// place. Server-side only: they gate a derivation over season data, not anything the pure
+// commentary module can see.
+const SLUMP_MIN_GAMES = 4;
+const SLUMP_MIN_PRIOR_RATE = 6;
+
+// Players on a still-alive manager's roster who are scoring materially less in this round than
+// they were before it — the "why is he losing" that a scoreboard cannot show.
+//
+// Attribution is the careful part, and it splits cleanly in two. WHOSE player he is comes from
+// `activeRosterForOdds`, i.e. the authoritative roster_dates windows scoped to this round — not
+// from `sd.rosters`, which is a derived cache. HOW MUCH he scored is his own production from his
+// own stat rows and needs no ownership at all, so there is nothing to get wrong there.
+//
+// Rates are per GAME, not per day: a batter with three games in a week and a starter with one
+// are not comparable per day, and the interesting claim is "he is worse when he plays", not "he
+// played less". Gated on SLUMP_MIN_GAMES so a two-game sample cannot libel anybody, and on
+// SLUMP_MIN_PRIOR_RATE so a player who never scored is not reported as having declined.
+function findUnderperformers(sd, round, managers, roundStartISO, todayISO, { limit = 3 } = {}) {
+  if (!roundStartISO || !Array.isArray(managers) || managers.length === 0) return [];
+
+  // Per-player game scores, split at the round boundary. Same per-game aggregation as
+  // collectPlayerGameScores (doubleheaders count once per game, not once per row).
+  const before = new Map();
+  const during = new Map();
+  const add = (bucket, name, key, score) => {
+    if (!bucket.has(name)) bucket.set(name, new Map());
+    const g = bucket.get(name);
+    g.set(key, (g.get(key) || 0) + score);
+  };
+  const walk = (rows, nameKey, scorer, type) => {
+    for (const r of rows || []) {
+      const stats = r.delta || r.cumulative;
+      const name = r[nameKey];
+      if (!name || !stats || !r.date) continue;
+      const key = r.game_id != null ? `g${r.game_id}` : `d${r.date}`;
+      add(r.date >= roundStartISO ? during : before, `${type}|${name}`, key, scorer(stats));
+    }
+  };
+  walk(sd.daily_batting, 'batter', calculateBattingScore, 'Batter');
+  walk(sd.daily_pitching, 'pitcher', calculatePitchingScore, 'Pitcher');
+
+  const rate = (bucket, key) => {
+    const games = bucket.get(key);
+    if (!games || games.size === 0) return null;
+    let total = 0;
+    for (const v of games.values()) total += v;
+    return { perGame: total / games.size, games: games.size };
+  };
+
+  const out = [];
+  for (const manager of managers) {
+    for (const player of activeRosterForOdds(sd, manager, todayISO, round)) {
+      for (const type of ['Batter', 'Pitcher']) {
+        const key = `${type}|${player}`;
+        const now = rate(during, key);
+        const then = rate(before, key);
+        if (!now || !then) continue;
+        // Every comparison below is `>=`, and NaN fails every comparison — so a single
+        // unparseable stat line would slip past all of them and report a player who is doing
+        // fine as collapsing. Insist on real numbers before judging anybody.
+        if (!Number.isFinite(now.perGame) || !Number.isFinite(then.perGame)) continue;
+        if (now.games < SLUMP_MIN_GAMES) continue;
+        if (then.perGame < SLUMP_MIN_PRIOR_RATE) continue;
+        if (now.perGame >= then.perGame * 0.6) continue; // not a slump, just noise
+        out.push({
+          manager,
+          player,
+          type,
+          roundPerGame: Math.round(now.perGame * 10) / 10,
+          priorPerGame: Math.round(then.perGame * 10) / 10,
+          games: now.games,
+          drop: then.perGame - now.perGame,
+        });
+      }
+    }
+  }
+  // Biggest falls first — a 20-point collapse is a story, a 7-point one is a shrug.
+  out.sort((a, b) => b.drop - a.drop);
+  return out.slice(0, limit);
+}
+
 // Today's Hot Takes for a season, generated at most once per (day, round) and cached on the
 // season exactly like `sd.playoff_odds`: a server-computed derived cache that clients only
 // ever display, kept across a full-season save by the preservation in the save handler.
@@ -4899,8 +5098,12 @@ const hotTakesText = (lines) => `*${HOT_TAKES_HEADING}*\n${lines.join('\n\n')}`;
 // logs can answer "why is the post in the bank's voice", which used to be unanswerable — the
 // no-key path returned silently, so a missing key and a broken key looked identical from
 // outside. Anything that ends in the bank now says why, once, at the point it happens.
-async function generatePlayoffCommentary(facts, { maxLines = 4 } = {}) {
-  const fallback = buildPlayoffCommentary(facts);
+async function generatePlayoffCommentary(facts, opts = {}) {
+  // How many takes the day has earned, not a fixed quota. A quiet day gets two lines; a day
+  // with a lead change and a collapse gets three. Printing the same volume regardless is the
+  // surest way to make the section skippable.
+  const maxLines = opts.maxLines || commentaryBudget(facts) || 2;
+  const fallback = buildPlayoffCommentary({ ...facts, maxLines });
   const bank = (reason) => {
     console.log(`[Hot Takes] Using the static bank: ${reason}`);
     return { lines: fallback, source: `bank (${reason})` };
@@ -4915,7 +5118,9 @@ async function generatePlayoffCommentary(facts, { maxLines = 4 } = {}) {
   const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup, a private fantasy baseball league of long-time friends. Write the "Hot Takes" section of this morning's scoreboard post: what yesterday DID to the playoff bracket.
 
 Rules:
-- Write ${Math.min(3, maxLines)} to ${maxLines} separate takes, one per line, nothing else. No heading, no preamble, no numbering, no bullets.
+- Write AT MOST ${maxLines} takes, one per line, nothing else. No heading, no preamble, no numbering, no bullets.
+- Write FEWER than that if the day does not justify them. A quiet day should produce a short section. Never pad, never restate the same fact twice in different words, and never write a take whose content is "not much happened".
+- Every take must carry a fact from the list below that the reader would not get from glancing at the scoreboard above it. Being funny is not enough on its own; being informative is not enough on its own; do both or cut the line.
 - Start each line with one of these Slack emoji shortcodes and NO others — anything else renders as literal text in Slack: ${SLACK_EMOJI.join(' ')}\nSuggested fits: :arrows_counterclockwise: a lead change, :coffin: a matchup that is over, :hourglass_flowing_sand: one that is close, :boom: a big day, :zzz: a dead one, :ticket: or :crown: a career fact.
 - Slack mrkdwn: *bold* is a single asterisk on each side. Never use **double** asterisks.
 - Two sentences per take at most. Vary the shape — do not write four takes with the same rhythm.
@@ -4923,6 +5128,8 @@ Rules:
 - Use the names exactly as written below. Some are abbreviated (e.g. "Ryan S.") — keep them that way, and do not add a second period when one ends a sentence.
 - Lead with a lead change if there is one; it outranks everything else that happened.
 - A career fact is worth a take only when it is a pattern (never reached a Final, keeps going out in the same round, a long drought), and at most one take should be about career history.
+- If a RUN-IN section is present, its verdict is the judgement — use it, do not re-derive it. A small "needs per day" number against a large average means the chase is comfortable, not doomed.
+- If a PLAYERS GOING BACKWARDS section is present, one take naming a specific player and both his rates is usually the most informative thing available. Blame the manager for still starting him.
 
 ${ROAST_VOICE}
 
@@ -6468,10 +6675,14 @@ function collectPlayerGameScores(sd) {
 // authoritative date windows (roster_dates scoped to the PP2 period start,
 // latest add <= today with no later drop) — the same latest-add/latest-drop
 // logic managerWeekSubtotal uses, evaluated as of today instead of week end.
-function activeRosterForOdds(sd, managerName, todayISO) {
+// `round` defaults to the odds window's PP2 so every existing caller is unchanged; the daily
+// playoff commentary passes the round in progress to ask the same question about a bracket
+// roster. The rule is the same either way, and it is the authoritative one: latest add on or
+// before the date, scoped to the period, with no later drop.
+function activeRosterForOdds(sd, managerName, todayISO, round = ODDS_WINDOW.round) {
   const allMgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || null;
   if (!allMgrDates) return [];
-  const periodStart = periodStartForRound(sd, ODDS_WINDOW.round);
+  const periodStart = periodStartForRound(sd, round);
   const latestAdd = {};
   const latestDrop = {};
   for (const players of Object.values(allMgrDates)) {
@@ -7058,6 +7269,14 @@ function buildScoreboardBlocks(db, year, opts = {}) {
     if (!Number.isNaN(ms)) daysLeftInRound = Math.max(0, Math.round(ms / 86400000) + 1);
   }
 
+  // ...and how many have already been scored, which is what turns "needs 58 a day" into a
+  // judgement ("against the 37 he has averaged") instead of a bare number.
+  let daysElapsedInRound = 0;
+  if (roundStartDate) {
+    const ms = Date.parse(`${yesterdayET}T12:00:00Z`) - Date.parse(`${roundStartDate}T12:00:00Z`);
+    if (!Number.isNaN(ms)) daysElapsedInRound = Math.max(0, Math.round(ms / 86400000) + 1);
+  }
+
   // ---- Standings text: bracket matchups for playoff rounds, overall + pool columns
   // for pool play. Pool-play scaffolding (winner sets, wildcards, legend) is only
   // computed when it is actually shown.
@@ -7491,9 +7710,19 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         matchups: commentaryMatchups,
         dailyTotals: roundDailyTotals,
         daysLeft: daysLeftInRound,
+        daysElapsed: daysElapsedInRound,
         histories,
         shortNames: shortMgrNames,
         seed: seedFromDate(yesterdayET),
+        // Only worth deriving for the managers still playing — everyone else's roster is a
+        // museum piece. Empty when the round has no start date to split the season at.
+        underperformers: findUnderperformers(
+          seasonData,
+          currentRound,
+          roundParticipants(seasonData, currentRound),
+          roundStartDate,
+          yesterdayET
+        ),
       };
 
       // Prefer the takes already generated for this exact day and round, which is what makes

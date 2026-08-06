@@ -290,7 +290,8 @@ elimination roasts were failing for the same reason all along. Two different mod
 environment, both landing on their banks. So the 2026-08-03 entry reached a wrong conclusion
 (`the key is unset`) from a real symptom, and my correction of it — `bank output does not prove a
 missing key` — was right about the logic and did not find the actual cause either. The cause is
-still open at the time of writing; `anthropic-check` exists to close it.
+`data.content[0].text` — see the section below, which `anthropic-check` and the new logging found
+within minutes of being deployed.
 
 **FOUND IT: `data.content[0].text`.** The improved logging paid for itself on the first re-roll —
 `[Hot Takes] Using the static bank: the API returned an empty reply`. HTTP 200, tokens billed, no
@@ -318,6 +319,47 @@ Fixed in `js/anthropic.js` (canonical, tested, mirrored): `anthropicReplyText` w
 `stop_reason` and token usage so an empty reply is never again unattributable. `max_tokens` on the
 commentary went 600 → 4000, because thinking spends the same budget and at 600 the takes could be
 truncated before a single text block existed.
+
+**Confirmed in production**, 2026-08-06 17:08 ET, after deploying the fix:
+
+```
+[Hot Takes] Written by claude-sonnet-5: 4 take(s).
+[Hot Takes] Stored 4 take(s) for 2026 SF 2026-08-05 — source: written, re-roll #2
+```
+
+First Claude-written post this app has ever produced. The elimination roasts and the
+season-opening draft roast are fixed by the same commit and have never run against Claude either
+— the next round end will read noticeably different from every previous one, which is worth
+expecting rather than being surprised by.
+
+**Second pass on the post, once it was live: fewer lines, better facts.** The commissioner's note
+was "2 or 3 lines depending on what happened — if nothing too extreme, don't fill space for no
+reason", plus catch-up pace, comparative scoring, and underperforming players. Note the tension:
+fewer lines but more facts. That is the right shape — richer evidence, and the writer picks the
+best two or three instead of padding to a quota.
+
+- `commentaryBudget` counts what actually happened (a lead change is worth two on its own) and
+  returns 2 or 3. Both the bank and the prompt honour it, and the prompt is told explicitly to
+  write FEWER if the day does not justify them, and that every take must carry a fact the reader
+  would not get from glancing at the scoreboard directly above it.
+- `catchUpPace` gives the trailing manager's required per-day against what he has actually
+  averaged — but only inside `RUN_IN_DAYS` (5) of the end, because a 200-pt gap with 12 days left
+  is meaningless. **It returns a plain-English `verdict`, not just the ratio**, because "0.1x his
+  own pace" means the chase is comfortable and a reader skimming for a punchline will see a small
+  number and write a eulogy. State the conclusion; do not make the model infer it.
+- Bracket-wide round totals, so a take can say "best of the four" without deriving it.
+- `findUnderperformers` (server-side) reports players scoring materially less this round than
+  before it. The attribution splits cleanly: WHOSE player he is comes from `activeRosterForOdds`
+  (authoritative `roster_dates` windows, now round-parameterised), and HOW MUCH he scored is his
+  own production from his own stat rows, which needs no ownership at all. Rates are per GAME, not
+  per day — a batter with three games and a starter with one are not comparable per day.
+
+**The bug that testing caught, and it is the reusable one.** Every gate in `findUnderperformers` is
+a `>=` comparison, and **NaN fails every comparison**, so one unparseable stat line slipped past
+all of them and reported a player whose rate had not moved as having collapsed. A guard written as
+"skip if things look normal" fails OPEN on NaN; a guard written as "proceed only if things look
+abnormal" fails closed. Insist on `Number.isFinite` before judging anybody. This would have put a
+false accusation in the league channel.
 
 **Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
 seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
