@@ -1,7 +1,13 @@
 # Save / roster-integrity hardening — design plan
 
-Status: **proposal for review** (no code changes in this doc).
+Status: **delivered** — kept as the reference for the core invariant and the totals-vet procedure
+(`§7`), which `CLAUDE.md` points at. Not a live work plan; do not re-implement from it.
 Author: drafted after the 2026‑06‑08 `sd.rosters` wipe and a week of date-window scoring bugs.
+
+Shipped: Phase 1a destructive-save integrity guard (#286), Phase 1b optimistic-concurrency `_rev`
+gate (#288), Phase 2 bulk-endpoint guard + eligibility test harness (#290), Phase 3a generic
+commissioner initial-submission endpoint (#251) and Phase 3b deletion of the hardcoded band-aid
+repairs (#252).
 
 ---
 

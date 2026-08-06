@@ -1,10 +1,19 @@
 # Commissioner roster add/drop — granular endpoints design plan
 
-Status: **proposal for review** (no code changes in this doc). Tracks the last high-risk slice of
-the granular-endpoints migration (#275): _Commissioner roster add/drop → targeted op_.
+Status: **delivered** — all three endpoints shipped, in the sequence below. Kept as the design
+record for how the atomic swap endpoints are meant to behave; the "Open questions" in §6 were
+resolved by shipping, not by answering them here.
 
-> This is the single most invariant-critical change in the migration. It is written design-first,
-> on purpose, so the approach is reviewed before any code lands.
+- 3a `POST /api/seasons/:year/swaps/:id/deny` — #322
+- 3b `PUT /api/seasons/:year/swaps/:id` — #322
+- 3c `POST /api/seasons/:year/swaps/:id/approve` — #323, with the drop-can't-predate-add clamp
+  and clean undo following in #324
+
+The rest of the granular-endpoints migration (#275) landed alongside: `PUT .../schedule` (#321),
+`PUT .../pool` (#325), `POST .../submissions`, and the backup/restore tooling (#318).
+
+> This was the single most invariant-critical change in the migration. It was written design-first,
+> on purpose, so the approach was reviewed before any code landed.
 
 ## 0. The invariant this must protect (non-negotiable)
 
