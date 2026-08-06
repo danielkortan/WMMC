@@ -178,8 +178,14 @@ async function postSlack(text, blocks) {
 // unrestored/ephemeral instance cannot push a pool-play-shaped post mid-playoffs no matter which
 // path it takes. The upstream hasScoreboardData checks exist to give better errors and to avoid
 // consuming the day's post slot; this one is the backstop that cannot be bypassed.
-async function postScoreboardSlack(db, year, opts) {
-  if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
+// `opts.webhookUrl` overrides the destination — the ONLY supported use is the commissioner's
+// explicit test post into the notifications channel. It is deliberately not a fallback: an
+// unset scoreboard webhook still means "post nowhere", because a scoreboard silently rerouting
+// itself into the swaps channel is how a stray instance reaches the league by accident.
+// `opts.refreshTakes` forces the day's Hot Takes to be regenerated instead of reused.
+async function postScoreboardSlack(db, year, opts = {}) {
+  const webhookUrl = opts.webhookUrl || SLACK_SCOREBOARD_WEBHOOK_URL;
+  if (!webhookUrl) return;
   const { blocks, text, round, commentaryFacts } = buildScoreboardBlocks(db, year, opts);
   if (!round) {
     throw new Error(
@@ -189,19 +195,19 @@ async function postScoreboardSlack(db, year, opts) {
     );
   }
 
-  // Upgrade the Hot Takes to the written version. This is the only Slack path that can: it is
-  // the only async one, and buildScoreboardBlocks has to stay synchronous for the /wmmc slash
-  // command, which owes Slack a reply in three seconds. The block is already populated by the
-  // deterministic bank, so a failed or slow call costs the post nothing — generatePlayoffCommentary
-  // returns that same bank text and the swap is a no-op.
+  // Upgrade the Hot Takes to the written version, and cache it for the day. This is the only
+  // Slack path that can generate: it is the only async one, and buildScoreboardBlocks has to
+  // stay synchronous for the /wmmc slash command, which owes Slack a reply in three seconds.
+  // The block already carries the bank's version (or an earlier cache hit), so a failed or
+  // slow call costs the post nothing — the swap simply becomes a no-op.
   if (commentaryFacts) {
-    const takes = await generatePlayoffCommentary(commentaryFacts);
+    const takes = await ensureFreshHotTakes(year, commentaryFacts, { force: !!opts.refreshTakes });
     const block = blocks.find((b) => b && b.block_id === HOT_TAKES_BLOCK_ID);
-    if (block && takes.length) block.text.text = hotTakesText(takes);
+    if (block && takes && takes.length) block.text.text = hotTakesText(takes);
   }
 
   const map = managerShortNameMap(db);
-  await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
+  await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1416,6 +1422,11 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // the recompute endpoint). Same defense as score_snapshots: always keep
     // the server's copy so a client save can never wipe or roll them back.
     if (existingSd.playoff_odds) sd.playoff_odds = existingSd.playoff_odds;
+
+    // The day's Hot Takes are the same kind of thing: written server-side by the Slack post,
+    // read by /wmmc so the slash command and the 7am post tell the same joke. A client save
+    // that wiped them would silently split those two apart again.
+    if (existingSd.hot_takes) sd.hot_takes = existingSd.hot_takes;
 
     // Elimination roasts are written server-side by /generate-roast while the client's
     // full-season save (fired at "End Pool Play") may still be in flight carrying a copy
@@ -4274,6 +4285,28 @@ function matchupMovement({ label, a, b, aTotal = 0, bTotal = 0, aDelta = 0, bDel
   };
 }
 
+// Every emoji shortcode the banks (and the Anthropic prompt) are allowed to use. Slack renders
+// an unknown shortcode as LITERAL TEXT — a line reading ":tickets: 8 seasons. No Finals." went
+// out to the league that way, because `:tickets:` is not in Slack's set (🎫 is `:ticket:`,
+// singular). Nothing in the code can catch that: it is valid JS, valid mrkdwn, and only wrong
+// once Slack tries to draw it. So the set is written down, and a test asserts every bank line
+// starts with one of these. Add to this list only after confirming the shortcode renders.
+const SLACK_EMOJI = [
+  ':arrows_counterclockwise:',
+  ':zap:',
+  ':coffin:',
+  ':hourglass_flowing_sand:',
+  ':boom:',
+  ':zzz:',
+  ':chart_with_downwards_trend:',
+  ':ticket:',
+  ':crown:',
+  ':hourglass:',
+  ':second_place_medal:',
+  ':sparkles:',
+  ':repeat:',
+];
+
 // ---- Line banks -------------------------------------------------------------
 // Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the short-name
 // formatter the caller supplies, so every name in the post reads the same way.
@@ -4397,11 +4430,11 @@ const historyLines = [
     when: (h, ctx) => h.neverMadeFinals && h.seasonsPlayed >= 4 && ctx.matchupLabel !== '3rd Place',
     texts: [
       (h, n) =>
-        `:tickets: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest the man has ever stood to the thing.`,
+        `:ticket: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest the man has ever stood to the thing.`,
       (h, n) =>
-        `:tickets: ${h.seasonsPlayed} seasons. No Finals. *${n(h.manager)}* has watched this league hand out ${h.seasonsPlayed} trophies from roughly the same seat every time.`,
+        `:ticket: ${h.seasonsPlayed} seasons. No Finals. *${n(h.manager)}* has watched this league hand out ${h.seasonsPlayed} trophies from roughly the same seat every time.`,
       (h, n) =>
-        `:tickets: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it — he keeps buying tickets to the building and leaving at the seventh.`,
+        `:ticket: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it — he keeps buying tickets to the building and leaving at the seventh.`,
     ],
   },
   {
@@ -4409,9 +4442,9 @@ const historyLines = [
     when: (h) => h.neverPastQF && h.playoffAppearances >= 3,
     texts: [
       (h, n) =>
-        `:tickets: *${n(h.manager)} has never won a playoff round.* ${h.playoffAppearances} trips to the bracket. Zero rounds won. Ever.`,
+        `:ticket: *${n(h.manager)} has never won a playoff round.* ${h.playoffAppearances} trips to the bracket. Zero rounds won. Ever.`,
       (h, n) =>
-        `:tickets: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies every year for what appears to be the sole purpose of leaving.`,
+        `:ticket: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies every year for what appears to be the sole purpose of leaving.`,
     ],
   },
   {
@@ -4711,6 +4744,79 @@ function tidyCommentaryLine(line) {
     .trim();
 }
 
+// Force a line to lead with a vetted shortcode. The banks are covered by a test, but a written
+// reply is not — the model is given the list and can still reach for something outside it, and
+// Slack would print that as literal text. Swapping in a neutral one keeps the line (the joke is
+// the valuable part) while guaranteeing it renders. Lines with no shortcode at all get one.
+function enforceVettedEmoji(line, fallbackCode = ':zap:') {
+  const text = String(line || '').trim();
+  if (!text) return '';
+  const match = text.match(/^:[a-z_0-9]+:/);
+  if (match && SLACK_EMOJI.includes(match[0])) return text;
+  const body = match ? text.slice(match[0].length).trim() : text;
+  return `${fallbackCode} ${body}`.trim();
+}
+
+// Cache key for a day's takes. The takes are about ONE day's scoring inside ONE round, so
+// both belong in the key: a new day obviously invalidates them, and so does a round rolling
+// over underneath the same day (the Monday a round ends, "yesterday" belongs to the round
+// that just finished). Returns null when either half is missing, which callers treat as
+// "not cacheable" rather than as a key that could accidentally match.
+function hotTakesCacheKey(dayISO, round) {
+  if (!dayISO || !round) return null;
+  return `${dayISO}|${round}`;
+}
+
+// Is a stored takes cache still the right answer for this day and round?
+function hotTakesCacheHit(cached, dayISO, round) {
+  const key = hotTakesCacheKey(dayISO, round);
+  return !!(
+    key &&
+    cached &&
+    cached.key === key &&
+    Array.isArray(cached.lines) &&
+    cached.lines.length > 0 &&
+    cached.lines.every((l) => typeof l === 'string' && l.trim())
+  );
+}
+
+// Today's Hot Takes for a season, generated at most once per (day, round) and cached on the
+// season exactly like `sd.playoff_odds`: a server-computed derived cache that clients only
+// ever display, kept across a full-season save by the preservation in the save handler.
+//
+// Caching is not (only) about cost. `/wmmc` cannot call an API — Slack wants a reply inside
+// three seconds — so without a stored copy the slash command would be permanently stuck on the
+// static bank while the 7am post used Claude, and the channel would carry two different sets
+// of jokes about the same day. One generation per day, read by everything, is the whole point.
+//
+// Re-reads the database rather than taking the caller's copy, and writes back only after the
+// generation succeeds, so a long API call cannot carry a stale snapshot back to disk.
+async function ensureFreshHotTakes(year, facts, opts = {}) {
+  if (!facts || !facts.dayISO || !facts.round) return null;
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return null;
+
+  if (!opts.force && hotTakesCacheHit(sd.hot_takes, facts.dayISO, facts.round)) {
+    return sd.hot_takes.lines;
+  }
+
+  const lines = await generatePlayoffCommentary(facts);
+  if (!lines || !lines.length) return null;
+
+  sd.hot_takes = {
+    key: hotTakesCacheKey(facts.dayISO, facts.round),
+    date: facts.dayISO,
+    round: facts.round,
+    lines,
+    generated_at: new Date().toISOString(),
+  };
+  writeDB(db);
+  console.log(`[Hot Takes] Stored ${lines.length} take(s) for ${year} ${facts.round} ${facts.dayISO}`);
+  return lines;
+}
+
 // ============================================================
 // Slack Scoreboard Builder
 // ============================================================
@@ -4744,7 +4850,7 @@ async function generatePlayoffCommentary(facts, { maxLines = 4 } = {}) {
 
 Rules:
 - Write ${Math.min(3, maxLines)} to ${maxLines} separate takes, one per line, nothing else. No heading, no preamble, no numbering, no bullets.
-- Start each line with a Slack emoji shortcode that fits it, e.g. :arrows_counterclockwise: for a lead change, :coffin: for a matchup that is over, :hourglass_flowing_sand: for one that is close, :boom: for a big day, :zzz: for a dead one, :tickets: or :crown: for a career fact.
+- Start each line with one of these Slack emoji shortcodes and NO others — anything else renders as literal text in Slack: ${SLACK_EMOJI.join(' ')}\nSuggested fits: :arrows_counterclockwise: a lead change, :coffin: a matchup that is over, :hourglass_flowing_sand: one that is close, :boom: a big day, :zzz: a dead one, :ticket: or :crown: a career fact.
 - Slack mrkdwn: *bold* is a single asterisk on each side. Never use **double** asterisks.
 - Two sentences per take at most. Vary the shape — do not write four takes with the same rhythm.
 - Use ONLY the numbers and facts below. Do not invent, estimate, extrapolate or round a score. If you want to talk about something that is not listed, do not.
@@ -4807,6 +4913,8 @@ Write the takes now.`;
     // Slack mrkdwn has no **bold**; a model reaching for Markdown habits would print the
     // asterisks literally.
     .map((l) => l.replace(/\*\*(.+?)\*\*/g, '*$1*'))
+    // ...and the same is true of an emoji shortcode Slack does not know.
+    .map((l) => enforceVettedEmoji(l))
     .filter(Boolean)
     .slice(0, maxLines);
 
@@ -7304,6 +7412,8 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         round: currentRound,
         roundLabel: currentRoundLabel,
         year,
+        // The day the takes are ABOUT, which is also half the cache key.
+        dayISO: yesterdayET,
         matchups: commentaryMatchups,
         dailyTotals: roundDailyTotals,
         daysLeft: daysLeftInRound,
@@ -7312,12 +7422,18 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         seed: seedFromDate(yesterdayET),
       };
 
-      // The bank runs unconditionally and is what gets rendered here. `postScoreboardSlack`
-      // may then upgrade this block in place (it is tagged, hence `block_id`) with a written
-      // version — it is the only caller that can, because it is the only async one. Building
-      // the floor first means every synchronous caller (the /wmmc slash command, which owes
-      // Slack a reply in three seconds) still gets a full post.
-      const commentary = buildPlayoffCommentary(commentaryFacts);
+      // Prefer the takes already generated for this exact day and round, which is what makes
+      // the /wmmc slash command able to show the Claude-written version at all: it owes Slack
+      // a reply in three seconds, so it cannot call an API, but it CAN read what the morning
+      // post already wrote. It also means /wmmc and the 7am post tell the same joke instead of
+      // two different ones about the same day.
+      //
+      // Falling back to the bank covers every cold case honestly: a /wmmc before the morning
+      // post, a different season (`/wmmc 2024`), or a restart that lost nothing because the
+      // cache lives on the season, not in memory.
+      const commentary = hotTakesCacheHit(seasonData.hot_takes, yesterdayET, currentRound)
+        ? seasonData.hot_takes.lines
+        : buildPlayoffCommentary(commentaryFacts);
 
       if (commentary.length) {
         blocks.push({ type: 'divider' });
@@ -13009,9 +13125,26 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
 });
 
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
+// Body (all optional):
+//   year          — season to post; defaults to the active one
+//   channel       — 'notifications' sends to SLACK_WEBHOOK_URL instead of the league scoreboard
+//                   channel. For rehearsing a post before it goes to everyone. Anything else
+//                   (including omitted) posts to the real scoreboard channel.
+//   refreshTakes  — regenerate the day's Hot Takes instead of reusing the cached ones
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
-  if (!SLACK_WEBHOOK_URL) {
-    return res.status(503).json({ error: 'Slack webhook not configured' });
+  // Test posts go to the notifications webhook, real ones to the scoreboard webhook. The old
+  // check gated on SLACK_WEBHOOK_URL no matter what, which meant a deploy with only the
+  // scoreboard webhook set returned 503 with nothing wrong, and — worse — a deploy missing the
+  // SCOREBOARD webhook returned {ok:true} for a post that postScoreboardSlack had silently
+  // dropped on the floor. Check the one actually being used.
+  const toNotifications = !!(req.body && req.body.channel === 'notifications');
+  const webhookUrl = toNotifications ? SLACK_WEBHOOK_URL : SLACK_SCOREBOARD_WEBHOOK_URL;
+  if (!webhookUrl) {
+    return res.status(503).json({
+      error: toNotifications
+        ? 'SLACK_WEBHOOK_URL is not configured, so there is no notifications channel to test-post to'
+        : 'SLACK_SCOREBOARD_WEBHOOK_URL is not configured, so the scoreboard has nowhere to post',
+    });
   }
 
   const db = readDB();
@@ -13028,10 +13161,26 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   }
 
   try {
-    await postScoreboardSlack(db, year);
-    addAuditEntry(db, 'slack_scoreboard_post', { year }, userEmail);
-    writeDB(db);
-    res.json({ ok: true });
+    await postScoreboardSlack(db, year, {
+      webhookUrl,
+      refreshTakes: !!(req.body && req.body.refreshTakes),
+    });
+    // Re-read before the audit write. postScoreboardSlack may have stored the day's Hot Takes
+    // (ensureFreshHotTakes writes its own fresh copy), and writing back the `db` snapshot taken
+    // above — now minutes stale, from before an API call — would erase them.
+    const dbAfter = readDB();
+    addAuditEntry(
+      dbAfter,
+      'slack_scoreboard_post',
+      {
+        year,
+        channel: toNotifications ? 'notifications' : 'scoreboard',
+        refreshTakes: !!(req.body && req.body.refreshTakes),
+      },
+      userEmail
+    );
+    writeDB(dbAfter);
+    res.json({ ok: true, channel: toNotifications ? 'notifications' : 'scoreboard' });
   } catch (e) {
     console.error('[Slack] Scoreboard post failed:', e.message);
     res.status(500).json({ error: e.message });
