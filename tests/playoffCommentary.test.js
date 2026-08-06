@@ -7,6 +7,9 @@ import {
   seedFromDate,
   matchupMovement,
   buildPlayoffCommentary,
+  commentaryFactSheet,
+  commentaryMentionsUnknownScore,
+  tidyCommentaryLine,
 } from '../js/playoffCommentary.js';
 
 const SHORT = {
@@ -442,5 +445,130 @@ describe('buildPlayoffCommentary', () => {
       ],
     });
     assert.match(lines[0], /Daniel Kortan/);
+  });
+});
+
+describe('commentaryFactSheet', () => {
+  const args = {
+    round: 'SF',
+    roundLabel: 'Semifinals',
+    year: 2026,
+    daysLeft: 11,
+    shortNames: SHORT,
+    matchups: [
+      { label: 'SF1', a: 'Daniel Kortan', b: 'Alex Thalacker', aTotal: 83, bTotal: 111, aDelta: 3, bDelta: 36 },
+      { label: 'SF2', a: 'Jamie Rogers', b: 'Ryan Sullivan', aTotal: 309, bTotal: 76, aDelta: 24, bDelta: 4 },
+    ],
+    dailyTotals: { 'Daniel Kortan': 3, 'Alex Thalacker': 36, 'Jamie Rogers': 24, 'Ryan Sullivan': 4 },
+    histories: {
+      'Jamie Rogers': history('Jamie Rogers', { neverMadeFinals: true, finalsAppearances: 0, qfExitCount: 5 }),
+    },
+  };
+
+  it('returns null outside the playoff rounds and with no matchups', () => {
+    assert.equal(commentaryFactSheet({ ...args, round: 'PP2' }), null);
+    assert.equal(commentaryFactSheet({ ...args, matchups: [] }), null);
+  });
+
+  it('states both totals, both deltas and who leads, per matchup', () => {
+    const sheet = commentaryFactSheet(args);
+    assert.match(sheet, /SF1: Daniel 83 \(yesterday \+3\) vs Alex 111 \(yesterday \+36\)/);
+    assert.match(sheet, /Alex leads by 28/);
+    assert.match(sheet, /Jamie leads by 233/);
+  });
+
+  it('names a lead change and reports the previous morning\u2019s margin', () => {
+    assert.match(commentaryFactSheet(args), /LEAD CHANGE yesterday: Daniel led by 5 the previous morning/);
+  });
+
+  it('marks a blowout as over and a tight one as a coin flip', () => {
+    assert.match(commentaryFactSheet(args), /this one is effectively over/);
+    const tight = commentaryFactSheet({
+      ...args,
+      matchups: [
+        { label: 'SF1', a: 'Daniel Kortan', b: 'Alex Thalacker', aTotal: 210, bTotal: 200, aDelta: 5, bDelta: 5 },
+      ],
+    });
+    assert.match(tight, /this one is a coin flip/);
+    assert.ok(!/effectively over/.test(tight));
+  });
+
+  it('says whether the gap opened or closed when the lead held', () => {
+    const closed = commentaryFactSheet({
+      ...args,
+      matchups: [
+        { label: 'SF1', a: 'Daniel Kortan', b: 'Alex Thalacker', aTotal: 200, bTotal: 190, aDelta: 5, bDelta: 45 },
+      ],
+    });
+    assert.match(closed, /the gap CLOSED by 40 yesterday \(was 50\)/);
+    assert.match(commentaryFactSheet(args), /the gap WIDENED by 20 yesterday \(was 213\)/);
+  });
+
+  it('uses short names only, never a full name the model could echo', () => {
+    const sheet = commentaryFactSheet(args);
+    for (const full of ['Daniel Kortan', 'Alex Thalacker', 'Jamie Rogers', 'Ryan Sullivan']) {
+      assert.ok(!sheet.includes(full), `fact sheet leaked the full name ${full}`);
+    }
+    assert.match(sheet, /Ryan S\./);
+  });
+
+  it('includes a career record only for managers a history was supplied for', () => {
+    const sheet = commentaryFactSheet(args);
+    assert.match(sheet, /Jamie: 8 seasons; no Cups; has NEVER reached a Final; 5 quarterfinal exits/);
+    assert.ok(!/^- Daniel: \d+ seasons/m.test(sheet), 'no history supplied for Daniel');
+  });
+
+  it('drops the career section entirely when no histories are supplied', () => {
+    const sheet = commentaryFactSheet({ ...args, histories: {} });
+    assert.ok(!/CAREER RECORD/.test(sheet), sheet);
+  });
+});
+
+describe('commentaryMentionsUnknownScore', () => {
+  const sheet = 'Alex 111 (yesterday +36.4)\nJamie leads by 233.7';
+
+  it('catches a decimal the facts never contained', () => {
+    assert.equal(commentaryMentionsUnknownScore('Alex put up 99.9 yesterday', sheet), true);
+  });
+
+  it('passes a decimal that is in the facts', () => {
+    assert.equal(commentaryMentionsUnknownScore('Alex put up 36.4 and leads', sheet), false);
+    assert.equal(commentaryMentionsUnknownScore('Jamie leads by 233.7', sheet), false);
+  });
+
+  it('ignores whole numbers, which are ordinary prose', () => {
+    assert.equal(commentaryMentionsUnknownScore('8 seasons, 2 of 3 matchups, 111 points', sheet), false);
+  });
+
+  it('matches across thousands separators in either direction', () => {
+    assert.equal(commentaryMentionsUnknownScore('he is at 1,182.4', 'total 1182.4'), false);
+    assert.equal(commentaryMentionsUnknownScore('he is at 1182.4', 'total 1,182.4'), false);
+  });
+
+  it('is false for text with no numbers at all', () => {
+    assert.equal(commentaryMentionsUnknownScore('nobody did anything', sheet), false);
+    assert.equal(commentaryMentionsUnknownScore('', sheet), false);
+  });
+});
+
+describe('tidyCommentaryLine', () => {
+  it('strips a bullet or number the model added', () => {
+    assert.equal(tidyCommentaryLine('- :zap: Alex leads'), ':zap: Alex leads');
+    assert.equal(tidyCommentaryLine('* :zap: Alex leads'), ':zap: Alex leads');
+    assert.equal(tidyCommentaryLine('1. :zap: Alex leads'), ':zap: Alex leads');
+    assert.equal(tidyCommentaryLine('2) :zap: Alex leads'), ':zap: Alex leads');
+  });
+
+  it('collapses the doubled period after an initialled name', () => {
+    assert.equal(tidyCommentaryLine('Nobody told Ryan S..'), 'Nobody told Ryan S.');
+  });
+
+  it('leaves an ellipsis and an ordinary sentence alone', () => {
+    assert.equal(tidyCommentaryLine('He waited... and lost.'), 'He waited... and lost.');
+    assert.equal(tidyCommentaryLine('  Alex leads by 28.  '), 'Alex leads by 28.');
+  });
+
+  it('does not eat a hyphen that is part of the sentence', () => {
+    assert.equal(tidyCommentaryLine(':coffin: 233-point lead'), ':coffin: 233-point lead');
   });
 });

@@ -57,6 +57,29 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 // hung connection would otherwise hold up everyone behind it. On timeout the caller takes
 // the static bank, same as any other failure.
 const ROAST_API_TIMEOUT_MS = 30000;
+// The elimination roasts ask for one sentence about one manager and use Haiku. The daily
+// playoff "Hot Takes" is a different job: several takes at once, each one anchored to a
+// specific number sitting a few lines above it on the same post. Getting a total subtly wrong
+// there is worse than any joke is good, so it runs on a stronger model. Both the prompt and
+// generatePlayoffCommentary's post-checks assume the reply quotes only supplied figures.
+const PLAYOFF_COMMENTARY_MODEL = 'claude-sonnet-5';
+
+// The house voice, shared by EVERY Claude-written roast in the app — the daily playoff Hot
+// Takes, the elimination/champion/3rd-place roasts, and the season-opening draft roast. It is
+// one constant on purpose: the league should sound like the same guy all season, and a tone
+// note that lives in only one of four prompts is how three of them drift.
+//
+// The comedians named below are references for CADENCE AND ATTITUDE, not people to impersonate
+// — never sign a roast with their name, quote them, or claim they wrote it. Ask for what each
+// one actually does, because "be funny like X" gets you a catchphrase and nothing else.
+const ROAST_VOICE = `VOICE — write like a sports comedy writer with these four in your ear. Take the technique, not the catchphrases; never name them, never impersonate them, never sign their name.
+
+- Stuart Scott: the anchor's swagger. Rhythm, wordplay, and a simile that turns one line of a box score into a whole picture. Announce a bad fantasy day like it is genuine breaking news.
+- Norm Macdonald on Weekend Update: deadpan. Build a careful setup and land on a blunt, stupid, perfect punchline. Understate the disaster. Let a flat sentence do the damage, and commit to a dumb bit one beat past where a normal person would stop.
+- Chris Rock: escalation and repetition. Say the thing, say it again louder with one detail changed, then turn it into an uncomfortable truth about the guy. Rhythm is the joke.
+- Shane Gillis: the guy at the bar. Loose, conversational, riffing sideways into an oddly specific character or scenario, amused at his own bit, crude but obviously fond of the person he is destroying.
+
+Mix them — do not do a clean impression of any one. This is a private league of long-time friends: mean the way friends are mean, never the way strangers are. Punch at the roster, the picks and the effort, never at anybody's family, looks, health, race, or anything a real friendship would not survive. Vulgarity is welcome; cruelty that would actually land wrong is not.`;
 
 // Compact display names for a set of managers — first name only, disambiguated with a last
 // initial when two of them share one. Synced copy of shortManagerNames in js/utils.js (the
@@ -157,7 +180,7 @@ async function postSlack(text, blocks) {
 // consuming the day's post slot; this one is the backstop that cannot be bypassed.
 async function postScoreboardSlack(db, year, opts) {
   if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
-  const { blocks, text, round } = buildScoreboardBlocks(db, year, opts);
+  const { blocks, text, round, commentaryFacts } = buildScoreboardBlocks(db, year, opts);
   if (!round) {
     throw new Error(
       `Refusing to post the ${year} scoreboard: no current round could be determined from this ` +
@@ -165,6 +188,18 @@ async function postScoreboardSlack(db, year, opts) {
         `would render as the "Current Period: Season" pool-play shell.`
     );
   }
+
+  // Upgrade the Hot Takes to the written version. This is the only Slack path that can: it is
+  // the only async one, and buildScoreboardBlocks has to stay synchronous for the /wmmc slash
+  // command, which owes Slack a reply in three seconds. The block is already populated by the
+  // deterministic bank, so a failed or slow call costs the post nothing — generatePlayoffCommentary
+  // returns that same bank text and the swap is a no-op.
+  if (commentaryFacts) {
+    const takes = await generatePlayoffCommentary(commentaryFacts);
+    const block = blocks.find((b) => b && b.block_id === HOT_TAKES_BLOCK_ID);
+    if (block && takes.length) block.text.text = hotTakesText(takes);
+  }
+
   const map = managerShortNameMap(db);
   await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
     method: 'POST',
@@ -4521,9 +4556,218 @@ function buildPlayoffCommentary({
   return lines;
 }
 
+// ---- Claude-generated commentary: the facts, and a guard on what comes back ----
+// `buildPlayoffCommentary` above is the floor — a deterministic bank that always produces
+// something. When an Anthropic key is configured the server prefers a written version, and
+// these two helpers are what make that safe: one renders the facts (and ONLY the facts) that
+// the model is allowed to talk about, the other checks that the reply did not invent a score.
+// Both are pure, so the interesting half of the API path is testable without an API.
+
+// Everything the model needs to write about yesterday, as plain text. Names are already
+// shortened, so the model never sees a full name it might print. No prompt wording here —
+// that lives with the API call in server.js; this is the evidence, not the instruction.
+function commentaryFactSheet({
+  round = null,
+  roundLabel = '',
+  year = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  histories = {},
+  shortNames = {},
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return null;
+  const n = (name) => shortNames[name] || name || '';
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return null;
+
+  const out = [];
+  out.push(`Round: ${roundLabel || round}${year ? ` of the ${year} season` : ''}`);
+  if (daysLeft != null) {
+    out.push(daysLeft <= 0 ? 'Days left in the round: none, it is over' : `Days left in the round: ${daysLeft}`);
+  }
+
+  out.push('', 'MATCHUPS (round-to-date total, then what they scored yesterday):');
+  for (const m of moves) {
+    out.push(
+      `- ${m.label}: ${n(m.a)} ${fmtPts(m.aTotal)} (yesterday ${fmtDelta(m.aDelta)}) vs ` +
+        `${n(m.b)} ${fmtPts(m.bTotal)} (yesterday ${fmtDelta(m.bDelta)})`
+    );
+    if (m.leaderNow) out.push(`  ${n(m.leaderNow)} leads by ${fmtPts(m.margin)}`);
+    else out.push('  dead level');
+    if (m.flipped) {
+      out.push(
+        `  LEAD CHANGE yesterday: ${n(m.trailerNow)} led by ${fmtPts(m.marginBefore)} the previous morning and lost it`
+      );
+    } else if (m.brokeTie) {
+      out.push(`  they were exactly level the previous morning; ${n(m.leaderNow)} broke it`);
+    } else if (m.swing < 0) {
+      out.push(`  the gap CLOSED by ${fmtPts(Math.abs(m.swing))} yesterday (was ${fmtPts(m.marginBefore)})`);
+    } else if (m.swing > 0) {
+      out.push(`  the gap WIDENED by ${fmtPts(m.swing)} yesterday (was ${fmtPts(m.marginBefore)})`);
+    }
+    if (m.margin >= BLOWOUT_MARGIN) out.push('  this one is effectively over');
+    else if (m.margin <= NAILBITER_MARGIN) out.push('  this one is a coin flip');
+  }
+
+  const dayRows = Object.entries(dailyTotals || {})
+    .filter(([manager]) => moves.some((m) => m.a === manager || m.b === manager))
+    .map(([manager, points]) => ({ manager, points: Number(points) || 0 }))
+    .sort((x, y) => y.points - x.points);
+  if (dayRows.length) {
+    out.push('', "YESTERDAY'S SCORING, best to worst:");
+    for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)}`);
+  }
+
+  const careerLines = [];
+  for (const m of moves) {
+    for (const name of [m.a, m.b]) {
+      const h = histories[name];
+      if (!h || careerLines.some((l) => l.startsWith(`- ${n(name)}:`))) continue;
+      const bits = [`${h.seasonsPlayed} seasons`];
+      bits.push(
+        h.titleCount ? `${h.titleCount} Cup${h.titleCount === 1 ? '' : 's'} (${h.titles.join(', ')})` : 'no Cups'
+      );
+      if (h.runnerUps.length) bits.push(`lost ${h.runnerUps.length} Final${h.runnerUps.length === 1 ? '' : 's'}`);
+      if (h.neverMadeFinals) bits.push('has NEVER reached a Final');
+      if (h.neverPastQF) bits.push('has NEVER won a playoff round');
+      if (h.qfExitCount) bits.push(`${h.qfExitCount} quarterfinal exit${h.qfExitCount === 1 ? '' : 's'}`);
+      if (h.sfExitCount) bits.push(`${h.sfExitCount} semifinal loss${h.sfExitCount === 1 ? '' : 'es'}`);
+      if (h.dnqCount) bits.push(`missed the bracket ${h.dnqCount}x`);
+      careerLines.push(`- ${n(name)}: ${bits.join('; ')}`);
+    }
+  }
+  if (careerLines.length) {
+    out.push('', 'CAREER RECORD of the managers still playing (finished seasons only):');
+    out.push(...careerLines);
+  }
+
+  return out.join('\n');
+}
+
+// Does `text` quote a decimal number that the fact sheet never mentioned? Scores in this
+// league are decimals (48.4, 233.7), so a decimal the evidence does not contain is the model
+// having made one up — the single failure that would put a wrong number in the same post as
+// the right one. Whole numbers are deliberately NOT checked: "2 of 3", "8 seasons" and "one
+// bad afternoon" are ordinary prose, and margins that land on a round number are legitimately
+// derivable from two figures that are both present.
+function commentaryMentionsUnknownScore(text, factSheet) {
+  const decimals = String(text || '').match(/\d[\d,]*\.\d+/g) || [];
+  if (decimals.length === 0) return false;
+  const known = new Set((String(factSheet || '').match(/\d[\d,]*\.\d+/g) || []).map((s) => s.replace(/,/g, '')));
+  return decimals.some((d) => !known.has(d.replace(/,/g, '')));
+}
+
+// Clean up a model-written line: strip any bullet/numbering it added, collapse the doubled
+// period an initialled short name produces at a full stop ("Ryan S.."), and trim.
+function tidyCommentaryLine(line) {
+  return String(line || '')
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '')
+    .replace(/([A-Z]\.)\.(?!\.)/g, '$1')
+    .trim();
+}
+
 // ============================================================
 // Slack Scoreboard Builder
 // ============================================================
+
+// The Hot Takes section is rendered by buildScoreboardBlocks from the deterministic bank, and
+// then optionally rewritten in place by postScoreboardSlack with an Anthropic-written version.
+// The tag is how the second step finds the first step's block without counting array indexes.
+const HOT_TAKES_BLOCK_ID = 'wmmc_hot_takes';
+const HOT_TAKES_HEADING = '\u{1F399}\u{FE0F} Hot Takes';
+const hotTakesText = (lines) => `*${HOT_TAKES_HEADING}*\n${lines.join('\n\n')}`;
+
+// Write the Hot Takes with Claude, falling back to the deterministic bank on absolutely any
+// problem — no key, a network failure, a bad status, an unreadable body, an empty reply, or a
+// reply that quotes a score the evidence never contained.
+//
+// The model is given `commentaryFactSheet(facts)` and nothing else: already-shortened names,
+// the round totals, yesterday's deltas, who led when, and each survivor's career record. It is
+// not given the season, the rosters, or any way to reach them, so the worst it can do is
+// phrase a real fact badly — and the one failure that would actually mislead the league,
+// inventing a number that looks like a score, is checked for explicitly before the reply is
+// used. That check is why this is worth doing at all: the section sits directly beneath a
+// scoreboard, and a made-up total next to a real one is worse than no joke.
+async function generatePlayoffCommentary(facts, { maxLines = 4 } = {}) {
+  const fallback = buildPlayoffCommentary(facts);
+  if (!ANTHROPIC_API_KEY || !facts) return fallback;
+
+  const factSheet = commentaryFactSheet(facts);
+  if (!factSheet) return fallback;
+
+  const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup, a private fantasy baseball league of long-time friends. Write the "Hot Takes" section of this morning's scoreboard post: what yesterday DID to the playoff bracket.
+
+Rules:
+- Write ${Math.min(3, maxLines)} to ${maxLines} separate takes, one per line, nothing else. No heading, no preamble, no numbering, no bullets.
+- Start each line with a Slack emoji shortcode that fits it, e.g. :arrows_counterclockwise: for a lead change, :coffin: for a matchup that is over, :hourglass_flowing_sand: for one that is close, :boom: for a big day, :zzz: for a dead one, :tickets: or :crown: for a career fact.
+- Slack mrkdwn: *bold* is a single asterisk on each side. Never use **double** asterisks.
+- Two sentences per take at most. Vary the shape — do not write four takes with the same rhythm.
+- Use ONLY the numbers and facts below. Do not invent, estimate, extrapolate or round a score. If you want to talk about something that is not listed, do not.
+- Use the names exactly as written below. Some are abbreviated (e.g. "Ryan S.") — keep them that way, and do not add a second period when one ends a sentence.
+- Lead with a lead change if there is one; it outranks everything else that happened.
+- A career fact is worth a take only when it is a pattern (never reached a Final, keeps going out in the same round, a long drought), and at most one take should be about career history.
+
+${ROAST_VOICE}
+
+FACTS — everything you are allowed to talk about, and every number you are allowed to print:
+${factSheet}
+
+Write the takes now.`;
+
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: PLAYOFF_COMMENTARY_MODEL,
+        max_tokens: 600,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
+    });
+  } catch (e) {
+    console.error('[Hot Takes] Anthropic call failed:', e.name, e.message);
+    return fallback;
+  }
+
+  if (!resp.ok) {
+    console.error('[Hot Takes] Anthropic error:', resp.status, await resp.text().catch(() => ''));
+    return fallback;
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    console.error('[Hot Takes] Anthropic returned an unreadable body:', e.message);
+    return fallback;
+  }
+
+  const raw = data && data.content && data.content[0] && data.content[0].text;
+  if (!raw) return fallback;
+
+  if (commentaryMentionsUnknownScore(raw, factSheet)) {
+    console.error('[Hot Takes] Reply quoted a score that is not in the facts — using the static bank instead.');
+    return fallback;
+  }
+
+  const lines = String(raw)
+    .split(/\n+/)
+    .map(tidyCommentaryLine)
+    // Slack mrkdwn has no **bold**; a model reaching for Markdown habits would print the
+    // asterisks literally.
+    .map((l) => l.replace(/\*\*(.+?)\*\*/g, '*$1*'))
+    .filter(Boolean)
+    .slice(0, maxLines);
+
+  return lines.length ? lines : fallback;
+}
 
 const ROUND_LABELS = {
   PP1: 'Pool Play 1',
@@ -6458,6 +6702,10 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   const seasonData = (db.seasons || {})[year] || {};
   const managers = db.managers || [];
 
+  // Set only when a Hot Takes block was rendered — see the assembly below and the async
+  // upgrade in postScoreboardSlack.
+  let commentaryFacts = null;
+
   const managerPoolMap = {};
   managers.forEach((m) => {
     if (m.pool) managerPoolMap[m.name] = m.pool;
@@ -7005,7 +7253,10 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         histories[m] = managerPlayoffHistory(m, WMMC_HISTORICAL_RESULTS, { throughYear: year });
       }
 
-      const commentary = buildPlayoffCommentary({
+      // The facts, assembled once. They are BOTH what the deterministic bank writes from and
+      // what the Anthropic call is given as evidence, so the two versions of this section can
+      // never be about different numbers — only about the same numbers in different words.
+      commentaryFacts = {
         round: currentRound,
         roundLabel: currentRoundLabel,
         year,
@@ -7015,13 +7266,21 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         histories,
         shortNames: shortMgrNames,
         seed: seedFromDate(yesterdayET),
-      });
+      };
+
+      // The bank runs unconditionally and is what gets rendered here. `postScoreboardSlack`
+      // may then upgrade this block in place (it is tagged, hence `block_id`) with a written
+      // version — it is the only caller that can, because it is the only async one. Building
+      // the floor first means every synchronous caller (the /wmmc slash command, which owes
+      // Slack a reply in three seconds) still gets a full post.
+      const commentary = buildPlayoffCommentary(commentaryFacts);
 
       if (commentary.length) {
         blocks.push({ type: 'divider' });
         blocks.push({
           type: 'section',
-          text: { type: 'mrkdwn', text: `*\u{1F399}\u{FE0F} Hot Takes*\n${commentary.join('\n\n')}` },
+          block_id: HOT_TAKES_BLOCK_ID,
+          text: { type: 'mrkdwn', text: hotTakesText(commentary) },
         });
       }
     }
@@ -7042,6 +7301,10 @@ function buildScoreboardBlocks(db, year, opts = {}) {
     // The period this post is framed for — null when it could not be determined and the
     // blocks above are therefore the pool-play shell. Callers gate on it before sending.
     round: currentRound || null,
+    // The evidence behind the Hot Takes block, or null when there is no such block. An async
+    // caller can hand this to generatePlayoffCommentary and swap the block's text for a
+    // written version; a synchronous one ignores it and ships the bank's version.
+    commentaryFacts,
   };
 }
 
@@ -14964,6 +15227,8 @@ Total score across the Finals round: ${perf.total} pts (Batting: ${perf.batting_
 Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 
+${ROAST_VOICE}
+
 Write the roast now. No preamble, no labels — just the roast.`;
   } else if (outcome === 'third') {
     prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. ${manager} just WON the 3rd-place game — a real result, but a hollow one (it only exists because two other managers were better than both players in it). Write a sarcastic "congratulations, sort of" roast. Keep it to 2-3 sentences max.
@@ -14973,6 +15238,8 @@ Write the roast now. No preamble, no labels — just the roast.`;
 Total score across the Finals round: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
 Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+${ROAST_VOICE}
 
 Write the roast now. No preamble, no labels — just the roast.`;
   } else {
@@ -15008,6 +15275,8 @@ Roast intensity for this round: ${intensity.level} (the later the round, the mor
 ${matchupLines ? matchupLines + '\n' : ''}Total score: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
 ${roastPromptRankLines(perf)}Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+${ROAST_VOICE}
 
 Write the roast now. No preamble, no labels — just the roast.`;
   }
@@ -16163,6 +16432,8 @@ Roast the league as a whole. Do NOT write a separate roast for every manager, an
 
 Draft facts:
 ${factLines.join('\n')}
+
+${ROAST_VOICE}
 
 Write the roast now. No preamble, no labels — just the roast.`;
 

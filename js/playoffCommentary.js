@@ -7,9 +7,15 @@
 // matchups themselves plus this: a handful of lines that name the lead changes, the
 // collapses, and the career-shaped ironies that a column of numbers cannot.
 //
-// PURE by design — no season data, no rosters, no dates. Every fact is handed in already
-// derived by the caller (server.js), so this module can never disagree with the scoreboard
-// about a score, and the whole thing is testable without a database.
+// Two things live here: `buildPlayoffCommentary`, a deterministic template bank, and the pure
+// half of the Anthropic path (`commentaryFactSheet` renders the evidence, and
+// `commentaryMentionsUnknownScore` / `tidyCommentaryLine` vet what comes back). server.js
+// prefers the written version and falls back to the bank on any failure, so the bank is the
+// floor rather than the alternative — see generatePlayoffCommentary.
+//
+// PURE by design — no season data, no rosters, no dates, no network. Every fact is handed in
+// already derived by the caller (server.js), so this module can never disagree with the
+// scoreboard about a score, and the interesting half of the API path is testable without an API.
 //
 // server.js keeps a synced duplicate of this file's logic because it cannot import an ES
 // module; this copy is the canonical, unit-tested one. Same rule as detectScoreSwings —
@@ -373,4 +379,115 @@ export function buildPlayoffCommentary({
   }
 
   return lines;
+}
+
+// ---- Claude-generated commentary: the facts, and a guard on what comes back ----
+// `buildPlayoffCommentary` above is the floor — a deterministic bank that always produces
+// something. When an Anthropic key is configured the server prefers a written version, and
+// these two helpers are what make that safe: one renders the facts (and ONLY the facts) that
+// the model is allowed to talk about, the other checks that the reply did not invent a score.
+// Both are pure, so the interesting half of the API path is testable without an API.
+
+// Everything the model needs to write about yesterday, as plain text. Names are already
+// shortened, so the model never sees a full name it might print. No prompt wording here —
+// that lives with the API call in server.js; this is the evidence, not the instruction.
+export function commentaryFactSheet({
+  round = null,
+  roundLabel = '',
+  year = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  histories = {},
+  shortNames = {},
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return null;
+  const n = (name) => shortNames[name] || name || '';
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return null;
+
+  const out = [];
+  out.push(`Round: ${roundLabel || round}${year ? ` of the ${year} season` : ''}`);
+  if (daysLeft != null) {
+    out.push(daysLeft <= 0 ? 'Days left in the round: none, it is over' : `Days left in the round: ${daysLeft}`);
+  }
+
+  out.push('', 'MATCHUPS (round-to-date total, then what they scored yesterday):');
+  for (const m of moves) {
+    out.push(
+      `- ${m.label}: ${n(m.a)} ${fmtPts(m.aTotal)} (yesterday ${fmtDelta(m.aDelta)}) vs ` +
+        `${n(m.b)} ${fmtPts(m.bTotal)} (yesterday ${fmtDelta(m.bDelta)})`
+    );
+    if (m.leaderNow) out.push(`  ${n(m.leaderNow)} leads by ${fmtPts(m.margin)}`);
+    else out.push('  dead level');
+    if (m.flipped) {
+      out.push(
+        `  LEAD CHANGE yesterday: ${n(m.trailerNow)} led by ${fmtPts(m.marginBefore)} the previous morning and lost it`
+      );
+    } else if (m.brokeTie) {
+      out.push(`  they were exactly level the previous morning; ${n(m.leaderNow)} broke it`);
+    } else if (m.swing < 0) {
+      out.push(`  the gap CLOSED by ${fmtPts(Math.abs(m.swing))} yesterday (was ${fmtPts(m.marginBefore)})`);
+    } else if (m.swing > 0) {
+      out.push(`  the gap WIDENED by ${fmtPts(m.swing)} yesterday (was ${fmtPts(m.marginBefore)})`);
+    }
+    if (m.margin >= BLOWOUT_MARGIN) out.push('  this one is effectively over');
+    else if (m.margin <= NAILBITER_MARGIN) out.push('  this one is a coin flip');
+  }
+
+  const dayRows = Object.entries(dailyTotals || {})
+    .filter(([manager]) => moves.some((m) => m.a === manager || m.b === manager))
+    .map(([manager, points]) => ({ manager, points: Number(points) || 0 }))
+    .sort((x, y) => y.points - x.points);
+  if (dayRows.length) {
+    out.push('', "YESTERDAY'S SCORING, best to worst:");
+    for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)}`);
+  }
+
+  const careerLines = [];
+  for (const m of moves) {
+    for (const name of [m.a, m.b]) {
+      const h = histories[name];
+      if (!h || careerLines.some((l) => l.startsWith(`- ${n(name)}:`))) continue;
+      const bits = [`${h.seasonsPlayed} seasons`];
+      bits.push(
+        h.titleCount ? `${h.titleCount} Cup${h.titleCount === 1 ? '' : 's'} (${h.titles.join(', ')})` : 'no Cups'
+      );
+      if (h.runnerUps.length) bits.push(`lost ${h.runnerUps.length} Final${h.runnerUps.length === 1 ? '' : 's'}`);
+      if (h.neverMadeFinals) bits.push('has NEVER reached a Final');
+      if (h.neverPastQF) bits.push('has NEVER won a playoff round');
+      if (h.qfExitCount) bits.push(`${h.qfExitCount} quarterfinal exit${h.qfExitCount === 1 ? '' : 's'}`);
+      if (h.sfExitCount) bits.push(`${h.sfExitCount} semifinal loss${h.sfExitCount === 1 ? '' : 'es'}`);
+      if (h.dnqCount) bits.push(`missed the bracket ${h.dnqCount}x`);
+      careerLines.push(`- ${n(name)}: ${bits.join('; ')}`);
+    }
+  }
+  if (careerLines.length) {
+    out.push('', 'CAREER RECORD of the managers still playing (finished seasons only):');
+    out.push(...careerLines);
+  }
+
+  return out.join('\n');
+}
+
+// Does `text` quote a decimal number that the fact sheet never mentioned? Scores in this
+// league are decimals (48.4, 233.7), so a decimal the evidence does not contain is the model
+// having made one up — the single failure that would put a wrong number in the same post as
+// the right one. Whole numbers are deliberately NOT checked: "2 of 3", "8 seasons" and "one
+// bad afternoon" are ordinary prose, and margins that land on a round number are legitimately
+// derivable from two figures that are both present.
+export function commentaryMentionsUnknownScore(text, factSheet) {
+  const decimals = String(text || '').match(/\d[\d,]*\.\d+/g) || [];
+  if (decimals.length === 0) return false;
+  const known = new Set((String(factSheet || '').match(/\d[\d,]*\.\d+/g) || []).map((s) => s.replace(/,/g, '')));
+  return decimals.some((d) => !known.has(d.replace(/,/g, '')));
+}
+
+// Clean up a model-written line: strip any bullet/numbering it added, collapse the doubled
+// period an initialled short name produces at a full stop ("Ryan S.."), and trim.
+export function tidyCommentaryLine(line) {
+  return String(line || '')
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '')
+    .replace(/([A-Z]\.)\.(?!\.)/g, '$1')
+    .trim();
 }
