@@ -4275,54 +4275,98 @@ function matchupMovement({ label, a, b, aTotal = 0, bTotal = 0, aDelta = 0, bDel
 }
 
 // ---- Line banks -------------------------------------------------------------
-// Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the
-// short-name formatter the caller supplies, so every name in the post reads the same way.
+// Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the short-name
+// formatter the caller supplies, so every name in the post reads the same way.
+//
+// These are the FALLBACK — server.js prefers a Claude-written version and drops to these on
+// any failure. They are written in the same four voices `ROAST_VOICE` asks Claude for, so a
+// failed API call changes who wrote the post, not how the league sounds: the anchor's swagger
+// and simile (Stuart Scott), the deadpan setup landing on a blunt understated punchline (Norm
+// Macdonald), escalating repetition turning into an uncomfortable truth (Chris Rock), and the
+// loose bar-guy riff into an oddly specific scenario (Shane Gillis). One of each per bank,
+// which is also why the banks are four long rather than three.
+//
+// Invariants the tests hold these to (tests/playoffCommentary.test.js): every flip line says
+// "Lead change" / "flipped" / "New leader"; every blowout and nailbiter line interpolates
+// `f.daysLeftText` and the margin; every nailbiter says "coin flip" or "separate"; big-day and
+// dead-day lines name the manager and print the points. And no line may ever contain "..",
+// which is why a name at a full stop goes through `endSentence`.
 
 const flipLines = [
+  // Scott: call it like a highlight, with a simile that makes the number mean something.
   (f, n) =>
-    `:arrows_counterclockwise: *Lead change in ${f.label}.* ${n(f.leaderNow)} put up ${fmtPts(f.winnerDelta)} and turned a ${fmtPts(f.marginBefore)}-pt deficit into a ${fmtPts(f.margin)}-pt lead. ${n(f.trailerNow)} watched it happen in real time.`,
+    `:arrows_counterclockwise: *Lead change in ${f.label}.* ${n(f.leaderNow)} dropped ${fmtPts(f.winnerDelta)} on the day and flipped a ${fmtPts(f.marginBefore)}-pt deficit into a ${fmtPts(f.margin)}-pt lead — smoother than a Sunday afternoon and twice as cold. ${n(f.trailerNow)} felt every degree of it.`,
+  // Macdonald: two flat sentences, and the punchline is just the fact.
   (f, n) =>
-    `:arrows_counterclockwise: *${f.label} flipped.* ${n(f.trailerNow)} woke up in front and went to bed ${fmtPts(f.margin)} behind — ${n(f.leaderNow)}'s ${fmtPts(f.winnerDelta)} did it in a single day.`,
+    `:arrows_counterclockwise: *${f.label} flipped.* ${n(f.trailerNow)} was winning this. Then ${n(f.leaderNow)} put up ${fmtPts(f.winnerDelta)}, and now he's losing it by ${fmtPts(f.margin)}, and I think that's the whole story there.`,
+  // Rock: say the lead three times, each time smaller.
   (f, n) =>
-    `:arrows_counterclockwise: *New leader in ${f.label}:* ${n(f.leaderNow)}, by ${fmtPts(f.margin)}, off a ${fmtPts(f.winnerDelta)}-pt day. ${n(f.trailerNow)} held that lead for exactly as long as he could.`,
+    `:arrows_counterclockwise: *${n(f.trailerNow)} had a lead in ${f.label}.* He had a ${fmtPts(f.marginBefore)}-pt lead. He had a ${fmtPts(f.marginBefore)}-pt lead and one afternoon of baseball, and now he is down ${fmtPts(f.margin)} — because ${n(f.leaderNow)} wanted it and he did not.`,
+  // Gillis: the oddly specific scenario.
+  (f, n) =>
+    `:arrows_counterclockwise: *New leader in ${f.label}:* ${n(f.leaderNow)}, by ${fmtPts(f.margin)}, off a ${fmtPts(f.winnerDelta)}-pt day. ${n(f.trailerNow)} led this thing the way you lead a group project — loudly, for about a day, right up until somebody actually did the work.`,
 ];
 
 const tieBreakLines = [
   (f, n) => `:zap: *${f.label} is no longer level* — ${n(f.leaderNow)} nudged ahead by ${fmtPts(f.margin)}.`,
-  (f, n) => `:zap: *${n(f.leaderNow)} broke the tie in ${f.label}*, and leads by ${fmtPts(f.margin)}.`,
+  (f, n) =>
+    `:zap: *${n(f.leaderNow)} broke the tie in ${f.label}*, by ${fmtPts(f.margin)}. Dead even is a nice place to visit, but nobody's putting a banner up for it.`,
+  (f, n) =>
+    `:zap: They were tied. Now they're not. *${n(f.leaderNow)}* is up ${fmtPts(f.margin)} in ${f.label}, and that is the most exciting sentence available to me this morning.`,
 ];
 
 const blowoutLines = [
+  // Macdonald: understate the disaster.
   (f, n) =>
-    `:coffin: *${f.label} is over and nobody told ${endSentence(n(f.trailerNow))}* Down ${fmtPts(f.margin)}${f.daysLeftText}. That is not a deficit, that is a eulogy.`,
+    `:coffin: *${f.label} is over and nobody told ${endSentence(n(f.trailerNow))}* Down ${fmtPts(f.margin)}${f.daysLeftText}. That is not a deficit, that is a eulogy with a countdown on it.`,
+  // Rock: escalate the same number.
   (f, n) =>
-    `:coffin: ${n(f.leaderNow)} leads ${n(f.trailerNow)} by ${fmtPts(f.margin)} in ${f.label}${f.daysLeftText}. At this point ${n(f.trailerNow)} is just accumulating evidence.`,
+    `:coffin: *${fmtPts(f.margin)} points.* Not ${fmtPts(f.margin)} points across a season — ${fmtPts(f.margin)} points in ONE ROUND, and ${n(f.trailerNow)} is still standing in it${f.daysLeftText}. At some point a hole stops being a hole and starts being an address.`,
+  // Scott: anchor voice, big call.
   (f, n) =>
-    `:coffin: *${fmtPts(f.margin)} points.* That is the hole ${n(f.trailerNow)} is in${f.daysLeftText}, and he keeps digging like there is something down there.`,
+    `:coffin: ${n(f.leaderNow)} is beating ${n(f.trailerNow)} by ${fmtPts(f.margin)} in ${f.label}${f.daysLeftText} — that is not a lead, that is a different area code. Somebody go check on the man.`,
+  // Gillis: bar-guy riff.
+  (f, n) =>
+    `:coffin: ${n(f.trailerNow)} is down ${fmtPts(f.margin)} in ${f.label}${f.daysLeftText} and still setting a lineup every morning, like a guy repainting the deck of a boat that is extremely already underwater.`,
 ];
 
 const nailbiterLines = [
   (f, n) =>
-    `:hourglass_flowing_sand: *${f.label} is a coin flip* — ${n(f.leaderNow)} by ${fmtPts(f.margin)}${f.daysLeftText}. One good afternoon decides it.`,
+    `:hourglass_flowing_sand: *${f.label} is a coin flip* — ${n(f.leaderNow)} by ${fmtPts(f.margin)}${f.daysLeftText}. One good afternoon decides it, and neither of these guys has had one in a while.`,
   (f, n) =>
-    `:hourglass_flowing_sand: ${fmtPts(f.margin)} points separate ${n(f.a)} and ${n(f.b)} in ${f.label}${f.daysLeftText}. Nobody should be sleeping well.`,
+    `:hourglass_flowing_sand: ${fmtPts(f.margin)} points separate ${n(f.a)} and ${n(f.b)} in ${f.label}${f.daysLeftText}. That's one start. That's one at-bat with two on. Nobody in this matchup should be sleeping well.`,
+  (f, n) =>
+    `:hourglass_flowing_sand: *${fmtPts(f.margin)} points is a coin flip*, and ${n(f.leaderNow)} is the side that happens to be up right now${f.daysLeftText}. Enjoy it, I guess.`,
 ];
 
 const bigDayLines = [
+  // Scott.
   (f, n) =>
-    `:boom: *${n(f.manager)} put up ${fmtPts(f.points)}* — the biggest haul of the day by ${fmtPts(f.gapToNext)}, and the only reason he is still in this conversation.`,
+    `:boom: *${n(f.manager)} went off for ${fmtPts(f.points)}* — biggest haul in the bracket by ${fmtPts(f.gapToNext)}, and he needed every point of it. Man showed up to work while everybody else was still finding parking.`,
+  // Macdonald.
   (f, n) =>
-    `:boom: *${fmtPts(f.points)} for ${endSentence(n(f.manager))}* Nobody else in the bracket cleared ${fmtPts(f.next)}.`,
+    `:boom: *${fmtPts(f.points)} for ${endSentence(n(f.manager))}* Nobody else in the bracket cleared ${fmtPts(f.next)}. So that was nice for him.`,
+  // Rock.
   (f, n) =>
-    `:boom: ${n(f.manager)} led all playoff managers with ${fmtPts(f.points)}. One day does not fix a bracket, but it is a start.`,
+    `:boom: ${n(f.manager)} put up ${fmtPts(f.points)}. ${fmtPts(f.points)}! And the next-best guy in this entire bracket managed ${fmtPts(f.next)} — one day does not fix a season, but it sure ruins somebody else's.`,
+  // Gillis.
+  (f, n) =>
+    `:boom: ${n(f.manager)} led every playoff manager with ${fmtPts(f.points)}, which for him is roughly a month's work compressed into an afternoon. Do not get used to it.`,
 ];
 
 const deadDayLines = [
+  // Macdonald.
   (f, n) =>
-    `:zzz: *${n(f.manager)} managed ${fmtPts(f.points)}.* An entire slate of baseball happened and his roster sat through it like a hostage video.`,
+    `:zzz: *${n(f.manager)} managed ${fmtPts(f.points)}.* A full slate of major league baseball was played yesterday. He was there for all of it.`,
+  // Gillis.
   (f, n) =>
-    `:zzz: ${fmtPts(f.points)} from ${n(f.manager)} — the fantasy equivalent of forgetting to set an alarm on the day of the exam.`,
-  (f, n) => `:zzz: *${n(f.manager)}: ${fmtPts(f.points)}.* His players showed up, signed in, and went home.`,
+    `:zzz: ${fmtPts(f.points)} from ${n(f.manager)} — that is a roster full of guys who each individually decided today was a good day to work on their swing in the cage instead.`,
+  // Rock.
+  (f, n) =>
+    `:zzz: *${n(f.manager)}: ${fmtPts(f.points)}.* Not a bad day. Not a slow day. ${fmtPts(f.points)} points, in the playoffs, on purpose.`,
+  // Scott.
+  (f, n) =>
+    `:zzz: ${n(f.manager)} posted ${fmtPts(f.points)} — colder than the other side of the pillow, and not in the good way we usually mean that.`,
 ];
 
 // ---- History lines ----------------------------------------------------------
@@ -4340,11 +4384,11 @@ const historyLines = [
     when: (h, ctx) => ctx.round === 'QF' && h.qfExitCount >= 3,
     texts: [
       (h, n) =>
-        `:chart_with_downwards_trend: *${n(h.manager)} has gone out in the Quarterfinals ${h.qfExitCount} times* in ${h.seasonsPlayed} seasons. The bracket knows where he lives.`,
+        `:chart_with_downwards_trend: *${n(h.manager)} has gone out in the Quarterfinals ${h.qfExitCount} times* in ${h.seasonsPlayed} seasons. The bracket knows his name, his order, and where he parks.`,
       (h, n) =>
-        `:chart_with_downwards_trend: ${h.qfExitCount} quarterfinal exits in ${h.seasonsPlayed} seasons for *${n(h.manager)}*. At some point it stops being bad luck and starts being a personality.`,
+        `:chart_with_downwards_trend: ${n(h.manager)} has lost in the Quarterfinals ${h.qfExitCount} times. ${h.qfExitCount} times! At some point that stops being variance and starts being a lifestyle.`,
       (h, n) =>
-        `:chart_with_downwards_trend: *${n(h.manager)} in the Quarterfinals* is the most predictable event in this league, and it has happened ${h.qfExitCount} times.`,
+        `:chart_with_downwards_trend: *${n(h.manager)} in the Quarterfinals.* ${h.qfExitCount} times he has been here. ${h.qfExitCount} times it has ended here. I'm not saying anything, I'm just reading it out.`,
     ],
   },
   {
@@ -4353,11 +4397,11 @@ const historyLines = [
     when: (h, ctx) => h.neverMadeFinals && h.seasonsPlayed >= 4 && ctx.matchupLabel !== '3rd Place',
     texts: [
       (h, n) =>
-        `:tickets: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest he has been.`,
+        `:tickets: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest the man has ever stood to the thing.`,
       (h, n) =>
-        `:tickets: ${h.seasonsPlayed} seasons, zero Finals. *${n(h.manager)}* has spent his entire career watching other people play the last game.`,
+        `:tickets: ${h.seasonsPlayed} seasons. No Finals. *${n(h.manager)}* has watched this league hand out ${h.seasonsPlayed} trophies from roughly the same seat every time.`,
       (h, n) =>
-        `:tickets: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it. The drought has its own drought.`,
+        `:tickets: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it — he keeps buying tickets to the building and leaving at the seventh.`,
     ],
   },
   {
@@ -4365,18 +4409,18 @@ const historyLines = [
     when: (h) => h.neverPastQF && h.playoffAppearances >= 3,
     texts: [
       (h, n) =>
-        `:tickets: *${n(h.manager)} has never won a playoff round* in ${h.playoffAppearances} trips to the bracket. Ever.`,
+        `:tickets: *${n(h.manager)} has never won a playoff round.* ${h.playoffAppearances} trips to the bracket. Zero rounds won. Ever.`,
       (h, n) =>
-        `:tickets: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies for the sole purpose of leaving.`,
+        `:tickets: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies every year for what appears to be the sole purpose of leaving.`,
     ],
   },
   {
     id: 'defending',
     when: (h, ctx) => h.lastTitle != null && ctx.year != null && Number(ctx.year) - h.lastTitle === 1,
     texts: [
-      (h, n) => `:crown: *${n(h.manager)} is the defending champion*, and is currently defending it.`,
+      (h, n) => `:crown: *${n(h.manager)} is the defending champion*, and is at this moment defending it.`,
       (h, n) =>
-        `:crown: *${n(h.manager)}* won this thing last year, which means everyone left in the bracket would enjoy ending him specifically.`,
+        `:crown: *${n(h.manager)}* won this thing last year, which means every other man left in the bracket would very much enjoy ending him specifically.`,
     ],
   },
   {
@@ -4384,9 +4428,9 @@ const historyLines = [
     when: (h, ctx) => h.titleCount > 0 && ctx.year != null && Number(ctx.year) - h.lastTitle >= 3,
     texts: [
       (h, n, ctx) =>
-        `:hourglass: *${n(h.manager)} has ${h.titleCount === 1 ? 'a Cup' : `${h.titleCount} Cups`}*, the most recent in ${h.lastTitle} — ${Number(ctx.year) - h.lastTitle} years of being reminded about it.`,
+        `:hourglass: *${n(h.manager)} has ${h.titleCount === 1 ? 'a Cup' : `${h.titleCount} Cups`}*, the most recent in ${h.lastTitle} — ${Number(ctx.year) - h.lastTitle} years, and he has found a way to mention it in every one of them.`,
       (h, n, ctx) =>
-        `:hourglass: ${Number(ctx.year) - h.lastTitle} years since *${n(h.manager)}* last won the Cup, and he has brought it up in roughly that many conversations.`,
+        `:hourglass: ${Number(ctx.year) - h.lastTitle} years since *${n(h.manager)}* last won the Cup. He brings it up like it happened Tuesday.`,
     ],
   },
   {
@@ -4394,9 +4438,9 @@ const historyLines = [
     when: (h) => h.runnerUps.length >= 2 && h.titleCount === 0,
     texts: [
       (h, n) =>
-        `:second_place_medal: *${n(h.manager)} has lost ${h.runnerUps.length} Finals* (${h.runnerUps.join(', ')}) and won none. The trophy case is a mirror.`,
+        `:second_place_medal: *${n(h.manager)} has lost ${h.runnerUps.length} Finals* (${h.runnerUps.join(', ')}) and won none. He is extremely good at getting there and historically catastrophic at the last part.`,
       (h, n) =>
-        `:second_place_medal: ${h.runnerUps.length} Finals, ${h.runnerUps.length} losses. *${n(h.manager)}* is very good at getting there and historically bad at the last part.`,
+        `:second_place_medal: ${h.runnerUps.length} Finals for *${n(h.manager)}*. ${h.runnerUps.length} losses. The man has been to the mountaintop ${h.runnerUps.length} times and taken a photo of somebody else on it every single time.`,
     ],
   },
   {
@@ -4408,7 +4452,7 @@ const historyLines = [
       Number(ctx.year) - h.lastYearInSemis >= 4,
     texts: [
       (h, n, ctx) =>
-        `:sparkles: *${n(h.manager)}'s first ${ctx.round === 'Finals' ? 'Final' : 'Semifinal'} since ${h.lastYearInSemis}.* Whatever he did differently, he should write it down.`,
+        `:sparkles: *${n(h.manager)}'s first ${ctx.round === 'Finals' ? 'Final' : 'Semifinal'} since ${h.lastYearInSemis}.* Whatever he did differently this year, he should write it down, because he clearly did not remember it the last four times.`,
       (h, n, ctx) =>
         `:sparkles: ${n(h.manager)} last got this far in ${h.lastYearInSemis}. *${Number(ctx.year) - h.lastYearInSemis} years* is a long time to wait for another chance to blow it.`,
     ],
@@ -4418,9 +4462,9 @@ const historyLines = [
     when: (h, ctx) => ctx.round !== 'QF' && h.sfExitCount >= 3 && h.titleCount === 0,
     texts: [
       (h, n) =>
-        `:repeat: *${n(h.manager)} has lost ${h.sfExitCount} Semifinals* and won nothing. He is the league's most reliable participation trophy.`,
+        `:repeat: *${n(h.manager)} has lost ${h.sfExitCount} Semifinals* and won nothing. He is the most reliable participation trophy this league produces.`,
       (h, n) =>
-        `:repeat: ${h.sfExitCount} semifinal losses, zero Cups. *${n(h.manager)}* has made a career out of the second-to-last weekend.`,
+        `:repeat: ${h.sfExitCount} semifinal losses. Zero Cups. *${n(h.manager)}* has built an entire career out of the second-to-last weekend of the season.`,
     ],
   },
 ];

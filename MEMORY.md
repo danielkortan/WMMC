@@ -213,9 +213,18 @@ not do a clean impression of any one". "Be funny like X" without that gets a cat
 nothing else. It also carries the line about what this league's meanness is: aimed at rosters,
 picks and effort, never at family, looks, health or race, and never signed with a comedian's name.
 
-Not changed: the **static fallback banks**. They are hand-written, not AI-generated, and they are
-the safety net rather than the product now that the key is confirmed set. If they start firing
-often, rewriting them in this voice is the follow-up.
+**The Hot Takes fallback bank was rewritten in the same four voices** (commissioner asked for it
+in the same breath), so a failed API call changes _who wrote the post_, not _how the league
+sounds_. One line per voice per bank, which is why the banks are four long rather than three. The
+banks now carry a comment listing the invariants the tests hold them to — every flip line says
+"Lead change"/"flipped"/"New leader", every blowout and nailbiter interpolates `daysLeftText` and
+the margin, and no line may ever contain `..` — because those are exactly the things a future
+rewrite would break silently.
+
+Still NOT rewritten: the **elimination-roast bank** (110 templates) and the daily worst-player
+banks. Different feature, much bigger diff, and the elimination bank is full of the
+`${roundLabel}` article traps documented on 2026-08-03 — a bulk rewrite there wants its own PR and
+its own read-through, not a ride-along.
 
 **Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
 seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
