@@ -1,0 +1,78 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Several pure helpers exist twice: canonically in js/ (unit-tested, imported by the browser)
+// and again in server.js, which cannot import an ES module. CLAUDE.md's rule is "edit both",
+// and the project's history is full of the bug that happens when someone edits one. This file
+// is that rule, mechanized: it compares the two copies as text and fails on any drift.
+//
+// It deliberately runs no server code — it reads server.js as a string. If a mirror is
+// intentionally being changed, change it in js/ too and this passes again.
+
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const SERVER = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+
+// Everything from `startMarker` to the end of the module, with the ESM `export` keywords
+// stripped — which is exactly the transformation the server copy applies.
+function canonicalTail(source, startMarker) {
+  const at = source.indexOf(startMarker);
+  assert.notEqual(at, -1, `canonical source is missing its start marker: ${startMarker}`);
+  return source
+    .slice(at)
+    .replace(/^export /gm, '')
+    .trimEnd();
+}
+
+// One top-level `function name(...) { ... }` declaration, located by brace matching so the
+// comment above it (which legitimately differs between the two files) is not compared.
+function extractFunction(source, name) {
+  const at = source.search(new RegExp(`^(?:export )?function ${name}\\b`, 'm'));
+  assert.notEqual(at, -1, `no top-level function ${name}`);
+  const open = source.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(at, i + 1).replace(/^export /, '');
+    }
+  }
+  throw new Error(`unbalanced braces in ${name}`);
+}
+
+describe('server.js mirrors of js/ modules', () => {
+  it('carries js/history.js verbatim', () => {
+    const canonical = canonicalTail(read('js/history.js'), 'export const WMMC_HISTORICAL_RESULTS');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/history.js — the historical results table and its helpers must be identical in both'
+    );
+  });
+
+  it('carries js/playoffCommentary.js verbatim', () => {
+    const canonical = canonicalTail(
+      read('js/playoffCommentary.js'),
+      '// A margin this big, this late, is not a deficit any more.'
+    );
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/playoffCommentary.js — the commentary banks and rules must be identical in both'
+    );
+  });
+
+  it('carries shortManagerNames from js/utils.js verbatim', () => {
+    assert.equal(
+      extractFunction(SERVER, 'shortManagerNames'),
+      extractFunction(read('js/utils.js'), 'shortManagerNames')
+    );
+  });
+
+  it('carries normalizeName from js/utils.js verbatim (the pre-existing pair)', () => {
+    assert.equal(extractFunction(SERVER, 'normalizeName'), extractFunction(read('js/utils.js'), 'normalizeName'));
+  });
+});

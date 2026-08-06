@@ -10,6 +10,7 @@ import {
   fmtDateISO,
   normalizeName,
   parseServerTimestamp,
+  shortManagerNames,
 } from '../js/utils.js';
 
 describe('esc', () => {
@@ -115,6 +116,51 @@ describe('getInitials', () => {
 
   it('handles middle names by skipping them', () => {
     assert.equal(getInitials('Cal Quantrill Jr'), 'CJ');
+  });
+});
+
+describe('shortManagerNames', () => {
+  it('shortens to the first name when no two managers share one', () => {
+    const map = shortManagerNames(['Daniel Kortan', 'Jamie Rogers', 'Alex Thalacker']);
+    assert.deepEqual(map, {
+      'Daniel Kortan': 'Daniel',
+      'Jamie Rogers': 'Jamie',
+      'Alex Thalacker': 'Alex',
+    });
+  });
+
+  it('adds a last initial only to the managers who share a first name', () => {
+    const map = shortManagerNames(['Ryan Sullivan', 'Ryan Courville', 'Jamie Rogers']);
+    assert.equal(map['Ryan Sullivan'], 'Ryan S.');
+    assert.equal(map['Ryan Courville'], 'Ryan C.');
+    assert.equal(map['Jamie Rogers'], 'Jamie');
+  });
+
+  it('keeps full names when even the last initial would collide', () => {
+    const map = shortManagerNames(['Ryan Sullivan', 'Ryan Smith', 'Ryan Courville']);
+    assert.equal(map['Ryan Sullivan'], 'Ryan Sullivan');
+    assert.equal(map['Ryan Smith'], 'Ryan Smith');
+    // ...but the one whose initial is still unique keeps the short form.
+    assert.equal(map['Ryan Courville'], 'Ryan C.');
+  });
+
+  it('handles single-word names, extra whitespace and duplicates', () => {
+    const map = shortManagerNames(['  Whit  ', 'Whit', 'Cam McCallum']);
+    assert.equal(map['Whit'], 'Whit');
+    assert.equal(map['Cam McCallum'], 'Cam');
+    assert.equal(Object.keys(map).length, 2);
+  });
+
+  it('ignores blank and non-string entries', () => {
+    assert.deepEqual(shortManagerNames(['', null, undefined, 42, 'Cam McCallum']), { 'Cam McCallum': 'Cam' });
+    assert.deepEqual(shortManagerNames([]), {});
+    assert.deepEqual(shortManagerNames(null), {});
+  });
+
+  it('gives two managers with the same first name but only one surname word each a distinct label', () => {
+    const map = shortManagerNames(['Alex Thalacker', 'Alex Johnson']);
+    assert.equal(map['Alex Thalacker'], 'Alex T.');
+    assert.equal(map['Alex Johnson'], 'Alex J.');
   });
 });
 

@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                            | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-06 | Playoff daily Slack post: matchup deltas, Hot Takes, and short manager names everywhere          | [MEMORY](#2026-08-06-playoff-daily-slack-post-matchup-deltas-hot-takes-and-short-manager-names-everywhere)                        |
 | 2026-08-06 | Deleting a dormant fallback is a risk decision, not a cleanup                                    | [MEMORY](#2026-08-06-deleting-a-dormant-fallback-is-a-risk-decision-not-a-cleanup)                                                |
 | 2026-08-06 | Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted                             | [MEMORY](#2026-08-06-repo-wide-prbranchdead-code-audit-and-why-no-endpoint-was-deleted)                                           |
 | 2026-08-05 | Live tab boxscores scrolled inside their column while the page had empty gutters                 | [MEMORY](#2026-08-05-live-tab-boxscores-scrolled-inside-their-column-while-the-page-had-empty-gutters)                            |
@@ -92,6 +93,106 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                              | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                              | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                              | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-06 — Playoff daily Slack post: matchup deltas, Hot Takes, and short manager names everywhere
+
+Commissioner's complaint, mid-semifinals: the daily post's "Barely Competent / Monkeys Trying to
+Fuck a Loose Couch" top-3/bottom-3 manager columns stop meaning anything once the bracket is down
+to four teams — the two columns are just every surviving manager, sorted, with one matchup's
+winners stacked against another's losers. Quarterfinals (eight teams) still reads fine.
+
+**What changed, all in the daily scoreboard post.**
+
+1. **Manager columns are dropped from the semifinals on** (`showManagerColumns`), kept for
+   PP1/PP2/QF. The best/worst PLAYER columns are untouched in every round — they rank individual
+   games, and there are always plenty of those.
+
+2. **Each matchup line carries yesterday's movement** right after the round total:
+   `▸ (8) Daniel — 83 (+3) _(B: 81 | P: 2)_`. `buildPlayoffMatchupsSlackText` gained an optional
+   `dailyTotals`; the Monday wrap-up (`final: true`) never gets it, because a finished round has
+   no "yesterday" worth reporting.
+
+3. **New "🎙️ Hot Takes" section** — lead changes, blowouts, coin-flips, the day's biggest haul
+   and deadest day, plus one career-pattern line. Deterministic (seeded off the date, like the
+   existing worst-player roast), never an API call: production still has no `ANTHROPIC_API_KEY`,
+   so anything that needed Claude would silently never fire.
+
+4. **Short manager names on every Slack post** — first name, last initial only when two managers
+   share one (`Ryan S.` / `Ryan C.`).
+
+**The three decisions worth remembering.**
+
+**Deltas are computed once, above the standings, not twice.** `computeDailyHighLow` already
+returns an unsliced `managerTotals`; the post now calls it BEFORE building the matchup block and
+feeds the same map to the matchup lines and to the commentary. A delta on a line and a delta a
+roast talks about are the same number by construction, not by coincidence.
+
+**The lead-change math needs a guard the numbers do not advertise.** "Did the lead change
+overnight" is computed by subtracting yesterday's points back out of the round totals. That is
+only valid while yesterday belongs to the round being reported — on the Monday of a new round,
+yesterday's points sit in the PREVIOUS round, and subtracting them would invent a lead change out
+of nothing. `yesterdayInRound` (against the round's own first/last schedule dates) gates the whole
+feature; outside the window there are no deltas and no commentary, and the post degrades to what
+it was before.
+
+**Short names are applied at the SEND boundary, not in each builder.** `shortenManagerNamesInSlack`
+runs inside `postSlack` / `postScoreboardSlack` / `postScoreboardChannelSlack`, so the prose posts
+(swap notifications, elimination roasts, integrity alerts) inherit it without every template
+learning about it. Two things this got right only on the second pass:
+
+- The `/wmmc` slash command replies to Slack **directly** instead of going through
+  `postScoreboardSlack`, so it needed the pass applied by hand or it would have been the one post
+  in the channel still using full names.
+- `Ryan S..` — a short name ending in an initial, followed by a sentence period. Caught in the
+  live E2E render, not by any test. Fixed in two places, because there are two paths a name can
+  reach a full stop by: `endSentence()` in the commentary templates (which receive short names
+  directly), and a `\.?` swallow in the boundary regex (for prose that still holds full names).
+  A 40-seed × 3-round × 4-shape sweep in `tests/playoffCommentary.test.js` now asserts no line
+  ever contains `..`.
+
+**Where the history came from, and the bug it exposed.** The "does he always lose in the
+quarterfinals" material needs the finished-season record, which lived as a `const` inside app.js
+where the server could not see it. Moved to **`js/history.js`** (canonical, unit-tested, bridged
+onto `window` by js/index.js, deleted from app.js per the modularization rule) and mirrored into
+server.js. Adding a season is now a two-file edit — noted in CLAUDE.md.
+
+Deriving a manager's exit round per season reuses `js/playoffStatus.js`'s own ladder
+(1st-2nd = Finals, 3rd-4th = lost the semi, 5th-8th = lost the quarterfinal, 9th+ = missed it),
+so the commentary and the Hall of Fame agree about what a placing means.
+
+Doing this surfaced a **pre-existing bug I did not fix**: the historical tables spell the
+commissioner `Dan Kortan` while `db.managers` says `Daniel Kortan`, so the Hall of Fame's all-time
+records treat them as two people and split that career in half. `js/history.js` has a
+`HISTORICAL_NAME_ALIASES` map and applies it; the Hall of Fame does not read it yet. Flagged in
+CLAUDE.md as a known bug with the fix already sitting in the module.
+
+**Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
+seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
+the quarterfinals. And in the Finals the two games mean opposite things — "this is the closest he
+has been to a Final" is pointed for a championship-game player and simply false for somebody in
+the 3rd-place game, who already lost his semi. Each history rule is therefore evaluated with its
+candidate's own matchup label in context.
+
+**New: `tests/serverMirrors.test.js`.** This change added two more `js/` ↔ `server.js` duplicate
+pairs to a codebase whose recurring failure mode is exactly that drift. The test reads server.js
+as text and fails if a mirrored block no longer matches its `js/` original. It runs no server code
+(so it does not violate "no tests for server.js"), and it already covers the pre-existing
+`normalizeName` pair. Extending it to `SCORING` / `detectScoreSwings` / the odds engine is the
+obvious next win.
+
+**Verified E2E, not just unit-tested.** A synthetic season generator (real manager names, invented
+players) plus a local webhook sink: booted the real `server.js` against a QF / SF / Finals / PP2
+fixture in turn and POSTed `/api/slack/scoreboard`, then read the captured blocks. Confirmed the
+manager columns present in QF and PP2 and absent in SF and Finals, an engineered overnight lead
+change reported as one, a 233-pt blowout reported as one, deltas on every matchup line, pool play
+byte-for-byte unchanged in structure, and the `/wmmc` reply carrying short names. The `Ryan S..`
+bug only ever showed up here — a reminder that for Slack work the render is the test that counts.
+
+**Gotcha for the next fixture builder:** `computeEffectiveBattingScore` recomputes a weekly score
+from the daily rows whenever daily rows exist for that week, so a fixture with ONE day of daily
+data reports round totals equal to that single day, no matter what `weekly_score` says. The first
+fixture looked broken for exactly this reason. Give the round at least two dated days (a lump for
+"everything before yesterday" plus yesterday) or the lead-change math has nothing to work with.
 
 ## 2026-08-06 — Deleting a dormant fallback is a risk decision, not a cleanup
 

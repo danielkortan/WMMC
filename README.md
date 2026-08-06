@@ -15,7 +15,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
 - **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap log with undo (plus approvals for guard-flagged swaps), audit log
-- **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post
+- **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post. Manager names are shortened to first names (with a last initial when two managers share one). During the playoffs the post leads with the bracket matchups, each manager's round total carrying yesterday's movement as a delta, and closes with **Hot Takes** — lead changes, collapses, the day's biggest haul, and the career pattern a survivor is carrying, drawn from the finished-season record in `js/history.js`. From the semifinals on, the best/worst _manager_ columns are dropped (four teams is not a leaderboard); the best/worst _player_ columns stay all season
 
 ## Tech Stack
 
@@ -251,9 +251,12 @@ WMMC/
 │                          #   hypothetical.js — What If sandbox engine (pure, read-only)
 │                          #   seeding.js — pool-play seeding rule (real bracket + What If)
 │                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
+│                          #   history.js — finished-season record + per-manager career facts
+│                          #   playoffCommentary.js — daily playoff post "Hot Takes" (server-only caller)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
-└── tests/                 # Tests for pure js/ modules
+└── tests/                 # Tests for pure js/ modules, plus serverMirrors.test.js, which
+                           # fails if server.js drifts from a js/ module it duplicates
 ```
 
 > **Note on ongoing modularization:** The frontend has historically been a single `app.js` file. We're incrementally extracting pure logic (scoring, CSV parsing, utilities) into `js/` modules, with matching tests in `tests/`. Until the migration is complete, both layers co-exist: `index.html` still loads `app.js` directly, and the extracted modules are exercised through `tests/`. Do not duplicate logic between layers — once a function is in `js/`, delete its sibling in `app.js` and call into the module via `<script type="module">`.
