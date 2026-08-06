@@ -3934,6 +3934,42 @@ function backfillWmmcQS(db) {
 }
 
 // ============================================================
+// Anthropic response shape (synced copy of js/anthropic.js)
+// ============================================================
+// Canonical, unit-tested copy lives in js/anthropic.js — the server cannot import an ES module,
+// so every edit goes in both (see CLAUDE.md gotchas). Read that file's header for why indexing
+// into `content` is the bug that silently disabled three features for months.
+
+// The assistant's text from a Messages API response, or '' when there is none.
+// Tolerates any shape — missing content, non-arrays, blocks with no text, thinking blocks,
+// tool_use blocks — because the whole point is to not assume.
+function anthropicReplyText(data) {
+  const blocks = data && Array.isArray(data.content) ? data.content : [];
+  return blocks
+    .filter((b) => b && (b.type === 'text' || (b.type === undefined && typeof b.text === 'string')))
+    .map((b) => (typeof b.text === 'string' ? b.text : ''))
+    .join('')
+    .trim();
+}
+
+// A short description of what actually came back, for the log line when `anthropicReplyText`
+// returns nothing. Without this an empty reply is unattributable: "the API returned an empty
+// reply" is true of a refusal, a `max_tokens` cut-off mid-thinking, and a response made
+// entirely of tool blocks, and those want very different fixes.
+function describeAnthropicReply(data) {
+  const blocks = data && Array.isArray(data.content) ? data.content : null;
+  if (!blocks) return 'no content array in the response';
+  if (blocks.length === 0) return 'content array was empty';
+  const types = blocks.map((b) => (b && b.type) || 'untyped').join(', ');
+  const stop = data.stop_reason ? `, stop_reason: ${data.stop_reason}` : '';
+  const usage =
+    data.usage && (data.usage.output_tokens != null || data.usage.input_tokens != null)
+      ? `, tokens in/out: ${data.usage.input_tokens ?? '?'}/${data.usage.output_tokens ?? '?'}`
+      : '';
+  return `content blocks: [${types}]${stop}${usage}`;
+}
+
+// ============================================================
 // League history + playoff commentary (synced copies)
 // ============================================================
 // Synced duplicates of js/history.js and js/playoffCommentary.js — the canonical, unit-tested
@@ -4906,7 +4942,9 @@ Write the takes now.`;
       },
       body: JSON.stringify({
         model: PLAYOFF_COMMENTARY_MODEL,
-        max_tokens: 600,
+        // Generous, because a model that emits a thinking block spends this budget on it
+        // first. At 600 the takes could be cut off before a single text block was produced.
+        max_tokens: 4000,
         messages: [{ role: 'user', content: prompt }],
       }),
       signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
@@ -4930,8 +4968,11 @@ Write the takes now.`;
     return bank('the API response body could not be parsed');
   }
 
-  const raw = data && data.content && data.content[0] && data.content[0].text;
-  if (!raw) return bank('the API returned an empty reply');
+  const raw = anthropicReplyText(data);
+  if (!raw) {
+    console.error(`[Hot Takes] Empty reply from ${PLAYOFF_COMMENTARY_MODEL} — ${describeAnthropicReply(data)}`);
+    return bank(`the API returned no text (${describeAnthropicReply(data)})`);
+  }
 
   if (commentaryMentionsUnknownScore(raw, factSheet)) {
     console.error('[Hot Takes] Reply quoted a score absent from the facts:', String(raw).slice(0, 300));
@@ -13218,13 +13259,15 @@ app.get('/api/admin/anthropic-check', requireCommissioner, async (req, res) => {
   }
 
   let reply = null;
+  let shape = null;
   try {
     const data = JSON.parse(bodyText);
-    reply = data && data.content && data.content[0] && data.content[0].text;
+    reply = anthropicReplyText(data) || null;
+    shape = describeAnthropicReply(data);
   } catch {
     /* fall through — a 200 with an unreadable body is still a working key */
   }
-  res.json({ ok: true, model, reply: reply || null, key: keyInfo });
+  res.json({ ok: true, model, reply, shape, key: keyInfo });
 });
 
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
@@ -15621,9 +15664,12 @@ Write the roast now. No preamble, no labels — just the roast.`;
     console.error('Anthropic API returned an unreadable body for', manager, '-', e.message);
     return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
   }
-  const text = data && data.content && data.content[0] && data.content[0].text;
+  const text = anthropicReplyText(data);
   // A Claude-written roast has no template id — there is nothing to de-duplicate.
   if (text) return { text, templateId: null };
+  // Silent here is how this went unnoticed for months: HTTP 200, tokens billed, and the bank
+  // shipped anyway. Say what came back instead.
+  console.error(`[Roast] Empty reply for ${manager} — ${describeAnthropicReply(data)}`);
   return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
 }
 
@@ -16755,7 +16801,10 @@ Write the roast now. No preamble, no labels — just the roast.`;
       return fallbackWelcomeRoast(facts);
     }
     const data = await resp.json();
-    return (data.content && data.content[0] && data.content[0].text) || fallbackWelcomeRoast(facts);
+    const welcomeText = anthropicReplyText(data);
+    if (welcomeText) return welcomeText;
+    console.error(`[Welcome] Empty reply — ${describeAnthropicReply(data)}`);
+    return fallbackWelcomeRoast(facts);
   } catch (e) {
     console.error('[Welcome] Roast generation failed:', e.message);
     return fallbackWelcomeRoast(facts);

@@ -252,6 +252,7 @@ WMMC/
 │                          #   hypothetical.js — What If sandbox engine (pure, read-only)
 │                          #   seeding.js — pool-play seeding rule (real bracket + What If)
 │                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
+│                          #   anthropic.js — Messages API reply shape (never index content[0])
 │                          #   history.js — finished-season record + per-manager career facts
 │                          #   playoffCommentary.js — daily playoff post "Hot Takes" (server-only caller)
 │                          #   index.js — bridges module exports onto window for app.js

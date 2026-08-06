@@ -292,6 +292,33 @@ environment, both landing on their banks. So the 2026-08-03 entry reached a wron
 missing key` — was right about the logic and did not find the actual cause either. The cause is
 still open at the time of writing; `anthropic-check` exists to close it.
 
+**FOUND IT: `data.content[0].text`.** The improved logging paid for itself on the first re-roll —
+`[Hot Takes] Using the static bank: the API returned an empty reply`. HTTP 200, tokens billed, no
+text. The cause is that every Anthropic caller in this app read `data.content[0].text`, which
+assumes the first content block is the answer. **A model that emits a `thinking` block puts that at
+index 0**, so `content[0].text` is `undefined` and the caller falls back to its template bank
+having paid for a perfectly good reply.
+
+Four call sites had it: the Hot Takes, the elimination roasts, the season-opening draft roast, and
+(harmlessly) my own new diagnostic. Which resolves the thing this log has now been wrong about
+twice:
+
+- 2026-08-03 concluded "production has no `ANTHROPIC_API_KEY`" from roasts coming out of the bank.
+- 2026-08-06 (above) corrected that to "bank output doesn't prove a missing key" — right about the
+  logic, still didn't find the cause.
+- The cause was this, all along. The key was set and valid the whole time; `anthropic-check`
+  returned `ok: true`, 108-char key, model resolving, reply "OK".
+
+The reason the diagnostic passed while the real call failed is itself the lesson: a 4-token
+trivial prompt produces no thinking block, so `content[0]` IS the text. **A smoke test that
+exercises a simpler path than production does can confirm everything and prove nothing.**
+
+Fixed in `js/anthropic.js` (canonical, tested, mirrored): `anthropicReplyText` walks the whole
+`content` array and joins every text block, and `describeAnthropicReply` reports block types,
+`stop_reason` and token usage so an empty reply is never again unattributable. `max_tokens` on the
+commentary went 600 → 4000, because thinking spends the same budget and at 600 the takes could be
+truncated before a single text block existed.
+
 **Line rules are gated on patterns, not incidents.** "He has never reached a Final" fires at 4+
 seasons; "he always goes out in the quarterfinals" needs 3+ QF exits AND the current round to be
 the quarterfinals. And in the Finals the two games mean opposite things — "this is the closest he
