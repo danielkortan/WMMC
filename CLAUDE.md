@@ -157,7 +157,6 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 ## Memory files
 
-- `MEMORY.md` — decisions log. Read at session start if it exists. Append on meaningful decisions and at session end.
-- `ERRORS.md` — what didn't work and what did. Check before proposing approaches to similar problems.
-
-(These files do not exist yet — create them when first needed.)
+- `MEMORY.md` — decisions log. Read at session start. Append on meaningful decisions and at session end. It opens with an **index of every entry ever written**, including the archived ones — read the index, then read only the entries you need.
+- `MEMORY-ARCHIVE.md` — the same log, for entries older than the cutoff at the top of `MEMORY.md`. Not read at session start. **Search it before concluding something is new or unexplored** — most "why is this like this" answers live here. When `MEMORY.md` grows unwieldy again, move the oldest entries across and regenerate the index; never delete an entry.
+- `ERRORS.md` — what didn't work and what did. Check before proposing approaches to similar problems. (Does not exist yet — create it when first needed.)
