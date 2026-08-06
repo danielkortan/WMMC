@@ -28,7 +28,6 @@ curl -X POST https://<host>/api/google-sheets/config \
         "enabled": true,
         "spreadsheet_id": "<google-sheet-id>",
         "api_key": "<google-api-key>",
-        "season": "<year>",
         "sync_time": "05:00"
       }'
 
@@ -49,17 +48,40 @@ whole off switch — `scheduleGSheetsSync` refuses to arm without `enabled` **an
 own. The MLB cutover also clears the flag itself (`server.js:3622`), which is why a healthy boot
 logs `[GSheets] Auto-sync not configured or disabled`.
 
-> **Never delete the `google_sheets_config` object to "turn off Google Sheets."** Despite the
-> name, `google_sheets_config.season` is the **app-wide current-season pointer**, not a
-> GSheets-only setting. The daily scoreboard post, the 4am MLB sync, the `/wmmc` slash command,
-> the boot-time player-pool seed, and the auto-advance scheduler all read the active season from
-> it. Removing the object leaves every one of them falling back to `new Date().getFullYear()`,
-> which silently points the app at a season that may not exist. Disable with
-> `"enabled": false`; leave the object in place.
+> This endpoint no longer accepts `season`, and `google_sheets_config` is now only about Google
+> Sheets. The app-wide current-season pointer used to live on it — see the next section — which
+> meant re-arming this fallback could repoint the whole app as a side effect, and a cleanup pass
+> aimed at the importer could take the season pointer with it. Both hazards are gone.
 
 The Google Sheet must have tabs named `Week 1 Batting`, `Week 1 Pitching`, etc. GSheets rows
 are tagged `source: 'gsheets'`; the MLB path tags `source: 'mlbapi'`. `dedupeWeeklyRows`
 reconciles any overlap, so running both at once is safe but not recommended.
+
+## The current-season pointer
+
+`db.active_season` is the app-wide "which season is live" pointer. The daily scoreboard post,
+the season welcome post, the 4am MLB sync, the `/wmmc` slash command, the boot-time player-pool
+seed and the auto-advance scheduler all resolve their season from it. Get it wrong and all six
+go quiet at once, without an error — each looks up `sd` and bails when it is missing.
+
+```bash
+# What is it now, and what seasons exist?
+curl https://<host>/api/admin/active-season
+
+# Repoint it (commissioner credentials required). Rejects a season that does not exist,
+# because pointing at a missing season silently disables all six automations.
+curl -X POST https://<host>/api/admin/active-season \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <commissioner-password>' \
+  -d '{ "season": "<year>" }'
+```
+
+If `active_season` is unset the server falls back to `db.google_sheets_config.season` (where this
+value lived until 2026-08) and then to the current calendar year. A db restored from an older
+Upstash backup arrives without `active_season`; the boot migration sets it from the legacy
+location on the next start, and the fallback covers the gap in the meantime. Both are logged as
+`[Season pointer] ...`.
 
 ## Storage / durability
 
