@@ -54,6 +54,14 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries js/anthropic.js verbatim', () => {
+    const canonical = canonicalTail(read('js/anthropic.js'), "// The assistant's text from a Messages API response");
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/anthropic.js — the reply-shape helpers must be identical in both'
+    );
+  });
+
   it('carries js/playoffCommentary.js verbatim', () => {
     const canonical = canonicalTail(
       read('js/playoffCommentary.js'),
