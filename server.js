@@ -1421,7 +1421,9 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // Playoff odds are a server-computed derived cache (4am sync / 7am post /
     // the recompute endpoint). Same defense as score_snapshots: always keep
     // the server's copy so a client save can never wipe or roll them back.
+    // `bracket_odds` is the same thing for a bracket round's final week.
     if (existingSd.playoff_odds) sd.playoff_odds = existingSd.playoff_odds;
+    if (existingSd.bracket_odds) sd.bracket_odds = existingSd.bracket_odds;
 
     // The day's Hot Takes are the same kind of thing: written server-side by the Slack post,
     // read by /wmmc so the slash command and the 7am post tell the same joke. A client save
@@ -4955,7 +4957,7 @@ function findUnderperformers(sd, round, managers, roundStartISO, todayISO, { lim
   if (!roundStartISO || !Array.isArray(managers) || managers.length === 0) return [];
 
   // Per-player game scores, split at the round boundary. Same per-game aggregation as
-  // collectPlayerGameScores (doubleheaders count once per game, not once per row).
+  // collectPlayerGameLog (doubleheaders count once per game, not once per row).
   const before = new Map();
   const during = new Map();
   const add = (bucket, name, key, score) => {
@@ -6325,15 +6327,22 @@ function computeDailyHighLow(sd, date) {
 }
 
 // ============================================================
-// Playoff odds (Monte-Carlo) — PP2 Week 4–5 only
+// Odds (Monte-Carlo) — pool play's last two weeks, and each bracket round's last week
 // ============================================================
-// Simulates every manager's remaining PP2 production (per-player per-game
-// scoring rates x their team's remaining MLB games) and applies the exact
-// qualification rules — win your pool's PP1 or PP2 period, or take a
-// wildcard on combined total — to each simulated season. Results are stored
-// on the season as `sd.playoff_odds` (a derived cache, like the weekly
-// rollups: rebuilt daily, never authoritative for anything) so the
-// scoreboard UI and the Slack post always read identical numbers.
+// One projection engine, two questions. It simulates every manager's remaining
+// production (per-player per-game scoring rates x their team's remaining MLB
+// games x how often the player actually appears in one) and then asks either:
+//
+//   * PP2 Weeks 4-5 — apply the exact qualification rules (win your pool's PP1
+//     or PP2 period, or take a wildcard on combined total) to each simulated
+//     season, and report who makes the 8-team bracket. Stored as
+//     `sd.playoff_odds`.
+//   * QF/SF/Finals Week 2 — play each head-to-head matchup out and report who
+//     wins it. Stored as `sd.bracket_odds`.
+//
+// Both are derived caches, like the weekly rollups: rebuilt daily, never
+// authoritative for anything, so the scoreboard UI and the Slack post always
+// read identical numbers instead of each deriving their own.
 //
 // The pure engine below (ODDS_WINDOW through formatOddsPct) is a synced copy
 // of js/playoffOdds.js — the canonical, unit-tested version lives there.
@@ -6360,6 +6369,25 @@ function oddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCHEDULE) 
   };
 }
 
+// The bracket rounds that get head-to-head odds in their FINAL week. Pool play
+// keeps its own two-week window above; these get one, because a playoff round
+// is only two weeks long to begin with.
+const BRACKET_ODDS_ROUNDS = ['QF', 'SF', 'Finals'];
+
+function bracketOddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCHEDULE) {
+  if (!Array.isArray(scheduleDates) || !todayISO) return null;
+  for (let i = 0; i < schedule.length; i++) {
+    const entry = schedule[i];
+    if (!BRACKET_ODDS_ROUNDS.includes(entry.round)) continue;
+    if (i + 1 < schedule.length && schedule[i + 1].round === entry.round) continue;
+    const dates = scheduleDates[i] || {};
+    if (!dates.start || !dates.end) continue;
+    if (todayISO < dates.start || todayISO > dates.end) continue;
+    return { round: entry.round, week: entry.week, start: dates.start, end: dates.end };
+  }
+  return null;
+}
+
 function meanVariance(xs) {
   const arr = Array.isArray(xs) ? xs.filter((x) => typeof x === 'number' && !Number.isNaN(x)) : [];
   const n = arr.length;
@@ -6378,6 +6406,22 @@ function playerGameRate(gameScores, baseline = { mean: 0, variance: 0 }, k = 5) 
   const ownVar = n >= 2 ? sVar : bVar;
   const variance = (ownVar * n + bVar * k) / (n + k || 1);
   return { mean, variance, games: n };
+}
+
+// ---- Appearance rate: "his team has 12 games left" is not "he has 12 left" ----
+// A per-game scoring rate is a rate per APPEARANCE, so multiplying it by a team's
+// remaining games projects a starting pitcher to take every turn. This is the
+// correction — the player's own observed appearances over the same span, shrunk
+// toward a positional prior so someone with almost no history lands on the prior.
+const APPEARANCE_PRIORS = { batter: 0.85, pitcher: 0.3 };
+const APPEARANCE_RATE_FLOOR = 0.05;
+
+function expectedAppearanceRate(appearances, teamGamesInSpan, prior = APPEARANCE_PRIORS.batter, k = 8) {
+  const played = typeof appearances === 'number' && appearances > 0 ? appearances : 0;
+  const span = typeof teamGamesInSpan === 'number' && teamGamesInSpan > 0 ? teamGamesInSpan : 0;
+  if (!span) return prior;
+  const rate = (played + k * prior) / (span + k);
+  return Math.min(1, Math.max(APPEARANCE_RATE_FLOOR, rate));
 }
 
 // ---- Schedule-context adjustments (opponent quality, home/away, park factor) ----
@@ -6472,11 +6516,13 @@ function projectManager(playerProjections) {
   let games = 0;
   for (const p of playerProjections || []) {
     const factors = Array.isArray(p.gameFactors) ? p.gameFactors : [];
+    const rate = typeof p.appearanceRate === 'number' ? Math.min(1, Math.max(0, p.appearanceRate)) : 1;
     const sumFactors = factors.reduce((s, f) => s + f, 0);
     const sumFactorsSq = factors.reduce((s, f) => s + f * f, 0);
-    mean += (p.mean || 0) * sumFactors;
-    variance += (p.variance || 0) * sumFactorsSq;
-    games += factors.length;
+    const playerMean = p.mean || 0;
+    mean += playerMean * rate * sumFactors;
+    variance += (rate * (p.variance || 0) + rate * (1 - rate) * playerMean * playerMean) * sumFactorsSq;
+    games += factors.length * rate;
   }
   return { mean, variance, games };
 }
@@ -6538,6 +6584,7 @@ function makeNormalSampler(rng = Math.random) {
   return function normal() {
     let u = 0;
     let v = 0;
+    // Guard against rng() returning exactly 0 (log(0) = -Infinity).
     while (u === 0) u = rng();
     while (v === 0) v = rng();
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
@@ -6635,6 +6682,51 @@ function simulatePlayoffOdds({
   return { sims, managers };
 }
 
+function simulateBracketOdds({
+  pairs,
+  totals = {},
+  projections = {},
+  seedRank = {},
+  sims = ODDS_DEFAULT_SIMS,
+  rng = Math.random,
+}) {
+  const normal = makeNormalSampler(rng);
+  const matchups = (pairs || []).filter((p) => p && p.a && p.b);
+  const counts = {};
+  const played = {};
+  for (const p of matchups) {
+    for (const name of [p.a, p.b]) {
+      if (!(name in counts)) counts[name] = 0;
+      played[name] = (played[name] || 0) + 1;
+    }
+  }
+
+  const draw = (name) => {
+    const proj = projections[name] || {};
+    const mean = proj.mean || 0;
+    const sd = Math.sqrt(Math.max(0, proj.variance || 0));
+    return (totals[name] || 0) + (sd > 0 ? mean + sd * normal() : mean);
+  };
+
+  for (let s = 0; s < sims; s++) {
+    for (const p of matchups) {
+      const aScore = draw(p.a);
+      const bScore = draw(p.b);
+      let winner;
+      if (aScore !== bScore) winner = aScore > bScore ? p.a : p.b;
+      else winner = (seedRank[p.a] ?? Infinity) <= (seedRank[p.b] ?? Infinity) ? p.a : p.b;
+      counts[winner]++;
+    }
+  }
+
+  const managers = {};
+  for (const name of Object.keys(counts)) {
+    const denom = sims * (played[name] || 1);
+    managers[name] = { advance: denom > 0 ? counts[name] / denom : 0 };
+  }
+  return { sims, managers };
+}
+
 function formatOddsPct(fraction, locked = false) {
   if (locked) return '100%';
   const pct = fraction * 100;
@@ -6645,30 +6737,46 @@ function formatOddsPct(fraction, locked = false) {
 
 // ---- Server-only glue (not part of the synced pure engine) ----
 
-// Per-player per-game season scores from the daily rows. Batting and
-// pitching deltas for the same game (two-way players) merge into one score.
-// Rows without a game_id (manual/gsheets imports) fall back to keying by
-// date so they still count as one appearance.
-function collectPlayerGameScores(sd) {
+// Per-player per-game season scores from the daily rows, plus the date of the
+// player's first appearance. Batting and pitching deltas for the same game
+// (two-way players) merge into one score. Rows without a game_id (manual/
+// gsheets imports) fall back to keying by date so they still count as one
+// appearance.
+//
+// `firstDate` is what lets expectedAppearanceRate divide by the right span: a
+// July call-up has played every game since he arrived, and measuring him
+// against the whole season would file him as a part-timer.
+// Returns { games: Map(name -> { scores, firstDate }), scoringDates: string[] }
+// where scoringDates is every distinct date the season has stats for, ascending
+// — the calendar teamGamesInSpan counts a player's span in days off.
+function collectPlayerGameLog(sd) {
   const perGame = new Map(); // name -> Map(gameKey -> score)
-  const add = (name, key, score) => {
+  const firstDate = new Map();
+  const dates = new Set();
+  const add = (name, key, score, date) => {
     if (!perGame.has(name)) perGame.set(name, new Map());
     const games = perGame.get(name);
     games.set(key, (games.get(key) || 0) + score);
+    if (date) {
+      dates.add(date);
+      if (!firstDate.has(name) || date < firstDate.get(name)) firstDate.set(name, date);
+    }
   };
   for (const r of sd.daily_batting || []) {
     const stats = r.delta || r.cumulative;
     if (!r.batter || !stats) continue;
-    add(r.batter, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculateBattingScore(stats));
+    add(r.batter, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculateBattingScore(stats), r.date);
   }
   for (const r of sd.daily_pitching || []) {
     const stats = r.delta || r.cumulative;
     if (!r.pitcher || !stats) continue;
-    add(r.pitcher, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculatePitchingScore(stats));
+    add(r.pitcher, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculatePitchingScore(stats), r.date);
   }
-  const out = new Map();
-  for (const [name, games] of perGame) out.set(name, [...games.values()]);
-  return out;
+  const games = new Map();
+  for (const [name, byKey] of perGame) {
+    games.set(name, { scores: [...byKey.values()], firstDate: firstDate.get(name) || null });
+  }
+  return { games, scoringDates: [...dates].sort() };
 }
 
 // A manager's active PP2 roster as of `todayISO`, derived from the
@@ -6774,6 +6882,110 @@ async function fetchTeamSeasonQuality(season, idToAbbrev) {
   return out; // { [abbrev]: { era?, runsPerGame? } }
 }
 
+// How many games a player's team played over the stretch we have stats for HIM
+// — the denominator his appearance rate needs, and the one number that has to
+// be measured over the SAME span as the numerator.
+//
+// That rules out the team's MLB season game count, which was the obvious
+// choice and is wrong: MLB starts in late March and the WMMC season starts in
+// May, so a full-season denominator over a WMMC-season numerator files every
+// everyday bat in the league as a part-timer. Instead, take the league's
+// current games-per-day off the remaining schedule (which is measured, not
+// assumed) and apply it to the days we actually have stats for this player.
+// Both halves then cover the same calendar.
+//
+// Returns 0 ("unknown", so expectedAppearanceRate falls back to the positional
+// prior) when there is no schedule to read a rate from.
+function teamGamesInSpan(firstDate, scoringDates, gamesPerDay) {
+  if (!(gamesPerDay > 0) || !scoringDates.length) return 0;
+  const spanDays = firstDate ? scoringDates.filter((d) => d >= firstDate).length : scoringDates.length;
+  return Math.max(1, Math.round(spanDays * gamesPerDay));
+}
+
+// The three MLB fetches both odds computes need, in one place.
+//
+// The id map and the team season stats fail safe to neutral: a bad response
+// leaves that one signal at 1.0 for the affected teams and the compute carries
+// on. The remaining-schedule fetch deliberately does NOT — it is the spine of
+// the whole projection, and without it there is no honest number to publish, so
+// it throws and the caller logs and skips the day (long-standing behavior).
+async function fetchOddsScheduleContext(todayISO, endISO, year) {
+  let idToAbbrev = {};
+  try {
+    idToAbbrev = await fetchTeamIdAbbrevMap();
+  } catch (e) {
+    console.error('[PlayoffOdds] Team id/abbrev map fetch failed (adjustments neutral):', e.message);
+  }
+  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, endISO, idToAbbrev);
+  const teamStats = await fetchTeamSeasonQuality(year, idToAbbrev);
+  const teamQuality = computeTeamQualityFactors(teamStats);
+  const teamCounts = Object.values(remainingByTeam).map((g) => g.length);
+  const avgRemaining = teamCounts.length > 0 ? teamCounts.reduce((a, b) => a + b, 0) / teamCounts.length : 0;
+
+  // League-wide games per calendar day, measured across every team so one club's
+  // off-day can't skew it, then clamped to the range a real MLB schedule lives in
+  // (a team plays at most once a day and rarely fewer than five times a week). On
+  // the last day of a round the window is a single day, which is exactly when an
+  // unclamped rate would be noisiest.
+  const days = Math.max(
+    1,
+    Math.round((Date.parse(`${endISO}T12:00:00Z`) - Date.parse(`${todayISO}T12:00:00Z`)) / 86400000) + 1
+  );
+  const gamesPerDay = avgRemaining > 0 ? Math.min(1, Math.max(0.6, avgRemaining / days)) : 0;
+
+  return { remainingByTeam, teamStats, teamQuality, avgRemaining, gamesPerDay };
+}
+
+// Everything the per-manager projection depends on that is NOT the roster —
+// assembled once per compute and reused for every manager. Keeping it in one
+// object is what lets the pool-play and bracket computes share the projection
+// step verbatim instead of each growing its own copy of it.
+function buildOddsContext(sd, schedule) {
+  const { games: gameLog, scoringDates } = collectPlayerGameLog(sd);
+  const allScores = [];
+  for (const log of gameLog.values()) allScores.push(...log.scores);
+  return {
+    gameLog,
+    scoringDates,
+    baseline: meanVariance(allScores),
+    batPoolSet: new Set(sd.batters_pool || []),
+    battersTeam: sd.batters_team || {},
+    pitchersTeam: sd.pitchers_team || {},
+    ...schedule,
+  };
+}
+
+// One manager's active roster -> the { mean, variance, games } projection
+// simulatePlayoffOdds/simulateBracketOdds draw from, plus the average schedule
+// factor the stored payload reports. Shared by both computes: given these
+// players and this remaining schedule, what do they produce?
+function projectRosterForOdds(roster, ctx) {
+  const perPlayer = roster.map((player) => {
+    const log = ctx.gameLog.get(player) || { scores: [], firstDate: null };
+    const rate = playerGameRate(log.scores, ctx.baseline);
+    const team = ctx.battersTeam[player] || ctx.pitchersTeam[player] || null;
+    const playerType = ctx.batPoolSet.has(player) ? 'batter' : 'pitcher';
+    const games = team && ctx.remainingByTeam[team];
+    // No team (unknown player -> team mapping) means no schedule to read, so
+    // give him the league's average number of remaining games at neutral 1.0
+    // rather than zero — he plays, we just can't say against whom or where.
+    const gameFactors = games
+      ? games.map((g) => gameFactor(playerType, g, ctx.teamQuality))
+      : Array.from({ length: Math.round(ctx.avgRemaining) }, () => 1);
+    const appearanceRate = expectedAppearanceRate(
+      log.scores.length,
+      teamGamesInSpan(log.firstDate, ctx.scoringDates, ctx.gamesPerDay),
+      APPEARANCE_PRIORS[playerType]
+    );
+    return { mean: rate.mean, variance: rate.variance, gameFactors, appearanceRate };
+  });
+  const allFactors = perPlayer.flatMap((p) => p.gameFactors);
+  return {
+    projection: projectManager(perPlayer),
+    scheduleFactor: allFactors.length ? allFactors.reduce((a, b) => a + b, 0) / allFactors.length : 1,
+  };
+}
+
 // Compute the full odds payload for one season, or null when outside the
 // PP2 Week 4–5 window (or pool play is already finalized / pools missing).
 // Managers come from db.managers (the canonical list), scores from
@@ -6799,45 +7011,14 @@ async function computePlayoffOddsForSeason(db, sd, todayISO, year) {
     pp2: pp2Totals[m.name] || 0,
   }));
 
-  const gameScores = collectPlayerGameScores(sd);
-  const allScores = [];
-  for (const scores of gameScores.values()) allScores.push(...scores);
-  const baseline = meanVariance(allScores);
-
-  // Schedule-context signals (opponent quality, home/away, park factor). Each
-  // fetch fails safe to neutral — a bad response never blocks the nightly
-  // compute, it just leaves that one signal at 1.0 for the affected teams.
-  let idToAbbrev = {};
-  try {
-    idToAbbrev = await fetchTeamIdAbbrevMap();
-  } catch (e) {
-    console.error('[PlayoffOdds] Team id/abbrev map fetch failed (adjustments neutral):', e.message);
-  }
-  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, window.end, idToAbbrev);
-  const teamStats = await fetchTeamSeasonQuality(year, idToAbbrev);
-  const teamQuality = computeTeamQualityFactors(teamStats);
-  const batPoolSet = new Set(sd.batters_pool || []);
-
-  const teamCounts = Object.values(remainingByTeam).map((g) => g.length);
-  const avgRemaining = teamCounts.length > 0 ? teamCounts.reduce((a, b) => a + b, 0) / teamCounts.length : 0;
+  const ctx = buildOddsContext(sd, await fetchOddsScheduleContext(todayISO, window.end, year));
 
   const projections = {};
   const avgFactorByManager = {};
   for (const m of managers) {
-    const roster = activeRosterForOdds(sd, m.name, todayISO);
-    const perPlayer = roster.map((player) => {
-      const rate = playerGameRate(gameScores.get(player) || [], baseline);
-      const team = (sd.batters_team || {})[player] || (sd.pitchers_team || {})[player] || null;
-      const playerType = batPoolSet.has(player) ? 'batter' : 'pitcher';
-      const games = team && remainingByTeam[team];
-      const gameFactors = games
-        ? games.map((g) => gameFactor(playerType, g, teamQuality))
-        : Array.from({ length: Math.round(avgRemaining) }, () => 1);
-      return { mean: rate.mean, variance: rate.variance, gameFactors };
-    });
-    projections[m.name] = projectManager(perPlayer);
-    const allFactors = perPlayer.flatMap((p) => p.gameFactors);
-    avgFactorByManager[m.name] = allFactors.length ? allFactors.reduce((a, b) => a + b, 0) / allFactors.length : 1;
+    const { projection, scheduleFactor } = projectRosterForOdds(activeRosterForOdds(sd, m.name, todayISO), ctx);
+    projections[m.name] = projection;
+    avgFactorByManager[m.name] = scheduleFactor;
   }
 
   const sim = simulatePlayoffOdds({ entries, projections });
@@ -7086,15 +7267,134 @@ function playoffMatchupResultForRoast(sd, round, manager) {
   };
 }
 
+// ============================================================
+// Bracket odds — head-to-head, in the final week of QF / SF / Finals
+// ============================================================
+// The pool-play odds answered "does he make the bracket". Once the bracket is
+// running there is only one question left, and it is a two-body problem: does
+// he beat the guy across from him. Same projections, same schedule-context
+// adjustments, same appearance rates — the pairings come from
+// computePlayoffPairs, so these numbers can never be about a matchup the
+// scoreboard doesn't show.
+//
+// Returns null outside a bracket round's last week, or before pool play has
+// been ended in the app (no confirmed_seeding -> no pairings to simulate).
+async function computeBracketOddsForSeason(sd, todayISO, year) {
+  const window = bracketOddsWindowForDate(sd.schedule_dates || [], todayISO);
+  if (!window) return null;
+  if ((sd.finalized_rounds || []).includes(window.round)) return null;
+
+  const computed = computePlayoffPairs(sd, window.round);
+  if (!computed) return null;
+  const { pairs, score, seedRank } = computed;
+
+  const totals = {};
+  for (const p of pairs) {
+    for (const name of [p.a, p.b]) if (name) totals[name] = score(p.r, name).total;
+  }
+  const participants = Object.keys(totals);
+  if (participants.length === 0) return null;
+
+  const ctx = buildOddsContext(sd, await fetchOddsScheduleContext(todayISO, window.end, year));
+
+  const projections = {};
+  const scheduleFactors = {};
+  for (const name of participants) {
+    const { projection, scheduleFactor } = projectRosterForOdds(
+      activeRosterForOdds(sd, name, todayISO, window.round),
+      ctx
+    );
+    projections[name] = projection;
+    scheduleFactors[name] = scheduleFactor;
+  }
+
+  const sim = simulateBracketOdds({ pairs, totals, projections, seedRank });
+
+  const pct1 = (fraction) => Math.round(fraction * 1000) / 10;
+  const r1 = (x) => Math.round(x * 10) / 10;
+  const managersOut = {};
+  for (const p of pairs) {
+    for (const [name, opponent] of [
+      [p.a, p.b],
+      [p.b, p.a],
+    ]) {
+      if (!name) continue;
+      // Decided, not merely lopsided: the opponent has no games left to play and
+      // is behind, so no simulation is needed and the % becomes a padlock.
+      const opponentDone = opponent ? (projections[opponent] || {}).games < 0.5 : false;
+      managersOut[name] = {
+        advance_pct: pct1(sim.managers[name] ? sim.managers[name].advance : 0),
+        matchup: p.label,
+        opponent: opponent || null,
+        clinched: !!(opponentDone && totals[name] > (totals[opponent] || 0)),
+        proj_mean: r1(projections[name].mean),
+        games_remaining: Math.round(projections[name].games),
+        schedule_factor: Math.round((scheduleFactors[name] || 1) * 1000) / 1000,
+      };
+    }
+  }
+
+  return {
+    computed_at: new Date().toISOString(),
+    date: todayISO,
+    sims: sim.sims,
+    round: window.round,
+    week: window.week,
+    window: { start: window.start, end: window.end },
+    pairs: pairs.map((p) => ({ label: p.label, a: p.a, b: p.b })),
+    managers: managersOut,
+  };
+}
+
+// Compute-and-store on a FRESH db copy, exactly like ensureFreshPlayoffOdds:
+// its own read-modify-write so it can run after the 4am sync's write, or
+// standalone from the 7am post, without clobbering anything. No-ops outside a
+// bracket round's final week or when today's are already stored (unless forced).
+async function ensureFreshBracketOdds(year, opts = {}) {
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return null;
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (!opts.force && sd.bracket_odds && sd.bracket_odds.date === todayISO) return sd.bracket_odds;
+  const odds = await computeBracketOddsForSeason(sd, todayISO, year);
+  if (!odds) return null;
+  sd.bracket_odds = odds;
+  writeDB(db);
+  console.log(
+    `[BracketOdds] Computed ${year} ${odds.round} odds for ${todayISO} (${odds.sims} sims, trigger: ${opts.trigger || 'manual'})`
+  );
+  return odds;
+}
+
+// The stored bracket odds, but only when they are actually about the post being
+// built — today's date and this round. A stale payload (yesterday's, or the
+// previous round's, left behind by a restart that skipped a compute) is dropped
+// rather than shown, because a wrong % beside a live score is worse than none.
+function bracketOddsForPost(sd, todayISO, round) {
+  const odds = sd && sd.bracket_odds;
+  if (!odds || !odds.managers) return null;
+  if (odds.date !== todayISO || odds.round !== round) return null;
+  if ((sd.finalized_rounds || []).includes(round)) return null;
+  if (!bracketOddsWindowForDate(sd.schedule_dates || [], todayISO)) return null;
+  return odds;
+}
+
 // `dailyTotals` (optional): { manager: yesterday's points }, from computeDailyHighLow. When
 // supplied, each manager's line carries the day's movement right after their round total —
 // which is what turns a static leaderboard into "who actually gained ground overnight". The
 // Monday wrap-up post (`final: true`) never passes it: the round is over, so there is no
 // "yesterday" worth reporting inside it.
-function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals = null } = {}) {
+//
+// `advanceOdds` (optional): the stored bracket-odds payload (see bracketOddsForPost), which
+// puts each manager's odds to win his matchup right on his own line — the same place pool
+// play's odds sat, next to the name they belong to, and high enough in the post that Slack's
+// "View Full Message" fold can never swallow them. Also dropped when `final`: a finished
+// round's outcome is a fact, not a probability.
+function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals = null, advanceOdds = null } = {}) {
   const computed = computePlayoffPairs(sd, round);
   if (!computed) return null;
   const { pairs, score, seedRank } = computed;
+  const odds = final ? null : advanceOdds;
 
   const fmt = (n) => {
     const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -7106,7 +7406,11 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
       const s = score(r, name);
       const seedTag = seedRank[name] ? `(${seedRank[name]}) ` : '';
       const delta = dailyTotals && !final && name in dailyTotals ? ` (${fmtDelta(dailyTotals[name])})` : '';
-      const core = `${seedTag}${name} — ${fmt(s.total)}${delta}`;
+      const o = odds && odds.managers[name];
+      const oddsTag = o
+        ? ` \u{00B7} ${formatOddsPct(o.advance_pct / 100, o.clinched)}${o.clinched ? ' \u{1F512}' : ''}`
+        : '';
+      const core = `${seedTag}${name} — ${fmt(s.total)}${delta}${oddsTag}`;
       const mark = final ? (name === leader ? ' \u{2705}' : ' \u{274C}') : '';
       return `\u{25B8} ${name === leader ? `*${core}*` : core} _(B: ${fmt(s.batting)} | P: ${fmt(s.pitching)})_${mark}`;
     };
@@ -7128,10 +7432,19 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
     }
   }
 
+  // One legend line for the whole section, so eight matchup lines don't each have to
+  // explain themselves. Says what the % is AND what went into it — the factors are the
+  // reason to believe the number.
+  const oddsLegend = odds
+    ? `\n\n_\u{1F52E} % = odds to win this matchup, from ${odds.sims.toLocaleString('en-US')} simulated finishes` +
+      ` (games left, projected starts, opponent, park)\u{00A0}\u{00B7}\u{00A0}\u{1F512} = decided_`
+    : '';
+
   return (
     `${heading}\n\n` +
     pairs.map((p) => matchupText(p.label, p.r, p.a, p.b, p.leader)).join('\n\n') +
-    (footer ? `\n\n${footer}` : '')
+    (footer ? `\n\n${footer}` : '') +
+    oddsLegend
   );
 }
 
@@ -7288,6 +7601,10 @@ function buildScoreboardBlocks(db, year, opts = {}) {
     playoffText = buildPlayoffMatchupsSlackText(seasonData, currentRound, {
       final: !!summaryRound,
       dailyTotals: roundDailyTotals,
+      // Odds to advance, in the round's final week. Server-computed (4am sync / pre-post
+      // backstop) and only read here, so the % beside a manager and the score beside it
+      // come from the same pass — /wmmc shows whatever the morning already computed.
+      advanceOdds: bracketOddsForPost(seasonData, todayISO, currentRound),
     });
     if (!playoffText) {
       // No confirmed_seeding snapshot yet (pool play not ended in the app) — degrade to a
@@ -13562,10 +13879,12 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   }
 });
 
-// POST /api/seasons/:year/playoff-odds/recompute — recompute & store playoff
-// odds on demand (the 4am sync and the 7am scoreboard post refresh them
-// automatically). 409 outside the PP2 Week 4–5 window or once pool play is
-// finalized — there is nothing meaningful to compute then.
+// POST /api/seasons/:year/playoff-odds/recompute — recompute & store the odds
+// on demand (the 4am sync and the 7am scoreboard post refresh them
+// automatically). Recomputes whichever window today is in: pool play's during
+// PP2 Weeks 4–5, the head-to-head bracket odds in a QF/SF/Finals final week.
+// 409 when today is in neither, or the round is already finalized — there is
+// nothing meaningful to compute then.
 app.post('/api/seasons/:year/playoff-odds/recompute', requireCommissioner, async (req, res) => {
   const { year } = req.params;
   if (!(readDB().seasons || {})[year]) {
@@ -13573,15 +13892,28 @@ app.post('/api/seasons/:year/playoff-odds/recompute', requireCommissioner, async
   }
   try {
     const odds = await ensureFreshPlayoffOdds(year, { force: true, trigger: 'manual' });
-    if (!odds) {
+    const bracketOdds = await ensureFreshBracketOdds(year, { force: true, trigger: 'manual' });
+    if (!odds && !bracketOdds) {
       return res.status(409).json({
-        error: 'Playoff odds are only computed during PP2 Weeks 4–5, before pool play is finalized.',
+        error:
+          'Odds are only computed during PP2 Weeks 4–5 or the final week of a playoff round, ' +
+          'before that round is finalized.',
       });
     }
     const db = readDB();
-    addAuditEntry(db, 'playoff_odds_recompute', { year, date: odds.date, sims: odds.sims }, req.get('X-User-Email'));
+    addAuditEntry(
+      db,
+      'playoff_odds_recompute',
+      {
+        year,
+        date: (odds || bracketOdds).date,
+        sims: (odds || bracketOdds).sims,
+        kind: odds ? 'pool_play' : `bracket_${bracketOdds.round}`,
+      },
+      req.get('X-User-Email')
+    );
     writeDB(db);
-    res.json({ ok: true, odds });
+    res.json({ ok: true, odds: odds || null, bracketOdds: bracketOdds || null });
   } catch (e) {
     console.error('[PlayoffOdds] Manual recompute failed:', e.message);
     res.status(500).json({ error: e.message });
@@ -17239,6 +17571,12 @@ function scheduleScoreboardPost() {
             console.error('[PlayoffOdds] Pre-post odds compute failed (continuing):', e.message);
             return null;
           })
+          .then(() =>
+            ensureFreshBracketOdds(season, { trigger: '7am-scoreboard' }).catch((e) => {
+              console.error('[BracketOdds] Pre-post odds compute failed (continuing):', e.message);
+              return null;
+            })
+          )
           // Vet the numbers about to be posted against the stats they come from. The post goes out
           // either way (a silent wrong scoreboard is worse than a flagged one) — but the
           // commissioner gets told, instead of finding out hours later from a manager.
@@ -17559,6 +17897,15 @@ function scheduleMLBApiSync() {
           await ensureFreshPlayoffOdds(season, { force: true, trigger: 'auto-4am' });
         } catch (e) {
           console.error('[PlayoffOdds] 4am odds compute failed (continuing):', e.message);
+        }
+
+        // ...and the head-to-head odds for a bracket round's final week, on the same
+        // terms. Only one of the two ever produces anything on a given day — the
+        // windows can't overlap — so this is a no-op for most of the season.
+        try {
+          await ensureFreshBracketOdds(season, { force: true, trigger: 'auto-4am' });
+        } catch (e) {
+          console.error('[BracketOdds] 4am odds compute failed (continuing):', e.message);
         }
       }
     } catch (e) {

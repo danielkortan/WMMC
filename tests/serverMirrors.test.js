@@ -83,4 +83,29 @@ describe('server.js mirrors of js/ modules', () => {
   it('carries normalizeName from js/utils.js verbatim (the pre-existing pair)', () => {
     assert.equal(extractFunction(SERVER, 'normalizeName'), extractFunction(read('js/utils.js'), 'normalizeName'));
   });
+
+  // The odds engine is the oldest untested mirror pair in the repo. These are the functions
+  // whose two copies are byte-identical — the rest of the engine (computeTeamQualityFactors,
+  // gameFactor) differs only in the name of the local clamp helper, which server.js has to
+  // call oddsClamp because a `clamp` already lives at its top level.
+  for (const name of [
+    'bracketOddsWindowForDate',
+    'expectedAppearanceRate',
+    'projectManager',
+    'simulateBracketOdds',
+    'simulatePlayoffOdds',
+    'playerGameRate',
+    'meanVariance',
+    'currentQualification',
+    'makeNormalSampler',
+    'formatOddsPct',
+  ]) {
+    it(`carries ${name} from js/playoffOdds.js verbatim`, () => {
+      assert.equal(
+        extractFunction(SERVER, name),
+        extractFunction(read('js/playoffOdds.js'), name),
+        `server.js has drifted from js/playoffOdds.js in ${name} — the odds engine must be identical in both`
+      );
+    });
+  }
 });

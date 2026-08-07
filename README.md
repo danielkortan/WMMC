@@ -10,7 +10,8 @@ A full-stack fantasy baseball league management application with multi-season su
 - **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
-- **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
+- **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games × how often that player actually appears in one, adjusted for opponent quality, home/away and park factor, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
+- **Odds to Advance** — In the final week of each bracket round (QF/SF/Finals Week 2), the same engine plays each head-to-head matchup out instead and puts every manager's odds to win it beside their name on the daily Slack post's matchup lines
 - **Hypothetical Zone ("What If")** — A read-only sandbox for every manager. The **Scoring Lab** changes what any stat is worth (including three batting stats and one pitching stat that are recorded but currently unscored) and rescores the standings instantly. The **Roster Lab** swaps who a manager started for a whole period and shows it beside what they actually had, side by side, then reports whether the change alters who makes the playoffs (using the league's real seeding rule). A manager who never reached a round can enter a roster for it to score the round they didn't play. The **Player Explorer** looks up any player who recorded a stat — rostered or not — with a per-game log, per-round totals scored both ways, and who actually held him. The **Playoff Picture** shows pool play by pool with each period's winners and the wild cards, then re-seeds and re-pairs the bracket under the scenario; where a promoted manager never played a round it says so rather than inventing a result. Runs entirely in the browser against a snapshot — no write path to league data, and an unmodified scenario reproduces the live scoreboard exactly. Scenarios are shareable by link
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
@@ -133,14 +134,14 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Seasons
 
-| Method   | Endpoint                                    | Description                                                           |
-| -------- | ------------------------------------------- | --------------------------------------------------------------------- |
-| `GET`    | `/api/seasons`                              | All seasons keyed by year.                                            |
-| `POST`   | `/api/seasons`                              | Replace the entire seasons map.                                       |
-| `POST`   | `/api/seasons/:year`                        | Save a single season.                                                 |
-| `DELETE` | `/api/seasons/:year/week-data`              | Wipe a single week's uploaded stats for a season.                     |
-| `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                 |
-| `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store playoff odds now (only valid during PP2 Weeks 4–5). |
+| Method   | Endpoint                                    | Description                                                                                                                  |
+| -------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/seasons`                              | All seasons keyed by year.                                                                                                   |
+| `POST`   | `/api/seasons`                              | Replace the entire seasons map.                                                                                              |
+| `POST`   | `/api/seasons/:year`                        | Save a single season.                                                                                                        |
+| `DELETE` | `/api/seasons/:year/week-data`              | Wipe a single week's uploaded stats for a season.                                                                            |
+| `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                                                                        |
+| `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store odds now — pool-play odds during PP2 Weeks 4–5, head-to-head bracket odds in a playoff round's final week. |
 
 ### Player Dates & Daily Stats
 
