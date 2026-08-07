@@ -1,13 +1,19 @@
 // ============================================================
 // WMMC — Playoff-odds engine (pure)
 // ============================================================
-// Monte-Carlo playoff odds for the final stretch of pool play. The engine
-// simulates every manager's remaining PP2 production (per-player per-game
-// scoring rates x that player's team's remaining MLB games), applies the
-// league's exact qualification rules to each simulated season — win your
-// pool's PP1 or PP2 period, or take a wildcard on combined total — and
-// reports the fraction of simulations in which each manager makes the
-// 8-team bracket.
+// Monte-Carlo odds for the stretch run of a round. The engine simulates every
+// manager's remaining production (per-player per-game scoring rates x that
+// player's team's remaining MLB games x how often he actually plays in one)
+// and then asks the question the round is actually about:
+//
+//   * Pool play (PP2 Weeks 4-5) — apply the league's exact qualification
+//     rules to each simulated season (win your pool's PP1 or PP2 period, or
+//     take a wildcard on combined total) and report the fraction of
+//     simulations in which each manager makes the 8-team bracket.
+//   * A bracket round's final week (QF/SF/Finals Week 2) — play each
+//     head-to-head matchup out and report the fraction of simulations each
+//     side wins it. Same projections, same schedule-context adjustments; the
+//     only difference is what counts as success.
 //
 // Everything here is pure and unit-tested (tests/playoffOdds.test.js).
 // NOTE: a synced copy of these functions lives in server.js (the only
@@ -48,6 +54,30 @@ export function oddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCH
   };
 }
 
+// The bracket rounds that get head-to-head odds in their FINAL week. Pool play
+// keeps its own two-week window above; these get one, because a playoff round
+// is only two weeks long to begin with.
+export const BRACKET_ODDS_ROUNDS = ['QF', 'SF', 'Finals'];
+
+// Returns the active bracket-odds window for `todayISO`, or null when today is
+// not inside the last scheduled week of a QF/SF/Finals round. "Last week" is
+// read off the schedule itself (the last entry carrying that round) rather than
+// hardcoded to 'Week 2', so adding a third week to a round moves the window
+// with it instead of silently pointing at the wrong one.
+export function bracketOddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCHEDULE) {
+  if (!Array.isArray(scheduleDates) || !todayISO) return null;
+  for (let i = 0; i < schedule.length; i++) {
+    const entry = schedule[i];
+    if (!BRACKET_ODDS_ROUNDS.includes(entry.round)) continue;
+    if (i + 1 < schedule.length && schedule[i + 1].round === entry.round) continue;
+    const dates = scheduleDates[i] || {};
+    if (!dates.start || !dates.end) continue;
+    if (todayISO < dates.start || todayISO > dates.end) continue;
+    return { round: entry.round, week: entry.week, start: dates.start, end: dates.end };
+  }
+  return null;
+}
+
 // Sample mean and (n-1) sample variance. Empty input -> zeros.
 export function meanVariance(xs) {
   const arr = Array.isArray(xs) ? xs.filter((x) => typeof x === 'number' && !Number.isNaN(x)) : [];
@@ -72,6 +102,31 @@ export function playerGameRate(gameScores, baseline = { mean: 0, variance: 0 }, 
   const ownVar = n >= 2 ? sVar : bVar;
   const variance = (ownVar * n + bVar * k) / (n + k || 1);
   return { mean, variance, games: n };
+}
+
+// ============================================================
+// Appearance rate — "his team has 12 games left" is not "he has 12 games left"
+// ============================================================
+// A per-game scoring rate is a rate per APPEARANCE, so multiplying it by a
+// team's remaining games projects a starting pitcher to take every turn and a
+// platoon bat to start every day. `expectedAppearanceRate` is the correction:
+// the player's own observed appearances over the same span, shrunk toward a
+// positional prior by `k` pseudo-team-games so someone with almost no history
+// (a call-up, a man back off the IL) lands on the prior instead of on 0 or 1.
+//
+// A starter taking every fifth turn sits near 0.2; an everyday bat near 0.9; a
+// reliever in between. With no usable denominator — the team schedule fetch
+// failed, so we don't know how many games the span even held — the prior is
+// the honest answer, and a far better one than 1.0.
+export const APPEARANCE_PRIORS = { batter: 0.85, pitcher: 0.3 };
+export const APPEARANCE_RATE_FLOOR = 0.05;
+
+export function expectedAppearanceRate(appearances, teamGamesInSpan, prior = APPEARANCE_PRIORS.batter, k = 8) {
+  const played = typeof appearances === 'number' && appearances > 0 ? appearances : 0;
+  const span = typeof teamGamesInSpan === 'number' && teamGamesInSpan > 0 ? teamGamesInSpan : 0;
+  if (!span) return prior;
+  const rate = (played + k * prior) / (span + k);
+  return Math.min(1, Math.max(APPEARANCE_RATE_FLOOR, rate));
 }
 
 // ============================================================
@@ -188,23 +243,34 @@ export function gameFactor(playerType, game, teamQuality = {}, parkFactors = PAR
 }
 
 // Aggregate per-player rates into one manager's remaining-production
-// projection. Each entry: { mean, variance, gameFactors } where gameFactors
-// is one schedule-adjustment multiplier (see gameFactor) per remaining game
-// — its LENGTH is that player's games remaining. All-neutral (1.0) factors
-// reduce this to the pre-phase-2 `mean * gamesRemaining` behavior. Means
-// scale linearly with each game's factor; variances scale with the factor
-// SQUARED, since Var(sum ci*Xi) = sum(ci^2 * Var(Xi)) for independent Xi.
+// projection. Each entry: { mean, variance, gameFactors, appearanceRate }.
+// `gameFactors` is one schedule-adjustment multiplier (see gameFactor) per
+// remaining TEAM game — its LENGTH is the player's team's games remaining, not
+// his own. `appearanceRate` (see expectedAppearanceRate; default 1) is the
+// probability he actually plays in any one of them.
+//
+// Each remaining game therefore contributes B*f*S with B ~ Bernoulli(p) and S
+// the per-appearance score, so by the law of total variance:
+//   E[X]   = p * f * mean
+//   Var[X] = f^2 * (p * variance + p(1-p) * mean^2)
+// The second variance term is the appearance risk itself — for a pitcher who
+// may get two starts or three, that IS most of the uncertainty, and dropping
+// it is what makes a rotation look like a sure thing. p = 1 reduces the whole
+// thing exactly to the previous behavior (mean * sum(f), variance * sum(f^2)),
+// and `games` becomes EXPECTED appearances rather than team games.
 export function projectManager(playerProjections) {
   let mean = 0;
   let variance = 0;
   let games = 0;
   for (const p of playerProjections || []) {
     const factors = Array.isArray(p.gameFactors) ? p.gameFactors : [];
+    const rate = typeof p.appearanceRate === 'number' ? Math.min(1, Math.max(0, p.appearanceRate)) : 1;
     const sumFactors = factors.reduce((s, f) => s + f, 0);
     const sumFactorsSq = factors.reduce((s, f) => s + f * f, 0);
-    mean += (p.mean || 0) * sumFactors;
-    variance += (p.variance || 0) * sumFactorsSq;
-    games += factors.length;
+    const playerMean = p.mean || 0;
+    mean += playerMean * rate * sumFactors;
+    variance += (rate * (p.variance || 0) + rate * (1 - rate) * playerMean * playerMean) * sumFactorsSq;
+    games += factors.length * rate;
   }
   return { mean, variance, games };
 }
@@ -379,6 +445,64 @@ export function simulatePlayoffOdds({
       lockedPP1: pp1WinnerIdx.has(i),
     };
   });
+  return { sims, managers };
+}
+
+// Monte-Carlo odds to WIN A HEAD-TO-HEAD MATCHUP — the bracket's version of
+// the question simulatePlayoffOdds asks about pool play. Same projections and
+// the same draw; the only difference is that success is beating one specific
+// opponent instead of clearing a qualification bar.
+//   pairs:       [{ label, a, b }] — the round's matchups (see computePlayoffPairs).
+//   totals:      { [manager]: current round total } — drop-aware, as scored.
+//   projections: { [manager]: { mean, variance } } — remaining production.
+//   seedRank:    { [manager]: seed } — a simulated exact tie goes to the better
+//                seed, which is the same rule the live bracket applies.
+// Returns { sims, managers: { [name]: { advance } } } with advance a fraction
+// (0..1). Every round pairs each manager exactly once today; should one ever
+// appear in two matchups, the denominator counts both, so the number stays a
+// fraction rather than climbing past 1.
+export function simulateBracketOdds({
+  pairs,
+  totals = {},
+  projections = {},
+  seedRank = {},
+  sims = ODDS_DEFAULT_SIMS,
+  rng = Math.random,
+}) {
+  const normal = makeNormalSampler(rng);
+  const matchups = (pairs || []).filter((p) => p && p.a && p.b);
+  const counts = {};
+  const played = {};
+  for (const p of matchups) {
+    for (const name of [p.a, p.b]) {
+      if (!(name in counts)) counts[name] = 0;
+      played[name] = (played[name] || 0) + 1;
+    }
+  }
+
+  const draw = (name) => {
+    const proj = projections[name] || {};
+    const mean = proj.mean || 0;
+    const sd = Math.sqrt(Math.max(0, proj.variance || 0));
+    return (totals[name] || 0) + (sd > 0 ? mean + sd * normal() : mean);
+  };
+
+  for (let s = 0; s < sims; s++) {
+    for (const p of matchups) {
+      const aScore = draw(p.a);
+      const bScore = draw(p.b);
+      let winner;
+      if (aScore !== bScore) winner = aScore > bScore ? p.a : p.b;
+      else winner = (seedRank[p.a] ?? Infinity) <= (seedRank[p.b] ?? Infinity) ? p.a : p.b;
+      counts[winner]++;
+    }
+  }
+
+  const managers = {};
+  for (const name of Object.keys(counts)) {
+    const denom = sims * (played[name] || 1);
+    managers[name] = { advance: denom > 0 ? counts[name] / denom : 0 };
+  }
   return { sims, managers };
 }
 

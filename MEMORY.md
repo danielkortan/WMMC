@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-07 | Odds to advance in every round's final week, and the appearance-rate bug it exposed               | [MEMORY](#2026-08-07-odds-to-advance-in-every-rounds-final-week-and-the-appearance-rate-bug-it-exposed)                           |
 | 2026-08-06 | Playoff daily Slack post: matchup deltas, Claude-written Hot Takes, short manager names           | [MEMORY](#2026-08-06-playoff-daily-slack-post-matchup-deltas-claude-written-hot-takes-short-manager-names)                        |
 | 2026-08-06 | Deleting a dormant fallback is a risk decision, not a cleanup                                     | [MEMORY](#2026-08-06-deleting-a-dormant-fallback-is-a-risk-decision-not-a-cleanup)                                                |
 | 2026-08-06 | Repo-wide PR/branch/dead-code audit, and why no endpoint was deleted                              | [MEMORY](#2026-08-06-repo-wide-prbranchdead-code-audit-and-why-no-endpoint-was-deleted)                                           |
@@ -93,6 +94,84 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-07 — Odds to advance in every round's final week, and the appearance-rate bug it exposed
+
+Commissioner, the morning after the Slack-post rework: the playoff odds still need to show in the
+final week of each round, with the % next to the manager names the way pool play had it. They
+never appeared in the quarterfinals at all, and that was the thing to fix.
+
+**Why they never appeared in QF.** They were never built to. The whole engine was scoped to
+`ODDS_WINDOW = { round: 'PP2', firstWeek: 'Week 4', lastWeek: 'Week 5' }` and answered exactly one
+question — "does this manager make the 8-team bracket". Once the bracket exists that question is
+answered, so the section correctly rendered nothing. Nothing was broken by yesterday's changes;
+the feature simply stopped at the bracket's door.
+
+**What was added.** The same engine, asked the other question. In the FINAL week of QF/SF/Finals
+it plays each head-to-head matchup out and reports the odds each side wins it — same projections,
+same schedule-context adjustments, same Monte-Carlo draw, different definition of success.
+
+1. `bracketOddsWindowForDate` reads "final week of the round" off `SEASON_SCHEDULE` rather than
+   hardcoding `'Week 2'`, so adding a third week to a round moves the window instead of silently
+   pointing at the wrong one. Pool play keeps its own untouched two-week window.
+2. `simulateBracketOdds` (pure, unit-tested) draws both sides and counts matchup wins; an exact
+   tie goes to the better seed, which is the rule the live bracket already applies.
+3. Pairings come from `computePlayoffPairs` — the same function the matchup lines are built from —
+   so a % can never describe a matchup the post doesn't show.
+4. Stored as `sd.bracket_odds`, a derived cache in the same family as `sd.playoff_odds`: computed
+   by the 4am sync and the 7am pre-post backstop, preserved on a full-season save, and only read
+   at render time. `bracketOddsForPost` drops a payload whose date or round doesn't match the post
+   being built, because a stale % beside a live score is worse than no %.
+
+**Where the % went, and why not in its own section.** Inline on the matchup line, right after the
+score: `▸ (1) Ada — 840 (+45) · 79%`, with one legend line under the section. That is the same
+place pool play put it (next to the name it belongs to) and it is high in the post, above Slack's
+"View Full Message" fold — a new section at the bottom is exactly what gets clipped. It also cost
+about seven characters a line, so **no roasts had to be shortened**; the offer was there and
+nothing needed to give.
+
+**The real find: the projection had no concept of a player's playing time.** A per-game scoring
+rate is a rate per APPEARANCE, and the engine multiplied it by the player's TEAM's remaining
+games. That projects a starting pitcher to take every turn in the rotation, and it inflates a
+pitcher-heavy roster relative to a bat-heavy one. It has been wrong since the engine shipped; it
+just never showed, because pool play's window is long and everyone was inflated in the same
+direction. In a two-week head-to-head it decides matchups.
+
+`expectedAppearanceRate` estimates it from the player's own observed appearances, shrunk toward a
+positional prior (0.85 batter / 0.3 pitcher) so a call-up lands on the prior instead of on 0 or 1.
+`projectManager` applies it via the law of total variance —
+`Var = f²(p·σ² + p(1-p)·μ²)` — so the appearance risk itself is carried, not just a scaled-down
+mean. For a pitcher who may get two starts or three, that second term IS most of the uncertainty.
+`p = 1` reduces the whole thing exactly to the old behavior, so the change is opt-in per player.
+
+**And the bug inside the fix, which only a real run surfaced.** The first version used the team's
+MLB-season `gamesPlayed` as the denominator. MLB starts in late March and the WMMC season starts
+in May, so the numerator (appearances, from `daily_*` rows) covered ~81 days while the denominator
+covered ~112 games — every everyday bat was filed as a 60% part-timer. Driving the real endpoint
+against a synthetic QF-Week-2 season is what caught it: 104 projected appearances where the
+fixture should have produced 137. `teamGamesInSpan` now derives games-per-day from the REMAINING
+schedule (measured, not assumed; clamped to `[0.6, 1.0]`, the range a real MLB schedule lives in)
+and applies it to the days we actually have stats for that player, so both halves cover the same
+calendar. Re-run: 140 vs 137 expected.
+
+**Lesson worth keeping: a rate and its denominator must be measured over the same span.** The
+mistake is easy precisely because both numbers are individually correct — the team really did play
+112 games, the player really did appear 66 times. Only the spans disagreed, and no unit test would
+have caught it, because the unit was right.
+
+**Also mechanized.** `tests/serverMirrors.test.js` now guards ten odds-engine functions as
+`server.js` ↔ `js/playoffOdds.js` pairs. It paid for itself on the first run by catching a comment
+that had gone missing from the server copy of `makeNormalSampler`. The two it can't cover are
+`computeTeamQualityFactors` and `gameFactor`, which differ only in the name of the local clamp
+helper (`server.js` must call it `oddsClamp`, a `clamp` already lives at its top level).
+
+**Verification.** Booted the real server against a synthetic QF-Week-2 season with a local MLB API
+stand-in, then drove the actual endpoints: `POST /playoff-odds/recompute` produced the payload
+(every pair summing to 100.0%), `/wmmc` rendered the post with the % inline, and a second season
+anchored one week earlier confirmed QF **Week 1** shows no odds and 409s the recompute. One
+sharp edge worth remembering: **booting the server against a synthetic `db.json` rewrites the
+committed `managers_seed.json`** with whatever managers that db holds. Check `git status` after
+any local server run and revert it.
 
 ## 2026-08-06 — Playoff daily Slack post: matchup deltas, Claude-written Hot Takes, short manager names
 
