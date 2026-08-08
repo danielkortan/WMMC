@@ -478,13 +478,31 @@ describe('commentaryFactSheet', () => {
 
   it('states both totals, both deltas and who leads, per matchup', () => {
     const sheet = commentaryFactSheet(args);
-    assert.match(sheet, /SF1: Daniel 83 \(yesterday \+3\) vs Alex 111 \(yesterday \+36\)/);
-    assert.match(sheet, /Alex leads by 28/);
-    assert.match(sheet, /Jamie leads by 233/);
+    assert.match(sheet, /SF1: Daniel 83 pts \(yesterday \+3 pts\) vs Alex 111 pts \(yesterday \+36 pts\)/);
+    assert.match(sheet, /Alex leads by 28 pts/);
+    assert.match(sheet, /Jamie leads by 233 pts/);
+  });
+
+  // The model echoes the shape of its evidence: a sheet of bare decimals produces takes full of
+  // bare decimals, which is how "Jamie's lead is down to 0.8" reached the league \u2014 points, games
+  // or a batting average, no way to tell.
+  it('gives every figure a unit, so no bare decimal can be copied out of it', () => {
+    const sheet = commentaryFactSheet({ ...args, daysLeft: 4, daysElapsed: 10 });
+    for (const line of sheet.split('\n')) {
+      // Career records and the section headings count things, not points.
+      if (!/^[-\s]/.test(line) || /seasons;|Days left|scored so far/.test(line)) continue;
+      // A figure is anything not glued to a word (so the "1" in "SF1" is a label, not a
+      // number), and it must be followed by a unit — points, or one of the countable nouns
+      // the sheet legitimately uses.
+      const bare = line.match(
+        /(?<![-\w.])\d[\d,]*(?:\.\d+)?(?![\d.])(?!\s?pts?\b|-pt\b|\spoints?\b|\sdays?\b|\sgames?\b)/g
+      );
+      assert.equal(bare, null, `unitless figure ${JSON.stringify(bare)} in: ${line}`);
+    }
   });
 
   it('names a lead change and reports the previous morning\u2019s margin', () => {
-    assert.match(commentaryFactSheet(args), /LEAD CHANGE yesterday: Daniel led by 5 the previous morning/);
+    assert.match(commentaryFactSheet(args), /LEAD CHANGE yesterday: Daniel led by 5 pts the previous morning/);
   });
 
   it('marks a blowout as over and a tight one as a coin flip', () => {
@@ -506,8 +524,8 @@ describe('commentaryFactSheet', () => {
         { label: 'SF1', a: 'Daniel Kortan', b: 'Alex Thalacker', aTotal: 200, bTotal: 190, aDelta: 5, bDelta: 45 },
       ],
     });
-    assert.match(closed, /the gap CLOSED by 40 yesterday \(was 50\)/);
-    assert.match(commentaryFactSheet(args), /the gap WIDENED by 20 yesterday \(was 213\)/);
+    assert.match(closed, /the gap CLOSED by 40 pts yesterday \(was 50 pts\)/);
+    assert.match(commentaryFactSheet(args), /the gap WIDENED by 20 pts yesterday \(was 213 pts\)/);
   });
 
   it('uses short names only, never a full name the model could echo', () => {
@@ -667,6 +685,38 @@ describe('emoji shortcodes', () => {
               assert.ok(SLACK_EMOJI.includes(code), `unvetted shortcode ${code} in: ${line}`);
             }
           }
+        }
+      }
+    }
+  });
+
+  // A bank line is the floor the written takes fall back to, so it has to obey the same
+  // units rule. Every score-driven rule (as opposed to the career ones, which count seasons
+  // and years) has to attach a unit somewhere — a line reading "nudged ahead by 0.8" leaves
+  // the reader guessing at points, games or a batting average.
+  it('every score-driven line names its unit', () => {
+    const scoreCodes = [
+      ':arrows_counterclockwise:',
+      ':zap:',
+      ':coffin:',
+      ':hourglass_flowing_sand:',
+      ':boom:',
+      ':zzz:',
+    ];
+    for (let seed = 0; seed < 30; seed++) {
+      for (const shape of shapes) {
+        const lines = run({
+          seed,
+          matchups: [
+            { label: 'SF1', a: 'A', b: 'B', ...shape },
+            { label: 'SF2', a: 'C', b: 'D', ...shape },
+          ],
+          dailyTotals: { A: shape.aDelta, B: shape.bDelta, C: shape.aDelta, D: shape.bDelta },
+        });
+        for (const line of lines) {
+          const code = (line.match(/^:[a-z_0-9]+:/) || [])[0];
+          if (!scoreCodes.includes(code)) continue;
+          assert.match(line, /\bpts\b|-pt\b|\bpoints?\b/, `no unit on a score line: ${line}`);
         }
       }
     }
@@ -840,7 +890,8 @@ describe('commentaryFactSheet — run-in and slumps', () => {
     assert.ok(!/THE RUN-IN/.test(commentaryFactSheet({ ...base, daysLeft: 11, daysElapsed: 3 })));
     const late = commentaryFactSheet({ ...base, daysLeft: 4, daysElapsed: 10 });
     assert.match(late, /THE RUN-IN \(4 days left, 10 scored so far\)/);
-    assert.match(late, /Ryan S\. needs 58\.3 per day/);
+    assert.match(late, /Ryan S\. needs 58\.3 pts per day/);
+    assert.match(late, /against the 37\.6 pts per day he has averaged/);
     assert.match(late, /Verdict:/);
   });
 
@@ -864,25 +915,34 @@ describe('commentaryFactSheet — run-in and slumps', () => {
     assert.ok(order.indexOf('Jamie') < order.indexOf('Ryan S.'), order);
   });
 
+  const slump = {
+    manager: 'Ryan Sullivan',
+    player: 'CJ Abrams',
+    type: 'Batter',
+    roundPerGame: 4.2,
+    priorPerGame: 18.6,
+    games: 9,
+  };
+
   it('lists slumping players with both rates, and omits the section when there are none', () => {
     assert.ok(!/PLAYERS GOING BACKWARDS/.test(commentaryFactSheet({ ...base, daysLeft: 9 })));
-    const withSlump = commentaryFactSheet({
-      ...base,
-      daysLeft: 9,
-      underperformers: [
-        {
-          manager: 'Ryan Sullivan',
-          player: 'CJ Abrams',
-          type: 'Batter',
-          roundPerGame: 4.2,
-          priorPerGame: 18.6,
-          games: 9,
-        },
-      ],
-    });
+    const withSlump = commentaryFactSheet({ ...base, daysLeft: 9, underperformers: [slump] });
     assert.match(
       withSlump,
-      /CJ Abrams \(Ryan S\., Batter\): 4\.2 per game this round vs 18\.6 before it, over 9 games/
+      /CJ Abrams \(Ryan S\., Batter\): was 18\.6 pts per game before this round, now 4\.2 pts per game in it, over 9 games/
     );
+  });
+
+  // "(8.9 to 3.3 a game)" shipped to the league: two real numbers, in the right order, and no
+  // way for a reader to tell which end is the player's form today or that either is points. The
+  // fix is in the phrasing of the evidence — the model compresses whatever it is handed, so the
+  // direction has to be carried by words it cannot drop without dropping a number too.
+  it('states the slump directionally, oldest rate first, so a compressed rewrite keeps its meaning', () => {
+    const sheet = commentaryFactSheet({ ...base, daysLeft: 9, underperformers: [slump] });
+    const line = sheet.split('\n').find((l) => l.includes('CJ Abrams'));
+    assert.match(line, /\bwas\b.*\bbefore this round\b.*\bnow\b.*\bin it\b/);
+    // The prior rate must come first: "was 4.2 ... now 18.6" would invert the story.
+    assert.ok(line.indexOf('18.6') < line.indexOf('4.2'), line);
+    assert.match(sheet, /PLAYERS GOING BACKWARDS \(scoring rate BEFORE this round vs DURING it\)/);
   });
 });

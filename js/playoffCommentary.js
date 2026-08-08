@@ -207,82 +207,89 @@ export function commentaryBudget({
 // `f.daysLeftText` and the margin; every nailbiter says "coin flip" or "separate"; big-day and
 // dead-day lines name the manager and print the points. And no line may ever contain "..",
 // which is why a name at a full stop goes through `endSentence`.
+//
+// UNITS: the FIRST score in a line always carries one — "48.4 pts", "a 39.1-pt lead". After
+// that, bare numbers inside the same line are fine, because the unit is established and
+// repeating it reads like a receipt. A bare decimal with nothing attached is the failure mode
+// this rule exists for: "Jamie's lead is down to 0.8" could be points, games or a batting
+// average, and the reader should not have to work out which. The same rule is written into the
+// Anthropic prompt in server.js, so the written takes and this fallback read the same way.
 
 const flipLines = [
   // Scott: call it like a highlight, with a simile that makes the number mean something.
   (f, n) =>
-    `:arrows_counterclockwise: *Lead change in ${f.label}.* ${n(f.leaderNow)} dropped ${fmtPts(f.winnerDelta)} on the day and flipped a ${fmtPts(f.marginBefore)}-pt deficit into a ${fmtPts(f.margin)}-pt lead — smoother than a Sunday afternoon and twice as cold. ${n(f.trailerNow)} felt every degree of it.`,
+    `:arrows_counterclockwise: *Lead change in ${f.label}.* ${n(f.leaderNow)} dropped ${fmtPts(f.winnerDelta)} pts on the day and flipped a ${fmtPts(f.marginBefore)}-pt deficit into a ${fmtPts(f.margin)}-pt lead — smoother than a Sunday afternoon and twice as cold. ${n(f.trailerNow)} felt every degree of it.`,
   // Macdonald: two flat sentences, and the punchline is just the fact.
   (f, n) =>
-    `:arrows_counterclockwise: *${f.label} flipped.* ${n(f.trailerNow)} was winning this. Then ${n(f.leaderNow)} put up ${fmtPts(f.winnerDelta)}, and now he's losing it by ${fmtPts(f.margin)}, and I think that's the whole story there.`,
+    `:arrows_counterclockwise: *${f.label} flipped.* ${n(f.trailerNow)} was winning this. Then ${n(f.leaderNow)} put up ${fmtPts(f.winnerDelta)} pts, and now he's losing it by ${fmtPts(f.margin)}, and I think that's the whole story there.`,
   // Rock: say the lead three times, each time smaller.
   (f, n) =>
     `:arrows_counterclockwise: *${n(f.trailerNow)} had a lead in ${f.label}.* He had a ${fmtPts(f.marginBefore)}-pt lead. He had a ${fmtPts(f.marginBefore)}-pt lead and one afternoon of baseball, and now he is down ${fmtPts(f.margin)} — because ${n(f.leaderNow)} wanted it and he did not.`,
   // Gillis: the oddly specific scenario.
   (f, n) =>
-    `:arrows_counterclockwise: *New leader in ${f.label}:* ${n(f.leaderNow)}, by ${fmtPts(f.margin)}, off a ${fmtPts(f.winnerDelta)}-pt day. ${n(f.trailerNow)} led this thing the way you lead a group project — loudly, for about a day, right up until somebody actually did the work.`,
+    `:arrows_counterclockwise: *New leader in ${f.label}:* ${n(f.leaderNow)}, by ${fmtPts(f.margin)} pts, off a ${fmtPts(f.winnerDelta)}-pt day. ${n(f.trailerNow)} led this thing the way you lead a group project — loudly, for about a day, right up until somebody actually did the work.`,
 ];
 
 const tieBreakLines = [
-  (f, n) => `:zap: *${f.label} is no longer level* — ${n(f.leaderNow)} nudged ahead by ${fmtPts(f.margin)}.`,
+  (f, n) => `:zap: *${f.label} is no longer level* — ${n(f.leaderNow)} nudged ahead by ${fmtPts(f.margin)} pts.`,
   (f, n) =>
-    `:zap: *${n(f.leaderNow)} broke the tie in ${f.label}*, by ${fmtPts(f.margin)}. Dead even is a nice place to visit, but nobody's putting a banner up for it.`,
+    `:zap: *${n(f.leaderNow)} broke the tie in ${f.label}*, by ${fmtPts(f.margin)} pts. Dead even is a nice place to visit, but nobody's putting a banner up for it.`,
   (f, n) =>
-    `:zap: They were tied. Now they're not. *${n(f.leaderNow)}* is up ${fmtPts(f.margin)} in ${f.label}, and that is the most exciting sentence available to me this morning.`,
+    `:zap: They were tied. Now they're not. *${n(f.leaderNow)}* is up ${fmtPts(f.margin)} pts in ${f.label}, and that is the most exciting sentence available to me this morning.`,
 ];
 
 const blowoutLines = [
   // Macdonald: understate the disaster.
   (f, n) =>
-    `:coffin: *${f.label} is over and nobody told ${endSentence(n(f.trailerNow))}* Down ${fmtPts(f.margin)}${f.daysLeftText}. That is not a deficit, that is a eulogy with a countdown on it.`,
+    `:coffin: *${f.label} is over and nobody told ${endSentence(n(f.trailerNow))}* Down ${fmtPts(f.margin)} pts${f.daysLeftText}. That is not a deficit, that is a eulogy with a countdown on it.`,
   // Rock: escalate the same number.
   (f, n) =>
     `:coffin: *${fmtPts(f.margin)} points.* Not ${fmtPts(f.margin)} points across a season — ${fmtPts(f.margin)} points in ONE ROUND, and ${n(f.trailerNow)} is still standing in it${f.daysLeftText}. At some point a hole stops being a hole and starts being an address.`,
   // Scott: anchor voice, big call.
   (f, n) =>
-    `:coffin: ${n(f.leaderNow)} is beating ${n(f.trailerNow)} by ${fmtPts(f.margin)} in ${f.label}${f.daysLeftText} — that is not a lead, that is a different area code. Somebody go check on the man.`,
+    `:coffin: ${n(f.leaderNow)} is beating ${n(f.trailerNow)} by ${fmtPts(f.margin)} pts in ${f.label}${f.daysLeftText} — that is not a lead, that is a different area code. Somebody go check on the man.`,
   // Gillis: bar-guy riff.
   (f, n) =>
-    `:coffin: ${n(f.trailerNow)} is down ${fmtPts(f.margin)} in ${f.label}${f.daysLeftText} and still setting a lineup every morning, like a guy repainting the deck of a boat that is extremely already underwater.`,
+    `:coffin: ${n(f.trailerNow)} is down ${fmtPts(f.margin)} pts in ${f.label}${f.daysLeftText} and still setting a lineup every morning, like a guy repainting the deck of a boat that is extremely already underwater.`,
 ];
 
 const nailbiterLines = [
   (f, n) =>
-    `:hourglass_flowing_sand: *${f.label} is a coin flip* — ${n(f.leaderNow)} by ${fmtPts(f.margin)}${f.daysLeftText}. One good afternoon decides it, and neither of these guys has had one in a while.`,
+    `:hourglass_flowing_sand: *${f.label} is a coin flip* — ${n(f.leaderNow)} by ${fmtPts(f.margin)} pts${f.daysLeftText}. One good afternoon decides it, and neither of these guys has had one in a while.`,
   (f, n) =>
     `:hourglass_flowing_sand: ${fmtPts(f.margin)} points separate ${n(f.a)} and ${n(f.b)} in ${f.label}${f.daysLeftText}. That's one start. That's one at-bat with two on. Nobody in this matchup should be sleeping well.`,
   (f, n) =>
-    `:hourglass_flowing_sand: *${fmtPts(f.margin)} points is a coin flip*, and ${n(f.leaderNow)} is the side that happens to be up right now${f.daysLeftText}. Enjoy it, I guess.`,
+    `:hourglass_flowing_sand: *${fmtPts(f.margin)} pts is a coin flip*, and ${n(f.leaderNow)} is the side that happens to be up right now${f.daysLeftText}. Enjoy it, I guess.`,
 ];
 
 const bigDayLines = [
   // Scott.
   (f, n) =>
-    `:boom: *${n(f.manager)} went off for ${fmtPts(f.points)}* — biggest haul in the bracket by ${fmtPts(f.gapToNext)}, and he needed every point of it. Man showed up to work while everybody else was still finding parking.`,
+    `:boom: *${n(f.manager)} went off for ${fmtPts(f.points)} pts* — biggest haul in the bracket by ${fmtPts(f.gapToNext)}, and he needed every point of it. Man showed up to work while everybody else was still finding parking.`,
   // Macdonald.
   (f, n) =>
-    `:boom: *${fmtPts(f.points)} for ${endSentence(n(f.manager))}* Nobody else in the bracket cleared ${fmtPts(f.next)}. So that was nice for him.`,
+    `:boom: *${fmtPts(f.points)} pts for ${endSentence(n(f.manager))}* Nobody else in the bracket cleared ${fmtPts(f.next)}. So that was nice for him.`,
   // Rock.
   (f, n) =>
-    `:boom: ${n(f.manager)} put up ${fmtPts(f.points)}. ${fmtPts(f.points)}! And the next-best guy in this entire bracket managed ${fmtPts(f.next)} — one day does not fix a season, but it sure ruins somebody else's.`,
+    `:boom: ${n(f.manager)} put up ${fmtPts(f.points)} pts. ${fmtPts(f.points)}! And the next-best guy in this entire bracket managed ${fmtPts(f.next)} — one day does not fix a season, but it sure ruins somebody else's.`,
   // Gillis.
   (f, n) =>
-    `:boom: ${n(f.manager)} led every playoff manager with ${fmtPts(f.points)}, which for him is roughly a month's work compressed into an afternoon. Do not get used to it.`,
+    `:boom: ${n(f.manager)} led every playoff manager with ${fmtPts(f.points)} pts, which for him is roughly a month's work compressed into an afternoon. Do not get used to it.`,
 ];
 
 const deadDayLines = [
   // Macdonald.
   (f, n) =>
-    `:zzz: *${n(f.manager)} managed ${fmtPts(f.points)}.* A full slate of major league baseball was played yesterday. He was there for all of it.`,
+    `:zzz: *${n(f.manager)} managed ${fmtPts(f.points)} pts.* A full slate of major league baseball was played yesterday. He was there for all of it.`,
   // Gillis.
   (f, n) =>
-    `:zzz: ${fmtPts(f.points)} from ${n(f.manager)} — that is a roster full of guys who each individually decided today was a good day to work on their swing in the cage instead.`,
+    `:zzz: ${fmtPts(f.points)} pts from ${n(f.manager)} — that is a roster full of guys who each individually decided today was a good day to work on their swing in the cage instead.`,
   // Rock.
   (f, n) =>
-    `:zzz: *${n(f.manager)}: ${fmtPts(f.points)}.* Not a bad day. Not a slow day. ${fmtPts(f.points)} points, in the playoffs, on purpose.`,
+    `:zzz: *${n(f.manager)}: ${fmtPts(f.points)} pts.* Not a bad day. Not a slow day. ${fmtPts(f.points)} points, in the playoffs, on purpose.`,
   // Scott.
   (f, n) =>
-    `:zzz: ${n(f.manager)} posted ${fmtPts(f.points)} — colder than the other side of the pillow, and not in the good way we usually mean that.`,
+    `:zzz: ${n(f.manager)} posted ${fmtPts(f.points)} pts — colder than the other side of the pillow, and not in the good way we usually mean that.`,
 ];
 
 // ---- History lines ----------------------------------------------------------
@@ -549,24 +556,27 @@ export function commentaryFactSheet({
     out.push(daysLeft <= 0 ? 'Days left in the round: none, it is over' : `Days left in the round: ${daysLeft}`);
   }
 
+  // Every figure below carries its unit, because the model echoes the shape of its evidence:
+  // a fact sheet of bare decimals produces takes full of bare decimals, and a lead "down to
+  // 0.8" with nothing attached could be points, games or a batting average.
   out.push('', 'MATCHUPS (round-to-date total, then what they scored yesterday):');
   for (const m of moves) {
     out.push(
-      `- ${m.label}: ${n(m.a)} ${fmtPts(m.aTotal)} (yesterday ${fmtDelta(m.aDelta)}) vs ` +
-        `${n(m.b)} ${fmtPts(m.bTotal)} (yesterday ${fmtDelta(m.bDelta)})`
+      `- ${m.label}: ${n(m.a)} ${fmtPts(m.aTotal)} pts (yesterday ${fmtDelta(m.aDelta)} pts) vs ` +
+        `${n(m.b)} ${fmtPts(m.bTotal)} pts (yesterday ${fmtDelta(m.bDelta)} pts)`
     );
-    if (m.leaderNow) out.push(`  ${n(m.leaderNow)} leads by ${fmtPts(m.margin)}`);
+    if (m.leaderNow) out.push(`  ${n(m.leaderNow)} leads by ${fmtPts(m.margin)} pts`);
     else out.push('  dead level');
     if (m.flipped) {
       out.push(
-        `  LEAD CHANGE yesterday: ${n(m.trailerNow)} led by ${fmtPts(m.marginBefore)} the previous morning and lost it`
+        `  LEAD CHANGE yesterday: ${n(m.trailerNow)} led by ${fmtPts(m.marginBefore)} pts the previous morning and lost it`
       );
     } else if (m.brokeTie) {
       out.push(`  they were exactly level the previous morning; ${n(m.leaderNow)} broke it`);
     } else if (m.swing < 0) {
-      out.push(`  the gap CLOSED by ${fmtPts(Math.abs(m.swing))} yesterday (was ${fmtPts(m.marginBefore)})`);
+      out.push(`  the gap CLOSED by ${fmtPts(Math.abs(m.swing))} pts yesterday (was ${fmtPts(m.marginBefore)} pts)`);
     } else if (m.swing > 0) {
-      out.push(`  the gap WIDENED by ${fmtPts(m.swing)} yesterday (was ${fmtPts(m.marginBefore)})`);
+      out.push(`  the gap WIDENED by ${fmtPts(m.swing)} pts yesterday (was ${fmtPts(m.marginBefore)} pts)`);
     }
     if (m.margin >= BLOWOUT_MARGIN) out.push('  this one is effectively over');
     else if (m.margin <= NAILBITER_MARGIN) out.push('  this one is a coin flip');
@@ -578,7 +588,7 @@ export function commentaryFactSheet({
     .sort((x, y) => y.points - x.points);
   if (dayRows.length) {
     out.push('', "YESTERDAY'S SCORING, best to worst:");
-    for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)}`);
+    for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)} pts`);
   }
 
   // Bracket-wide, so a take can say "best in the bracket" or "worst of the four" without the
@@ -591,7 +601,7 @@ export function commentaryFactSheet({
   totals.sort((x, y) => y.total - x.total);
   if (totals.length > 2) {
     out.push('', 'ROUND TOTALS ACROSS THE WHOLE BRACKET, best to worst:');
-    for (const t of totals) out.push(`- ${n(t.name)}: ${fmtPts(t.total)}`);
+    for (const t of totals) out.push(`- ${n(t.name)}: ${fmtPts(t.total)} pts`);
   }
 
   // Only near the end, where the number means something. Earlier it is noise dressed as maths.
@@ -603,9 +613,9 @@ export function commentaryFactSheet({
       const pace = catchUpPace({ margin: m.margin, daysLeft, trailerTotal, daysElapsed });
       if (!pace) continue;
       runIn.push(
-        `- ${m.label}: ${n(m.trailerNow)} needs ${fmtPts(pace.needPerDay)} per day over the last ` +
+        `- ${m.label}: ${n(m.trailerNow)} needs ${fmtPts(pace.needPerDay)} pts per day over the last ` +
           `${daysLeft} day${daysLeft === 1 ? '' : 's'} to draw level, against the ` +
-          `${fmtPts(pace.actualPerDay)} per day he has averaged this round. Verdict: ${pace.verdict}.`
+          `${fmtPts(pace.actualPerDay)} pts per day he has averaged this round. Verdict: ${pace.verdict}.`
       );
     }
     if (runIn.length) {
@@ -615,13 +625,21 @@ export function commentaryFactSheet({
   }
 
   // Players going backwards, with the two rates that make it a fact rather than an opinion.
+  //
+  // Phrased as "was X, now Y" rather than "Y this round vs X before it", because the model
+  // compresses whatever it is given and a compressed comparison loses whichever end was not
+  // nailed down. "(8.9 to 3.3 a game)" went out to the league that way: two real numbers, in
+  // the right order, and no way for a reader to tell which one is the player's form today, or
+  // that either of them is points. Leading with "was" and ending with "now" makes the
+  // direction survive any rewrite short of dropping a number entirely.
   const slumps = (underperformers || []).filter((u) => u && u.player && u.manager);
   if (slumps.length) {
-    out.push('', 'PLAYERS GOING BACKWARDS (per-game scoring this round vs earlier in the season):');
+    out.push('', 'PLAYERS GOING BACKWARDS (scoring rate BEFORE this round vs DURING it):');
     for (const u of slumps) {
       out.push(
-        `- ${u.player} (${n(u.manager)}, ${u.type}): ${fmtPts(u.roundPerGame)} per game this round ` +
-          `vs ${fmtPts(u.priorPerGame)} before it, over ${u.games} game${u.games === 1 ? '' : 's'}.`
+        `- ${u.player} (${n(u.manager)}, ${u.type}): was ${fmtPts(u.priorPerGame)} pts per game before ` +
+          `this round, now ${fmtPts(u.roundPerGame)} pts per game in it, over ` +
+          `${u.games} game${u.games === 1 ? '' : 's'}.`
       );
     }
   }
