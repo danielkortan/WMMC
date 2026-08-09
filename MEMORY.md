@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-08 | Hot Takes read like a stat line: units, direction, and number density                             | [MEMORY](#2026-08-08-hot-takes-read-like-a-stat-line-units-direction-and-number-density)                                          |
 | 2026-08-07 | Odds to advance in every round's final week, and the appearance-rate bug it exposed               | [MEMORY](#2026-08-07-odds-to-advance-in-every-rounds-final-week-and-the-appearance-rate-bug-it-exposed)                           |
 | 2026-08-06 | Playoff daily Slack post: matchup deltas, Claude-written Hot Takes, short manager names           | [MEMORY](#2026-08-06-playoff-daily-slack-post-matchup-deltas-claude-written-hot-takes-short-manager-names)                        |
 | 2026-08-06 | Deleting a dormant fallback is a risk decision, not a cleanup                                     | [MEMORY](#2026-08-06-deleting-a-dormant-fallback-is-a-risk-decision-not-a-cleanup)                                                |
@@ -94,6 +95,50 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-08 — Hot Takes read like a stat line: units, direction, and number density
+
+Commissioner sent a screenshot of the morning's Hot Takes. The verdict was that it clearly reads
+as Claude-written now (good — that was the point of the Sonnet path) but "a little clunky", "very
+direct on numbers but doesn't say pts", and "unclear what the range is showing". Three separate
+complaints, one root cause and two fixes.
+
+**The root cause: the model echoes the shape of its evidence.** `commentaryFactSheet` handed over
+bare decimals — `Jamie 401.4 (yesterday +3.1)`, `leads by 0.8` — so the takes came back full of
+bare decimals: "Jamie's lead is down to 0.8 after Ryan S. clawed back 12.8 in one day." Both
+numbers are correct and neither says what it is. A reader who does not already know the league
+scoring cannot tell points from games from a batting average. So the units went into the FACTS,
+not just into the rules: every figure in the fact sheet now carries `pts`.
+
+**The range that showed nothing.** The worst line was `Freeman (8.9 to 3.3 a game)`. That is a
+compression of the slump fact, and the compression is where the meaning died — two real numbers,
+in the right order, with nothing saying which end is the player's form today. The fix is in the
+phrasing of the evidence rather than a rule telling the model not to compress: the sheet now reads
+`was 8.9 pts per game before this round, now 3.3 pts per game in it`. "Was … now" is carried by
+words the model cannot drop without dropping a number too, so the direction survives any rewrite.
+Heading changed to match: `PLAYERS GOING BACKWARDS (scoring rate BEFORE this round vs DURING it)`.
+
+**The clunk.** Take 3 stacked three players and three parenthetical number pairs into one
+sentence. Added a `HOW TO WRITE A NUMBER` block to the prompt covering four things: unit on the
+first figure in a take and bare numbers after it (four `pts` in a sentence is its own kind of
+clunky), never a bare two-figure range, at most two figures per sentence and three per take, and
+an em dash rather than the hyphen it kept reaching for. Plus one instruction to read the take back
+and cut it if it only parses as text on a screen.
+
+**The bank got the same treatment**, because it is the floor the written takes fall back to and a
+fallback that reads differently defeats the point of writing it in the same four voices. Every
+score-driven bank line now names its unit, held there by a new sweep in
+`tests/playoffCommentary.test.js`.
+
+**Two tests worth keeping.** One walks every fact-sheet line and fails on a figure with no unit
+attached — that is the property, stated once, rather than a dozen assertions on individual
+strings. The other pins the slump line's direction (prior rate first, `was … before … now … in
+it`), because the natural way to write that line is round-first and round-first is what produced
+the ambiguous output.
+
+No scoring, roster or manager logic was touched — this is entirely the wording of a derived
+display. `commentaryFactSheet` is a `js/playoffCommentary.js` ↔ `server.js` mirror, so both copies
+moved together and `tests/serverMirrors.test.js` confirms it.
 
 ## 2026-08-07 — Odds to advance in every round's final week, and the appearance-rate bug it exposed
 
