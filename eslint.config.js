@@ -38,6 +38,7 @@ const projectGlobals = {
   parseCSVLine: 'readonly',
   findColumn: 'readonly',
   oddsWindowForDate: 'readonly',
+  bracketOddsWindowForDate: 'readonly',
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
   checkSwapLimit: 'readonly',

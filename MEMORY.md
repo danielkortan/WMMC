@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-11 | The scoreboard showed the bracket twice; the odds to advance moved onto the real one              | [MEMORY](#2026-08-11-the-scoreboard-showed-the-bracket-twice-the-odds-to-advance-moved-onto-the-real-one)                         |
 | 2026-08-08 | Hot Takes read like a stat line: units, direction, and number density                             | [MEMORY](#2026-08-08-hot-takes-read-like-a-stat-line-units-direction-and-number-density)                                          |
 | 2026-08-07 | Odds to advance in every round's final week, and the appearance-rate bug it exposed               | [MEMORY](#2026-08-07-odds-to-advance-in-every-rounds-final-week-and-the-appearance-rate-bug-it-exposed)                           |
 | 2026-08-06 | Playoff daily Slack post: matchup deltas, Claude-written Hot Takes, short manager names           | [MEMORY](#2026-08-06-playoff-daily-slack-post-matchup-deltas-claude-written-hot-takes-short-manager-names)                        |
@@ -95,6 +96,50 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-11 — The scoreboard showed the bracket twice; the odds to advance moved onto the real one
+
+Commissioner sent a screenshot of the Scoreboard tab mid-Semifinals: collapsible `Quarterfinals` /
+`Semifinals` sections, each holding the round's matchup cards. His read was that it is an "extra"
+view, because the Playoffs section above it already shows all of them — and that the one thing he
+actually wanted there was the % likelihood to advance that the Slack post has been carrying since
+2026-08-07.
+
+He was right about the duplication, and it was worse than "two views of the same thing". Once pool
+play is finalized, `orderScoreboardBracket` moves `#scoreboard-bracket` ABOVE `#scoreboard-content`,
+so the page led with the Playoff Bracket card and then repeated the same eight matchups a screen
+later — same pairings, same totals, same B/P split, from two different code paths
+(`buildActivePlayoffBracket` vs `renderPlayoffMatchupCards`). The bracket card is strictly the
+richer of the two: its rows expand into that round's per-player breakdown, the cards never did.
+So `renderPlayoffMatchupCards` and the QF/SF/Finals section block are gone, along with
+`renderPlayoffTable` (its only other caller) and the two CSS rules that existed solely for those
+cards (`.matchup-team-sub`, `.matchup-team.matchup-leader`). The HISTORICAL-season scoreboard's own
+QF/SF/Finals sections (`renderScoreboardSections`, a different function) were left alone — a
+finished season has no bracket card sitting above them.
+
+**The odds now render on the bracket card**, one pill per row between the name and the score, in
+the same `.odds-pill` colour family the pool-play odds already use. `sd.bracket_odds` was already
+being shipped to clients and already preserved across a full-season save; nothing on the server
+changed. The only plumbing needed was bridging `bracketOddsWindowForDate` onto `window` in
+`js/index.js` (and into `eslint.config.js`'s globals).
+
+**The gate is the interesting part.** `advanceOddsHtml` mirrors the server's `bracketOddsForPost`
+exactly — wrong date, wrong round, round since finalized, or outside the final-week window all mean
+render nothing — and then adds one check the server does not need: the payload's `opponent` must
+equal the name across the bracket row. The reason is that these two things derive their pairings
+differently. The server builds them with `computePlayoffPairs`; the bracket card builds its own
+from the seeding plus the prior round's winners. They agree today, but a % is a claim about one
+specific matchup, so if they ever stop agreeing the correct output is no pill rather than a number
+attached to the wrong opponent. Same principle that made `bracketOddsForPost` drop stale payloads:
+a wrong % beside a live score is worse than no %.
+
+**Verified in the running app** (per the `verify` skill) against a fabricated `db.json` — pool play
+and QF finalized, SF live in its final week, a stored SF `bracket_odds` payload. Confirmed at 1280px
+and at 390×844: four pills in the SF column and none in the QF column (the round check working),
+`78%` / `22%` / `🔒 100%` / `0%` covering the high/low/clinched branches, the legend line rendering
+once for the card, and zero `.matchup-results-grid` left anywhere in `#scoreboard-content`. On the
+phone the pill costs the manager's name width, so `mobile.css` gives it back the row gap and most of
+its padding — without that, "Jamie Rogers" ellipsized to "Jamie Rog…" next to a `🔒 100%` pill.
 
 ## 2026-08-08 — Hot Takes read like a stat line: units, direction, and number density
 
