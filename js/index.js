@@ -32,7 +32,7 @@ import {
 } from './utils.js';
 import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
-import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
+import { oddsWindowForDate, bracketOddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
 import { checkSwapLimit } from './swaps.js';
 import {
@@ -91,6 +91,7 @@ Object.assign(window, {
   findColumn,
   computeSeasonAccolades,
   oddsWindowForDate,
+  bracketOddsWindowForDate,
   formatOddsPct,
   orderWithSwapChains,
   checkSwapLimit,

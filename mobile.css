@@ -1113,6 +1113,14 @@
     flex-shrink: 0;
   }
 
+  /* Every pixel the odds pill takes comes out of the manager's name, so on a phone it
+     gives back the row gap and most of its padding. */
+  #scoreboard-bracket .bracket-odds-pill {
+    font-size: 0.72rem;
+    padding: 0.05rem 0.3rem;
+    margin: 0 -0.2rem 0 -0.15rem;
+  }
+
   #scoreboard-bracket .bracket-score {
     font-size: clamp(1rem, 4.4vw, 1.35rem);
     font-weight: 800;
