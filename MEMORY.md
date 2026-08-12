@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-12 | Branch cleanup, and why `staging` stays                                                           | [MEMORY](#2026-08-12-branch-cleanup-and-why-staging-stays)                                                                        |
 | 2026-08-11 | The scoreboard showed the bracket twice; the odds to advance moved onto the real one              | [MEMORY](#2026-08-11-the-scoreboard-showed-the-bracket-twice-the-odds-to-advance-moved-onto-the-real-one)                         |
 | 2026-08-08 | Hot Takes read like a stat line: units, direction, and number density                             | [MEMORY](#2026-08-08-hot-takes-read-like-a-stat-line-units-direction-and-number-density)                                          |
 | 2026-08-07 | Odds to advance in every round's final week, and the appearance-rate bug it exposed               | [MEMORY](#2026-08-07-odds-to-advance-in-every-rounds-final-week-and-the-appearance-rate-bug-it-exposed)                           |
@@ -96,6 +97,48 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-12 — Branch cleanup, and why `staging` stays
+
+Routine sweep: **zero open PRs** (the newest is #436, merged 2026-08-11) and only four remote
+branches. `claude/scoreboard-playoff-matchups-hx55p8` (#436) and `claude/slack-post-messaging-fgzz42`
+(#435) were both merged and their tips were ancestors of `main`, so they carried nothing; the
+commissioner deleted them. **Agent sessions still get HTTP 403 on ref deletion** — pushes work,
+deletes do not, exactly as the 2026-08-06 audit found. Hand the commands over; don't report the
+deletion as done.
+
+**`staging`'s "838 commits ahead" is a lie told by commit counts.** `git rev-list --left-right`
+reads 28/838 against `main`, which looks like a branch full of unique work. It has none. Those 838
+are history noise: the same changes reached `main` under different SHAs via PR merge commits, so
+they share no identity with staging's copies. The check that settles it is the tree, not the log —
+`git diff $(git merge-base main staging) staging` came back **empty**, meaning staging's tree was
+byte-identical to `main` at `5072849` (2026-08-06). It was simply 28 commits stale. Do that diff
+first next time; the ahead/behind numbers on this branch will never be informative.
+
+The refresh (`git merge origin/main` into `staging`) was conflict-free for the same reason — one
+side had no changes to conflict with — and `git diff origin/main HEAD` was empty before pushing.
+481 tests, lint and Prettier all clean.
+
+**Decision: keep `staging`.** The 2026-08-06 audit floated retiring the branch and its `render.yaml`
+block together, since it has now drifted 240 → 820 → 28 commits behind across three cleanups. The
+commissioner's call is that it earns its keep for QA'ing bigger changes before they hit production,
+so the branch and the `wmmc-staging` service both stay. Treat the drift as a chore to repeat, not a
+smell to fix — and note staging reseeds from `managers_seed.json` on every deploy (no disk, no
+`DB_PATH`), so a QA pass wanting realistic rosters needs `tests/fixtures/staging-seed.json`, which
+the service's Start Command copies to `db.json` on boot.
+
+**The pre-push hook needs two pushes, and this is not obvious.** `.githooks/pre-push` stamps
+`version.json` and commits — but git computes the refs to push _before_ running the hook, so that
+commit is created after the push list is frozen and stays local. The first push reported
+`5f5044b..57eb994` and left `17179ff` behind; a second push sent it. Verify with
+`git ls-remote origin refs/heads/<branch>` rather than trusting the push output, because the second
+push prints a confusing "Everything up-to-date" while still moving the ref. This is why `main`'s
+history shows "chore: stamp version" commits landing alongside the work rather than after it. It
+also leaves `staging` differing from `main` by exactly one line — `version.json`'s date stamp — which
+is expected, since the hook maintains that cache-buster per branch.
+
+One local-only trap: `npm run lint` failed with `Cannot find module '@eslint/js'` on a fresh
+container whose `node_modules` predated the merge. Environment, not code — `npm install` fixed it.
 
 ## 2026-08-11 — The scoreboard showed the bracket twice; the odds to advance moved onto the real one
 
