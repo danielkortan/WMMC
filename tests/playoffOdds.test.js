@@ -3,12 +3,18 @@ import assert from 'node:assert/strict';
 import {
   ODDS_WINDOW,
   oddsWindowForDate,
+  BRACKET_ODDS_ROUNDS,
+  bracketOddsWindowForDate,
   meanVariance,
   playerGameRate,
+  APPEARANCE_PRIORS,
+  APPEARANCE_RATE_FLOOR,
+  expectedAppearanceRate,
   projectManager,
   currentQualification,
   makeNormalSampler,
   simulatePlayoffOdds,
+  simulateBracketOdds,
   formatOddsPct,
   HOME_ADVANTAGE,
   PARK_FACTORS,
@@ -79,6 +85,70 @@ describe('oddsWindowForDate', () => {
   });
 });
 
+describe('bracketOddsWindowForDate', () => {
+  const scheduleDates = makeScheduleDates();
+  // SEASON_SCHEDULE: QF is indexes 10-11, SF 12-13, Finals 14-15.
+  const qfW1 = scheduleDates[10];
+  const qfW2 = scheduleDates[11];
+  const sfW2 = scheduleDates[13];
+  const finalsW2 = scheduleDates[15];
+
+  it('is null during pool play and during a bracket round’s FIRST week', () => {
+    assert.equal(bracketOddsWindowForDate(scheduleDates, scheduleDates[8].start), null);
+    assert.equal(bracketOddsWindowForDate(scheduleDates, qfW1.start), null);
+    assert.equal(bracketOddsWindowForDate(scheduleDates, qfW1.end), null);
+  });
+
+  it('opens on the first day of each bracket round’s final week and names that round', () => {
+    for (const [dates, round] of [
+      [qfW2, 'QF'],
+      [sfW2, 'SF'],
+      [finalsW2, 'Finals'],
+    ]) {
+      const atStart = bracketOddsWindowForDate(scheduleDates, dates.start);
+      assert.ok(atStart, `expected a window on ${dates.start}`);
+      assert.equal(atStart.round, round);
+      assert.equal(atStart.week, 'Week 2');
+      assert.equal(atStart.start, dates.start);
+      assert.equal(atStart.end, dates.end);
+      assert.ok(bracketOddsWindowForDate(scheduleDates, dates.end));
+    }
+  });
+
+  it('is null after the Finals end, and whenever the schedule is unusable', () => {
+    const dayAfter = new Date(finalsW2.end + 'T00:00:00Z');
+    dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
+    assert.equal(bracketOddsWindowForDate(scheduleDates, dayAfter.toISOString().slice(0, 10)), null);
+    assert.equal(bracketOddsWindowForDate([], qfW2.start), null);
+    assert.equal(bracketOddsWindowForDate(null, qfW2.start), null);
+    assert.equal(bracketOddsWindowForDate(scheduleDates, null), null);
+    // Schedule configured only through QF Week 1 — no dates for any final week.
+    assert.equal(bracketOddsWindowForDate(scheduleDates.slice(0, 11), qfW2.start), null);
+  });
+
+  it('reads "final week" off the schedule rather than hardcoding Week 2', () => {
+    // A hypothetical three-week quarterfinal: the window must follow to Week 3.
+    const schedule = [
+      { round: 'QF', week: 'Week 1' },
+      { round: 'QF', week: 'Week 2' },
+      { round: 'QF', week: 'Week 3' },
+    ];
+    const dates = [
+      { start: '2026-07-20', end: '2026-07-26' },
+      { start: '2026-07-27', end: '2026-08-02' },
+      { start: '2026-08-03', end: '2026-08-09' },
+    ];
+    assert.equal(bracketOddsWindowForDate(dates, '2026-07-28', schedule), null);
+    const w3 = bracketOddsWindowForDate(dates, '2026-08-05', schedule);
+    assert.ok(w3);
+    assert.equal(w3.week, 'Week 3');
+  });
+
+  it('covers exactly the three bracket rounds', () => {
+    assert.deepEqual(BRACKET_ODDS_ROUNDS, ['QF', 'SF', 'Finals']);
+  });
+});
+
 describe('meanVariance', () => {
   it('handles empty, single, and multi-element inputs', () => {
     assert.deepEqual(meanVariance([]), { mean: 0, variance: 0, n: 0 });
@@ -123,6 +193,38 @@ describe('playerGameRate', () => {
   });
 });
 
+describe('expectedAppearanceRate', () => {
+  it('files a starter near the rotation rate and an everyday bat near 1', () => {
+    // 20 starts in 110 team games, shrunk toward the pitcher prior.
+    const starter = expectedAppearanceRate(20, 110, APPEARANCE_PRIORS.pitcher);
+    assert.ok(starter > 0.15 && starter < 0.25, `starter rate was ${starter}`);
+    // 100 games out of 110 — an everyday bat, and the prior barely moves it.
+    const everyday = expectedAppearanceRate(100, 110, APPEARANCE_PRIORS.batter);
+    assert.ok(everyday > 0.85 && everyday <= 1, `everyday rate was ${everyday}`);
+    // A reliever lands between the two.
+    const reliever = expectedAppearanceRate(45, 110, APPEARANCE_PRIORS.pitcher);
+    assert.ok(reliever > starter && reliever < everyday);
+  });
+
+  it('falls back to the positional prior when the span is unknown', () => {
+    assert.equal(expectedAppearanceRate(20, 0, APPEARANCE_PRIORS.pitcher), APPEARANCE_PRIORS.pitcher);
+    assert.equal(expectedAppearanceRate(20, null, APPEARANCE_PRIORS.batter), APPEARANCE_PRIORS.batter);
+    assert.equal(expectedAppearanceRate(20, -5, APPEARANCE_PRIORS.batter), APPEARANCE_PRIORS.batter);
+  });
+
+  it('pulls a tiny sample toward the prior instead of to 0 or 1', () => {
+    // One appearance in one team game is not a 100% player.
+    assert.ok(expectedAppearanceRate(1, 1, APPEARANCE_PRIORS.batter) < 0.95);
+    // Zero appearances over a couple of games is not a 0% player either.
+    assert.ok(expectedAppearanceRate(0, 2, APPEARANCE_PRIORS.batter) > 0.5);
+  });
+
+  it('never returns a rate outside (floor, 1]', () => {
+    assert.equal(expectedAppearanceRate(0, 100000, 0), APPEARANCE_RATE_FLOOR);
+    assert.equal(expectedAppearanceRate(100, 10, APPEARANCE_PRIORS.batter), 1);
+  });
+});
+
 describe('projectManager', () => {
   it('reduces to mean * games / variance * games when every factor is neutral (1.0)', () => {
     const neutral = (n) => Array(n).fill(1);
@@ -147,6 +249,141 @@ describe('projectManager', () => {
   it('handles an empty roster and entries with no gameFactors', () => {
     assert.deepEqual(projectManager([]), { mean: 0, variance: 0, games: 0 });
     assert.deepEqual(projectManager([{ mean: 5, variance: 4 }]), { mean: 0, variance: 0, games: 0 });
+  });
+
+  it('treats a missing appearanceRate as 1, so old callers are unchanged', () => {
+    const factors = [1, 1.2, 0.9];
+    const withoutRate = projectManager([{ mean: 5, variance: 4, gameFactors: factors }]);
+    const withRateOne = projectManager([{ mean: 5, variance: 4, gameFactors: factors, appearanceRate: 1 }]);
+    assert.deepEqual(withoutRate, withRateOne);
+  });
+
+  it('scales the projection down by the appearance rate — a starter is not his rotation', () => {
+    // 10 remaining team games, a per-start mean of 20, but he only takes every fifth turn.
+    const proj = projectManager([{ mean: 20, variance: 100, gameFactors: Array(10).fill(1), appearanceRate: 0.2 }]);
+    assert.ok(Math.abs(proj.mean - 40) < 1e-9); // 20 * 0.2 * 10
+    assert.ok(Math.abs(proj.games - 2) < 1e-9); // EXPECTED starts, not team games
+    // Var per game = p*sigma^2 + p(1-p)*mu^2 = 0.2*100 + 0.16*400 = 84, over 10 games.
+    assert.ok(Math.abs(proj.variance - 840) < 1e-9);
+  });
+
+  it('carries the appearance risk itself in the variance, not just the scaled-down mean', () => {
+    // Same expected production either way (10 games at p=0.2 vs 2 games at p=1), but the
+    // player who might get one start or three is the more uncertain of the two.
+    const uncertain = projectManager([
+      { mean: 20, variance: 100, gameFactors: Array(10).fill(1), appearanceRate: 0.2 },
+    ]);
+    const certain = projectManager([{ mean: 20, variance: 100, gameFactors: Array(2).fill(1), appearanceRate: 1 }]);
+    assert.ok(Math.abs(uncertain.mean - certain.mean) < 1e-9);
+    assert.ok(uncertain.variance > certain.variance);
+  });
+
+  it('clamps a nonsensical appearance rate into [0, 1]', () => {
+    const over = projectManager([{ mean: 5, variance: 1, gameFactors: [1, 1], appearanceRate: 4 }]);
+    assert.equal(over.mean, 10);
+    assert.equal(over.games, 2);
+    const under = projectManager([{ mean: 5, variance: 1, gameFactors: [1, 1], appearanceRate: -2 }]);
+    assert.deepEqual(under, { mean: 0, variance: 0, games: 0 });
+  });
+});
+
+describe('simulateBracketOdds', () => {
+  const pairs = [
+    { label: 'SF1', a: 'Ahead', b: 'Behind' },
+    { label: 'SF2', a: 'Even1', b: 'Even2' },
+  ];
+
+  it('gives a big lead with little time left a near-certain matchup win', () => {
+    const res = simulateBracketOdds({
+      pairs: [pairs[0]],
+      totals: { Ahead: 500, Behind: 300 },
+      projections: { Ahead: { mean: 40, variance: 100 }, Behind: { mean: 40, variance: 100 } },
+      sims: 4000,
+      rng: makeLcg(7),
+    });
+    assert.equal(res.sims, 4000);
+    assert.ok(res.managers.Ahead.advance > 0.99, `got ${res.managers.Ahead.advance}`);
+    assert.ok(Math.abs(res.managers.Ahead.advance + res.managers.Behind.advance - 1) < 1e-9);
+  });
+
+  it('reads a genuine coin-flip as one', () => {
+    const res = simulateBracketOdds({
+      pairs: [pairs[1]],
+      totals: { Even1: 400, Even2: 400 },
+      projections: { Even1: { mean: 50, variance: 900 }, Even2: { mean: 50, variance: 900 } },
+      sims: 6000,
+      rng: makeLcg(11),
+    });
+    assert.ok(Math.abs(res.managers.Even1.advance - 0.5) < 0.06, `got ${res.managers.Even1.advance}`);
+  });
+
+  it('lets a projection overturn a deficit when there is enough baseball left', () => {
+    const res = simulateBracketOdds({
+      pairs: [{ label: 'QF1', a: 'Trailing', b: 'Leading' }],
+      totals: { Trailing: 380, Leading: 400 },
+      // Trailing is 20 back but projects 120 more points over the rest of the round.
+      projections: { Trailing: { mean: 200, variance: 400 }, Leading: { mean: 80, variance: 400 } },
+      sims: 4000,
+      rng: makeLcg(3),
+    });
+    assert.ok(res.managers.Trailing.advance > 0.9, `got ${res.managers.Trailing.advance}`);
+  });
+
+  it('resolves an exact tie by seed, exactly as the live bracket does', () => {
+    // Zero variance and identical totals/projections means every sim ties.
+    const res = simulateBracketOdds({
+      pairs: [{ label: 'QF1', a: 'LowSeed', b: 'HighSeed' }],
+      totals: { LowSeed: 400, HighSeed: 400 },
+      projections: { LowSeed: { mean: 10, variance: 0 }, HighSeed: { mean: 10, variance: 0 } },
+      seedRank: { LowSeed: 8, HighSeed: 1 },
+      sims: 100,
+      rng: makeLcg(5),
+    });
+    assert.equal(res.managers.HighSeed.advance, 1);
+    assert.equal(res.managers.LowSeed.advance, 0);
+    // With no seeds known at all it still has to pick someone, deterministically.
+    const noSeeds = simulateBracketOdds({
+      pairs: [{ label: 'QF1', a: 'First', b: 'Second' }],
+      totals: { First: 400, Second: 400 },
+      projections: { First: { mean: 10, variance: 0 }, Second: { mean: 10, variance: 0 } },
+      sims: 50,
+      rng: makeLcg(5),
+    });
+    assert.equal(noSeeds.managers.First.advance, 1);
+  });
+
+  it('simulates every pair in the round and reports each manager once', () => {
+    const res = simulateBracketOdds({
+      pairs,
+      totals: { Ahead: 500, Behind: 300, Even1: 400, Even2: 400 },
+      projections: {},
+      sims: 500,
+      rng: makeLcg(13),
+    });
+    assert.deepEqual(Object.keys(res.managers).sort(), ['Ahead', 'Behind', 'Even1', 'Even2']);
+    for (const o of Object.values(res.managers)) assert.ok(o.advance >= 0 && o.advance <= 1);
+  });
+
+  it('treats a manager with no projection as simply not scoring again', () => {
+    const res = simulateBracketOdds({
+      pairs: [{ label: 'QF1', a: 'Live', b: 'Done' }],
+      totals: { Live: 390, Done: 400 },
+      projections: { Live: { mean: 50, variance: 0 } },
+      sims: 200,
+      rng: makeLcg(17),
+    });
+    assert.equal(res.managers.Live.advance, 1); // 390 + 50 > 400 + 0
+  });
+
+  it('ignores malformed pairs and survives an empty round', () => {
+    const res = simulateBracketOdds({
+      pairs: [{ label: 'QF1', a: 'Solo' }, null, { label: 'QF2' }],
+      totals: { Solo: 1 },
+      sims: 10,
+      rng: makeLcg(19),
+    });
+    assert.deepEqual(res.managers, {});
+    assert.deepEqual(simulateBracketOdds({ pairs: null, sims: 10, rng: makeLcg(19) }).managers, {});
   });
 });
 

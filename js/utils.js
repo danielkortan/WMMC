@@ -57,6 +57,40 @@ export function getInitials(name) {
   return name.substring(0, 2).toUpperCase();
 }
 
+// Compact display names for a set of managers: first name only, disambiguated with a last
+// initial when two of them share a first name ("Ryan S." / "Ryan C."). Slack posts run out
+// of line width long before they run out of things to say, and inside a private league of a
+// dozen people the first name is the name everyone actually uses.
+//
+// Returns a { fullName: shortName } map so callers look names up rather than re-deriving
+// them per line. A short form that would STILL be ambiguous (two "Ryan S."s) is dropped in
+// favor of the full name for both — renaming two people to one label is worse than a long
+// line. Must stay identical to shortManagerNames in server.js, which cannot import this
+// ESM copy (see CLAUDE.md gotchas).
+export function shortManagerNames(names) {
+  const list = [...new Set((names || []).filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim()))];
+
+  const firstCounts = {};
+  for (const full of list) {
+    const first = full.split(/\s+/)[0];
+    firstCounts[first] = (firstCounts[first] || 0) + 1;
+  }
+
+  const draft = {};
+  for (const full of list) {
+    const parts = full.split(/\s+/);
+    const first = parts[0];
+    draft[full] = firstCounts[first] > 1 && parts[1] ? `${first} ${parts[1][0]}.` : first;
+  }
+
+  const shortCounts = {};
+  for (const short of Object.values(draft)) shortCounts[short] = (shortCounts[short] || 0) + 1;
+
+  const out = {};
+  for (const [full, short] of Object.entries(draft)) out[full] = shortCounts[short] > 1 ? full : short;
+  return out;
+}
+
 // Accent/punctuation/suffix-insensitive form of a player name, for matching
 // names across data sources that spell them differently ("Ronald Acuna Jr."
 // vs MLB's "Ronald Acuña Jr."). Must stay identical to normalizeName in

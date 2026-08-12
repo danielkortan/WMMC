@@ -10,12 +10,13 @@ A full-stack fantasy baseball league management application with multi-season su
 - **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
-- **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
+- **Playoff Odds** — During PP2 Weeks 4–5, a Monte-Carlo simulation (per-player per-game scoring rates × each team's remaining MLB games × how often that player actually appears in one, adjusted for opponent quality, home/away and park factor, run against the pool-winner/wild-card rules) shows every manager's likelihood of making the playoffs on the scoreboard and in the daily Slack post
+- **Odds to Advance** — In the final week of each bracket round (QF/SF/Finals Week 2), the same engine plays each head-to-head matchup out instead and puts every manager's odds to win it beside their name on the daily Slack post's matchup lines
 - **Hypothetical Zone ("What If")** — A read-only sandbox for every manager. The **Scoring Lab** changes what any stat is worth (including three batting stats and one pitching stat that are recorded but currently unscored) and rescores the standings instantly. The **Roster Lab** swaps who a manager started for a whole period and shows it beside what they actually had, side by side, then reports whether the change alters who makes the playoffs (using the league's real seeding rule). A manager who never reached a round can enter a roster for it to score the round they didn't play. The **Player Explorer** looks up any player who recorded a stat — rostered or not — with a per-game log, per-round totals scored both ways, and who actually held him. The **Playoff Picture** shows pool play by pool with each period's winners and the wild cards, then re-seeds and re-pairs the bracket under the scenario; where a promoted manager never played a round it says so rather than inventing a result. Runs entirely in the browser against a snapshot — no write path to league data, and an unmodified scenario reproduces the live scoreboard exactly. Scenarios are shareable by link
 - **Trends & Analytics** — Season-long Chart.js visualizations per manager and player
 - **Hall of Fame** — All-time records across past seasons
 - **Commissioner Panel** — Roster overrides, manager management, stat uploads, season setup, swap log with undo (plus approvals for guard-flagged swaps), audit log
-- **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post
+- **Slack Integration** — Optional webhooks for swap notifications and a daily scoreboard post. Manager names are shortened to first names (with a last initial when two managers share one). During the playoffs the post leads with the bracket matchups, each manager's round total carrying yesterday's movement as a delta, and closes with **Hot Takes** — lead changes, collapses, the day's biggest haul, and the career pattern a survivor is carrying, drawn from the finished-season record in `js/history.js`. Claude writes the takes from a fact sheet of those numbers when `ANTHROPIC_API_KEY` is set (a reply quoting a score the facts don't contain is rejected); a deterministic template bank in the same voice is the floor when it isn't, or when the call fails. The day's takes are generated once and cached on the season, so `/wmmc` — which must answer Slack within three seconds and therefore cannot call an API — shows the same takes as the morning post rather than a second set of jokes about the same day. From the semifinals on, the best/worst _manager_ columns are dropped (four teams is not a leaderboard); the best/worst _player_ columns stay all season
 
 ## Tech Stack
 
@@ -42,18 +43,18 @@ npm install
 
 All configuration is via environment variables (no `.env` loader is bundled — set them in your shell or in `render.yaml` for deployments).
 
-| Variable                       | Default        | Description                                                                                  |
-| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------- |
-| `PORT`                         | `3000`         | HTTP port                                                                                    |
-| `LOGIN_PASSWORD`               | `Welcome2Hell` | Global fallback password used when a manager has no per-account password set                 |
-| `DB_PATH`                      | `./db.json`    | Path to the runtime JSON database. On Render, point this at a persistent disk mount.         |
-| `UPSTASH_REDIS_REST_URL`       | _(unset)_      | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.     |
-| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_      | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                             |
-| `SLACK_WEBHOOK_URL`            | _(unset)_      | General notifications channel (swaps, sync errors).                                          |
-| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_      | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`. |
-| `SLACK_SIGNING_SECRET`         | _(unset)_      | Required if you wire up the `/api/slack/command` slash command.                              |
-| `ANTHROPIC_API_KEY`            | _(unset)_      | Optional. Enables AI-generated elimination roasts; unset falls back to a template bank.      |
-| `GOOGLE_CLIENT_ID`             | _(unset)_      | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).               |
+| Variable                       | Default        | Description                                                                                                                                  |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                         | `3000`         | HTTP port                                                                                                                                    |
+| `LOGIN_PASSWORD`               | `Welcome2Hell` | Global fallback password used when a manager has no per-account password set                                                                 |
+| `DB_PATH`                      | `./db.json`    | Path to the runtime JSON database. On Render, point this at a persistent disk mount.                                                         |
+| `UPSTASH_REDIS_REST_URL`       | _(unset)_      | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.                                                     |
+| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_      | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                                                                             |
+| `SLACK_WEBHOOK_URL`            | _(unset)_      | General notifications channel (swaps, sync errors).                                                                                          |
+| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_      | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`.                                                 |
+| `SLACK_SIGNING_SECRET`         | _(unset)_      | Required if you wire up the `/api/slack/command` slash command.                                                                              |
+| `ANTHROPIC_API_KEY`            | _(unset)_      | Optional. Enables AI-written elimination roasts and the daily playoff "Hot Takes"; unset (or any API failure) falls back to a template bank. |
+| `GOOGLE_CLIENT_ID`             | _(unset)_      | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).                                                               |
 
 ### Running
 
@@ -133,14 +134,14 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Seasons
 
-| Method   | Endpoint                                    | Description                                                           |
-| -------- | ------------------------------------------- | --------------------------------------------------------------------- |
-| `GET`    | `/api/seasons`                              | All seasons keyed by year.                                            |
-| `POST`   | `/api/seasons`                              | Replace the entire seasons map.                                       |
-| `POST`   | `/api/seasons/:year`                        | Save a single season.                                                 |
-| `DELETE` | `/api/seasons/:year/week-data`              | Wipe a single week's uploaded stats for a season.                     |
-| `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                 |
-| `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store playoff odds now (only valid during PP2 Weeks 4–5). |
+| Method   | Endpoint                                    | Description                                                                                                                  |
+| -------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/seasons`                              | All seasons keyed by year.                                                                                                   |
+| `POST`   | `/api/seasons`                              | Replace the entire seasons map.                                                                                              |
+| `POST`   | `/api/seasons/:year`                        | Save a single season.                                                                                                        |
+| `DELETE` | `/api/seasons/:year/week-data`              | Wipe a single week's uploaded stats for a season.                                                                            |
+| `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                                                                        |
+| `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store odds now — pool-play odds during PP2 Weeks 4–5, head-to-head bracket odds in a playoff round's final week. |
 
 ### Player Dates & Daily Stats
 
@@ -162,6 +163,13 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 | `POST`   | `/api/managers/:email/password` | Commissioner sets a manager's password.                                    |
 | `DELETE` | `/api/managers/:email/password` | Commissioner clears a manager's password (falls back to `LOGIN_PASSWORD`). |
 
+### Current-season pointer
+
+| Method | Endpoint                   | Description                                                            |
+| ------ | -------------------------- | ---------------------------------------------------------------------- |
+| `GET`  | `/api/admin/active-season` | Which season the automations act on, and which seasons exist.          |
+| `POST` | `/api/admin/active-season` | Repoint them. Body `{ season }`; rejects a season that does not exist. |
+
 ### Google Sheets Sync
 
 | Method | Endpoint                         | Description                             |
@@ -173,11 +181,12 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Slack
 
-| Method | Endpoint                          | Description                                                                                                                                                                                                                                                     |
-| ------ | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post.                                                                                                                                                                                                                     |
-| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                    |
-| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field, a roast for every manager eliminated in a round, and next-round submission instructions as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`. |
+| Method | Endpoint                          | Description                                                                                                                                                                                                                                                       |
+| ------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/admin/anthropic-check`      | Commissioner only. Asks the Anthropic API a one-token question with this service's key and reports exactly what came back — unset, wrong, rejected, unreachable, or working. Never returns the key itself. Optional `?model=` to test a different model id.       |
+| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post. Optional body: `year`; `channel: "notifications"` to rehearse it into the notifications channel instead of the league one; `refreshTakes: true` to regenerate the day's Hot Takes instead of reusing the cached ones. |
+| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                      |
+| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field, a roast for every manager eliminated in a round, and next-round submission instructions as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`.   |
 
 ### Misc
 
@@ -196,7 +205,7 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 2. Enable the **Google Sheets API**.
 3. Create an API key under **APIs & Services → Credentials**.
 4. In your spreadsheet, create tabs named `Week 1 Batting`, `Week 1 Pitching`, `Week 2 Batting`, etc.
-5. Enter the spreadsheet URL and API key in the Commissioner panel under **Stats Data → Google Sheets Auto-Sync**.
+5. Re-arm the sync via the API — there is intentionally no UI. See [RUNBOOK.md](RUNBOOK.md) → "Break glass: re-enable Google Sheets sync".
 
 ## Google Sign-In Setup
 
@@ -244,9 +253,13 @@ WMMC/
 │                          #   hypothetical.js — What If sandbox engine (pure, read-only)
 │                          #   seeding.js — pool-play seeding rule (real bracket + What If)
 │                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
+│                          #   anthropic.js — Messages API reply shape (never index content[0])
+│                          #   history.js — finished-season record + per-manager career facts
+│                          #   playoffCommentary.js — daily playoff post "Hot Takes" (server-only caller)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
-└── tests/                 # Tests for pure js/ modules
+└── tests/                 # Tests for pure js/ modules, plus serverMirrors.test.js, which
+                           # fails if server.js drifts from a js/ module it duplicates
 ```
 
 > **Note on ongoing modularization:** The frontend has historically been a single `app.js` file. We're incrementally extracting pure logic (scoring, CSV parsing, utilities) into `js/` modules, with matching tests in `tests/`. Until the migration is complete, both layers co-exist: `index.html` still loads `app.js` directly, and the extracted modules are exercised through `tests/`. Do not duplicate logic between layers — once a function is in `js/`, delete its sibling in `app.js` and call into the module via `<script type="module">`.

@@ -38,6 +38,7 @@ const projectGlobals = {
   parseCSVLine: 'readonly',
   findColumn: 'readonly',
   oddsWindowForDate: 'readonly',
+  bracketOddsWindowForDate: 'readonly',
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
   checkSwapLimit: 'readonly',
@@ -62,6 +63,12 @@ const projectGlobals = {
   computePlayoffStatuses: 'readonly',
   playoffStatusLabel: 'readonly',
   statusKeyForPosition: 'readonly',
+  shortManagerNames: 'readonly',
+  WMMC_HISTORICAL_RESULTS: 'readonly',
+  HISTORICAL_NAME_ALIASES: 'readonly',
+  canonicalManagerName: 'readonly',
+  exitStageForPlace: 'readonly',
+  managerPlayoffHistory: 'readonly',
 };
 
 const projectRules = {

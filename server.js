@@ -57,10 +57,115 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 // hung connection would otherwise hold up everyone behind it. On timeout the caller takes
 // the static bank, same as any other failure.
 const ROAST_API_TIMEOUT_MS = 30000;
+// The elimination roasts ask for one sentence about one manager and use Haiku. The daily
+// playoff "Hot Takes" is a different job: several takes at once, each one anchored to a
+// specific number sitting a few lines above it on the same post. Getting a total subtly wrong
+// there is worse than any joke is good, so it runs on a stronger model. Both the prompt and
+// generatePlayoffCommentary's post-checks assume the reply quotes only supplied figures.
+const PLAYOFF_COMMENTARY_MODEL = 'claude-sonnet-5';
+
+// The house voice, shared by EVERY Claude-written roast in the app — the daily playoff Hot
+// Takes, the elimination/champion/3rd-place roasts, and the season-opening draft roast. It is
+// one constant on purpose: the league should sound like the same guy all season, and a tone
+// note that lives in only one of four prompts is how three of them drift.
+//
+// The comedians named below are references for CADENCE AND ATTITUDE, not people to impersonate
+// — never sign a roast with their name, quote them, or claim they wrote it. Ask for what each
+// one actually does, because "be funny like X" gets you a catchphrase and nothing else.
+const ROAST_VOICE = `VOICE — write like a sports comedy writer with these four in your ear. Take the technique, not the catchphrases; never name them, never impersonate them, never sign their name.
+
+- Stuart Scott: the anchor's swagger. Rhythm, wordplay, and a simile that turns one line of a box score into a whole picture. Announce a bad fantasy day like it is genuine breaking news.
+- Norm Macdonald on Weekend Update: deadpan. Build a careful setup and land on a blunt, stupid, perfect punchline. Understate the disaster. Let a flat sentence do the damage, and commit to a dumb bit one beat past where a normal person would stop.
+- Chris Rock: escalation and repetition. Say the thing, say it again louder with one detail changed, then turn it into an uncomfortable truth about the guy. Rhythm is the joke.
+- Shane Gillis: the guy at the bar. Loose, conversational, riffing sideways into an oddly specific character or scenario, amused at his own bit, crude but obviously fond of the person he is destroying.
+
+Mix them — do not do a clean impression of any one. This is a private league of long-time friends: mean the way friends are mean, never the way strangers are. Punch at the roster, the picks and the effort, never at anybody's family, looks, health, race, or anything a real friendship would not survive. Vulgarity is welcome; cruelty that would actually land wrong is not.`;
+
+// Compact display names for a set of managers — first name only, disambiguated with a last
+// initial when two of them share one. Synced copy of shortManagerNames in js/utils.js (the
+// canonical, unit-tested one; the server can't import the ESM module — see CLAUDE.md gotchas).
+function shortManagerNames(names) {
+  const list = [...new Set((names || []).filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim()))];
+
+  const firstCounts = {};
+  for (const full of list) {
+    const first = full.split(/\s+/)[0];
+    firstCounts[first] = (firstCounts[first] || 0) + 1;
+  }
+
+  const draft = {};
+  for (const full of list) {
+    const parts = full.split(/\s+/);
+    const first = parts[0];
+    draft[full] = firstCounts[first] > 1 && parts[1] ? `${first} ${parts[1][0]}.` : first;
+  }
+
+  const shortCounts = {};
+  for (const short of Object.values(draft)) shortCounts[short] = (shortCounts[short] || 0) + 1;
+
+  const out = {};
+  for (const [full, short] of Object.entries(draft)) out[full] = shortCounts[short] > 1 ? full : short;
+  return out;
+}
+
+// The current { fullName: shortName } map. Managers come from db.managers and nowhere else
+// (the core scoring invariant), and that list changes about once a season, so the map is
+// rebuilt only when db.json has been written since it was last built.
+let slackShortNameCache = { counter: -1, map: {} };
+function managerShortNameMap(db = null) {
+  if (db && Array.isArray(db.managers)) return shortManagerNames(db.managers.map((m) => m.name));
+  if (slackShortNameCache.counter === dbWriteCounter) return slackShortNameCache.map;
+  const map = shortManagerNames((readDB().managers || []).map((m) => m.name));
+  slackShortNameCache = { counter: dbWriteCounter, map };
+  return map;
+}
+
+// Rewrite full manager names to their short form throughout an outbound Slack payload —
+// strings, arrays and every string field of a block object. Applied at the send boundary so
+// EVERY post inherits it, including the prose ones (swap notifications, elimination roasts,
+// alerts) that assemble their text from templates rather than from a name map.
+//
+// Whole-name, word-bounded matches only, so "Ryan Sullivan" becomes "Ryan S." while "Ryan"
+// on its own is left alone — which also makes the pass idempotent, so a builder that already
+// shortened its own names (buildScoreboardBlocks does, because its commentary needs the map
+// anyway) is not touched twice. The one thing it cannot tell apart is a manager who shares a
+// full name with an MLB player; nobody in this league does, and the failure would be a
+// cosmetic short name on a player row.
+function shortenManagerNamesInSlack(value, map) {
+  const entries = Object.entries(map || {}).filter(([full, short]) => full !== short);
+  if (entries.length === 0) return value;
+  // Longest first, so a name that contains another ("Ryan Sullivan Jr.") can't be half-matched.
+  entries.sort((a, b) => b[0].length - a[0].length);
+
+  const rewrite = (v) => {
+    if (typeof v === 'string') {
+      let out = v;
+      for (const [full, short] of entries) {
+        // When the short form is an initial ("Ryan S."), swallow a period that immediately
+        // follows the full name: English collapses the abbreviation period into the sentence
+        // period, and "…outscored Ryan S.." is the giveaway that a name got templated in.
+        const tail = short.endsWith('.') ? '\\.?' : '';
+        out = out.replace(new RegExp(`\\b${full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b${tail}`, 'g'), short);
+      }
+      return out;
+    }
+    if (Array.isArray(v)) return v.map(rewrite);
+    if (v && typeof v === 'object') {
+      const out = {};
+      for (const [k, val] of Object.entries(v)) out[k] = rewrite(val);
+      return out;
+    }
+    return v;
+  };
+  return rewrite(value);
+}
 
 async function postSlack(text, blocks) {
   if (!SLACK_WEBHOOK_URL) return;
-  const body = blocks ? { text, blocks } : { text };
+  const map = managerShortNameMap();
+  const body = blocks
+    ? { text: shortenManagerNamesInSlack(text, map), blocks: shortenManagerNamesInSlack(blocks, map) }
+    : { text: shortenManagerNamesInSlack(text, map) };
   await fetch(SLACK_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -73,9 +178,15 @@ async function postSlack(text, blocks) {
 // unrestored/ephemeral instance cannot push a pool-play-shaped post mid-playoffs no matter which
 // path it takes. The upstream hasScoreboardData checks exist to give better errors and to avoid
 // consuming the day's post slot; this one is the backstop that cannot be bypassed.
-async function postScoreboardSlack(db, year, opts) {
-  if (!SLACK_SCOREBOARD_WEBHOOK_URL) return;
-  const { blocks, text, round } = buildScoreboardBlocks(db, year, opts);
+// `opts.webhookUrl` overrides the destination — the ONLY supported use is the commissioner's
+// explicit test post into the notifications channel. It is deliberately not a fallback: an
+// unset scoreboard webhook still means "post nowhere", because a scoreboard silently rerouting
+// itself into the swaps channel is how a stray instance reaches the league by accident.
+// `opts.refreshTakes` forces the day's Hot Takes to be regenerated instead of reused.
+async function postScoreboardSlack(db, year, opts = {}) {
+  const webhookUrl = opts.webhookUrl || SLACK_SCOREBOARD_WEBHOOK_URL;
+  if (!webhookUrl) return;
+  const { blocks, text, round, commentaryFacts } = buildScoreboardBlocks(db, year, opts);
   if (!round) {
     throw new Error(
       `Refusing to post the ${year} scoreboard: no current round could be determined from this ` +
@@ -83,10 +194,26 @@ async function postScoreboardSlack(db, year, opts) {
         `would render as the "Current Period: Season" pool-play shell.`
     );
   }
-  await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
+
+  // Upgrade the Hot Takes to the written version, and cache it for the day. This is the only
+  // Slack path that can generate: it is the only async one, and buildScoreboardBlocks has to
+  // stay synchronous for the /wmmc slash command, which owes Slack a reply in three seconds.
+  // The block already carries the bank's version (or an earlier cache hit), so a failed or
+  // slow call costs the post nothing — the swap simply becomes a no-op.
+  if (commentaryFacts) {
+    const takes = await ensureFreshHotTakes(year, commentaryFacts, { force: !!opts.refreshTakes });
+    const block = blocks.find((b) => b && b.block_id === HOT_TAKES_BLOCK_ID);
+    if (block && takes && takes.length) block.text.text = hotTakesText(takes);
+  }
+
+  const map = managerShortNameMap(db);
+  await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, blocks }),
+    body: JSON.stringify({
+      text: shortenManagerNamesInSlack(text, map),
+      blocks: shortenManagerNamesInSlack(blocks, map),
+    }),
   });
 }
 
@@ -98,7 +225,7 @@ async function postScoreboardChannelSlack(text) {
   await fetch(SLACK_SCOREBOARD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text: shortenManagerNamesInSlack(text, managerShortNameMap()) }),
   });
 }
 
@@ -695,6 +822,41 @@ function addAuditEntry(db, action, details, email) {
 }
 
 // ============================================================
+// Current-season pointer
+// ============================================================
+
+// THE app-wide "which season is live" pointer. It drives the daily Slack scoreboard, the season
+// welcome post, the 4am MLB sync, the /wmmc slash command, the player-pool bootstrap and the
+// weekly auto-advance — so getting it wrong breaks all six at once, silently.
+//
+// It used to live on `db.google_sheets_config.season`, which made it a hostage of the Google
+// Sheets importer: the only writer was that integration's config endpoint, and a cleanup pass
+// aimed at the importer would have taken the pointer with it. The importer stays (it is the
+// break-glass fallback for an MLB API outage — see RUNBOOK.md); the pointer just no longer
+// lives inside it.
+//
+// The legacy fallback is deliberate and permanent-ish: `migrateActiveSeasonPointer` copies the
+// value across on boot, but a db restored from an older Upstash backup would arrive without
+// `active_season`, and falling back keeps that instance pointing at the right season instead of
+// silently jumping to the current calendar year.
+function activeSeason(db) {
+  return (
+    (db && db.active_season) || ((db && db.google_sheets_config) || {}).season || new Date().getFullYear().toString()
+  );
+}
+
+// One-shot: lift the pointer out of google_sheets_config. Idempotent — it only writes when
+// `active_season` is unset and the legacy value exists, so it is safe on every boot.
+function migrateActiveSeasonPointer(db) {
+  if (!db || db.active_season) return false;
+  const legacy = (db.google_sheets_config || {}).season;
+  if (!legacy) return false;
+  db.active_season = legacy;
+  console.log(`[Season pointer] Migrated active season "${legacy}" out of google_sheets_config.`);
+  return true;
+}
+
+// ============================================================
 // Input validation helpers
 // ============================================================
 
@@ -1259,7 +1421,14 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // Playoff odds are a server-computed derived cache (4am sync / 7am post /
     // the recompute endpoint). Same defense as score_snapshots: always keep
     // the server's copy so a client save can never wipe or roll them back.
+    // `bracket_odds` is the same thing for a bracket round's final week.
     if (existingSd.playoff_odds) sd.playoff_odds = existingSd.playoff_odds;
+    if (existingSd.bracket_odds) sd.bracket_odds = existingSd.bracket_odds;
+
+    // The day's Hot Takes are the same kind of thing: written server-side by the Slack post,
+    // read by /wmmc so the slash command and the 7am post tell the same joke. A client save
+    // that wiped them would silently split those two apart again.
+    if (existingSd.hot_takes) sd.hot_takes = existingSd.hot_takes;
 
     // Elimination roasts are written server-side by /generate-roast while the client's
     // full-season save (fired at "End Pool Play") may still be in flight carrying a copy
@@ -2850,6 +3019,44 @@ app.post('/api/admin/db-restore', requireCommissioner, async (req, res) => {
 });
 
 // ============================================================
+// Current-season pointer
+// ============================================================
+
+// GET /api/admin/active-season — which season the automations act on.
+app.get('/api/admin/active-season', (req, res) => {
+  const db = readDB();
+  res.json({
+    active_season: activeSeason(db),
+    explicit: !!db.active_season,
+    seasons: Object.keys(db.seasons || {}).sort(),
+  });
+});
+
+// POST /api/admin/active-season { season } — repoint every automation at a different season.
+// This is the pointer's only writer. It used to be `POST /api/google-sheets/config { season }`,
+// which buried an app-wide setting inside a dormant integration's config endpoint.
+app.post('/api/admin/active-season', requireCommissioner, (req, res) => {
+  const season = String((req.body || {}).season || '').trim();
+  if (!/^\d{4}$/.test(season)) {
+    return res.status(400).json({ error: 'season must be a 4-digit year' });
+  }
+  const db = readDB();
+  if (!(db.seasons || {})[season]) {
+    // Pointing at a season that does not exist would silently disable the daily scoreboard post,
+    // the sync and the auto-advance — all of which resolve `sd` and bail when it is missing.
+    return res
+      .status(400)
+      .json({ error: `Season ${season} does not exist`, seasons: Object.keys(db.seasons || {}).sort() });
+  }
+  const previous = activeSeason(db);
+  db.active_season = season;
+  addAuditEntry(db, 'active_season_changed', { from: previous, to: season }, req.get('X-User-Email'));
+  writeDB(db);
+  console.log(`[Season pointer] Active season changed ${previous} -> ${season}`);
+  res.json({ ok: true, active_season: season, previous });
+});
+
+// ============================================================
 // Banner Background Config
 // ============================================================
 
@@ -3580,8 +3787,7 @@ async function applyMLBApiTakeover(db) {
   // performMLBSync replaces mlbapi rows for each game_id, so re-running a
   // successful week is a no-op — safe to retry after a partial failure.
   const today = new Date().toISOString().split('T')[0];
-  const config = db.google_sheets_config || {};
-  const season = config.season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season];
   let weeksSynced = 0;
   if (sd) {
@@ -3613,7 +3819,7 @@ async function applyMLBApiTakeover(db) {
 
   db.mlb_api_takeover_v1 = true;
   console.log(
-    `[MLB-API takeover] Stripped ${stripped} gsheets-source row(s); backfilled ${weeksSynced} past week(s) from MLB; gsheets auto-sync disabled (re-enable from commissioner UI to use as a fallback).`
+    `[MLB-API takeover] Stripped ${stripped} gsheets-source row(s); backfilled ${weeksSynced} past week(s) from MLB; gsheets auto-sync disabled (re-arm via the API if the MLB feed fails — see RUNBOOK.md).`
   );
   return true;
 }
@@ -3730,8 +3936,1298 @@ function backfillWmmcQS(db) {
 }
 
 // ============================================================
+// Anthropic response shape (synced copy of js/anthropic.js)
+// ============================================================
+// Canonical, unit-tested copy lives in js/anthropic.js — the server cannot import an ES module,
+// so every edit goes in both (see CLAUDE.md gotchas). Read that file's header for why indexing
+// into `content` is the bug that silently disabled three features for months.
+
+// The assistant's text from a Messages API response, or '' when there is none.
+// Tolerates any shape — missing content, non-arrays, blocks with no text, thinking blocks,
+// tool_use blocks — because the whole point is to not assume.
+function anthropicReplyText(data) {
+  const blocks = data && Array.isArray(data.content) ? data.content : [];
+  return blocks
+    .filter((b) => b && (b.type === 'text' || (b.type === undefined && typeof b.text === 'string')))
+    .map((b) => (typeof b.text === 'string' ? b.text : ''))
+    .join('')
+    .trim();
+}
+
+// A short description of what actually came back, for the log line when `anthropicReplyText`
+// returns nothing. Without this an empty reply is unattributable: "the API returned an empty
+// reply" is true of a refusal, a `max_tokens` cut-off mid-thinking, and a response made
+// entirely of tool blocks, and those want very different fixes.
+function describeAnthropicReply(data) {
+  const blocks = data && Array.isArray(data.content) ? data.content : null;
+  if (!blocks) return 'no content array in the response';
+  if (blocks.length === 0) return 'content array was empty';
+  const types = blocks.map((b) => (b && b.type) || 'untyped').join(', ');
+  const stop = data.stop_reason ? `, stop_reason: ${data.stop_reason}` : '';
+  const usage =
+    data.usage && (data.usage.output_tokens != null || data.usage.input_tokens != null)
+      ? `, tokens in/out: ${data.usage.input_tokens ?? '?'}/${data.usage.output_tokens ?? '?'}`
+      : '';
+  return `content blocks: [${types}]${stop}${usage}`;
+}
+
+// ============================================================
+// League history + playoff commentary (synced copies)
+// ============================================================
+// Synced duplicates of js/history.js and js/playoffCommentary.js — the canonical, unit-tested
+// copies live there and the server cannot import an ES module, so every edit goes in both
+// (same rule as SCORING / SEASON_SCHEDULE / detectScoreSwings; see CLAUDE.md gotchas).
+//
+// WMMC_HISTORICAL_RESULTS is also loaded onto `window` by js/index.js for the Hall of Fame,
+// so a new season's entry has to be added to js/history.js AND to the copy below.
+
+const WMMC_HISTORICAL_RESULTS = [
+  {
+    year: '2018',
+    champion: 'Cam McCallum',
+    runnerUp: 'Alex Thalacker',
+    third: 'Dan Kortan',
+    standings: {
+      'Cam McCallum': 1,
+      'Alex Thalacker': 2,
+      'Dan Kortan': 3,
+      'Ryan Sullivan': 4,
+      'Chris Bentivegna': 5,
+      'Anton Capria': 6,
+      'Jamie Rogers': 7,
+      'Ryan Courville': 8,
+      'Stephen Farmer': 9,
+      'Marcus Gillespie': 10,
+      'Austin Johnson': 11,
+    },
+  },
+  {
+    year: '2019',
+    champion: 'Joey Auclair',
+    runnerUp: 'Cam McCallum',
+    third: 'Alex Thalacker',
+    standings: {
+      'Joey Auclair': 1,
+      'Cam McCallum': 2,
+      'Alex Thalacker': 3,
+      'Chris Bentivegna': 4,
+      'Dan Kortan': 5,
+      'Ryan Sullivan': 6,
+      'Jamie Rogers': 7,
+      'Anton Capria': 8,
+      'Austin Johnson': 9,
+      'Stephen Farmer': 10,
+      'Ryan Courville': 11,
+      'Marcus Gillespie': 12,
+    },
+  },
+  {
+    year: '2020',
+    champion: 'Ryan Sullivan',
+    runnerUp: 'Dan Kortan',
+    third: 'Marcus Gillespie',
+    standings: {
+      'Ryan Sullivan': 1,
+      'Dan Kortan': 2,
+      'Marcus Gillespie': 3,
+      'Cam McCallum': 4,
+      'Ryan Courville': 5,
+      'Joey Auclair': 6,
+      'Austin Johnson': 7,
+      'Edgar Rivas': 8,
+      'Anton Capria': 9,
+      'Jamie Rogers': 10,
+      'Alex Thalacker': 11,
+      'Chris Bentivegna': 12,
+    },
+  },
+  {
+    year: '2021',
+    champion: 'Ryan Sullivan',
+    runnerUp: 'Dan Kortan',
+    third: 'Joey Auclair',
+    standings: {
+      'Ryan Sullivan': 1,
+      'Dan Kortan': 2,
+      'Joey Auclair': 3,
+      'Austin Johnson': 4,
+      'Chris Bentivegna': 5,
+      'Ryan Courville': 6,
+      'Anton Capria': 7,
+      'Marcus Gillespie': 8,
+      'Cam McCallum': 9,
+      'Jamie Rogers': 10,
+      'Edgar Rivas': 11,
+      'Alex Thalacker': 12,
+    },
+  },
+  {
+    year: '2022',
+    champion: 'Dan Kortan',
+    runnerUp: 'Alex Thalacker',
+    third: 'Ryan Sullivan',
+    standings: {
+      'Dan Kortan': 1,
+      'Alex Thalacker': 2,
+      'Ryan Sullivan': 3,
+      'Austin Johnson': 4,
+      'Joey Auclair': 5,
+      'Chris Bentivegna': 6,
+      'Jamie Rogers': 7,
+      'Cam McCallum': 8,
+      'Edgar Rivas': 9,
+      'Anton Capria': 10,
+      'Marcus Gillespie': 11,
+      'Ryan Courville': 12,
+    },
+  },
+  {
+    year: '2023',
+    champion: 'Austin Johnson',
+    runnerUp: 'Dan Kortan',
+    third: 'Anton Capria',
+    standings: {
+      'Austin Johnson': 1,
+      'Dan Kortan': 2,
+      'Anton Capria': 3,
+      'Cam McCallum': 4,
+      'Ryan Sullivan': 5,
+      'Marcus Gillespie': 6,
+      'Alex Thalacker': 7,
+      'Jamie Rogers': 8,
+      'Joey Auclair': 9,
+      'Ryan Courville': 10,
+      'Chris Bentivegna': 11,
+      'Edgar Rivas': 12,
+    },
+  },
+  {
+    year: '2024',
+    champion: 'Dan Kortan',
+    runnerUp: 'Ryan Courville',
+    third: 'Jamie Rogers',
+    standings: {
+      'Dan Kortan': 1,
+      'Ryan Courville': 2,
+      'Jamie Rogers': 3,
+      'Austin Johnson': 4,
+      'Marcus Gillespie': 5,
+      'Anton Capria': 6,
+      'Cam McCallum': 7,
+      'Chris Bentivegna': 8,
+      'Joey Auclair': 9,
+      'Ryan Sullivan': 10,
+      'Alex Thalacker': 11,
+      'Edgar Rivas': 12,
+    },
+  },
+  {
+    year: '2025',
+    champion: 'Joey Auclair',
+    runnerUp: 'Anton Capria',
+    third: 'Ryan Sullivan',
+    standings: {
+      'Joey Auclair': 1,
+      'Anton Capria': 2,
+      'Ryan Sullivan': 3,
+      'Cam McCallum': 4,
+      'Marcus Gillespie': 5,
+      'Dan Kortan': 6,
+      'Jamie Rogers': 7,
+      'Austin Johnson': 8,
+      'Ryan Courville': 9,
+      'Chris Bentivegna': 10,
+      'Edgar Rivas': 11,
+      'Alex Thalacker': 12,
+    },
+  },
+];
+
+// Names in the historical tables above are whatever the league called someone at the time;
+// `db.managers` holds what the commissioner page calls them now. Map the old spelling to the
+// current one so a manager's career doesn't split in two halfway through it. Keyed old -> new.
+const HISTORICAL_NAME_ALIASES = {
+  'Dan Kortan': 'Daniel Kortan',
+};
+
+// Canonical (current) form of a name that may appear in either spelling.
+function canonicalManagerName(name) {
+  if (!name) return '';
+  return HISTORICAL_NAME_ALIASES[name] || name;
+}
+
+// The bracket stage a FINAL finishing position corresponds to. Mirrors
+// statusKeyForPosition in js/playoffStatus.js — the ladder is 1st/2nd = the Finals,
+// 3rd/4th = lost the semifinal (the 3rd-place game settles which), 5th-8th = lost the
+// quarterfinal, anything past the field size = never made the bracket.
+function exitStageForPlace(place, fieldSize = 8) {
+  if (!place || place < 1) return null;
+  if (place <= 2) return 'Finals';
+  if (place <= 4) return 'SF';
+  if (place <= fieldSize) return 'QF';
+  return 'DNQ';
+}
+
+// One manager's career as the finished seasons record it, newest season last.
+//
+//   results     — WMMC_HISTORICAL_RESULTS (or a subset/fixture with the same shape)
+//   throughYear — ignore seasons at or after this year (pass the season in progress, so an
+//                 in-flight year can never be counted as history)
+//
+// Returns null when the manager has no recorded finish at all (a first-year manager).
+// Every count is over seasons the manager actually played — a year they sat out simply
+// isn't in `seasons`.
+function managerPlayoffHistory(name, results = WMMC_HISTORICAL_RESULTS, { throughYear = null } = {}) {
+  const canon = canonicalManagerName(name);
+  if (!canon) return null;
+
+  const seasons = [];
+  for (const row of results || []) {
+    const year = Number(row && row.year);
+    if (!year) continue;
+    if (throughYear != null && year >= Number(throughYear)) continue;
+    const standings = row.standings || {};
+    let place = null;
+    for (const [who, pos] of Object.entries(standings)) {
+      if (canonicalManagerName(who) === canon) {
+        place = pos;
+        break;
+      }
+    }
+    if (!place) continue;
+    seasons.push({ year, place, stage: exitStageForPlace(place, 8) });
+  }
+  if (seasons.length === 0) return null;
+  seasons.sort((a, b) => a.year - b.year);
+
+  const stageIn = (stage) => seasons.filter((s) => s.stage === stage);
+  const titles = seasons.filter((s) => s.place === 1).map((s) => s.year);
+  const runnerUps = seasons.filter((s) => s.place === 2).map((s) => s.year);
+  const madePlayoffs = seasons.filter((s) => s.stage !== 'DNQ');
+  const latest = seasons[seasons.length - 1];
+
+  // Consecutive most-recent seasons that ended at the same stage — the "always loses in the
+  // quarterfinals" fact, and the reason it is worth saying out loud only when it is a streak
+  // rather than a scattered handful.
+  let currentStageStreak = 0;
+  for (let i = seasons.length - 1; i >= 0; i--) {
+    if (seasons[i].stage !== latest.stage) break;
+    currentStageStreak++;
+  }
+
+  // How long since they last got past each stage — null when they never have.
+  const lastYearReaching = (stages) => {
+    const hit = seasons.filter((s) => stages.includes(s.stage));
+    return hit.length ? hit[hit.length - 1].year : null;
+  };
+
+  return {
+    manager: canon,
+    seasons,
+    seasonsPlayed: seasons.length,
+    titles,
+    titleCount: titles.length,
+    lastTitle: titles.length ? titles[titles.length - 1] : null,
+    runnerUps,
+    playoffAppearances: madePlayoffs.length,
+    dnqCount: stageIn('DNQ').length,
+    qfExitCount: stageIn('QF').length,
+    sfExitCount: stageIn('SF').length,
+    finalsAppearances: stageIn('Finals').length,
+    lastStage: latest.stage,
+    lastPlace: latest.place,
+    lastYear: latest.year,
+    currentStageStreak,
+    lastYearInFinals: lastYearReaching(['Finals']),
+    lastYearInSemis: lastYearReaching(['Finals', 'SF']),
+    neverPastQF: madePlayoffs.length > 0 && stageIn('SF').length === 0 && stageIn('Finals').length === 0,
+    neverMadeFinals: madePlayoffs.length > 0 && stageIn('Finals').length === 0,
+  };
+}
+
+// A margin this big, this late, is not a deficit any more.
+const BLOWOUT_MARGIN = 120;
+// Below this the matchup is a coin flip and worth saying so.
+const NAILBITER_MARGIN = 25;
+// A daily haul has to clear this to be worth a sentence of its own.
+const BIG_DAY_POINTS = 40;
+// ...and a shutout day has to be under this to be worth mocking.
+const DEAD_DAY_POINTS = 5;
+// Inside this many days of the round ending, "what does he need per day to catch up" stops
+// being trivia and starts being the story. Earlier than that the number is meaningless — a
+// 200-pt gap with 12 days left is a rounding error to a manager scoring 60 a day.
+const RUN_IN_DAYS = 5;
+
+// One decimal, with the redundant ".0" dropped — matches the Slack scoreboard's own
+// formatter so a number never appears twice in one post wearing two different faces.
+function fmtPts(n) {
+  const s = Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+
+// Signed form for a day's movement: "+48.4", "-3.2", "+0".
+function fmtDelta(n) {
+  const v = Number(n || 0);
+  return `${v < 0 ? '-' : '+'}${fmtPts(Math.abs(v))}`;
+}
+
+// Deterministic pick from a bank. Seeded off the date (not Math.random) so re-running the
+// same day's post — a retry, a manual repost — tells the same joke instead of rerolling it.
+function pickLine(bank, seed, offset = 0) {
+  if (!bank || bank.length === 0) return null;
+  return bank[Math.abs(seed + offset) % bank.length];
+}
+
+// Sentence-final period after something that may already end in one. Short manager names can
+// be initials ("Ryan S."), and English collapses the abbreviation period into the sentence
+// period rather than printing "Ryan S..". Use this anywhere a name can land at a full stop.
+function endSentence(s) {
+  const t = String(s == null ? '' : s);
+  return t.endsWith('.') ? t : `${t}.`;
+}
+
+// Sum of a string's char codes — the seed the daily post already uses for its worst-player
+// roast, so both roasts on one post move together from day to day.
+function seedFromDate(dateISO) {
+  return String(dateISO || '')
+    .split('')
+    .reduce((acc, c) => acc + c.charCodeAt(0), 0);
+}
+
+// What one head-to-head matchup did yesterday. `aDelta`/`bDelta` are yesterday's points
+// only, so subtracting them from the round totals gives the standings as of the previous
+// morning — which is the only way to know a lead actually changed hands.
+function matchupMovement({ label, a, b, aTotal = 0, bTotal = 0, aDelta = 0, bDelta = 0 } = {}) {
+  const marginNow = aTotal - bTotal;
+  const marginBefore = aTotal - aDelta - (bTotal - bDelta);
+  const leaderNow = marginNow === 0 ? null : marginNow > 0 ? a : b;
+  const leaderBefore = marginBefore === 0 ? null : marginBefore > 0 ? a : b;
+  const trailerNow = leaderNow === null ? null : leaderNow === a ? b : a;
+  return {
+    label,
+    a,
+    b,
+    aTotal,
+    bTotal,
+    aDelta,
+    bDelta,
+    leaderNow,
+    leaderBefore,
+    trailerNow,
+    // A flip needs a real leader on both sides of the day — coming out of a dead tie is a
+    // lead taken, not a lead change, and gets its own line.
+    flipped: !!(leaderNow && leaderBefore && leaderNow !== leaderBefore),
+    brokeTie: !!(leaderNow && !leaderBefore),
+    margin: Math.abs(marginNow),
+    marginBefore: Math.abs(marginBefore),
+    // Positive when the day pushed the two further apart, negative when it closed the gap.
+    swing: Math.abs(marginNow) - Math.abs(marginBefore),
+    dayWinner: aDelta === bDelta ? null : aDelta > bDelta ? a : b,
+    dayGap: Math.abs(aDelta - bDelta),
+  };
+}
+
+// Every emoji shortcode the banks (and the Anthropic prompt) are allowed to use. Slack renders
+// an unknown shortcode as LITERAL TEXT — a line reading ":tickets: 8 seasons. No Finals." went
+// out to the league that way, because `:tickets:` is not in Slack's set (🎫 is `:ticket:`,
+// singular). Nothing in the code can catch that: it is valid JS, valid mrkdwn, and only wrong
+// once Slack tries to draw it. So the set is written down, and a test asserts every bank line
+// starts with one of these. Add to this list only after confirming the shortcode renders.
+const SLACK_EMOJI = [
+  ':arrows_counterclockwise:',
+  ':zap:',
+  ':coffin:',
+  ':hourglass_flowing_sand:',
+  ':boom:',
+  ':zzz:',
+  ':chart_with_downwards_trend:',
+  ':ticket:',
+  ':crown:',
+  ':hourglass:',
+  ':second_place_medal:',
+  ':sparkles:',
+  ':repeat:',
+];
+
+// What the trailing side needs per remaining day, against what he has actually been managing.
+// The second half is the point: "needs 23.3 a day" means nothing until you know he is averaging
+// 8.2, at which case it means it is over. Returns null when the maths is not meaningful — no
+// margin, no days left, or no scoring history to compare against.
+function catchUpPace({ margin = 0, daysLeft = null, trailerTotal = 0, daysElapsed = 0 } = {}) {
+  if (!(margin > 0) || !(daysLeft > 0) || !(daysElapsed > 0)) return null;
+  const needPerDay = Math.round((margin / daysLeft) * 10) / 10;
+  const actualPerDay = Math.round((trailerTotal / daysElapsed) * 10) / 10;
+  const multiple = actualPerDay > 0 ? Math.round((needPerDay / actualPerDay) * 10) / 10 : Infinity;
+  return {
+    needPerDay,
+    actualPerDay,
+    // How many times his own pace he has to find. Infinity when he has scored nothing at all.
+    multiple,
+    // The ratio in words, because a ratio is exactly the sort of thing that gets misread in one
+    // direction and turned into a joke that is factually backwards. "0.1x his own pace" means he
+    // is cruising, and a reader skimming for a punchline will see a small number and write a
+    // eulogy. State the conclusion so nobody has to infer it.
+    verdict:
+      multiple === Infinity
+        ? 'he has scored nothing at all this round, so any target is out of reach'
+        : multiple <= 1
+          ? 'comfortably inside what he has been doing anyway — this gap is not the problem it looks like'
+          : multiple <= 2
+            ? 'a real stretch, but within reach of a good weekend'
+            : 'far beyond anything he has managed this round — this is over barring a miracle',
+  };
+}
+
+// How many takes today has actually earned. A quiet day should produce a short post, not three
+// lines of padding — the surest way to make the section ignorable is to print the same volume
+// whether or not anything happened. Two is the floor (the matchup state is always worth saying
+// once), three the ceiling.
+function commentaryBudget({
+  round = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  histories = {},
+  underperformers = [],
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return 0;
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return 0;
+
+  let events = 0;
+  // A lead change is worth two on its own: it is the whole story of the day.
+  if (moves.some((m) => m.flipped)) events += 2;
+  if (moves.some((m) => m.brokeTie)) events += 1;
+  if (moves.some((m) => m.margin >= BLOWOUT_MARGIN)) events += 1;
+  if (moves.some((m) => m.margin <= NAILBITER_MARGIN)) events += 1;
+  // A gap that closed or opened sharply is a story even without a flip.
+  if (moves.some((m) => Math.abs(m.swing) >= BIG_DAY_POINTS)) events += 1;
+
+  const inRound = Object.entries(dailyTotals || {}).filter(([m]) => moves.some((x) => x.a === m || x.b === m));
+  if (inRound.some(([, p]) => Number(p) >= BIG_DAY_POINTS)) events += 1;
+  if (inRound.length >= 2 && inRound.some(([, p]) => Number(p) <= DEAD_DAY_POINTS)) events += 1;
+
+  if (daysLeft != null && daysLeft <= RUN_IN_DAYS && moves.some((m) => m.margin > 0)) events += 1;
+  if ((underperformers || []).length) events += 1;
+  if (Object.values(histories || {}).some(Boolean)) events += 1;
+
+  return events >= 4 ? 3 : 2;
+}
+
+// ---- Line banks -------------------------------------------------------------
+// Each bank takes a facts object and returns one Slack mrkdwn line. `n(x)` is the short-name
+// formatter the caller supplies, so every name in the post reads the same way.
+//
+// These are the FALLBACK — server.js prefers a Claude-written version and drops to these on
+// any failure. They are written in the same four voices `ROAST_VOICE` asks Claude for, so a
+// failed API call changes who wrote the post, not how the league sounds: the anchor's swagger
+// and simile (Stuart Scott), the deadpan setup landing on a blunt understated punchline (Norm
+// Macdonald), escalating repetition turning into an uncomfortable truth (Chris Rock), and the
+// loose bar-guy riff into an oddly specific scenario (Shane Gillis). One of each per bank,
+// which is also why the banks are four long rather than three.
+//
+// Invariants the tests hold these to (tests/playoffCommentary.test.js): every flip line says
+// "Lead change" / "flipped" / "New leader"; every blowout and nailbiter line interpolates
+// `f.daysLeftText` and the margin; every nailbiter says "coin flip" or "separate"; big-day and
+// dead-day lines name the manager and print the points. And no line may ever contain "..",
+// which is why a name at a full stop goes through `endSentence`.
+//
+// UNITS: the FIRST score in a line always carries one — "48.4 pts", "a 39.1-pt lead". After
+// that, bare numbers inside the same line are fine, because the unit is established and
+// repeating it reads like a receipt. A bare decimal with nothing attached is the failure mode
+// this rule exists for: "Jamie's lead is down to 0.8" could be points, games or a batting
+// average, and the reader should not have to work out which. The same rule is written into the
+// Anthropic prompt in server.js, so the written takes and this fallback read the same way.
+
+const flipLines = [
+  // Scott: call it like a highlight, with a simile that makes the number mean something.
+  (f, n) =>
+    `:arrows_counterclockwise: *Lead change in ${f.label}.* ${n(f.leaderNow)} dropped ${fmtPts(f.winnerDelta)} pts on the day and flipped a ${fmtPts(f.marginBefore)}-pt deficit into a ${fmtPts(f.margin)}-pt lead — smoother than a Sunday afternoon and twice as cold. ${n(f.trailerNow)} felt every degree of it.`,
+  // Macdonald: two flat sentences, and the punchline is just the fact.
+  (f, n) =>
+    `:arrows_counterclockwise: *${f.label} flipped.* ${n(f.trailerNow)} was winning this. Then ${n(f.leaderNow)} put up ${fmtPts(f.winnerDelta)} pts, and now he's losing it by ${fmtPts(f.margin)}, and I think that's the whole story there.`,
+  // Rock: say the lead three times, each time smaller.
+  (f, n) =>
+    `:arrows_counterclockwise: *${n(f.trailerNow)} had a lead in ${f.label}.* He had a ${fmtPts(f.marginBefore)}-pt lead. He had a ${fmtPts(f.marginBefore)}-pt lead and one afternoon of baseball, and now he is down ${fmtPts(f.margin)} — because ${n(f.leaderNow)} wanted it and he did not.`,
+  // Gillis: the oddly specific scenario.
+  (f, n) =>
+    `:arrows_counterclockwise: *New leader in ${f.label}:* ${n(f.leaderNow)}, by ${fmtPts(f.margin)} pts, off a ${fmtPts(f.winnerDelta)}-pt day. ${n(f.trailerNow)} led this thing the way you lead a group project — loudly, for about a day, right up until somebody actually did the work.`,
+];
+
+const tieBreakLines = [
+  (f, n) => `:zap: *${f.label} is no longer level* — ${n(f.leaderNow)} nudged ahead by ${fmtPts(f.margin)} pts.`,
+  (f, n) =>
+    `:zap: *${n(f.leaderNow)} broke the tie in ${f.label}*, by ${fmtPts(f.margin)} pts. Dead even is a nice place to visit, but nobody's putting a banner up for it.`,
+  (f, n) =>
+    `:zap: They were tied. Now they're not. *${n(f.leaderNow)}* is up ${fmtPts(f.margin)} pts in ${f.label}, and that is the most exciting sentence available to me this morning.`,
+];
+
+const blowoutLines = [
+  // Macdonald: understate the disaster.
+  (f, n) =>
+    `:coffin: *${f.label} is over and nobody told ${endSentence(n(f.trailerNow))}* Down ${fmtPts(f.margin)} pts${f.daysLeftText}. That is not a deficit, that is a eulogy with a countdown on it.`,
+  // Rock: escalate the same number.
+  (f, n) =>
+    `:coffin: *${fmtPts(f.margin)} points.* Not ${fmtPts(f.margin)} points across a season — ${fmtPts(f.margin)} points in ONE ROUND, and ${n(f.trailerNow)} is still standing in it${f.daysLeftText}. At some point a hole stops being a hole and starts being an address.`,
+  // Scott: anchor voice, big call.
+  (f, n) =>
+    `:coffin: ${n(f.leaderNow)} is beating ${n(f.trailerNow)} by ${fmtPts(f.margin)} pts in ${f.label}${f.daysLeftText} — that is not a lead, that is a different area code. Somebody go check on the man.`,
+  // Gillis: bar-guy riff.
+  (f, n) =>
+    `:coffin: ${n(f.trailerNow)} is down ${fmtPts(f.margin)} pts in ${f.label}${f.daysLeftText} and still setting a lineup every morning, like a guy repainting the deck of a boat that is extremely already underwater.`,
+];
+
+const nailbiterLines = [
+  (f, n) =>
+    `:hourglass_flowing_sand: *${f.label} is a coin flip* — ${n(f.leaderNow)} by ${fmtPts(f.margin)} pts${f.daysLeftText}. One good afternoon decides it, and neither of these guys has had one in a while.`,
+  (f, n) =>
+    `:hourglass_flowing_sand: ${fmtPts(f.margin)} points separate ${n(f.a)} and ${n(f.b)} in ${f.label}${f.daysLeftText}. That's one start. That's one at-bat with two on. Nobody in this matchup should be sleeping well.`,
+  (f, n) =>
+    `:hourglass_flowing_sand: *${fmtPts(f.margin)} pts is a coin flip*, and ${n(f.leaderNow)} is the side that happens to be up right now${f.daysLeftText}. Enjoy it, I guess.`,
+];
+
+const bigDayLines = [
+  // Scott.
+  (f, n) =>
+    `:boom: *${n(f.manager)} went off for ${fmtPts(f.points)} pts* — biggest haul in the bracket by ${fmtPts(f.gapToNext)}, and he needed every point of it. Man showed up to work while everybody else was still finding parking.`,
+  // Macdonald.
+  (f, n) =>
+    `:boom: *${fmtPts(f.points)} pts for ${endSentence(n(f.manager))}* Nobody else in the bracket cleared ${fmtPts(f.next)}. So that was nice for him.`,
+  // Rock.
+  (f, n) =>
+    `:boom: ${n(f.manager)} put up ${fmtPts(f.points)} pts. ${fmtPts(f.points)}! And the next-best guy in this entire bracket managed ${fmtPts(f.next)} — one day does not fix a season, but it sure ruins somebody else's.`,
+  // Gillis.
+  (f, n) =>
+    `:boom: ${n(f.manager)} led every playoff manager with ${fmtPts(f.points)} pts, which for him is roughly a month's work compressed into an afternoon. Do not get used to it.`,
+];
+
+const deadDayLines = [
+  // Macdonald.
+  (f, n) =>
+    `:zzz: *${n(f.manager)} managed ${fmtPts(f.points)} pts.* A full slate of major league baseball was played yesterday. He was there for all of it.`,
+  // Gillis.
+  (f, n) =>
+    `:zzz: ${fmtPts(f.points)} pts from ${n(f.manager)} — that is a roster full of guys who each individually decided today was a good day to work on their swing in the cage instead.`,
+  // Rock.
+  (f, n) =>
+    `:zzz: *${n(f.manager)}: ${fmtPts(f.points)} pts.* Not a bad day. Not a slow day. ${fmtPts(f.points)} points, in the playoffs, on purpose.`,
+  // Scott.
+  (f, n) =>
+    `:zzz: ${n(f.manager)} posted ${fmtPts(f.points)} pts — colder than the other side of the pillow, and not in the good way we usually mean that.`,
+];
+
+// ---- History lines ----------------------------------------------------------
+// Career facts only become interesting when they are a pattern, so each of these is gated
+// on a real streak or a real absence — never "he lost once, three years ago".
+
+// Each rule carries a small bank of phrasings rather than one line: a playoff round runs for
+// two weeks, and the career fact does not change over those two weeks even though everything
+// else on the post does. Rotating the wording by seed keeps the same true statement from
+// reading like a stuck record.
+const historyLines = [
+  // A manager who cannot get out of the quarterfinals, in the quarterfinals.
+  {
+    id: 'qf-serial',
+    when: (h, ctx) => ctx.round === 'QF' && h.qfExitCount >= 3,
+    texts: [
+      (h, n) =>
+        `:chart_with_downwards_trend: *${n(h.manager)} has gone out in the Quarterfinals ${h.qfExitCount} times* in ${h.seasonsPlayed} seasons. The bracket knows his name, his order, and where he parks.`,
+      (h, n) =>
+        `:chart_with_downwards_trend: ${n(h.manager)} has lost in the Quarterfinals ${h.qfExitCount} times. ${h.qfExitCount} times! At some point that stops being variance and starts being a lifestyle.`,
+      (h, n) =>
+        `:chart_with_downwards_trend: *${n(h.manager)} in the Quarterfinals.* ${h.qfExitCount} times he has been here. ${h.qfExitCount} times it has ended here. I'm not saying anything, I'm just reading it out.`,
+    ],
+  },
+  {
+    id: 'never-final',
+    // Not for a 3rd-place-game player: his Final is already gone for this year.
+    when: (h, ctx) => h.neverMadeFinals && h.seasonsPlayed >= 4 && ctx.matchupLabel !== '3rd Place',
+    texts: [
+      (h, n) =>
+        `:ticket: *${n(h.manager)} has never played in a Final* — ${h.seasonsPlayed} seasons, ${h.qfExitCount} quarterfinal exits, zero trips to the last weekend. This is the closest the man has ever stood to the thing.`,
+      (h, n) =>
+        `:ticket: ${h.seasonsPlayed} seasons. No Finals. *${n(h.manager)}* has watched this league hand out ${h.seasonsPlayed} trophies from roughly the same seat every time.`,
+      (h, n) =>
+        `:ticket: *${n(h.manager)}* is ${h.playoffAppearances} playoff appearances into a career with no Finals in it — he keeps buying tickets to the building and leaving at the seventh.`,
+    ],
+  },
+  {
+    id: 'never-past-qf',
+    when: (h) => h.neverPastQF && h.playoffAppearances >= 3,
+    texts: [
+      (h, n) =>
+        `:ticket: *${n(h.manager)} has never won a playoff round.* ${h.playoffAppearances} trips to the bracket. Zero rounds won. Ever.`,
+      (h, n) =>
+        `:ticket: ${h.playoffAppearances} brackets, ${h.playoffAppearances} first-round exits. *${n(h.manager)}* qualifies every year for what appears to be the sole purpose of leaving.`,
+    ],
+  },
+  {
+    id: 'defending',
+    when: (h, ctx) => h.lastTitle != null && ctx.year != null && Number(ctx.year) - h.lastTitle === 1,
+    texts: [
+      (h, n) => `:crown: *${n(h.manager)} is the defending champion*, and is at this moment defending it.`,
+      (h, n) =>
+        `:crown: *${n(h.manager)}* won this thing last year, which means every other man left in the bracket would very much enjoy ending him specifically.`,
+    ],
+  },
+  {
+    id: 'drought',
+    when: (h, ctx) => h.titleCount > 0 && ctx.year != null && Number(ctx.year) - h.lastTitle >= 3,
+    texts: [
+      (h, n, ctx) =>
+        `:hourglass: *${n(h.manager)} has ${h.titleCount === 1 ? 'a Cup' : `${h.titleCount} Cups`}*, the most recent in ${h.lastTitle} — ${Number(ctx.year) - h.lastTitle} years, and he has found a way to mention it in every one of them.`,
+      (h, n, ctx) =>
+        `:hourglass: ${Number(ctx.year) - h.lastTitle} years since *${n(h.manager)}* last won the Cup. He brings it up like it happened Tuesday.`,
+    ],
+  },
+  {
+    id: 'bridesmaid',
+    when: (h) => h.runnerUps.length >= 2 && h.titleCount === 0,
+    texts: [
+      (h, n) =>
+        `:second_place_medal: *${n(h.manager)} has lost ${h.runnerUps.length} Finals* (${h.runnerUps.join(', ')}) and won none. He is extremely good at getting there and historically catastrophic at the last part.`,
+      (h, n) =>
+        `:second_place_medal: ${h.runnerUps.length} Finals for *${n(h.manager)}*. ${h.runnerUps.length} losses. The man has been to the mountaintop ${h.runnerUps.length} times and taken a photo of somebody else on it every single time.`,
+    ],
+  },
+  {
+    id: 'back-from-nowhere',
+    when: (h, ctx) =>
+      ctx.round !== 'QF' &&
+      ctx.matchupLabel !== '3rd Place' &&
+      h.lastYearInSemis != null &&
+      Number(ctx.year) - h.lastYearInSemis >= 4,
+    texts: [
+      (h, n, ctx) =>
+        `:sparkles: *${n(h.manager)}'s first ${ctx.round === 'Finals' ? 'Final' : 'Semifinal'} since ${h.lastYearInSemis}.* Whatever he did differently this year, he should write it down, because he clearly did not remember it the last four times.`,
+      (h, n, ctx) =>
+        `:sparkles: ${n(h.manager)} last got this far in ${h.lastYearInSemis}. *${Number(ctx.year) - h.lastYearInSemis} years* is a long time to wait for another chance to blow it.`,
+    ],
+  },
+  {
+    id: 'semis-regular',
+    when: (h, ctx) => ctx.round !== 'QF' && h.sfExitCount >= 3 && h.titleCount === 0,
+    texts: [
+      (h, n) =>
+        `:repeat: *${n(h.manager)} has lost ${h.sfExitCount} Semifinals* and won nothing. He is the most reliable participation trophy this league produces.`,
+      (h, n) =>
+        `:repeat: ${h.sfExitCount} semifinal losses. Zero Cups. *${n(h.manager)}* has built an entire career out of the second-to-last weekend of the season.`,
+    ],
+  },
+];
+
+// ---- Assembly ---------------------------------------------------------------
+
+// Build the commentary lines for one daily playoff post.
+//
+//   round        — 'QF' | 'SF' | 'Finals'
+//   roundLabel   — 'Semifinals' (display only)
+//   year         — the season, for the history lines' arithmetic
+//   matchups     — [{ label, a, b, aTotal, bTotal, aDelta, bDelta }], already scored by the
+//                  caller from the same numbers the matchup block prints
+//   dailyTotals  — { manager: yesterday's points } for the round's participants
+//   daysLeft     — whole days left in the round including today, or null when unknown
+//   histories    — { manager: managerPlayoffHistory(...) | null }
+//   shortNames   — { manager: display name }
+//   seed         — deterministic template seed (seedFromDate(yesterdayISO))
+//   maxLines     — cap, default 4
+//
+// Returns [] when there is nothing worth saying — the caller drops the whole section rather
+// than printing a heading over an empty list.
+function buildPlayoffCommentary({
+  round = null,
+  roundLabel = '',
+  year = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  histories = {},
+  shortNames = {},
+  seed = 0,
+  maxLines = 4,
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return [];
+  const n = (name) => shortNames[name] || name || '';
+  const daysLeftText =
+    daysLeft == null
+      ? ''
+      : daysLeft <= 0
+        ? ' with the round already over'
+        : ` with ${daysLeft} day${daysLeft === 1 ? '' : 's'} left`;
+
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return [];
+
+  const lines = [];
+  const usedManagers = new Set();
+  const add = (text, ...managers) => {
+    if (!text || lines.length >= maxLines || lines.includes(text)) return;
+    lines.push(text);
+    managers.filter(Boolean).forEach((m) => usedManagers.add(m));
+  };
+
+  // 1. Lead changes first — nothing else that happened yesterday outranks one.
+  moves
+    .filter((m) => m.flipped)
+    .forEach((m, i) => {
+      const winnerDelta = m.leaderNow === m.a ? m.aDelta : m.bDelta;
+      add(pickLine(flipLines, seed, i)({ ...m, winnerDelta }, n), m.leaderNow, m.trailerNow);
+    });
+  moves
+    .filter((m) => m.brokeTie)
+    .forEach((m, i) => add(pickLine(tieBreakLines, seed, i)(m, n), m.leaderNow, m.trailerNow));
+
+  // 2. The most lopsided matchup, then the closest one — the two shapes a manager actually
+  //    wants to know about when he opens Slack.
+  const blowouts = moves.filter((m) => m.margin >= BLOWOUT_MARGIN).sort((a, b) => b.margin - a.margin);
+  if (blowouts.length) {
+    const m = blowouts[0];
+    add(pickLine(blowoutLines, seed, 1)({ ...m, daysLeftText }, n), m.leaderNow, m.trailerNow);
+  }
+  const tight = moves.filter((m) => m.margin <= NAILBITER_MARGIN).sort((a, b) => a.margin - b.margin);
+  if (tight.length) {
+    const m = tight[0];
+    add(pickLine(nailbiterLines, seed, 2)({ ...m, daysLeftText }, n), m.a, m.b);
+  }
+
+  // 3. The day's best and worst hauls, but only when they are extreme enough to carry a
+  //    sentence, and only for managers no line has already named.
+  const dayRows = Object.entries(dailyTotals || {})
+    .filter(([manager]) => moves.some((m) => m.a === manager || m.b === manager))
+    .map(([manager, points]) => ({ manager, points: Number(points) || 0 }))
+    .sort((x, y) => y.points - x.points);
+  if (dayRows.length >= 2) {
+    const best = dayRows[0];
+    const next = dayRows[1];
+    if (best.points >= BIG_DAY_POINTS && !usedManagers.has(best.manager)) {
+      add(
+        pickLine(bigDayLines, seed, 3)({ ...best, next: next.points, gapToNext: best.points - next.points }, n),
+        best.manager
+      );
+    }
+    const worst = dayRows[dayRows.length - 1];
+    if (worst.points <= DEAD_DAY_POINTS && !usedManagers.has(worst.manager)) {
+      add(pickLine(deadDayLines, seed, 4)(worst, n), worst.manager);
+    }
+  }
+
+  // 4. One history line, from whichever still-playing manager has the sharpest pattern.
+  //    Ordered by the bank's own priority (the earliest matching rule wins), tie-broken by
+  //    the seed so the same fixed situation does not print the same manager every morning.
+  //
+  //    Each candidate is judged with its OWN matchup label in context, because in the Finals
+  //    the two games mean opposite things: "he has never reached a Final, and this is the
+  //    closest he has been" is a true and pointed thing to say to a championship-game player
+  //    and a false one to say to somebody in the 3rd-place game, who already lost his semi.
+  const field = [];
+  const matchupLabelOf = {};
+  moves.forEach((m) => {
+    field.push(m.a, m.b);
+    matchupLabelOf[m.a] = m.label;
+    matchupLabelOf[m.b] = m.label;
+  });
+  const ctx = { round, roundLabel, year };
+  const candidates = [];
+  field.forEach((manager) => {
+    const h = histories[manager];
+    if (!h) return;
+    const mctx = { ...ctx, matchupLabel: matchupLabelOf[manager] || null };
+    historyLines.forEach((rule, rank) => {
+      if (rule.when(h, mctx)) candidates.push({ rank, rule, h, ctx: mctx });
+    });
+  });
+  if (candidates.length) {
+    candidates.sort((x, y) => x.rank - y.rank);
+    const bestRank = candidates[0].rank;
+    const tied = candidates.filter((c) => c.rank === bestRank);
+    const chosen = tied[Math.abs(seed) % tied.length];
+    add(pickLine(chosen.rule.texts, seed, 5)(chosen.h, n, chosen.ctx), chosen.h.manager);
+  }
+
+  return lines;
+}
+
+// ---- Claude-generated commentary: the facts, and a guard on what comes back ----
+// `buildPlayoffCommentary` above is the floor — a deterministic bank that always produces
+// something. When an Anthropic key is configured the server prefers a written version, and
+// these two helpers are what make that safe: one renders the facts (and ONLY the facts) that
+// the model is allowed to talk about, the other checks that the reply did not invent a score.
+// Both are pure, so the interesting half of the API path is testable without an API.
+
+// Everything the model needs to write about yesterday, as plain text. Names are already
+// shortened, so the model never sees a full name it might print. No prompt wording here —
+// that lives with the API call in server.js; this is the evidence, not the instruction.
+function commentaryFactSheet({
+  round = null,
+  roundLabel = '',
+  year = null,
+  matchups = [],
+  dailyTotals = {},
+  daysLeft = null,
+  daysElapsed = 0,
+  histories = {},
+  shortNames = {},
+  underperformers = [],
+} = {}) {
+  if (!['QF', 'SF', 'Finals'].includes(round)) return null;
+  const n = (name) => shortNames[name] || name || '';
+  const moves = (matchups || []).filter((m) => m && m.a && m.b).map((m) => matchupMovement(m));
+  if (moves.length === 0) return null;
+
+  const out = [];
+  out.push(`Round: ${roundLabel || round}${year ? ` of the ${year} season` : ''}`);
+  if (daysLeft != null) {
+    out.push(daysLeft <= 0 ? 'Days left in the round: none, it is over' : `Days left in the round: ${daysLeft}`);
+  }
+
+  // Every figure below carries its unit, because the model echoes the shape of its evidence:
+  // a fact sheet of bare decimals produces takes full of bare decimals, and a lead "down to
+  // 0.8" with nothing attached could be points, games or a batting average.
+  out.push('', 'MATCHUPS (round-to-date total, then what they scored yesterday):');
+  for (const m of moves) {
+    out.push(
+      `- ${m.label}: ${n(m.a)} ${fmtPts(m.aTotal)} pts (yesterday ${fmtDelta(m.aDelta)} pts) vs ` +
+        `${n(m.b)} ${fmtPts(m.bTotal)} pts (yesterday ${fmtDelta(m.bDelta)} pts)`
+    );
+    if (m.leaderNow) out.push(`  ${n(m.leaderNow)} leads by ${fmtPts(m.margin)} pts`);
+    else out.push('  dead level');
+    if (m.flipped) {
+      out.push(
+        `  LEAD CHANGE yesterday: ${n(m.trailerNow)} led by ${fmtPts(m.marginBefore)} pts the previous morning and lost it`
+      );
+    } else if (m.brokeTie) {
+      out.push(`  they were exactly level the previous morning; ${n(m.leaderNow)} broke it`);
+    } else if (m.swing < 0) {
+      out.push(`  the gap CLOSED by ${fmtPts(Math.abs(m.swing))} pts yesterday (was ${fmtPts(m.marginBefore)} pts)`);
+    } else if (m.swing > 0) {
+      out.push(`  the gap WIDENED by ${fmtPts(m.swing)} pts yesterday (was ${fmtPts(m.marginBefore)} pts)`);
+    }
+    if (m.margin >= BLOWOUT_MARGIN) out.push('  this one is effectively over');
+    else if (m.margin <= NAILBITER_MARGIN) out.push('  this one is a coin flip');
+  }
+
+  const dayRows = Object.entries(dailyTotals || {})
+    .filter(([manager]) => moves.some((m) => m.a === manager || m.b === manager))
+    .map(([manager, points]) => ({ manager, points: Number(points) || 0 }))
+    .sort((x, y) => y.points - x.points);
+  if (dayRows.length) {
+    out.push('', "YESTERDAY'S SCORING, best to worst:");
+    for (const r of dayRows) out.push(`- ${n(r.manager)}: ${fmtPts(r.points)} pts`);
+  }
+
+  // Bracket-wide, so a take can say "best in the bracket" or "worst of the four" without the
+  // model having to work it out from the matchup list and get it wrong.
+  const totals = [];
+  for (const m of moves) {
+    totals.push({ name: m.a, total: m.aTotal });
+    totals.push({ name: m.b, total: m.bTotal });
+  }
+  totals.sort((x, y) => y.total - x.total);
+  if (totals.length > 2) {
+    out.push('', 'ROUND TOTALS ACROSS THE WHOLE BRACKET, best to worst:');
+    for (const t of totals) out.push(`- ${n(t.name)}: ${fmtPts(t.total)} pts`);
+  }
+
+  // Only near the end, where the number means something. Earlier it is noise dressed as maths.
+  if (daysLeft != null && daysLeft <= RUN_IN_DAYS && daysElapsed > 0) {
+    const runIn = [];
+    for (const m of moves) {
+      if (!m.trailerNow || !(m.margin > 0)) continue;
+      const trailerTotal = m.trailerNow === m.a ? m.aTotal : m.bTotal;
+      const pace = catchUpPace({ margin: m.margin, daysLeft, trailerTotal, daysElapsed });
+      if (!pace) continue;
+      runIn.push(
+        `- ${m.label}: ${n(m.trailerNow)} needs ${fmtPts(pace.needPerDay)} pts per day over the last ` +
+          `${daysLeft} day${daysLeft === 1 ? '' : 's'} to draw level, against the ` +
+          `${fmtPts(pace.actualPerDay)} pts per day he has averaged this round. Verdict: ${pace.verdict}.`
+      );
+    }
+    if (runIn.length) {
+      out.push('', `THE RUN-IN (${daysLeft} day${daysLeft === 1 ? '' : 's'} left, ${daysElapsed} scored so far):`);
+      out.push(...runIn);
+    }
+  }
+
+  // Players going backwards, with the two rates that make it a fact rather than an opinion.
+  //
+  // Phrased as "was X, now Y" rather than "Y this round vs X before it", because the model
+  // compresses whatever it is given and a compressed comparison loses whichever end was not
+  // nailed down. "(8.9 to 3.3 a game)" went out to the league that way: two real numbers, in
+  // the right order, and no way for a reader to tell which one is the player's form today, or
+  // that either of them is points. Leading with "was" and ending with "now" makes the
+  // direction survive any rewrite short of dropping a number entirely.
+  const slumps = (underperformers || []).filter((u) => u && u.player && u.manager);
+  if (slumps.length) {
+    out.push('', 'PLAYERS GOING BACKWARDS (scoring rate BEFORE this round vs DURING it):');
+    for (const u of slumps) {
+      out.push(
+        `- ${u.player} (${n(u.manager)}, ${u.type}): was ${fmtPts(u.priorPerGame)} pts per game before ` +
+          `this round, now ${fmtPts(u.roundPerGame)} pts per game in it, over ` +
+          `${u.games} game${u.games === 1 ? '' : 's'}.`
+      );
+    }
+  }
+
+  const careerLines = [];
+  for (const m of moves) {
+    for (const name of [m.a, m.b]) {
+      const h = histories[name];
+      if (!h || careerLines.some((l) => l.startsWith(`- ${n(name)}:`))) continue;
+      const bits = [`${h.seasonsPlayed} seasons`];
+      bits.push(
+        h.titleCount ? `${h.titleCount} Cup${h.titleCount === 1 ? '' : 's'} (${h.titles.join(', ')})` : 'no Cups'
+      );
+      if (h.runnerUps.length) bits.push(`lost ${h.runnerUps.length} Final${h.runnerUps.length === 1 ? '' : 's'}`);
+      if (h.neverMadeFinals) bits.push('has NEVER reached a Final');
+      if (h.neverPastQF) bits.push('has NEVER won a playoff round');
+      if (h.qfExitCount) bits.push(`${h.qfExitCount} quarterfinal exit${h.qfExitCount === 1 ? '' : 's'}`);
+      if (h.sfExitCount) bits.push(`${h.sfExitCount} semifinal loss${h.sfExitCount === 1 ? '' : 'es'}`);
+      if (h.dnqCount) bits.push(`missed the bracket ${h.dnqCount}x`);
+      careerLines.push(`- ${n(name)}: ${bits.join('; ')}`);
+    }
+  }
+  if (careerLines.length) {
+    out.push('', 'CAREER RECORD of the managers still playing (finished seasons only):');
+    out.push(...careerLines);
+  }
+
+  return out.join('\n');
+}
+
+// Does `text` quote a decimal number that the fact sheet never mentioned? Scores in this
+// league are decimals (48.4, 233.7), so a decimal the evidence does not contain is the model
+// having made one up — the single failure that would put a wrong number in the same post as
+// the right one. Whole numbers are deliberately NOT checked: "2 of 3", "8 seasons" and "one
+// bad afternoon" are ordinary prose, and margins that land on a round number are legitimately
+// derivable from two figures that are both present.
+function commentaryMentionsUnknownScore(text, factSheet) {
+  const decimals = String(text || '').match(/\d[\d,]*\.\d+/g) || [];
+  if (decimals.length === 0) return false;
+  const known = new Set((String(factSheet || '').match(/\d[\d,]*\.\d+/g) || []).map((s) => s.replace(/,/g, '')));
+  return decimals.some((d) => !known.has(d.replace(/,/g, '')));
+}
+
+// Clean up a model-written line: strip any bullet/numbering it added, collapse the doubled
+// period an initialled short name produces at a full stop ("Ryan S.."), and trim.
+function tidyCommentaryLine(line) {
+  return String(line || '')
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '')
+    .replace(/([A-Z]\.)\.(?!\.)/g, '$1')
+    .trim();
+}
+
+// Force a line to lead with a vetted shortcode. The banks are covered by a test, but a written
+// reply is not — the model is given the list and can still reach for something outside it, and
+// Slack would print that as literal text. Swapping in a neutral one keeps the line (the joke is
+// the valuable part) while guaranteeing it renders. Lines with no shortcode at all get one.
+function enforceVettedEmoji(line, fallbackCode = ':zap:') {
+  const text = String(line || '').trim();
+  if (!text) return '';
+  const match = text.match(/^:[a-z_0-9]+:/);
+  if (match && SLACK_EMOJI.includes(match[0])) return text;
+  const body = match ? text.slice(match[0].length).trim() : text;
+  return `${fallbackCode} ${body}`.trim();
+}
+
+// Cache key for a day's takes. The takes are about ONE day's scoring inside ONE round, so
+// both belong in the key: a new day obviously invalidates them, and so does a round rolling
+// over underneath the same day (the Monday a round ends, "yesterday" belongs to the round
+// that just finished). Returns null when either half is missing, which callers treat as
+// "not cacheable" rather than as a key that could accidentally match.
+function hotTakesCacheKey(dayISO, round) {
+  if (!dayISO || !round) return null;
+  return `${dayISO}|${round}`;
+}
+
+// Is a stored takes cache still the right answer for this day and round?
+function hotTakesCacheHit(cached, dayISO, round) {
+  const key = hotTakesCacheKey(dayISO, round);
+  return !!(
+    key &&
+    cached &&
+    cached.key === key &&
+    Array.isArray(cached.lines) &&
+    cached.lines.length > 0 &&
+    cached.lines.every((l) => typeof l === 'string' && l.trim())
+  );
+}
+
+// A player has to have played this many games in the round before a slump is a slump rather than
+// a small sample, and his prior rate has to clear this or he was never contributing in the first
+// place. Server-side only: they gate a derivation over season data, not anything the pure
+// commentary module can see.
+const SLUMP_MIN_GAMES = 4;
+const SLUMP_MIN_PRIOR_RATE = 6;
+
+// Players on a still-alive manager's roster who are scoring materially less in this round than
+// they were before it — the "why is he losing" that a scoreboard cannot show.
+//
+// Attribution is the careful part, and it splits cleanly in two. WHOSE player he is comes from
+// `activeRosterForOdds`, i.e. the authoritative roster_dates windows scoped to this round — not
+// from `sd.rosters`, which is a derived cache. HOW MUCH he scored is his own production from his
+// own stat rows and needs no ownership at all, so there is nothing to get wrong there.
+//
+// Rates are per GAME, not per day: a batter with three games in a week and a starter with one
+// are not comparable per day, and the interesting claim is "he is worse when he plays", not "he
+// played less". Gated on SLUMP_MIN_GAMES so a two-game sample cannot libel anybody, and on
+// SLUMP_MIN_PRIOR_RATE so a player who never scored is not reported as having declined.
+function findUnderperformers(sd, round, managers, roundStartISO, todayISO, { limit = 3 } = {}) {
+  if (!roundStartISO || !Array.isArray(managers) || managers.length === 0) return [];
+
+  // Per-player game scores, split at the round boundary. Same per-game aggregation as
+  // collectPlayerGameLog (doubleheaders count once per game, not once per row).
+  const before = new Map();
+  const during = new Map();
+  const add = (bucket, name, key, score) => {
+    if (!bucket.has(name)) bucket.set(name, new Map());
+    const g = bucket.get(name);
+    g.set(key, (g.get(key) || 0) + score);
+  };
+  const walk = (rows, nameKey, scorer, type) => {
+    for (const r of rows || []) {
+      const stats = r.delta || r.cumulative;
+      const name = r[nameKey];
+      if (!name || !stats || !r.date) continue;
+      const key = r.game_id != null ? `g${r.game_id}` : `d${r.date}`;
+      add(r.date >= roundStartISO ? during : before, `${type}|${name}`, key, scorer(stats));
+    }
+  };
+  walk(sd.daily_batting, 'batter', calculateBattingScore, 'Batter');
+  walk(sd.daily_pitching, 'pitcher', calculatePitchingScore, 'Pitcher');
+
+  const rate = (bucket, key) => {
+    const games = bucket.get(key);
+    if (!games || games.size === 0) return null;
+    let total = 0;
+    for (const v of games.values()) total += v;
+    return { perGame: total / games.size, games: games.size };
+  };
+
+  const out = [];
+  for (const manager of managers) {
+    for (const player of activeRosterForOdds(sd, manager, todayISO, round)) {
+      for (const type of ['Batter', 'Pitcher']) {
+        const key = `${type}|${player}`;
+        const now = rate(during, key);
+        const then = rate(before, key);
+        if (!now || !then) continue;
+        // Every comparison below is `>=`, and NaN fails every comparison — so a single
+        // unparseable stat line would slip past all of them and report a player who is doing
+        // fine as collapsing. Insist on real numbers before judging anybody.
+        if (!Number.isFinite(now.perGame) || !Number.isFinite(then.perGame)) continue;
+        if (now.games < SLUMP_MIN_GAMES) continue;
+        if (then.perGame < SLUMP_MIN_PRIOR_RATE) continue;
+        if (now.perGame >= then.perGame * 0.6) continue; // not a slump, just noise
+        out.push({
+          manager,
+          player,
+          type,
+          roundPerGame: Math.round(now.perGame * 10) / 10,
+          priorPerGame: Math.round(then.perGame * 10) / 10,
+          games: now.games,
+          drop: then.perGame - now.perGame,
+        });
+      }
+    }
+  }
+  // Biggest falls first — a 20-point collapse is a story, a 7-point one is a shrug.
+  out.sort((a, b) => b.drop - a.drop);
+  return out.slice(0, limit);
+}
+
+// Today's Hot Takes for a season, generated at most once per (day, round) and cached on the
+// season exactly like `sd.playoff_odds`: a server-computed derived cache that clients only
+// ever display, kept across a full-season save by the preservation in the save handler.
+//
+// Caching is not (only) about cost. `/wmmc` cannot call an API — Slack wants a reply inside
+// three seconds — so without a stored copy the slash command would be permanently stuck on the
+// static bank while the 7am post used Claude, and the channel would carry two different sets
+// of jokes about the same day. One generation per day, read by everything, is the whole point.
+//
+// Re-reads the database rather than taking the caller's copy, and writes back only after the
+// generation succeeds, so a long API call cannot carry a stale snapshot back to disk.
+async function ensureFreshHotTakes(year, facts, opts = {}) {
+  if (!facts || !facts.dayISO || !facts.round) return null;
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return null;
+
+  const key = hotTakesCacheKey(facts.dayISO, facts.round);
+  const cached = sd.hot_takes;
+  const hit = hotTakesCacheHit(cached, facts.dayISO, facts.round);
+  if (!opts.force && hit) {
+    console.log(
+      `[Hot Takes] Reusing today's ${cached.lines.length} take(s) for ${year} ${facts.round} ${facts.dayISO}`
+    );
+    return cached.lines;
+  }
+
+  // A forced re-roll has to actually move, and it would not by default: the static bank is
+  // seeded off the date so a repost tells the same joke, which is right for a retry and wrong
+  // for "give me different ones". Count re-rolls and nudge the seed by that count, so each
+  // press lands on a different template while staying deterministic (the same re-roll number
+  // on the same day always gives the same text). The Anthropic path varies on its own.
+  const rerolls = opts.force && hit ? (Number(cached.rerolls) || 0) + 1 : 0;
+  const seeded = rerolls ? { ...facts, seed: (Number(facts.seed) || 0) + rerolls } : facts;
+
+  const { lines, source } = await generatePlayoffCommentary(seeded);
+  if (!lines || !lines.length) return null;
+
+  sd.hot_takes = {
+    key,
+    date: facts.dayISO,
+    round: facts.round,
+    lines,
+    source,
+    rerolls,
+    generated_at: new Date().toISOString(),
+  };
+  writeDB(db);
+  console.log(
+    `[Hot Takes] Stored ${lines.length} take(s) for ${year} ${facts.round} ${facts.dayISO} ` +
+      `— source: ${source}${rerolls ? `, re-roll #${rerolls}` : ''}`
+  );
+  return lines;
+}
+
+// ============================================================
 // Slack Scoreboard Builder
 // ============================================================
+
+// The Hot Takes section is rendered by buildScoreboardBlocks from the deterministic bank, and
+// then optionally rewritten in place by postScoreboardSlack with an Anthropic-written version.
+// The tag is how the second step finds the first step's block without counting array indexes.
+const HOT_TAKES_BLOCK_ID = 'wmmc_hot_takes';
+const HOT_TAKES_HEADING = '\u{1F399}\u{FE0F} Hot Takes';
+const hotTakesText = (lines) => `*${HOT_TAKES_HEADING}*\n${lines.join('\n\n')}`;
+
+// Write the Hot Takes with Claude, falling back to the deterministic bank on absolutely any
+// problem — no key, a network failure, a bad status, an unreadable body, an empty reply, or a
+// reply that quotes a score the evidence never contained.
+//
+// The model is given `commentaryFactSheet(facts)` and nothing else: already-shortened names,
+// the round totals, yesterday's deltas, who led when, and each survivor's career record. It is
+// not given the season, the rosters, or any way to reach them, so the worst it can do is
+// phrase a real fact badly — and the one failure that would actually mislead the league,
+// inventing a number that looks like a score, is checked for explicitly before the reply is
+// used. That check is why this is worth doing at all: the section sits directly beneath a
+// scoreboard, and a made-up total next to a real one is worse than no joke.
+// Returns { lines, source }, where source is 'written' (Claude) or 'bank' (the static
+// fallback) plus the reason it fell back. Callers only use `lines`; the source exists so the
+// logs can answer "why is the post in the bank's voice", which used to be unanswerable — the
+// no-key path returned silently, so a missing key and a broken key looked identical from
+// outside. Anything that ends in the bank now says why, once, at the point it happens.
+async function generatePlayoffCommentary(facts, opts = {}) {
+  // How many takes the day has earned, not a fixed quota. A quiet day gets two lines; a day
+  // with a lead change and a collapse gets three. Printing the same volume regardless is the
+  // surest way to make the section skippable.
+  const maxLines = opts.maxLines || commentaryBudget(facts) || 2;
+  const fallback = buildPlayoffCommentary({ ...facts, maxLines });
+  const bank = (reason) => {
+    console.log(`[Hot Takes] Using the static bank: ${reason}`);
+    return { lines: fallback, source: `bank (${reason})` };
+  };
+
+  if (!facts) return bank('no facts to write from');
+  if (!ANTHROPIC_API_KEY) return bank('ANTHROPIC_API_KEY is not set on this service');
+
+  const factSheet = commentaryFactSheet(facts);
+  if (!factSheet) return bank('the facts did not render (no usable matchups)');
+
+  const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup, a private fantasy baseball league of long-time friends. Write the "Hot Takes" section of this morning's scoreboard post: what yesterday DID to the playoff bracket.
+
+Rules:
+- Write AT MOST ${maxLines} takes, one per line, nothing else. No heading, no preamble, no numbering, no bullets.
+- Write FEWER than that if the day does not justify them. A quiet day should produce a short section. Never pad, never restate the same fact twice in different words, and never write a take whose content is "not much happened".
+- Every take must carry a fact from the list below that the reader would not get from glancing at the scoreboard above it. Being funny is not enough on its own; being informative is not enough on its own; do both or cut the line.
+- Start each line with one of these Slack emoji shortcodes and NO others — anything else renders as literal text in Slack: ${SLACK_EMOJI.join(' ')}\nSuggested fits: :arrows_counterclockwise: a lead change, :coffin: a matchup that is over, :hourglass_flowing_sand: one that is close, :boom: a big day, :zzz: a dead one, :ticket: or :crown: a career fact.
+- Slack mrkdwn: *bold* is a single asterisk on each side. Never use **double** asterisks.
+- Two sentences per take at most. Vary the shape — do not write four takes with the same rhythm.
+- Use ONLY the numbers and facts below. Do not invent, estimate, extrapolate or round a score. If you want to talk about something that is not listed, do not.
+- Use the names exactly as written below. Some are abbreviated (e.g. "Ryan S.") — keep them that way, and do not add a second period when one ends a sentence.
+- Lead with a lead change if there is one; it outranks everything else that happened.
+- A career fact is worth a take only when it is a pattern (never reached a Final, keeps going out in the same round, a long drought), and at most one take should be about career history.
+- If a RUN-IN section is present, its verdict is the judgement — use it, do not re-derive it. A small "needs per day" number against a large average means the chase is comfortable, not doomed.
+- If a PLAYERS GOING BACKWARDS section is present, one take naming a specific player and both his rates is usually the most informative thing available. Blame the manager for still starting him.
+
+HOW TO WRITE A NUMBER — a take lives directly under a scoreboard, so a figure that needs decoding is worse than no figure:
+- UNITS. Say the unit the first time a figure appears in a take: "clawed back 12.8 pts", "a 0.8-pt lead", "8.9 pts a game". After that first one, bare numbers in the same take are fine — "put up 68.1 pts and still trails by 100.6" is right, four "pts" in one sentence is not. A bare decimal with nothing attached is the failure: "his lead is down to 0.8" could be points, games, or a batting average.
+- DIRECTION. Never print two figures as a bare range. "(8.9 to 3.3 a game)" is two real numbers and no way to tell which end is the player's form today. Name the direction and both periods: "down from 8.9 pts a game before this round to 3.3 in it". Same for a player's rates in PLAYERS GOING BACKWARDS — the facts give you "was X, now Y"; keep that shape.
+- DENSITY. At most two figures in a sentence and three in a take. A take is a joke with a fact in it, not a stat line. If three players are slumping, give the rates for the worst one and merely name the others.
+- Use an em dash (—) for an aside, never a hyphen (-).
+- Read each take back to yourself before you keep it. If it only parses on a screen — numbers stacked up with a punchline bolted on the end — rewrite it as something a man would actually say out loud, or cut it.
+
+${ROAST_VOICE}
+
+FACTS — everything you are allowed to talk about, and every number you are allowed to print:
+${factSheet}
+
+Write the takes now.`;
+
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: PLAYOFF_COMMENTARY_MODEL,
+        // Generous, because a model that emits a thinking block spends this budget on it
+        // first. At 600 the takes could be cut off before a single text block was produced.
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
+    });
+  } catch (e) {
+    console.error(`[Hot Takes] Anthropic call failed (model ${PLAYOFF_COMMENTARY_MODEL}):`, e.name, e.message);
+    return bank(`the API call threw (${e.name})`);
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    console.error(`[Hot Takes] Anthropic HTTP ${resp.status} (model ${PLAYOFF_COMMENTARY_MODEL}):`, body.slice(0, 500));
+    return bank(`the API returned HTTP ${resp.status}`);
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    console.error('[Hot Takes] Anthropic returned an unreadable body:', e.message);
+    return bank('the API response body could not be parsed');
+  }
+
+  const raw = anthropicReplyText(data);
+  if (!raw) {
+    console.error(`[Hot Takes] Empty reply from ${PLAYOFF_COMMENTARY_MODEL} — ${describeAnthropicReply(data)}`);
+    return bank(`the API returned no text (${describeAnthropicReply(data)})`);
+  }
+
+  if (commentaryMentionsUnknownScore(raw, factSheet)) {
+    console.error('[Hot Takes] Reply quoted a score absent from the facts:', String(raw).slice(0, 300));
+    return bank('the reply quoted a score that is not in the facts');
+  }
+
+  const lines = String(raw)
+    .split(/\n+/)
+    .map(tidyCommentaryLine)
+    // Slack mrkdwn has no **bold**; a model reaching for Markdown habits would print the
+    // asterisks literally.
+    .map((l) => l.replace(/\*\*(.+?)\*\*/g, '*$1*'))
+    // ...and the same is true of an emoji shortcode Slack does not know.
+    .map((l) => enforceVettedEmoji(l))
+    .filter(Boolean)
+    .slice(0, maxLines);
+
+  if (!lines.length) return bank('nothing usable survived parsing the reply');
+  console.log(`[Hot Takes] Written by ${PLAYOFF_COMMENTARY_MODEL}: ${lines.length} take(s).`);
+  return { lines, source: 'written' };
+}
 
 const ROUND_LABELS = {
   PP1: 'Pool Play 1',
@@ -4856,15 +6352,22 @@ function computeDailyHighLow(sd, date) {
 }
 
 // ============================================================
-// Playoff odds (Monte-Carlo) — PP2 Week 4–5 only
+// Odds (Monte-Carlo) — pool play's last two weeks, and each bracket round's last week
 // ============================================================
-// Simulates every manager's remaining PP2 production (per-player per-game
-// scoring rates x their team's remaining MLB games) and applies the exact
-// qualification rules — win your pool's PP1 or PP2 period, or take a
-// wildcard on combined total — to each simulated season. Results are stored
-// on the season as `sd.playoff_odds` (a derived cache, like the weekly
-// rollups: rebuilt daily, never authoritative for anything) so the
-// scoreboard UI and the Slack post always read identical numbers.
+// One projection engine, two questions. It simulates every manager's remaining
+// production (per-player per-game scoring rates x their team's remaining MLB
+// games x how often the player actually appears in one) and then asks either:
+//
+//   * PP2 Weeks 4-5 — apply the exact qualification rules (win your pool's PP1
+//     or PP2 period, or take a wildcard on combined total) to each simulated
+//     season, and report who makes the 8-team bracket. Stored as
+//     `sd.playoff_odds`.
+//   * QF/SF/Finals Week 2 — play each head-to-head matchup out and report who
+//     wins it. Stored as `sd.bracket_odds`.
+//
+// Both are derived caches, like the weekly rollups: rebuilt daily, never
+// authoritative for anything, so the scoreboard UI and the Slack post always
+// read identical numbers instead of each deriving their own.
 //
 // The pure engine below (ODDS_WINDOW through formatOddsPct) is a synced copy
 // of js/playoffOdds.js — the canonical, unit-tested version lives there.
@@ -4891,6 +6394,25 @@ function oddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCHEDULE) 
   };
 }
 
+// The bracket rounds that get head-to-head odds in their FINAL week. Pool play
+// keeps its own two-week window above; these get one, because a playoff round
+// is only two weeks long to begin with.
+const BRACKET_ODDS_ROUNDS = ['QF', 'SF', 'Finals'];
+
+function bracketOddsWindowForDate(scheduleDates, todayISO, schedule = SEASON_SCHEDULE) {
+  if (!Array.isArray(scheduleDates) || !todayISO) return null;
+  for (let i = 0; i < schedule.length; i++) {
+    const entry = schedule[i];
+    if (!BRACKET_ODDS_ROUNDS.includes(entry.round)) continue;
+    if (i + 1 < schedule.length && schedule[i + 1].round === entry.round) continue;
+    const dates = scheduleDates[i] || {};
+    if (!dates.start || !dates.end) continue;
+    if (todayISO < dates.start || todayISO > dates.end) continue;
+    return { round: entry.round, week: entry.week, start: dates.start, end: dates.end };
+  }
+  return null;
+}
+
 function meanVariance(xs) {
   const arr = Array.isArray(xs) ? xs.filter((x) => typeof x === 'number' && !Number.isNaN(x)) : [];
   const n = arr.length;
@@ -4909,6 +6431,22 @@ function playerGameRate(gameScores, baseline = { mean: 0, variance: 0 }, k = 5) 
   const ownVar = n >= 2 ? sVar : bVar;
   const variance = (ownVar * n + bVar * k) / (n + k || 1);
   return { mean, variance, games: n };
+}
+
+// ---- Appearance rate: "his team has 12 games left" is not "he has 12 left" ----
+// A per-game scoring rate is a rate per APPEARANCE, so multiplying it by a team's
+// remaining games projects a starting pitcher to take every turn. This is the
+// correction — the player's own observed appearances over the same span, shrunk
+// toward a positional prior so someone with almost no history lands on the prior.
+const APPEARANCE_PRIORS = { batter: 0.85, pitcher: 0.3 };
+const APPEARANCE_RATE_FLOOR = 0.05;
+
+function expectedAppearanceRate(appearances, teamGamesInSpan, prior = APPEARANCE_PRIORS.batter, k = 8) {
+  const played = typeof appearances === 'number' && appearances > 0 ? appearances : 0;
+  const span = typeof teamGamesInSpan === 'number' && teamGamesInSpan > 0 ? teamGamesInSpan : 0;
+  if (!span) return prior;
+  const rate = (played + k * prior) / (span + k);
+  return Math.min(1, Math.max(APPEARANCE_RATE_FLOOR, rate));
 }
 
 // ---- Schedule-context adjustments (opponent quality, home/away, park factor) ----
@@ -5003,11 +6541,13 @@ function projectManager(playerProjections) {
   let games = 0;
   for (const p of playerProjections || []) {
     const factors = Array.isArray(p.gameFactors) ? p.gameFactors : [];
+    const rate = typeof p.appearanceRate === 'number' ? Math.min(1, Math.max(0, p.appearanceRate)) : 1;
     const sumFactors = factors.reduce((s, f) => s + f, 0);
     const sumFactorsSq = factors.reduce((s, f) => s + f * f, 0);
-    mean += (p.mean || 0) * sumFactors;
-    variance += (p.variance || 0) * sumFactorsSq;
-    games += factors.length;
+    const playerMean = p.mean || 0;
+    mean += playerMean * rate * sumFactors;
+    variance += (rate * (p.variance || 0) + rate * (1 - rate) * playerMean * playerMean) * sumFactorsSq;
+    games += factors.length * rate;
   }
   return { mean, variance, games };
 }
@@ -5069,6 +6609,7 @@ function makeNormalSampler(rng = Math.random) {
   return function normal() {
     let u = 0;
     let v = 0;
+    // Guard against rng() returning exactly 0 (log(0) = -Infinity).
     while (u === 0) u = rng();
     while (v === 0) v = rng();
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
@@ -5166,6 +6707,51 @@ function simulatePlayoffOdds({
   return { sims, managers };
 }
 
+function simulateBracketOdds({
+  pairs,
+  totals = {},
+  projections = {},
+  seedRank = {},
+  sims = ODDS_DEFAULT_SIMS,
+  rng = Math.random,
+}) {
+  const normal = makeNormalSampler(rng);
+  const matchups = (pairs || []).filter((p) => p && p.a && p.b);
+  const counts = {};
+  const played = {};
+  for (const p of matchups) {
+    for (const name of [p.a, p.b]) {
+      if (!(name in counts)) counts[name] = 0;
+      played[name] = (played[name] || 0) + 1;
+    }
+  }
+
+  const draw = (name) => {
+    const proj = projections[name] || {};
+    const mean = proj.mean || 0;
+    const sd = Math.sqrt(Math.max(0, proj.variance || 0));
+    return (totals[name] || 0) + (sd > 0 ? mean + sd * normal() : mean);
+  };
+
+  for (let s = 0; s < sims; s++) {
+    for (const p of matchups) {
+      const aScore = draw(p.a);
+      const bScore = draw(p.b);
+      let winner;
+      if (aScore !== bScore) winner = aScore > bScore ? p.a : p.b;
+      else winner = (seedRank[p.a] ?? Infinity) <= (seedRank[p.b] ?? Infinity) ? p.a : p.b;
+      counts[winner]++;
+    }
+  }
+
+  const managers = {};
+  for (const name of Object.keys(counts)) {
+    const denom = sims * (played[name] || 1);
+    managers[name] = { advance: denom > 0 ? counts[name] / denom : 0 };
+  }
+  return { sims, managers };
+}
+
 function formatOddsPct(fraction, locked = false) {
   if (locked) return '100%';
   const pct = fraction * 100;
@@ -5176,40 +6762,60 @@ function formatOddsPct(fraction, locked = false) {
 
 // ---- Server-only glue (not part of the synced pure engine) ----
 
-// Per-player per-game season scores from the daily rows. Batting and
-// pitching deltas for the same game (two-way players) merge into one score.
-// Rows without a game_id (manual/gsheets imports) fall back to keying by
-// date so they still count as one appearance.
-function collectPlayerGameScores(sd) {
+// Per-player per-game season scores from the daily rows, plus the date of the
+// player's first appearance. Batting and pitching deltas for the same game
+// (two-way players) merge into one score. Rows without a game_id (manual/
+// gsheets imports) fall back to keying by date so they still count as one
+// appearance.
+//
+// `firstDate` is what lets expectedAppearanceRate divide by the right span: a
+// July call-up has played every game since he arrived, and measuring him
+// against the whole season would file him as a part-timer.
+// Returns { games: Map(name -> { scores, firstDate }), scoringDates: string[] }
+// where scoringDates is every distinct date the season has stats for, ascending
+// — the calendar teamGamesInSpan counts a player's span in days off.
+function collectPlayerGameLog(sd) {
   const perGame = new Map(); // name -> Map(gameKey -> score)
-  const add = (name, key, score) => {
+  const firstDate = new Map();
+  const dates = new Set();
+  const add = (name, key, score, date) => {
     if (!perGame.has(name)) perGame.set(name, new Map());
     const games = perGame.get(name);
     games.set(key, (games.get(key) || 0) + score);
+    if (date) {
+      dates.add(date);
+      if (!firstDate.has(name) || date < firstDate.get(name)) firstDate.set(name, date);
+    }
   };
   for (const r of sd.daily_batting || []) {
     const stats = r.delta || r.cumulative;
     if (!r.batter || !stats) continue;
-    add(r.batter, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculateBattingScore(stats));
+    add(r.batter, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculateBattingScore(stats), r.date);
   }
   for (const r of sd.daily_pitching || []) {
     const stats = r.delta || r.cumulative;
     if (!r.pitcher || !stats) continue;
-    add(r.pitcher, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculatePitchingScore(stats));
+    add(r.pitcher, r.game_id != null ? `g${r.game_id}` : `d${r.date}`, calculatePitchingScore(stats), r.date);
   }
-  const out = new Map();
-  for (const [name, games] of perGame) out.set(name, [...games.values()]);
-  return out;
+  const games = new Map();
+  for (const [name, byKey] of perGame) {
+    games.set(name, { scores: [...byKey.values()], firstDate: firstDate.get(name) || null });
+  }
+  return { games, scoringDates: [...dates].sort() };
 }
 
 // A manager's active PP2 roster as of `todayISO`, derived from the
 // authoritative date windows (roster_dates scoped to the PP2 period start,
 // latest add <= today with no later drop) — the same latest-add/latest-drop
 // logic managerWeekSubtotal uses, evaluated as of today instead of week end.
-function activeRosterForOdds(sd, managerName, todayISO) {
+// `round` defaults to the odds window's PP2 so every existing caller is unchanged; the daily
+// playoff commentary passes the round in progress to ask the same question about a bracket
+// roster. The rule is the same either way, and it is the authoritative one: latest add on or
+// before the date, scoped to the period, with no later drop.
+function activeRosterForOdds(sd, managerName, todayISO, round = ODDS_WINDOW.round) {
   const allMgrDates = (sd.roster_dates && sd.roster_dates[managerName]) || null;
   if (!allMgrDates) return [];
-  const periodStart = periodStartForRound(sd, ODDS_WINDOW.round);
+  const periodStart = periodStartForRound(sd, round);
   const latestAdd = {};
   const latestDrop = {};
   for (const players of Object.values(allMgrDates)) {
@@ -5301,6 +6907,110 @@ async function fetchTeamSeasonQuality(season, idToAbbrev) {
   return out; // { [abbrev]: { era?, runsPerGame? } }
 }
 
+// How many games a player's team played over the stretch we have stats for HIM
+// — the denominator his appearance rate needs, and the one number that has to
+// be measured over the SAME span as the numerator.
+//
+// That rules out the team's MLB season game count, which was the obvious
+// choice and is wrong: MLB starts in late March and the WMMC season starts in
+// May, so a full-season denominator over a WMMC-season numerator files every
+// everyday bat in the league as a part-timer. Instead, take the league's
+// current games-per-day off the remaining schedule (which is measured, not
+// assumed) and apply it to the days we actually have stats for this player.
+// Both halves then cover the same calendar.
+//
+// Returns 0 ("unknown", so expectedAppearanceRate falls back to the positional
+// prior) when there is no schedule to read a rate from.
+function teamGamesInSpan(firstDate, scoringDates, gamesPerDay) {
+  if (!(gamesPerDay > 0) || !scoringDates.length) return 0;
+  const spanDays = firstDate ? scoringDates.filter((d) => d >= firstDate).length : scoringDates.length;
+  return Math.max(1, Math.round(spanDays * gamesPerDay));
+}
+
+// The three MLB fetches both odds computes need, in one place.
+//
+// The id map and the team season stats fail safe to neutral: a bad response
+// leaves that one signal at 1.0 for the affected teams and the compute carries
+// on. The remaining-schedule fetch deliberately does NOT — it is the spine of
+// the whole projection, and without it there is no honest number to publish, so
+// it throws and the caller logs and skips the day (long-standing behavior).
+async function fetchOddsScheduleContext(todayISO, endISO, year) {
+  let idToAbbrev = {};
+  try {
+    idToAbbrev = await fetchTeamIdAbbrevMap();
+  } catch (e) {
+    console.error('[PlayoffOdds] Team id/abbrev map fetch failed (adjustments neutral):', e.message);
+  }
+  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, endISO, idToAbbrev);
+  const teamStats = await fetchTeamSeasonQuality(year, idToAbbrev);
+  const teamQuality = computeTeamQualityFactors(teamStats);
+  const teamCounts = Object.values(remainingByTeam).map((g) => g.length);
+  const avgRemaining = teamCounts.length > 0 ? teamCounts.reduce((a, b) => a + b, 0) / teamCounts.length : 0;
+
+  // League-wide games per calendar day, measured across every team so one club's
+  // off-day can't skew it, then clamped to the range a real MLB schedule lives in
+  // (a team plays at most once a day and rarely fewer than five times a week). On
+  // the last day of a round the window is a single day, which is exactly when an
+  // unclamped rate would be noisiest.
+  const days = Math.max(
+    1,
+    Math.round((Date.parse(`${endISO}T12:00:00Z`) - Date.parse(`${todayISO}T12:00:00Z`)) / 86400000) + 1
+  );
+  const gamesPerDay = avgRemaining > 0 ? Math.min(1, Math.max(0.6, avgRemaining / days)) : 0;
+
+  return { remainingByTeam, teamStats, teamQuality, avgRemaining, gamesPerDay };
+}
+
+// Everything the per-manager projection depends on that is NOT the roster —
+// assembled once per compute and reused for every manager. Keeping it in one
+// object is what lets the pool-play and bracket computes share the projection
+// step verbatim instead of each growing its own copy of it.
+function buildOddsContext(sd, schedule) {
+  const { games: gameLog, scoringDates } = collectPlayerGameLog(sd);
+  const allScores = [];
+  for (const log of gameLog.values()) allScores.push(...log.scores);
+  return {
+    gameLog,
+    scoringDates,
+    baseline: meanVariance(allScores),
+    batPoolSet: new Set(sd.batters_pool || []),
+    battersTeam: sd.batters_team || {},
+    pitchersTeam: sd.pitchers_team || {},
+    ...schedule,
+  };
+}
+
+// One manager's active roster -> the { mean, variance, games } projection
+// simulatePlayoffOdds/simulateBracketOdds draw from, plus the average schedule
+// factor the stored payload reports. Shared by both computes: given these
+// players and this remaining schedule, what do they produce?
+function projectRosterForOdds(roster, ctx) {
+  const perPlayer = roster.map((player) => {
+    const log = ctx.gameLog.get(player) || { scores: [], firstDate: null };
+    const rate = playerGameRate(log.scores, ctx.baseline);
+    const team = ctx.battersTeam[player] || ctx.pitchersTeam[player] || null;
+    const playerType = ctx.batPoolSet.has(player) ? 'batter' : 'pitcher';
+    const games = team && ctx.remainingByTeam[team];
+    // No team (unknown player -> team mapping) means no schedule to read, so
+    // give him the league's average number of remaining games at neutral 1.0
+    // rather than zero — he plays, we just can't say against whom or where.
+    const gameFactors = games
+      ? games.map((g) => gameFactor(playerType, g, ctx.teamQuality))
+      : Array.from({ length: Math.round(ctx.avgRemaining) }, () => 1);
+    const appearanceRate = expectedAppearanceRate(
+      log.scores.length,
+      teamGamesInSpan(log.firstDate, ctx.scoringDates, ctx.gamesPerDay),
+      APPEARANCE_PRIORS[playerType]
+    );
+    return { mean: rate.mean, variance: rate.variance, gameFactors, appearanceRate };
+  });
+  const allFactors = perPlayer.flatMap((p) => p.gameFactors);
+  return {
+    projection: projectManager(perPlayer),
+    scheduleFactor: allFactors.length ? allFactors.reduce((a, b) => a + b, 0) / allFactors.length : 1,
+  };
+}
+
 // Compute the full odds payload for one season, or null when outside the
 // PP2 Week 4–5 window (or pool play is already finalized / pools missing).
 // Managers come from db.managers (the canonical list), scores from
@@ -5326,45 +7036,14 @@ async function computePlayoffOddsForSeason(db, sd, todayISO, year) {
     pp2: pp2Totals[m.name] || 0,
   }));
 
-  const gameScores = collectPlayerGameScores(sd);
-  const allScores = [];
-  for (const scores of gameScores.values()) allScores.push(...scores);
-  const baseline = meanVariance(allScores);
-
-  // Schedule-context signals (opponent quality, home/away, park factor). Each
-  // fetch fails safe to neutral — a bad response never blocks the nightly
-  // compute, it just leaves that one signal at 1.0 for the affected teams.
-  let idToAbbrev = {};
-  try {
-    idToAbbrev = await fetchTeamIdAbbrevMap();
-  } catch (e) {
-    console.error('[PlayoffOdds] Team id/abbrev map fetch failed (adjustments neutral):', e.message);
-  }
-  const remainingByTeam = await fetchRemainingGamesByTeam(todayISO, window.end, idToAbbrev);
-  const teamStats = await fetchTeamSeasonQuality(year, idToAbbrev);
-  const teamQuality = computeTeamQualityFactors(teamStats);
-  const batPoolSet = new Set(sd.batters_pool || []);
-
-  const teamCounts = Object.values(remainingByTeam).map((g) => g.length);
-  const avgRemaining = teamCounts.length > 0 ? teamCounts.reduce((a, b) => a + b, 0) / teamCounts.length : 0;
+  const ctx = buildOddsContext(sd, await fetchOddsScheduleContext(todayISO, window.end, year));
 
   const projections = {};
   const avgFactorByManager = {};
   for (const m of managers) {
-    const roster = activeRosterForOdds(sd, m.name, todayISO);
-    const perPlayer = roster.map((player) => {
-      const rate = playerGameRate(gameScores.get(player) || [], baseline);
-      const team = (sd.batters_team || {})[player] || (sd.pitchers_team || {})[player] || null;
-      const playerType = batPoolSet.has(player) ? 'batter' : 'pitcher';
-      const games = team && remainingByTeam[team];
-      const gameFactors = games
-        ? games.map((g) => gameFactor(playerType, g, teamQuality))
-        : Array.from({ length: Math.round(avgRemaining) }, () => 1);
-      return { mean: rate.mean, variance: rate.variance, gameFactors };
-    });
-    projections[m.name] = projectManager(perPlayer);
-    const allFactors = perPlayer.flatMap((p) => p.gameFactors);
-    avgFactorByManager[m.name] = allFactors.length ? allFactors.reduce((a, b) => a + b, 0) / allFactors.length : 1;
+    const { projection, scheduleFactor } = projectRosterForOdds(activeRosterForOdds(sd, m.name, todayISO), ctx);
+    projections[m.name] = projection;
+    avgFactorByManager[m.name] = scheduleFactor;
   }
 
   const sim = simulatePlayoffOdds({ entries, projections });
@@ -5613,10 +7292,134 @@ function playoffMatchupResultForRoast(sd, round, manager) {
   };
 }
 
-function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
+// ============================================================
+// Bracket odds — head-to-head, in the final week of QF / SF / Finals
+// ============================================================
+// The pool-play odds answered "does he make the bracket". Once the bracket is
+// running there is only one question left, and it is a two-body problem: does
+// he beat the guy across from him. Same projections, same schedule-context
+// adjustments, same appearance rates — the pairings come from
+// computePlayoffPairs, so these numbers can never be about a matchup the
+// scoreboard doesn't show.
+//
+// Returns null outside a bracket round's last week, or before pool play has
+// been ended in the app (no confirmed_seeding -> no pairings to simulate).
+async function computeBracketOddsForSeason(sd, todayISO, year) {
+  const window = bracketOddsWindowForDate(sd.schedule_dates || [], todayISO);
+  if (!window) return null;
+  if ((sd.finalized_rounds || []).includes(window.round)) return null;
+
+  const computed = computePlayoffPairs(sd, window.round);
+  if (!computed) return null;
+  const { pairs, score, seedRank } = computed;
+
+  const totals = {};
+  for (const p of pairs) {
+    for (const name of [p.a, p.b]) if (name) totals[name] = score(p.r, name).total;
+  }
+  const participants = Object.keys(totals);
+  if (participants.length === 0) return null;
+
+  const ctx = buildOddsContext(sd, await fetchOddsScheduleContext(todayISO, window.end, year));
+
+  const projections = {};
+  const scheduleFactors = {};
+  for (const name of participants) {
+    const { projection, scheduleFactor } = projectRosterForOdds(
+      activeRosterForOdds(sd, name, todayISO, window.round),
+      ctx
+    );
+    projections[name] = projection;
+    scheduleFactors[name] = scheduleFactor;
+  }
+
+  const sim = simulateBracketOdds({ pairs, totals, projections, seedRank });
+
+  const pct1 = (fraction) => Math.round(fraction * 1000) / 10;
+  const r1 = (x) => Math.round(x * 10) / 10;
+  const managersOut = {};
+  for (const p of pairs) {
+    for (const [name, opponent] of [
+      [p.a, p.b],
+      [p.b, p.a],
+    ]) {
+      if (!name) continue;
+      // Decided, not merely lopsided: the opponent has no games left to play and
+      // is behind, so no simulation is needed and the % becomes a padlock.
+      const opponentDone = opponent ? (projections[opponent] || {}).games < 0.5 : false;
+      managersOut[name] = {
+        advance_pct: pct1(sim.managers[name] ? sim.managers[name].advance : 0),
+        matchup: p.label,
+        opponent: opponent || null,
+        clinched: !!(opponentDone && totals[name] > (totals[opponent] || 0)),
+        proj_mean: r1(projections[name].mean),
+        games_remaining: Math.round(projections[name].games),
+        schedule_factor: Math.round((scheduleFactors[name] || 1) * 1000) / 1000,
+      };
+    }
+  }
+
+  return {
+    computed_at: new Date().toISOString(),
+    date: todayISO,
+    sims: sim.sims,
+    round: window.round,
+    week: window.week,
+    window: { start: window.start, end: window.end },
+    pairs: pairs.map((p) => ({ label: p.label, a: p.a, b: p.b })),
+    managers: managersOut,
+  };
+}
+
+// Compute-and-store on a FRESH db copy, exactly like ensureFreshPlayoffOdds:
+// its own read-modify-write so it can run after the 4am sync's write, or
+// standalone from the 7am post, without clobbering anything. No-ops outside a
+// bracket round's final week or when today's are already stored (unless forced).
+async function ensureFreshBracketOdds(year, opts = {}) {
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return null;
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (!opts.force && sd.bracket_odds && sd.bracket_odds.date === todayISO) return sd.bracket_odds;
+  const odds = await computeBracketOddsForSeason(sd, todayISO, year);
+  if (!odds) return null;
+  sd.bracket_odds = odds;
+  writeDB(db);
+  console.log(
+    `[BracketOdds] Computed ${year} ${odds.round} odds for ${todayISO} (${odds.sims} sims, trigger: ${opts.trigger || 'manual'})`
+  );
+  return odds;
+}
+
+// The stored bracket odds, but only when they are actually about the post being
+// built — today's date and this round. A stale payload (yesterday's, or the
+// previous round's, left behind by a restart that skipped a compute) is dropped
+// rather than shown, because a wrong % beside a live score is worse than none.
+function bracketOddsForPost(sd, todayISO, round) {
+  const odds = sd && sd.bracket_odds;
+  if (!odds || !odds.managers) return null;
+  if (odds.date !== todayISO || odds.round !== round) return null;
+  if ((sd.finalized_rounds || []).includes(round)) return null;
+  if (!bracketOddsWindowForDate(sd.schedule_dates || [], todayISO)) return null;
+  return odds;
+}
+
+// `dailyTotals` (optional): { manager: yesterday's points }, from computeDailyHighLow. When
+// supplied, each manager's line carries the day's movement right after their round total —
+// which is what turns a static leaderboard into "who actually gained ground overnight". The
+// Monday wrap-up post (`final: true`) never passes it: the round is over, so there is no
+// "yesterday" worth reporting inside it.
+//
+// `advanceOdds` (optional): the stored bracket-odds payload (see bracketOddsForPost), which
+// puts each manager's odds to win his matchup right on his own line — the same place pool
+// play's odds sat, next to the name they belong to, and high enough in the post that Slack's
+// "View Full Message" fold can never swallow them. Also dropped when `final`: a finished
+// round's outcome is a fact, not a probability.
+function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals = null, advanceOdds = null } = {}) {
   const computed = computePlayoffPairs(sd, round);
   if (!computed) return null;
   const { pairs, score, seedRank } = computed;
+  const odds = final ? null : advanceOdds;
 
   const fmt = (n) => {
     const s = n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -5627,7 +7430,12 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
     const line = (name) => {
       const s = score(r, name);
       const seedTag = seedRank[name] ? `(${seedRank[name]}) ` : '';
-      const core = `${seedTag}${name} — ${fmt(s.total)}`;
+      const delta = dailyTotals && !final && name in dailyTotals ? ` (${fmtDelta(dailyTotals[name])})` : '';
+      const o = odds && odds.managers[name];
+      const oddsTag = o
+        ? ` \u{00B7} ${formatOddsPct(o.advance_pct / 100, o.clinched)}${o.clinched ? ' \u{1F512}' : ''}`
+        : '';
+      const core = `${seedTag}${name} — ${fmt(s.total)}${delta}${oddsTag}`;
       const mark = final ? (name === leader ? ' \u{2705}' : ' \u{274C}') : '';
       return `\u{25B8} ${name === leader ? `*${core}*` : core} _(B: ${fmt(s.batting)} | P: ${fmt(s.pitching)})_${mark}`;
     };
@@ -5649,10 +7457,19 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false } = {}) {
     }
   }
 
+  // One legend line for the whole section, so eight matchup lines don't each have to
+  // explain themselves. Says what the % is AND what went into it — the factors are the
+  // reason to believe the number.
+  const oddsLegend = odds
+    ? `\n\n_\u{1F52E} % = odds to win this matchup, from ${odds.sims.toLocaleString('en-US')} simulated finishes` +
+      ` (games left, projected starts, opponent, park)\u{00A0}\u{00B7}\u{00A0}\u{1F512} = decided_`
+    : '';
+
   return (
     `${heading}\n\n` +
     pairs.map((p) => matchupText(p.label, p.r, p.a, p.b, p.leader)).join('\n\n') +
-    (footer ? `\n\n${footer}` : '')
+    (footer ? `\n\n${footer}` : '') +
+    oddsLegend
   );
 }
 
@@ -5660,27 +7477,20 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   const seasonData = (db.seasons || {})[year] || {};
   const managers = db.managers || [];
 
+  // Set only when a Hot Takes block was rendered — see the assembly below and the async
+  // upgrade in postScoreboardSlack.
+  let commentaryFacts = null;
+
   const managerPoolMap = {};
   managers.forEach((m) => {
     if (m.pool) managerPoolMap[m.name] = m.pool;
   });
 
-  // Short manager names for the player-ownership tag next to Best/Worst Player Days:
-  // first name only, unless two managers share a first name — then add the first
-  // initial of the last name to disambiguate.
-  const shortMgrNames = {};
-  {
-    const firstNameCounts = {};
-    managers.forEach((m) => {
-      const first = (m.name || '').split(' ')[0];
-      if (first) firstNameCounts[first] = (firstNameCounts[first] || 0) + 1;
-    });
-    managers.forEach((m) => {
-      const parts = (m.name || '').split(' ');
-      const first = parts[0] || m.name;
-      shortMgrNames[m.name] = firstNameCounts[first] > 1 && parts[1] ? `${first} ${parts[1][0]}.` : first;
-    });
-  }
+  // Short manager names — the player-ownership tag next to Best/Worst Player Days uses them
+  // directly, and the playoff commentary is handed the whole map. Every OTHER name in the
+  // post is shortened at the send boundary (shortenManagerNamesInSlack), so this and that
+  // agree by construction: they are the same map.
+  const shortMgrNames = shortManagerNames(managers.map((m) => m.name));
 
   // Determine current round. null means this process cannot say which period the post covers
   // — see resolveScoreboardRound. The label below degrades to 'Season' in that case, but
@@ -5729,6 +7539,18 @@ function buildScoreboardBlocks(db, year, opts = {}) {
     }
   }
 
+  // ...and the start date of its first week, so the daily deltas below can be checked against
+  // the round they are about to be subtracted from.
+  let roundStartDate = null;
+  if (currentRound) {
+    for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
+      if (SEASON_SCHEDULE[i].round === currentRound && (scheduleDates[i] || {}).start) {
+        roundStartDate = scheduleDates[i].start;
+        break;
+      }
+    }
+  }
+
   const batting = seasonData.weekly_batting || [];
   const pitching = seasonData.weekly_pitching || [];
 
@@ -5745,6 +7567,54 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   const heart = (n) => (Math.floor(n) === 69 ? ' ❤️' : ''); // ❤️ easter egg at 69
   const dumpster = '\u{1F5D1}️\u{1F4A6}'; // 🗑️💦 last place
 
+  // ---- Yesterday's numbers ----
+  // Hoisted above the standings because the playoff matchup lines now carry each manager's
+  // daily movement, and the commentary section is built from the same map. One date-windowed
+  // pass, one set of numbers — the delta on a matchup line and the delta a roast talks about
+  // can never be two different derivations of the same day.
+  const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000).toLocaleDateString('en-CA', {
+    timeZone: 'America/New_York',
+  });
+  const dailyHL = computeDailyHighLow(seasonData, yesterdayET);
+
+  // Per-manager totals for yesterday, but ONLY when yesterday actually belongs to the round
+  // being reported. Outside that window the day's points sit in a different round, and
+  // subtracting them from this round's totals — which is how the commentary reconstructs the
+  // previous morning's standings — would invent a lead change that never happened.
+  const yesterdayInRound = !!(
+    dailyHL &&
+    roundStartDate &&
+    roundEndDate &&
+    yesterdayET >= roundStartDate &&
+    yesterdayET <= roundEndDate
+  );
+  let roundDailyTotals = null;
+  if (yesterdayInRound && isPlayoffRound) {
+    roundDailyTotals = {};
+    // Seed every participant at 0 first: computeDailyHighLow only lists managers who scored,
+    // and a manager whose roster did nothing yesterday is exactly the case worth showing.
+    for (const name of roundParticipants(seasonData, currentRound)) roundDailyTotals[name] = 0;
+    for (const [mgr, s] of Object.entries(dailyHL.managerTotals || {})) {
+      if (!(mgr in roundDailyTotals)) continue;
+      roundDailyTotals[mgr] = Math.round(((s.batting || 0) + (s.pitching || 0)) * 100) / 100;
+    }
+  }
+
+  // Whole days left in the round including today — the "how dead is this matchup" context.
+  let daysLeftInRound = null;
+  if (roundEndDate) {
+    const ms = Date.parse(`${roundEndDate}T12:00:00Z`) - Date.parse(`${todayISO}T12:00:00Z`);
+    if (!Number.isNaN(ms)) daysLeftInRound = Math.max(0, Math.round(ms / 86400000) + 1);
+  }
+
+  // ...and how many have already been scored, which is what turns "needs 58 a day" into a
+  // judgement ("against the 37 he has averaged") instead of a bare number.
+  let daysElapsedInRound = 0;
+  if (roundStartDate) {
+    const ms = Date.parse(`${yesterdayET}T12:00:00Z`) - Date.parse(`${roundStartDate}T12:00:00Z`);
+    if (!Number.isNaN(ms)) daysElapsedInRound = Math.max(0, Math.round(ms / 86400000) + 1);
+  }
+
   // ---- Standings text: bracket matchups for playoff rounds, overall + pool columns
   // for pool play. Pool-play scaffolding (winner sets, wildcards, legend) is only
   // computed when it is actually shown.
@@ -5753,7 +7623,14 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   let poolText = '';
   let legendText = null;
   if (isPlayoffRound) {
-    playoffText = buildPlayoffMatchupsSlackText(seasonData, currentRound, { final: !!summaryRound });
+    playoffText = buildPlayoffMatchupsSlackText(seasonData, currentRound, {
+      final: !!summaryRound,
+      dailyTotals: roundDailyTotals,
+      // Odds to advance, in the round's final week. Server-computed (4am sync / pre-post
+      // backstop) and only read here, so the % beside a manager and the score beside it
+      // come from the same pass — /wmmc shows whatever the morning already computed.
+      advanceOdds: bracketOddsForPost(seasonData, todayISO, currentRound),
+    });
     if (!playoffText) {
       // No confirmed_seeding snapshot yet (pool play not ended in the app) — degrade to a
       // plain ranked list of this round's totals rather than resurrecting pool-play frames.
@@ -5963,10 +7840,7 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   }
 
   // ---- Daily high/low section ----
-  const yesterdayET = new Date(Date.now() - 24 * 60 * 60 * 1000).toLocaleDateString('en-CA', {
-    timeZone: 'America/New_York',
-  });
-  const dailyHL = computeDailyHighLow(seasonData, yesterdayET);
+  // (yesterdayET / dailyHL are computed above, with the round's daily deltas.)
   if (dailyHL) {
     const dateLabel = new Date(yesterdayET + 'T12:00:00Z').toLocaleDateString('en-US', {
       month: 'short',
@@ -6103,19 +7977,30 @@ function buildScoreboardBlocks(db, year, opts = {}) {
       type: 'section',
       text: { type: 'mrkdwn', text: `*\u{1F4C5} Yesterday's Best & Worst (${dateLabel})*` },
     });
-    blocks.push({
-      type: 'section',
-      fields: [
-        {
-          type: 'mrkdwn',
-          text: `\u{1F3C6} *Barely Competent*\n${topManagers.map((m, i) => fmtMgr(m, i, false)).join('\n')}`,
-        },
-        {
-          type: 'mrkdwn',
-          text: `\u{1F5D1}️ *Monkeys Trying to Fuck a Loose Couch*\n${bottomManagers.map((m, i) => fmtMgr(m, i, true)).join('\n')}`,
-        },
-      ],
-    });
+    // The best/worst MANAGER columns are a ranking, and a ranking needs enough managers to
+    // rank. Pool play has twelve and the quarterfinals eight, so a top-3/bottom-3 split still
+    // says something. The semifinals have four and the Finals four — at that size the two
+    // columns are just every manager in the bracket, sorted, with the winners of one matchup
+    // stacked against the losers of another. The matchup lines above already carry each
+    // manager's day (as a delta right next to their total), so the columns are dropped from
+    // the semifinals onward and the commentary section below does the talking instead. The
+    // PLAYER columns are unaffected: they rank individual games, and there are still plenty.
+    const showManagerColumns = !['SF', 'Finals'].includes(currentRound);
+    if (showManagerColumns) {
+      blocks.push({
+        type: 'section',
+        fields: [
+          {
+            type: 'mrkdwn',
+            text: `\u{1F3C6} *Barely Competent*\n${topManagers.map((m, i) => fmtMgr(m, i, false)).join('\n')}`,
+          },
+          {
+            type: 'mrkdwn',
+            text: `\u{1F5D1}️ *Monkeys Trying to Fuck a Loose Couch*\n${bottomManagers.map((m, i) => fmtMgr(m, i, true)).join('\n')}`,
+          },
+        ],
+      });
+    }
     blocks.push({
       type: 'section',
       fields: [
@@ -6129,6 +8014,81 @@ function buildScoreboardBlocks(db, year, opts = {}) {
         },
       ],
     });
+
+    // ---- Playoff commentary ----
+    // What yesterday DID to the bracket: lead changes, collapses, the day's biggest haul,
+    // and the career pattern the four survivors are each carrying into this round. Only on
+    // the daily post (a wrap-up post's round is already decided) and only when yesterday's
+    // points belong to the round being reported, because the lead-change math works by
+    // subtracting those points back out of the round totals.
+    if (isPlayoffRound && !summaryRound && roundDailyTotals) {
+      const computed = computePlayoffPairs(seasonData, currentRound);
+      const commentaryMatchups = computed
+        ? computed.pairs.map((p) => ({
+            label: p.label,
+            a: p.a,
+            b: p.b,
+            aTotal: computed.score(p.r, p.a).total,
+            bTotal: computed.score(p.r, p.b).total,
+            aDelta: roundDailyTotals[p.a] || 0,
+            bDelta: roundDailyTotals[p.b] || 0,
+          }))
+        : [];
+
+      const histories = {};
+      for (const m of roundParticipants(seasonData, currentRound)) {
+        histories[m] = managerPlayoffHistory(m, WMMC_HISTORICAL_RESULTS, { throughYear: year });
+      }
+
+      // The facts, assembled once. They are BOTH what the deterministic bank writes from and
+      // what the Anthropic call is given as evidence, so the two versions of this section can
+      // never be about different numbers — only about the same numbers in different words.
+      commentaryFacts = {
+        round: currentRound,
+        roundLabel: currentRoundLabel,
+        year,
+        // The day the takes are ABOUT, which is also half the cache key.
+        dayISO: yesterdayET,
+        matchups: commentaryMatchups,
+        dailyTotals: roundDailyTotals,
+        daysLeft: daysLeftInRound,
+        daysElapsed: daysElapsedInRound,
+        histories,
+        shortNames: shortMgrNames,
+        seed: seedFromDate(yesterdayET),
+        // Only worth deriving for the managers still playing — everyone else's roster is a
+        // museum piece. Empty when the round has no start date to split the season at.
+        underperformers: findUnderperformers(
+          seasonData,
+          currentRound,
+          roundParticipants(seasonData, currentRound),
+          roundStartDate,
+          yesterdayET
+        ),
+      };
+
+      // Prefer the takes already generated for this exact day and round, which is what makes
+      // the /wmmc slash command able to show the Claude-written version at all: it owes Slack
+      // a reply in three seconds, so it cannot call an API, but it CAN read what the morning
+      // post already wrote. It also means /wmmc and the 7am post tell the same joke instead of
+      // two different ones about the same day.
+      //
+      // Falling back to the bank covers every cold case honestly: a /wmmc before the morning
+      // post, a different season (`/wmmc 2024`), or a restart that lost nothing because the
+      // cache lives on the season, not in memory.
+      const commentary = hotTakesCacheHit(seasonData.hot_takes, yesterdayET, currentRound)
+        ? seasonData.hot_takes.lines
+        : buildPlayoffCommentary(commentaryFacts);
+
+      if (commentary.length) {
+        blocks.push({ type: 'divider' });
+        blocks.push({
+          type: 'section',
+          block_id: HOT_TAKES_BLOCK_ID,
+          text: { type: 'mrkdwn', text: hotTakesText(commentary) },
+        });
+      }
+    }
   }
 
   // ---- Submission window (Friday before a playoff round's Monday first pitch only) ----
@@ -6146,6 +8106,10 @@ function buildScoreboardBlocks(db, year, opts = {}) {
     // The period this post is framed for — null when it could not be determined and the
     // blocks above are therefore the pool-play shell. Callers gate on it before sending.
     round: currentRound || null,
+    // The evidence behind the Hot Takes block, or null when there is no such block. An async
+    // caller can hand this to generatePlayoffCommentary and swap the block's text for a
+    // written version; a synchronous one ignores it and ships the bank's version.
+    commentaryFacts,
   };
 }
 
@@ -7170,7 +9134,10 @@ app.get('/api/google-sheets/config', (req, res) => {
 // POST /api/google-sheets/config
 app.post('/api/google-sheets/config', requireCommissioner, (req, res) => {
   const db = readDB();
-  const { spreadsheet_url, api_key, enabled, season, sync_time } = req.body;
+  // `season` is deliberately NOT accepted here any more — the current-season pointer is
+  // app-wide and lives at db.active_season (POST /api/admin/active-season). Re-arming this
+  // fallback must not be able to repoint the whole app as a side effect.
+  const { spreadsheet_url, api_key, enabled, sync_time } = req.body;
 
   const spreadsheetId = extractSpreadsheetId(spreadsheet_url);
   if (spreadsheet_url && !spreadsheetId) {
@@ -7181,10 +9148,9 @@ app.post('/api/google-sheets/config', requireCommissioner, (req, res) => {
   if (spreadsheetId) db.google_sheets_config.spreadsheet_id = spreadsheetId;
   if (api_key) db.google_sheets_config.api_key = api_key;
   if (typeof enabled === 'boolean') db.google_sheets_config.enabled = enabled;
-  if (season) db.google_sheets_config.season = season;
   if (sync_time) db.google_sheets_config.sync_time = sync_time;
 
-  addAuditEntry(db, 'gsheets_config_update', { enabled, season }, req.get('X-User-Email'));
+  addAuditEntry(db, 'gsheets_config_update', { enabled }, req.get('X-User-Email'));
   writeDB(db);
   scheduleGSheetsSync(); // reconfigure scheduler
 
@@ -7220,7 +9186,7 @@ app.post('/api/google-sheets/sync', requireCommissioner, async (req, res) => {
 app.get('/api/google-sheets/sync-status', (req, res) => {
   const db = readDB();
   const config = db.google_sheets_config || {};
-  const season = config.season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season] || {};
   const recentLogs = (sd.upload_log || [])
     .filter((l) => l.type === 'gsheets_sync')
@@ -7238,8 +9204,7 @@ app.get('/api/google-sheets/sync-status', (req, res) => {
 // GET /api/mlb/sync-status
 app.get('/api/mlb/sync-status', requireCommissioner, (req, res) => {
   const db = readDB();
-  const config = db.google_sheets_config || {};
-  const season = config.season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season] || {};
 
   // Sync runs are recorded in two places: the per-season upload_log (rich — includes
@@ -9549,56 +11514,6 @@ app.get('/api/seasons/:year/roster-audit', requireCommissioner, (req, res) => {
   });
 });
 
-// POST /api/seasons/:year/dedupe-repair-swaps
-// Removes 'repair-...' swaps that duplicate a real (non-repair) swap for the same move
-// (manager + player_out + player_in + week_key). The old auto-repair band-aids (since deleted)
-// recreated some swaps that the real record also covers, leaving doubles. Idempotent and safe:
-// keeps any repair- swap that is the SOLE record of a move (deleting it would erase the move).
-// Reports the removed entries + a before/after total check (totals should not move).
-app.post('/api/seasons/:year/dedupe-repair-swaps', requireCommissioner, (req, res) => {
-  const year = req.params.year;
-  const db = readDB();
-  const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
-
-  const swaps = Array.isArray(sd.swaps) ? sd.swaps : [];
-  const moveKey = (s) => `${s.manager}|${s.player_out || ''}|${s.player_in || ''}|${s.week_key || ''}`;
-  const realMoves = new Set(swaps.filter((s) => !String(s.id).startsWith('repair-')).map(moveKey));
-
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const before = captureScoreSnapshot(sd, todayET).totals;
-
-  const removed = [];
-  sd.swaps = swaps.filter((s) => {
-    if (String(s.id).startsWith('repair-') && realMoves.has(moveKey(s))) {
-      removed.push({
-        id: s.id,
-        manager: s.manager,
-        player_out: s.player_out,
-        player_in: s.player_in,
-        week_key: s.week_key,
-      });
-      return false;
-    }
-    return true;
-  });
-
-  const after = captureScoreSnapshot(sd, todayET).totals;
-  const movedTotals = [];
-  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    const b = (before[m] || {}).total || 0;
-    const a = (after[m] || {}).total || 0;
-    if (Math.abs(a - b) >= 0.01) {
-      movedTotals.push({ manager: m, before: b, after: a, delta: Math.round((a - b) * 100) / 100 });
-    }
-  }
-
-  db.seasons[year] = sd;
-  addAuditEntry(db, 'dedupe_repair_swaps', { year, removed: removed.length }, req.get('X-User-Email'));
-  writeDB(db);
-  res.json({ ok: true, removed, removed_count: removed.length, moved_totals: movedTotals });
-});
-
 // POST /api/seasons/:year/initial-submission  { manager, batters, pitchers }
 // Commissioner set/override of a manager's initial (Pool Play 1) submission, at any
 // time. This is the generic, reusable replacement for the hardcoded "missing initial
@@ -9635,27 +11550,6 @@ app.post('/api/seasons/:year/initial-submission', requireCommissioner, (req, res
   );
   writeDB(db);
   res.json({ ok: true, manager, initial_submission: sd.initial_submissions[manager] });
-});
-
-// POST /api/slack/test-guard-alert  — posts a clearly-labeled TEST score-guard alert to the
-// notifications Slack channel so the commissioner can preview the format. Changes no data.
-app.post('/api/slack/test-guard-alert', requireCommissioner, async (req, res) => {
-  const blockers = [
-    { manager: 'Example Manager A', before: 1419.6, after: 1053.8, delta: -365.8, pct: -0.258 },
-    { manager: 'Example Manager B', before: 1108.2, after: 980.1, delta: -128.1, pct: -0.116 },
-  ];
-  const dateISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const msg =
-    ':test_tube: *TEST — Score guard BLOCKED a compile* — scores NOT saved (drop of 40+ pts).\n' +
-    `Season 2026 • ${dateISO} • trigger: test\n` +
-    `Largest drops:\n${formatSwingLines(blockers)}\n` +
-    '_This is a test — no scores changed. To triage a real one: paste `SCOREFIX` to Claude, or see RUNBOOK.md._';
-  try {
-    await postSlack(msg);
-    res.json({ ok: true, posted: !!SLACK_WEBHOOK_URL, preview: msg });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
 });
 
 // ============================================================
@@ -9879,12 +11773,6 @@ async function fetchMLBPlayerCatalog(season, { refresh = false } = {}) {
   return catalog;
 }
 
-// Back-compat: callers that only need names still work.
-async function fetchMLBPlayerNames(season) {
-  const catalog = await fetchMLBPlayerCatalog(season);
-  return catalog.map((p) => p.fullName);
-}
-
 // Index a catalog by normalized fullName so duplicates (e.g. two "Max Muncy"s) surface as arrays.
 function indexCatalogByName(catalog) {
   const byNorm = new Map();
@@ -10090,121 +11978,6 @@ function buildIdToWmmcName(sd) {
   }
   return map;
 }
-
-// For each WMMC name find the best MLB API match. Returns array of match objects.
-function buildNameMatchReport(wmmcNames, mlbNames) {
-  const mlbSet = new Set(mlbNames);
-  return wmmcNames.map((wmmcName) => {
-    if (mlbSet.has(wmmcName)) {
-      return { wmmc_name: wmmcName, mlb_name: wmmcName, score: 1.0, exact: true, action: 'none' };
-    }
-    let bestName = null,
-      bestScore = 0;
-    for (const mlbName of mlbNames) {
-      const s = nameSimilarity(wmmcName, mlbName);
-      if (s > bestScore) {
-        bestScore = s;
-        bestName = mlbName;
-      }
-    }
-    const score = Math.round(bestScore * 1000) / 1000;
-    return {
-      wmmc_name: wmmcName,
-      mlb_name: bestName,
-      score,
-      exact: false,
-      // >= 0.9: high confidence auto-fix; 0.75–0.89: review first; < 0.75: likely wrong sport/pool entry
-      action: score >= 0.9 ? 'auto' : score >= 0.75 ? 'review' : 'no_match',
-    };
-  });
-}
-
-// GET /api/mlb/name-check?year=2025
-// Compares every player name in the WMMC database against the MLB Stats API canonical list.
-// Returns match report with confidence scores. Nothing is changed.
-app.get('/api/mlb/name-check', requireCommissioner, async (req, res) => {
-  const { year } = req.query;
-  if (!year) return res.status(400).json({ error: 'year is required' });
-
-  const db = readDB();
-  const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
-
-  try {
-    const [mlbNames, wmmcNames] = await Promise.all([
-      fetchMLBPlayerNames(year),
-      Promise.resolve(extractSeasonPlayerNames(sd)),
-    ]);
-
-    const report = buildNameMatchReport(wmmcNames, mlbNames);
-
-    res.json({
-      season: year,
-      wmmc_player_count: wmmcNames.length,
-      mlb_roster_size: mlbNames.length,
-      exact_matches: report.filter((r) => r.exact).length,
-      auto_fixable: report.filter((r) => r.action === 'auto').length,
-      needs_review: report.filter((r) => r.action === 'review').length,
-      no_match: report.filter((r) => r.action === 'no_match').length,
-      // Worst matches first so problems are immediately visible
-      players: report.sort((a, b) => a.score - b.score),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// POST /api/mlb/name-fix
-// Applies name corrections across the entire season database.
-//
-// Two modes:
-//   { year, mappings: [{ from, to }, ...] }        — apply specific corrections you've reviewed
-//   { year, auto_threshold: 0.9 }                  — auto-apply all matches at or above the threshold
-//
-// Always returns what was changed so you can verify before running again.
-app.post('/api/mlb/name-fix', requireCommissioner, async (req, res) => {
-  const { year, mappings, auto_threshold } = req.body || {};
-  if (!year) return res.status(400).json({ error: 'year is required' });
-  if (!mappings && auto_threshold === undefined) {
-    return res.status(400).json({ error: 'Provide either mappings or auto_threshold' });
-  }
-
-  const db = readDB();
-  const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
-
-  let toApply = mappings || [];
-
-  if (auto_threshold !== undefined && !mappings) {
-    try {
-      const [mlbNames, wmmcNames] = await Promise.all([
-        fetchMLBPlayerNames(year),
-        Promise.resolve(extractSeasonPlayerNames(sd)),
-      ]);
-      const report = buildNameMatchReport(wmmcNames, mlbNames);
-      toApply = report
-        .filter((r) => !r.exact && r.score >= auto_threshold && r.mlb_name)
-        .map((r) => ({ from: r.wmmc_name, to: r.mlb_name }));
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
-    }
-  }
-
-  const applied = [];
-  for (const { from, to } of toApply) {
-    if (!from || !to || from === to) continue;
-    const occurrences = renamePlayerInSeason(sd, from, to);
-    applied.push({ from, to, occurrences_updated: occurrences });
-  }
-
-  if (applied.length > 0) {
-    db.seasons[year] = sd;
-    addAuditEntry(db, 'mlb_name_fix', { year, renames: applied.length, detail: applied });
-    writeDB(db);
-  }
-
-  res.json({ ok: true, renames_applied: applied.length, applied });
-});
 
 // Collect all player names that appear in any manager's roster for the given season.
 // "currently rostered" = present in sd.rosters for any week this season.
@@ -11996,16 +13769,104 @@ app.get('/api/mlb/live/game/:gamePk', async (req, res) => {
   }
 });
 
+// GET /api/admin/anthropic-check — is the Anthropic key on THIS service actually usable?
+//
+// Exists because "the post is in the bank's voice" has many causes and the logs only tell you
+// after a post has gone out. This asks the API directly with a one-token request and reports
+// exactly what came back. It never returns the key — only whether one is configured, its
+// length and last four characters, which is enough to tell "unset" from "set to the wrong
+// thing" from "set correctly but rejected" without putting a secret in an HTTP response.
+app.get('/api/admin/anthropic-check', requireCommissioner, async (req, res) => {
+  const model = (req.query && req.query.model) || PLAYOFF_COMMENTARY_MODEL;
+  const key = ANTHROPIC_API_KEY;
+  const keyInfo = {
+    configured: !!key,
+    length: key ? key.length : 0,
+    endsWith: key ? key.slice(-4) : null,
+    looksLikeAnthropicKey: /^sk-ant-/.test(key || ''),
+  };
+
+  if (!key) {
+    return res.json({
+      ok: false,
+      reason: 'ANTHROPIC_API_KEY is not set on this service',
+      key: keyInfo,
+      model,
+    });
+  }
+
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model, max_tokens: 4, messages: [{ role: 'user', content: 'Reply with the word OK.' }] }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (e) {
+    // A throw here is the network itself — egress blocked, DNS, TLS — not the API saying no.
+    return res.json({
+      ok: false,
+      reason: `the request never reached the API (${e.name}: ${e.message})`,
+      key: keyInfo,
+      model,
+    });
+  }
+
+  const bodyText = await resp.text().catch(() => '');
+  if (!resp.ok) {
+    return res.json({
+      ok: false,
+      reason: `the API returned HTTP ${resp.status}`,
+      status: resp.status,
+      body: bodyText.slice(0, 500),
+      key: keyInfo,
+      model,
+    });
+  }
+
+  let reply = null;
+  let shape = null;
+  try {
+    const data = JSON.parse(bodyText);
+    reply = anthropicReplyText(data) || null;
+    shape = describeAnthropicReply(data);
+  } catch {
+    /* fall through — a 200 with an unreadable body is still a working key */
+  }
+  res.json({ ok: true, model, reply, shape, key: keyInfo });
+});
+
 // POST /api/slack/scoreboard — post the current scoreboard to Slack
+// Body (all optional):
+//   year          — season to post; defaults to the active one
+//   channel       — 'notifications' sends to SLACK_WEBHOOK_URL instead of the league scoreboard
+//                   channel. For rehearsing a post before it goes to everyone. Anything else
+//                   (including omitted) posts to the real scoreboard channel.
+//   refreshTakes  — regenerate the day's Hot Takes instead of reusing the cached ones
 app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
-  if (!SLACK_WEBHOOK_URL) {
-    return res.status(503).json({ error: 'Slack webhook not configured' });
+  // Test posts go to the notifications webhook, real ones to the scoreboard webhook. The old
+  // check gated on SLACK_WEBHOOK_URL no matter what, which meant a deploy with only the
+  // scoreboard webhook set returned 503 with nothing wrong, and — worse — a deploy missing the
+  // SCOREBOARD webhook returned {ok:true} for a post that postScoreboardSlack had silently
+  // dropped on the floor. Check the one actually being used.
+  const toNotifications = !!(req.body && req.body.channel === 'notifications');
+  const webhookUrl = toNotifications ? SLACK_WEBHOOK_URL : SLACK_SCOREBOARD_WEBHOOK_URL;
+  if (!webhookUrl) {
+    return res.status(503).json({
+      error: toNotifications
+        ? 'SLACK_WEBHOOK_URL is not configured, so there is no notifications channel to test-post to'
+        : 'SLACK_SCOREBOARD_WEBHOOK_URL is not configured, so the scoreboard has nowhere to post',
+    });
   }
 
   const db = readDB();
   const userEmail = req.get('X-User-Email') || '';
-  const config = db.google_sheets_config || {};
-  const year = (req.body && req.body.year) || config.season || String(new Date().getFullYear());
+  const year = (req.body && req.body.year) || activeSeason(db);
 
   // Same guard as the 7am auto-post: without usable season data the post renders as a pool-play
   // "Current Period: Season / No scores recorded yet" shell. Fail loudly instead of
@@ -12017,20 +13878,38 @@ app.post('/api/slack/scoreboard', requireCommissioner, async (req, res) => {
   }
 
   try {
-    await postScoreboardSlack(db, year);
-    addAuditEntry(db, 'slack_scoreboard_post', { year }, userEmail);
-    writeDB(db);
-    res.json({ ok: true });
+    await postScoreboardSlack(db, year, {
+      webhookUrl,
+      refreshTakes: !!(req.body && req.body.refreshTakes),
+    });
+    // Re-read before the audit write. postScoreboardSlack may have stored the day's Hot Takes
+    // (ensureFreshHotTakes writes its own fresh copy), and writing back the `db` snapshot taken
+    // above — now minutes stale, from before an API call — would erase them.
+    const dbAfter = readDB();
+    addAuditEntry(
+      dbAfter,
+      'slack_scoreboard_post',
+      {
+        year,
+        channel: toNotifications ? 'notifications' : 'scoreboard',
+        refreshTakes: !!(req.body && req.body.refreshTakes),
+      },
+      userEmail
+    );
+    writeDB(dbAfter);
+    res.json({ ok: true, channel: toNotifications ? 'notifications' : 'scoreboard' });
   } catch (e) {
     console.error('[Slack] Scoreboard post failed:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// POST /api/seasons/:year/playoff-odds/recompute — recompute & store playoff
-// odds on demand (the 4am sync and the 7am scoreboard post refresh them
-// automatically). 409 outside the PP2 Week 4–5 window or once pool play is
-// finalized — there is nothing meaningful to compute then.
+// POST /api/seasons/:year/playoff-odds/recompute — recompute & store the odds
+// on demand (the 4am sync and the 7am scoreboard post refresh them
+// automatically). Recomputes whichever window today is in: pool play's during
+// PP2 Weeks 4–5, the head-to-head bracket odds in a QF/SF/Finals final week.
+// 409 when today is in neither, or the round is already finalized — there is
+// nothing meaningful to compute then.
 app.post('/api/seasons/:year/playoff-odds/recompute', requireCommissioner, async (req, res) => {
   const { year } = req.params;
   if (!(readDB().seasons || {})[year]) {
@@ -12038,15 +13917,28 @@ app.post('/api/seasons/:year/playoff-odds/recompute', requireCommissioner, async
   }
   try {
     const odds = await ensureFreshPlayoffOdds(year, { force: true, trigger: 'manual' });
-    if (!odds) {
+    const bracketOdds = await ensureFreshBracketOdds(year, { force: true, trigger: 'manual' });
+    if (!odds && !bracketOdds) {
       return res.status(409).json({
-        error: 'Playoff odds are only computed during PP2 Weeks 4–5, before pool play is finalized.',
+        error:
+          'Odds are only computed during PP2 Weeks 4–5 or the final week of a playoff round, ' +
+          'before that round is finalized.',
       });
     }
     const db = readDB();
-    addAuditEntry(db, 'playoff_odds_recompute', { year, date: odds.date, sims: odds.sims }, req.get('X-User-Email'));
+    addAuditEntry(
+      db,
+      'playoff_odds_recompute',
+      {
+        year,
+        date: (odds || bracketOdds).date,
+        sims: (odds || bracketOdds).sims,
+        kind: odds ? 'pool_play' : `bracket_${bracketOdds.round}`,
+      },
+      req.get('X-User-Email')
+    );
     writeDB(db);
-    res.json({ ok: true, odds });
+    res.json({ ok: true, odds: odds || null, bracketOdds: bracketOdds || null });
   } catch (e) {
     console.error('[PlayoffOdds] Manual recompute failed:', e.message);
     res.status(500).json({ error: e.message });
@@ -12087,8 +13979,7 @@ app.post('/api/slack/command', (req, res) => {
       const text = (body.text || '').trim().toLowerCase();
 
       const db = readDB();
-      const config = db.google_sheets_config || {};
-      const year = config.season || String(new Date().getFullYear());
+      const year = activeSeason(db);
 
       // Support optional year argument: /wmmc 2024
       const requestedYear = /^\d{4}$/.test(text) ? text : year;
@@ -12099,8 +13990,17 @@ app.post('/api/slack/command', (req, res) => {
 
       const { blocks, text: fallback } = buildScoreboardBlocks(db, requestedYear);
 
+      // This path replies to Slack directly instead of going through postScoreboardSlack, so
+      // it has to apply the short-name pass itself or /wmmc would be the one post in the
+      // channel still using full names.
+      const shortMap = managerShortNameMap(db);
+
       // response_type: in_channel makes the reply visible to everyone in the channel
-      res.json({ response_type: 'in_channel', text: fallback, blocks });
+      res.json({
+        response_type: 'in_channel',
+        text: shortenManagerNamesInSlack(fallback, shortMap),
+        blocks: shortenManagerNamesInSlack(blocks, shortMap),
+      });
     } catch (err) {
       console.error('[Slack] /wmmc command error:', err);
       res.json({ response_type: 'ephemeral', text: 'An error occurred generating the scoreboard.' });
@@ -14252,6 +16152,8 @@ Total score across the Finals round: ${perf.total} pts (Batting: ${perf.batting_
 Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 
+${ROAST_VOICE}
+
 Write the roast now. No preamble, no labels — just the roast.`;
   } else if (outcome === 'third') {
     prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. ${manager} just WON the 3rd-place game — a real result, but a hollow one (it only exists because two other managers were better than both players in it). Write a sarcastic "congratulations, sort of" roast. Keep it to 2-3 sentences max.
@@ -14261,6 +16163,8 @@ Write the roast now. No preamble, no labels — just the roast.`;
 Total score across the Finals round: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
 Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+${ROAST_VOICE}
 
 Write the roast now. No preamble, no labels — just the roast.`;
   } else {
@@ -14296,6 +16200,8 @@ Roast intensity for this round: ${intensity.level} (the later the round, the mor
 ${matchupLines ? matchupLines + '\n' : ''}Total score: ${perf.total} pts (Batting: ${perf.batting_total}, Pitching: ${perf.pitching_total})
 ${roastPromptRankLines(perf)}Worst batters (lowest scores first): ${perf.batters_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
 Worst pitchers (lowest scores first): ${perf.pitchers_ranked_worst_first.slice(0, 3).join(', ') || 'none'}
+
+${ROAST_VOICE}
 
 Write the roast now. No preamble, no labels — just the roast.`;
   }
@@ -14344,9 +16250,12 @@ Write the roast now. No preamble, no labels — just the roast.`;
     console.error('Anthropic API returned an unreadable body for', manager, '-', e.message);
     return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
   }
-  const text = data && data.content && data.content[0] && data.content[0].text;
+  const text = anthropicReplyText(data);
   // A Claude-written roast has no template id — there is nothing to de-duplicate.
   if (text) return { text, templateId: null };
+  // Silent here is how this went unnoticed for months: HTTP 200, tokens billed, and the bank
+  // shipped anyway. Say what came back instead.
+  console.error(`[Roast] Empty reply for ${manager} — ${describeAnthropicReply(data)}`);
   return fallbackRoastForOutcome(manager, round, perf, outcome, matchup, narrative, excludeIds);
 }
 
@@ -15097,8 +17006,7 @@ function scheduleWeeklyAutoAdvance() {
   async function runAndReschedule() {
     try {
       const db = readDB();
-      const config = db.google_sheets_config || {};
-      const season = config.season || new Date().getFullYear().toString();
+      const season = activeSeason(db);
       const sd = (db.seasons || {})[season];
 
       if (!sd) {
@@ -15159,8 +17067,7 @@ function scheduleGSheetsSync() {
     console.log(`[GSheets] Running scheduled sync at ${now.toISOString()}`);
 
     const db2 = readDB();
-    const cfg = db2.google_sheets_config || {};
-    const season = cfg.season || now.getFullYear().toString();
+    const season = activeSeason(db2);
 
     syncGoogleSheets(season)
       .then((result) => {
@@ -15454,6 +17361,8 @@ Roast the league as a whole. Do NOT write a separate roast for every manager, an
 Draft facts:
 ${factLines.join('\n')}
 
+${ROAST_VOICE}
+
 Write the roast now. No preamble, no labels — just the roast.`;
 
   try {
@@ -15478,7 +17387,10 @@ Write the roast now. No preamble, no labels — just the roast.`;
       return fallbackWelcomeRoast(facts);
     }
     const data = await resp.json();
-    return (data.content && data.content[0] && data.content[0].text) || fallbackWelcomeRoast(facts);
+    const welcomeText = anthropicReplyText(data);
+    if (welcomeText) return welcomeText;
+    console.error(`[Welcome] Empty reply — ${describeAnthropicReply(data)}`);
+    return fallbackWelcomeRoast(facts);
   } catch (e) {
     console.error('[Welcome] Roast generation failed:', e.message);
     return fallbackWelcomeRoast(facts);
@@ -15581,7 +17493,7 @@ async function fireSeasonWelcomePost(season, todayET) {
 // posts immediately — a welcome post at the wrong hour beats no welcome post at all.
 async function scheduleSeasonWelcomePost(reason) {
   const db = readDB();
-  const season = (db.google_sheets_config || {}).season || new Date().getFullYear().toString();
+  const season = activeSeason(db);
   const sd = (db.seasons || {})[season];
   if (!hasScoreboardData(sd)) return;
 
@@ -15637,8 +17549,7 @@ function scheduleScoreboardPost() {
     // data loaded yet). Re-reading fresh and writing the claim first keeps the race window
     // as small as possible.
     const db = readDB();
-    const config = db.google_sheets_config || {};
-    const season = config.season || now.getFullYear().toString();
+    const season = activeSeason(db);
     const sd = (db.seasons || {})[season];
 
     if (db.last_scoreboard_post_date === todayET) {
@@ -15685,6 +17596,12 @@ function scheduleScoreboardPost() {
             console.error('[PlayoffOdds] Pre-post odds compute failed (continuing):', e.message);
             return null;
           })
+          .then(() =>
+            ensureFreshBracketOdds(season, { trigger: '7am-scoreboard' }).catch((e) => {
+              console.error('[BracketOdds] Pre-post odds compute failed (continuing):', e.message);
+              return null;
+            })
+          )
           // Vet the numbers about to be posted against the stats they come from. The post goes out
           // either way (a silent wrong scoreboard is worse than a flagged one) — but the
           // commissioner gets told, instead of finding out hours later from a manager.
@@ -15788,7 +17705,7 @@ function detectScheduleWeekForDate(sd, dateISO) {
 function recordSyncStatus(status) {
   try {
     const sdb = readDB();
-    const season = (sdb.google_sheets_config || {}).season || new Date().getFullYear().toString();
+    const season = activeSeason(sdb);
     if (!sdb.seasons || !sdb.seasons[season]) return;
     sdb.seasons[season].last_sync_status = status;
     writeDB(sdb);
@@ -15804,8 +17721,7 @@ function scheduleMLBApiSync() {
     const now = new Date();
     try {
       const db = readDB();
-      const config = db.google_sheets_config || {};
-      const season = config.season || now.getFullYear().toString();
+      const season = activeSeason(db);
       const sd = (db.seasons || {})[season];
 
       if (!sd) {
@@ -16007,6 +17923,15 @@ function scheduleMLBApiSync() {
         } catch (e) {
           console.error('[PlayoffOdds] 4am odds compute failed (continuing):', e.message);
         }
+
+        // ...and the head-to-head odds for a bracket round's final week, on the same
+        // terms. Only one of the two ever produces anything on a given day — the
+        // windows can't overlap — so this is a no-op for most of the season.
+        try {
+          await ensureFreshBracketOdds(season, { force: true, trigger: 'auto-4am' });
+        } catch (e) {
+          console.error('[BracketOdds] 4am odds compute failed (continuing):', e.message);
+        }
       }
     } catch (e) {
       console.error('[MLB-API] Daily sync error:', e.message);
@@ -16182,6 +18107,15 @@ async function main() {
       console.error('Could not backfill manager googleEmail:', e.message);
     }
 
+    // Lift the current-season pointer out of google_sheets_config. Must run before anything
+    // that resolves a season.
+    try {
+      const dbForPointer = readDB();
+      if (migrateActiveSeasonPointer(dbForPointer)) writeDB(dbForPointer);
+    } catch (e) {
+      console.error('[Season pointer] Migration error (continuing):', e.message);
+    }
+
     // One-shot: cut over to the MLB Stats API as the sole stats source.
     // Strips gsheets-sourced rows, flips gsheets auto-sync off, and
     // backfills every past schedule week via MLB. Gated by a db flag so it
@@ -16200,8 +18134,7 @@ async function main() {
     // next daily refresh.
     try {
       const dbForPool = readDB();
-      const cfg = dbForPool.google_sheets_config || {};
-      const season = cfg.season || new Date().getFullYear().toString();
+      const season = activeSeason(dbForPool);
       const sd = (dbForPool.seasons || {})[season];
       if (sd) {
         const r = await bootstrapPlayerPools(sd, season);

@@ -5242,8 +5242,9 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   // Render a bracket team row. A real (non-TBD) manager is clickable: clicking expands that
   // round's player breakdown beneath it (same panel as the pool-play rows), and each player's
   // points open the stat quick-view. `seedHtml` is '' for rounds without seeds; `round` is the
-  // BREAKDOWN_PERIODS key for this column ('QF'/'SF'/'Finals').
-  function bracketTeamHtml(name, seedHtml, bd, winnerClass, round) {
+  // BREAKDOWN_PERIODS key for this column ('QF'/'SF'/'Finals'); `opponent` is the other name in
+  // this matchup, which is what qualifies the odds tag (see advanceOddsHtml).
+  function bracketTeamHtml(name, seedHtml, bd, winnerClass, round, opponent) {
     const isReal = name && name !== 'TBD';
     const scoreCell = isReal ? bracketScoreHtml(bd) : '<span class="bracket-score">-</span>';
     if (!isReal) {
@@ -5251,7 +5252,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     }
     const detailId = `bracket-detail-${round}-${name.replace(/[^a-zA-Z0-9]/g, '_')}`;
     return `<div class="bracket-team bracket-team-clickable ${winnerClass}" onclick="toggleBracketTeam('${detailId}','${jsStr(name)}','${round}')">
-        ${seedHtml}<span class="bracket-name">${esc(name)}</span>${scoreCell}
+        ${seedHtml}<span class="bracket-name">${esc(name)}</span>${advanceOddsHtml(name, opponent, round)}${scoreCell}
         <span class="sb-expand-arrow bracket-team-arrow" id="${detailId}-arrow">&#9660;</span>
       </div>
       <div class="bracket-team-detail" id="${detailId}" style="display:none;"></div>`;
@@ -5260,8 +5261,54 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const finalized = seasonData.finalized_rounds || [];
   const tentativeLabel = !ppFinalized ? ' <span class="badge badge-wildcard">Tentative</span>' : '';
 
+  // ---- Odds to advance (server-computed, a bracket round's FINAL week only) ----
+  // Same contract as the pool-play odds pill: `sd.bracket_odds` is written by the server (4am
+  // sync / 7am post / manual recompute) and the client only displays it, so the bracket and the
+  // Slack matchup lines can never quote different numbers. The gate mirrors the server's
+  // `bracketOddsForPost` exactly — a payload from another day, another round, a round since
+  // finalized, or from outside the final-week window is dropped, because a stale % beside a live
+  // score is worse than no %.
+  const oddsTodayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const bracketOdds = (() => {
+    const o = seasonData.bracket_odds;
+    if (!o || !o.managers) return null;
+    if (o.date !== oddsTodayISO || finalized.includes(o.round)) return null;
+    if (!bracketOddsWindowForDate(seasonData.schedule_dates || [], oddsTodayISO)) return null;
+    return o;
+  })();
+
+  // A % is about ONE matchup, so it renders only where the payload agrees with the pairing this
+  // row belongs to: same round, and the same opponent across the line. This card derives its
+  // pairs from the seeding plus the prior round's winners while the server derives them from
+  // computePlayoffPairs; if those two ever disagree, showing nothing is the correct answer.
+  function advanceOddsHtml(name, opponent, round) {
+    if (!bracketOdds || bracketOdds.round !== round) return '';
+    const o = bracketOdds.managers[name];
+    if (!o || o.opponent !== opponent) return '';
+    const label = formatOddsPct(o.advance_pct / 100, o.clinched);
+    const cls = o.clinched
+      ? 'odds-lock'
+      : o.advance_pct >= 75
+        ? 'odds-high'
+        : o.advance_pct >= 25
+          ? 'odds-mid'
+          : 'odds-low';
+    const title = o.clinched
+      ? `Matchup decided — ${opponent} has no games left`
+      : `Wins this matchup in ${o.advance_pct}% of ${bracketOdds.sims.toLocaleString('en-US')} simulated finishes ` +
+        `(games left, projected starts, opponent, park)`;
+    return `<span class="odds-pill bracket-odds-pill ${cls}" title="${esc(title)}">${o.clinched ? '&#128274; ' : ''}${label}</span>`;
+  }
+
+  // One legend for the whole card, exactly like the Slack section's — eight rows shouldn't each
+  // have to explain what the pill is.
+  const oddsLegend = bracketOdds
+    ? `<p class="bracket-odds-legend">&#128302; % = odds to win this matchup, from ${bracketOdds.sims.toLocaleString('en-US')} simulated finishes (games left, projected starts, opponent, park) &middot; &#128274; = decided</p>`
+    : '';
+
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
     <h2>Playoffs${tentativeLabel}</h2>
+    ${oddsLegend}
     <div class="active-bracket">`;
 
   // QF column
@@ -5275,8 +5322,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     qfWinners.push(winner);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
-      ${bracketTeamHtml(m.s1.name, `<span class="bracket-seed">${m.s1.seed}</span>`, s1Bd, winner === m.s1.name ? 'bracket-winner' : '', 'QF')}
-      ${bracketTeamHtml(m.s2.name, `<span class="bracket-seed">${m.s2.seed}</span>`, s2Bd, winner === m.s2.name ? 'bracket-winner' : '', 'QF')}
+      ${bracketTeamHtml(m.s1.name, `<span class="bracket-seed">${m.s1.seed}</span>`, s1Bd, winner === m.s1.name ? 'bracket-winner' : '', 'QF', m.s2.name)}
+      ${bracketTeamHtml(m.s2.name, `<span class="bracket-seed">${m.s2.seed}</span>`, s2Bd, winner === m.s2.name ? 'bracket-winner' : '', 'QF', m.s1.name)}
     </div>`;
   });
   html += '</div>';
@@ -5302,8 +5349,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     sfLosers.push(loser);
     html += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
-      ${bracketTeamHtml(m.t1, '', s1Bd, winner === m.t1 ? 'bracket-winner' : '', 'SF')}
-      ${bracketTeamHtml(m.t2, '', s2Bd, winner === m.t2 ? 'bracket-winner' : '', 'SF')}
+      ${bracketTeamHtml(m.t1, '', s1Bd, winner === m.t1 ? 'bracket-winner' : '', 'SF', m.t2)}
+      ${bracketTeamHtml(m.t2, '', s2Bd, winner === m.t2 ? 'bracket-winner' : '', 'SF', m.t1)}
     </div>`;
   });
   html += '</div>';
@@ -5320,8 +5367,8 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   html += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
-    ${bracketTeamHtml(f1, '', f1Bd, champion === f1 ? 'bracket-winner bracket-champion' : '', 'Finals')}
-    ${bracketTeamHtml(f2, '', f2Bd, champion === f2 ? 'bracket-winner bracket-champion' : '', 'Finals')}
+    ${bracketTeamHtml(f1, '', f1Bd, champion === f1 ? 'bracket-winner bracket-champion' : '', 'Finals', f2)}
+    ${bracketTeamHtml(f2, '', f2Bd, champion === f2 ? 'bracket-winner bracket-champion' : '', 'Finals', f1)}
   </div>`;
 
   // 3rd Place
@@ -5333,57 +5380,12 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
 
   html += `<div class="bracket-matchup" style="margin-top:1rem;">
     <div class="bracket-matchup-label">3rd Place</div>
-    ${bracketTeamHtml(t1, '', t1Bd, thirdPlace === t1 ? 'bracket-winner' : '', 'Finals')}
-    ${bracketTeamHtml(t2, '', t2Bd, thirdPlace === t2 ? 'bracket-winner' : '', 'Finals')}
+    ${bracketTeamHtml(t1, '', t1Bd, thirdPlace === t1 ? 'bracket-winner' : '', 'Finals', t2)}
+    ${bracketTeamHtml(t2, '', t2Bd, thirdPlace === t2 ? 'bracket-winner' : '', 'Finals', t1)}
   </div>`;
 
   html += '</div></div></div>';
   return html;
-}
-
-// Playoff scoreboard sections render the round's head-to-head matchups — the same pairs as the
-// Playoff Bracket card and the Live tab — instead of a league-wide ranked table. Once the bracket
-// starts only its participants can score, so an "overall" list of every manager is noise. Totals
-// are the same periodScores() rows the table used, so no number moves. `seedRank` breaks ties on
-// a finalized round; while a round is live the highlight is only "currently ahead".
-function renderPlayoffMatchupCards(matchups, scores, seedRank, isFinalized) {
-  const byName = {};
-  scores.forEach((s) => (byName[s.manager] = s));
-  const rowOf = (name) => byName[name] || { batting: 0, pitching: 0, total: 0 };
-
-  const teamHtml = (t, cls) => {
-    const r = rowOf(t.name);
-    return `<div class="matchup-team ${cls}">
-      ${t.seed ? `<span class="seed">${t.seed}</span>` : ''}
-      <span class="team-name">${esc(t.name)}<span class="matchup-team-sub">B ${fmt(r.batting)} &middot; P ${fmt(r.pitching)}</span></span>
-      <span class="team-score">${fmt(r.total)}</span>
-    </div>`;
-  };
-
-  const cards = matchups
-    .map((mu) => {
-      const [t1, t2] = mu.teams;
-      const a = rowOf(t1.name).total;
-      const b = rowOf(t2.name).total;
-      // A finalized round marks the official winner (seed tiebreak included); a live round just
-      // flags whoever currently leads, and nobody while the two are level.
-      const ahead = isFinalized
-        ? roundMatchupWinner(t1.name, a, t2.name, b, seedRank)
-        : a === b
-          ? null
-          : a > b
-            ? t1.name
-            : t2.name;
-      const cls = isFinalized ? 'winner' : 'matchup-leader';
-      return `<div class="matchup">
-        <div class="matchup-label">${esc(mu.label)}</div>
-        ${teamHtml(t1, ahead === t1.name ? cls : '')}
-        ${teamHtml(t2, ahead === t2.name ? cls : '')}
-      </div>`;
-    })
-    .join('');
-
-  return `<div class="matchup-results-grid">${cards}</div>`;
 }
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
@@ -5793,61 +5795,11 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
   html += `</div></div>`; // close sb-poolplay-body and sb-poolplay-section
 
-  // Playoff period tabs (QF / SF / Finals) — only if data exists
-  const hasQF = rounds.has('QF');
-  const hasSF = rounds.has('SF');
-  const hasFinals = rounds.has('Finals');
-
-  if (hasQF || hasSF || hasFinals) {
-    const renderPlayoffTable = (scores) => {
-      if (scores.length === 0) return '<p>No data.</p>';
-      let tbl = `<table class="data-table compact-table">
-        <thead><tr><th>#</th><th>Manager</th><th>Bat</th><th>Pit</th><th>Total</th></tr></thead><tbody>`;
-      scores.forEach((m, i) => {
-        tbl += `<tr>
-          <td class="rank ${i < 3 ? 'rank-' + (i + 1) : ''}">${i + 1}</td>
-          <td><strong>${esc(m.manager)}</strong></td>
-          <td class="num">${fmt(m.batting)}</td>
-          <td class="num">${fmt(m.pitching)}</td>
-          <td class="num"><strong>${fmt(m.total)}</strong></td>
-        </tr>`;
-      });
-      tbl += '</tbody></table>';
-      return tbl;
-    };
-
-    // Playoff rounds are head-to-head, so each section shows just that round's matchups. The
-    // ranked table is only the fallback for a round whose pairings aren't determined yet (the
-    // prior round isn't finalized), where there is nothing to pair managers up by.
-    const playoffSeedRank = seedRankLookup(seasonData);
-    const finalizedRounds = new Set(seasonData.finalized_rounds || []);
-
-    html += `<div class="card scoreboard-card">`;
-    [
-      { key: 'qf', has: hasQF, label: 'Quarterfinals', round: ['QF'] },
-      { key: 'sf', has: hasSF, label: 'Semifinals', round: ['SF'] },
-      { key: 'finals', has: hasFinals, label: 'Finals', round: ['Finals'] },
-    ].forEach(({ key, has, label, round }) => {
-      if (!has) return;
-      const open = currentSectionId === key;
-      const scores = periodScores(round);
-      const matchups = playoffRoundMatchups(seasonData, round[0]);
-      const body = matchups
-        ? renderPlayoffMatchupCards(matchups, scores, playoffSeedRank, finalizedRounds.has(round[0]))
-        : renderPlayoffTable(scores);
-      html += `
-        <div class="sb-section${open ? '' : ' sb-section-collapsed'}" id="sb-section-${key}">
-          <div class="sb-section-header" onclick="toggleScoreboardSection('${key}')">
-            <span class="sb-section-title">${label}</span>
-            <span class="sb-section-arrow">▾</span>
-          </div>
-          <div class="sb-period" id="sb-${key}" style="display:${open ? 'block' : 'none'}">
-            ${body}
-          </div>
-        </div>`;
-    });
-    html += '</div>';
-  }
+  // No QF/SF/Finals sections here on purpose. The Playoff Bracket card (buildActivePlayoffBracket,
+  // rendered into #scoreboard-bracket and moved ABOVE this content once pool play is finalized)
+  // already shows every round's pairings, totals and B/P split — and unlike a second copy down
+  // here, its rows expand into the per-player breakdown. Two views of the same eight matchups on
+  // one page was just noise.
 
   return html;
 }
@@ -15895,168 +15847,9 @@ function parseCSVFileWithStats(file, callback) {
 // Hall of Fame
 // ============================================================
 
-// Authoritative historical results — add a new entry each year after Finals are finalized.
-const WMMC_HISTORICAL_RESULTS = [
-  {
-    year: '2018',
-    champion: 'Cam McCallum',
-    runnerUp: 'Alex Thalacker',
-    third: 'Dan Kortan',
-    standings: {
-      'Cam McCallum': 1,
-      'Alex Thalacker': 2,
-      'Dan Kortan': 3,
-      'Ryan Sullivan': 4,
-      'Chris Bentivegna': 5,
-      'Anton Capria': 6,
-      'Jamie Rogers': 7,
-      'Ryan Courville': 8,
-      'Stephen Farmer': 9,
-      'Marcus Gillespie': 10,
-      'Austin Johnson': 11,
-    },
-  },
-  {
-    year: '2019',
-    champion: 'Joey Auclair',
-    runnerUp: 'Cam McCallum',
-    third: 'Alex Thalacker',
-    standings: {
-      'Joey Auclair': 1,
-      'Cam McCallum': 2,
-      'Alex Thalacker': 3,
-      'Chris Bentivegna': 4,
-      'Dan Kortan': 5,
-      'Ryan Sullivan': 6,
-      'Jamie Rogers': 7,
-      'Anton Capria': 8,
-      'Austin Johnson': 9,
-      'Stephen Farmer': 10,
-      'Ryan Courville': 11,
-      'Marcus Gillespie': 12,
-    },
-  },
-  {
-    year: '2020',
-    champion: 'Ryan Sullivan',
-    runnerUp: 'Dan Kortan',
-    third: 'Marcus Gillespie',
-    standings: {
-      'Ryan Sullivan': 1,
-      'Dan Kortan': 2,
-      'Marcus Gillespie': 3,
-      'Cam McCallum': 4,
-      'Ryan Courville': 5,
-      'Joey Auclair': 6,
-      'Austin Johnson': 7,
-      'Edgar Rivas': 8,
-      'Anton Capria': 9,
-      'Jamie Rogers': 10,
-      'Alex Thalacker': 11,
-      'Chris Bentivegna': 12,
-    },
-  },
-  {
-    year: '2021',
-    champion: 'Ryan Sullivan',
-    runnerUp: 'Dan Kortan',
-    third: 'Joey Auclair',
-    standings: {
-      'Ryan Sullivan': 1,
-      'Dan Kortan': 2,
-      'Joey Auclair': 3,
-      'Austin Johnson': 4,
-      'Chris Bentivegna': 5,
-      'Ryan Courville': 6,
-      'Anton Capria': 7,
-      'Marcus Gillespie': 8,
-      'Cam McCallum': 9,
-      'Jamie Rogers': 10,
-      'Edgar Rivas': 11,
-      'Alex Thalacker': 12,
-    },
-  },
-  {
-    year: '2022',
-    champion: 'Dan Kortan',
-    runnerUp: 'Alex Thalacker',
-    third: 'Ryan Sullivan',
-    standings: {
-      'Dan Kortan': 1,
-      'Alex Thalacker': 2,
-      'Ryan Sullivan': 3,
-      'Austin Johnson': 4,
-      'Joey Auclair': 5,
-      'Chris Bentivegna': 6,
-      'Jamie Rogers': 7,
-      'Cam McCallum': 8,
-      'Edgar Rivas': 9,
-      'Anton Capria': 10,
-      'Marcus Gillespie': 11,
-      'Ryan Courville': 12,
-    },
-  },
-  {
-    year: '2023',
-    champion: 'Austin Johnson',
-    runnerUp: 'Dan Kortan',
-    third: 'Anton Capria',
-    standings: {
-      'Austin Johnson': 1,
-      'Dan Kortan': 2,
-      'Anton Capria': 3,
-      'Cam McCallum': 4,
-      'Ryan Sullivan': 5,
-      'Marcus Gillespie': 6,
-      'Alex Thalacker': 7,
-      'Jamie Rogers': 8,
-      'Joey Auclair': 9,
-      'Ryan Courville': 10,
-      'Chris Bentivegna': 11,
-      'Edgar Rivas': 12,
-    },
-  },
-  {
-    year: '2024',
-    champion: 'Dan Kortan',
-    runnerUp: 'Ryan Courville',
-    third: 'Jamie Rogers',
-    standings: {
-      'Dan Kortan': 1,
-      'Ryan Courville': 2,
-      'Jamie Rogers': 3,
-      'Austin Johnson': 4,
-      'Marcus Gillespie': 5,
-      'Anton Capria': 6,
-      'Cam McCallum': 7,
-      'Chris Bentivegna': 8,
-      'Joey Auclair': 9,
-      'Ryan Sullivan': 10,
-      'Alex Thalacker': 11,
-      'Edgar Rivas': 12,
-    },
-  },
-  {
-    year: '2025',
-    champion: 'Joey Auclair',
-    runnerUp: 'Anton Capria',
-    third: 'Ryan Sullivan',
-    standings: {
-      'Joey Auclair': 1,
-      'Anton Capria': 2,
-      'Ryan Sullivan': 3,
-      'Cam McCallum': 4,
-      'Marcus Gillespie': 5,
-      'Dan Kortan': 6,
-      'Jamie Rogers': 7,
-      'Austin Johnson': 8,
-      'Ryan Courville': 9,
-      'Chris Bentivegna': 10,
-      'Edgar Rivas': 11,
-      'Alex Thalacker': 12,
-    },
-  },
-];
+// WMMC_HISTORICAL_RESULTS — the authoritative record of every finished season — now lives in
+// js/history.js (loaded onto window by js/index.js), because the Slack playoff commentary needs
+// the same table server-side. Add a new entry there each year after the Finals are finalized.
 
 // Number of historical seasons (2018-2025 = 8 seasons).
 // Number of historical seasons (2018-2025 = 8 seasons).

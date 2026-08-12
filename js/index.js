@@ -28,10 +28,11 @@ import {
   fmtDateISO,
   normalizeName,
   parseServerTimestamp,
+  shortManagerNames,
 } from './utils.js';
 import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
-import { oddsWindowForDate, formatOddsPct } from './playoffOdds.js';
+import { oddsWindowForDate, bracketOddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
 import { checkSwapLimit } from './swaps.js';
 import {
@@ -57,6 +58,13 @@ import {
 } from './hypothetical.js';
 import { seedFromPeriodTotals } from './seeding.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
+import {
+  WMMC_HISTORICAL_RESULTS,
+  HISTORICAL_NAME_ALIASES,
+  canonicalManagerName,
+  exitStageForPlace,
+  managerPlayoffHistory,
+} from './history.js';
 
 // Expose helpers globally for app.js (classic script) to consume.
 Object.assign(window, {
@@ -78,10 +86,12 @@ Object.assign(window, {
   fmtDateISO,
   normalizeName,
   parseServerTimestamp,
+  shortManagerNames,
   parseCSVLine,
   findColumn,
   computeSeasonAccolades,
   oddsWindowForDate,
+  bracketOddsWindowForDate,
   formatOddsPct,
   orderWithSwapChains,
   checkSwapLimit,
@@ -106,4 +116,9 @@ Object.assign(window, {
   computePlayoffStatuses,
   playoffStatusLabel,
   statusKeyForPosition,
+  WMMC_HISTORICAL_RESULTS,
+  HISTORICAL_NAME_ALIASES,
+  canonicalManagerName,
+  exitStageForPlace,
+  managerPlayoffHistory,
 });

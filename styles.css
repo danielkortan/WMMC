@@ -704,24 +704,6 @@ main {
   min-width: 0;
 }
 
-/* Batting/pitching split beneath a manager's name on the scoreboard's playoff matchup cards.
-   Kept at normal weight so it stays readable inside a bolded winner row. */
-.matchup-team .matchup-team-sub {
-  display: block;
-  font-size: 0.7rem;
-  font-weight: 400;
-  color: var(--text-light);
-  font-variant-numeric: tabular-nums;
-  margin-top: 0.1rem;
-}
-
-/* A round still in progress has no winner yet — highlight whoever is currently ahead, in a
-   different colour from the settled `.winner` row so the two never read as the same claim. */
-.matchup-team.matchup-leader {
-  background: rgba(16, 185, 129, 0.1);
-  font-weight: 700;
-}
-
 .matchup-team .team-score {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -4683,6 +4665,24 @@ body::before {
 
 .bracket-score-detail-label:not(:first-child) {
   margin-left: 0.25rem;
+}
+
+/* Odds to advance, in a bracket round's final week — the same pill (and the same colour
+   thresholds) as the pool-play odds, shrunk to fit a bracket row between the name and
+   the score. Only rendered while sd.bracket_odds is live for that round; see
+   advanceOddsHtml in app.js. */
+.bracket-team .bracket-odds-pill {
+  font-size: 0.68rem;
+  padding: 0.05rem 0.35rem;
+  margin-right: 0.15rem;
+  flex: 0 0 auto;
+}
+
+.bracket-odds-legend {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin: -0.25rem 0 0.75rem;
+  line-height: 1.4;
 }
 
 /* ---- Live tab: playoff matchup (bracket) view ----
