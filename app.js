@@ -10687,20 +10687,45 @@ function renderSubmissionStatusTable() {
 
   const fmtDt = (iso) => (iso ? fmtServerTimestamp(iso) : '');
 
+  // The Finals PERIOD is two games, not one: the Championship (the SF winners) and the
+  // 3rd-place game (the SF losers), played concurrently over the same two Finals weeks. All
+  // FOUR semifinalists submit a Finals roster, so all four belong in this table — listing only
+  // getFinalsParticipants hid the 3rd-place game's two managers from the commissioner
+  // completely, which is exactly the pair most likely to need chasing. Championship pair first,
+  // then the 3rd-place pair. Before SF is finalized the pairing isn't known yet, so the whole
+  // semifinal field is shown — still the right four names.
+  const finalsField = () => {
+    const sf = getSFParticipants(sd);
+    const fin = getFinalsParticipants(sd);
+    if (!sf) return fin;
+    if (!fin) return sf;
+    return [...fin, ...sf.filter((m) => !fin.includes(m))];
+  };
+
+  // Which of the two Finals-week games a manager is in. '' for every other period, and '' until
+  // the Championship pair is actually known.
+  const gameLabelFor = (period, name) => {
+    if (period !== 'finals') return '';
+    const fin = getFinalsParticipants(sd);
+    if (!fin || !fin.length) return '';
+    return fin.includes(name) ? 'Championship' : '3rd Place';
+  };
+
   // Managers to show for a period: Pool Play = all active managers; playoff rounds = only the
   // managers who advanced to that round (null until the prior round is finalized).
   const participantsFor = (period) => {
     if (period === 'pp1' || period === 'pp2') return activeManagers;
     if (period === 'qf') return getQFQualifiers(sd);
     if (period === 'sf') return getSFParticipants(sd);
-    if (period === 'finals') return getFinalsParticipants(sd);
+    if (period === 'finals') return finalsField();
     return null;
   };
 
   const pendingNote = {
     qf: 'Advancing managers appear here once Pool Play is finalized.',
     sf: 'Semifinalists appear here once the Quarterfinals are finalized.',
-    finals: 'Finalists appear here once the Semifinals are finalized.',
+    finals:
+      'All four semifinalists appear here once the Quarterfinals are finalized — two for the Championship, two for the 3rd-place game.',
   };
 
   const muted = (txt) => `<p class="text-muted" style="font-size:0.85rem;margin:0.5rem 0;">${txt}</p>`;
@@ -10731,7 +10756,11 @@ function renderSubmissionStatusTable() {
           ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
-        return `<tr><td style="font-weight:500;">${esc(name)}</td>${notCell}${subCell}${appCell}</tr>`;
+        const game = gameLabelFor(period, name);
+        const gameTag = game
+          ? ` <span class="text-muted" style="font-weight:400;font-size:0.78rem;">(${game})</span>`
+          : '';
+        return `<tr><td style="font-weight:500;">${esc(name)}${gameTag}</td>${notCell}${subCell}${appCell}</tr>`;
       })
       .join('');
     const table =
