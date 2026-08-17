@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-17 | `\b` treats `_` as a word character, so italicised manager names never got shortened              | [MEMORY](#2026-08-17-b-treats-_-as-a-word-character-so-italicised-manager-names-never-got-shortened)                              |
 | 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
 | 2026-08-12 | Branch cleanup, and why `staging` stays                                                           | [MEMORY](#2026-08-12-branch-cleanup-and-why-staging-stays)                                                                        |
 | 2026-08-11 | The scoreboard showed the bracket twice; the odds to advance moved onto the real one              | [MEMORY](#2026-08-11-the-scoreboard-showed-the-bracket-twice-the-odds-to-advance-moved-onto-the-real-one)                         |
@@ -98,6 +99,34 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-17 — `\b` treats `_` as a word character, so italicised manager names never got shortened
+
+Found while building the round-end preview (entry below), fixed here on its own once the
+commissioner asked for it.
+
+`shortenManagerNamesInSlack` rewrote full names to short ones with `\bFull Name\b`. `\b` is
+defined against `\w`, and **`\w` includes underscore** — which is Slack's italic marker. So
+`_Ryan Sullivan_` failed the boundary test at BOTH ends and came out long, while `*Ryan Sullivan*`
+and `Ryan Sullivan.` in the same post came out short. One post, one manager, two different names.
+`*` and `~` were always fine; only `_` was ever affected, which is why this survived so long.
+
+The fix is one constant: `NAME_EDGE = '[A-Za-z0-9]'`, used as `(?<!…)name(?!…)` instead of `\b`.
+That is _exactly_ the `\b` semantics minus underscore — verified by diffing old against new over
+markup, punctuation and glued-letter cases: only the underscore cases move, everything else is
+byte-identical. Letters and digits delimit a name; markup and punctuation do not.
+
+**The function moved to `js/utils.js` to get it under test.** It was server-only, and the project
+rule is that tests cover pure `js/` modules — so a boundary regex that every Slack post in the
+league depends on had no test at all, which is the actual reason the bug lasted. It is now the
+canonical copy (mirrored back into `server.js`, guarded by `tests/serverMirrors.test.js`) with
+twelve cases, including the italic regression and the "still refuses to match a name glued to
+letters or digits" case that keeps the fix from being over-broad. No frontend caller, same as
+`js/playoffCommentary.js`.
+
+Verified live as well as in unit tests: with two fixture managers renamed to share a first name,
+a real SF round-end post through a local webhook sink rendered `_History:_ Ryan D. …` and
+`*Ryan D.* vs *Ryan C.*` — one name for the same manager everywhere in the post.
 
 ## 2026-08-17 — The semifinal was never an elimination round; the 3rd-place game lost its two rosters
 
