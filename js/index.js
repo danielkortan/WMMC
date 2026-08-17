@@ -41,6 +41,8 @@ import {
   rosterStatusForManager,
   periodWeekKeys,
   managerWeekWindow,
+  lastRoundPlayed,
+  isManagerActiveInRound,
 } from './eligibility.js';
 import {
   buildSnapshot,
@@ -100,6 +102,8 @@ Object.assign(window, {
   rosterStatusForManager,
   periodWeekKeys,
   managerWeekWindow,
+  lastRoundPlayed,
+  isManagerActiveInRound,
   buildSnapshot,
   realRosterForRound,
   rosterOverrides,

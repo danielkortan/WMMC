@@ -47,6 +47,8 @@ const projectGlobals = {
   rosterStatusForManager: 'readonly',
   periodWeekKeys: 'readonly',
   managerWeekWindow: 'readonly',
+  lastRoundPlayed: 'readonly',
+  isManagerActiveInRound: 'readonly',
   buildSnapshot: 'readonly',
   scoreScenario: 'readonly',
   scoringDiff: 'readonly',

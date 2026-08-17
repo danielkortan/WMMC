@@ -119,6 +119,8 @@ A season is 16 scoring weeks plus a midseason break.
 
 The schedule is hardcoded in `js/scoring.js` (`SEASON_SCHEDULE`, consumed by `app.js` via `window`) and `server.js` (`SEASON_SCHEDULE`).
 
+**Only Pool Play, the Quarterfinals and the Finals eliminate anyone.** The Semifinals do not: the two winners play the Championship and the two losers play the 3rd-place game, and both games are contested over the same two Finals weeks. All four semifinalists therefore submit a Finals-period roster, and the season's last eliminations (runner-up and 4th place) are settled at "Crown Champion". The rule lives in `lastRoundPlayed` / `isManagerActiveInRound` (`js/eligibility.js`, mirrored in `server.js`).
+
 ## API Reference
 
 All endpoints return JSON. Endpoints that read state are unauthenticated; endpoints that mutate state perform their own per-request password/role checks.
@@ -181,12 +183,13 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Slack
 
-| Method | Endpoint                          | Description                                                                                                                                                                                                                                                       |
-| ------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`  | `/api/admin/anthropic-check`      | Commissioner only. Asks the Anthropic API a one-token question with this service's key and reports exactly what came back — unset, wrong, rejected, unreachable, or working. Never returns the key itself. Optional `?model=` to test a different model id.       |
-| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post. Optional body: `year`; `channel: "notifications"` to rehearse it into the notifications channel instead of the league one; `refreshTakes: true` to regenerate the day's Hot Takes instead of reusing the cached ones. |
-| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                      |
-| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field, a roast for every manager eliminated in a round, and next-round submission instructions as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`.   |
+| Method   | Endpoint                           | Description                                                                                                                                                                                                                                                                                                                |
+| -------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/admin/anthropic-check`       | Commissioner only. Asks the Anthropic API a one-token question with this service's key and reports exactly what came back — unset, wrong, rejected, unreachable, or working. Never returns the key itself. Optional `?model=` to test a different model id.                                                                |
+| `POST`   | `/api/slack/scoreboard`            | Manually trigger the scoreboard Slack post. Optional body: `year`; `channel: "notifications"` to rehearse it into the notifications channel instead of the league one; `refreshTakes: true` to regenerate the day's Hot Takes instead of reusing the cached ones.                                                          |
+| `POST`   | `/api/slack/command`               | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                                                                               |
+| `POST`   | `/api/seasons/:year/roasts/slack`  | Post a round-end message to the scoreboard channel: the results, a roast for every manager eliminated in the round (generating any that are missing), and — after the Semifinals, which eliminate nobody — a preview of the Championship and the 3rd-place game. Body: `{ round, qualifiers?, eliminated?, regenerate? }`. |
+| `DELETE` | `/api/seasons/:year/roasts/:round` | Commissioner only. Withdraw every stored roast for a round. `sd.roasts` is server-authoritative (a full-season save can only add to it), so this is the only way to un-say one.                                                                                                                                            |
 
 ### Misc
 
