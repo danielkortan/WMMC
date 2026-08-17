@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-17 | The semifinal eliminates you from the Cup but not from the schedule                               | [MEMORY](#2026-08-17-the-semifinal-eliminates-you-from-the-cup-but-not-from-the-schedule)                                         |
 | 2026-08-17 | `\b` treats `_` as a word character, so italicised manager names never got shortened              | [MEMORY](#2026-08-17-b-treats-_-as-a-word-character-so-italicised-manager-names-never-got-shortened)                              |
 | 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
 | 2026-08-12 | Branch cleanup, and why `staging` stays                                                           | [MEMORY](#2026-08-12-branch-cleanup-and-why-staging-stays)                                                                        |
@@ -99,6 +100,47 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-17 — The semifinal eliminates you from the Cup but not from the schedule
+
+Correction to the entry below, from the commissioner, and the distinction is the whole thing:
+**losing a semifinal DOES eliminate you.** You are out of the Cup, you cannot win anything, and
+you get roasted for it that night. What it does not do is end your season — the 3rd-place game
+runs over the same two Finals weeks, so you still submit a roster and still score. My earlier
+framing ("the semifinal eliminates nobody") collapsed two different questions into one field.
+
+They are now answered separately, and the split is the durable part of this:
+
+- **`sd.eliminated[m]` = the round your run at the CUP ended.** Both semifinal losers are stamped
+  `'SF'` — including the one who goes on to win 3rd place, and including 4th, whom
+  `crownChampionAndRoastFinals` must NOT overwrite to `'Finals'` (doing so would record him as
+  alive going into the last week when he wasn't).
+- **`lastRoundPlayed` = the last round you still PLAY.** Maps `'SF'` → `'Finals'` on read, which
+  is what keeps both of them eligible to submit and to score.
+
+So the read-normalization built yesterday survives the correction unchanged — it was the right
+mechanism attached to the wrong story. What changed is that `advanceToFinalsAndThirdPlace` marks
+both losers eliminated and roasts them again, while still deleting no submission.
+
+**The 3rd-place game is for draft position, not a medal.** Pot 1 covers 1st–3rd, so winning it
+buys a pool captaincy next season and nothing else. Three places said otherwise and now don't: the
+Slack preview carries a per-matchup `stakes` line ("Both out of the Cup at the semifinal. This one
+is for 3rd, and for a Pot 1 slot in next year's draft"), the season-end post splits what used to be
+one "top 3 podium" block into the Cup pair and a separate participation-trophy line, and the
+`third` roast prompt is explicitly told not to call it a medal, a podium finish or a bronze. The
+roster-page banner reads "3RD PLACE — Participation Trophy, Pot 1 Draft Slot".
+
+**`sd.roasts` holds ONE roast per manager, and that constraint decided the design.** Roasting at
+the semifinal means 4th place keeps that roast at season end rather than getting a second one —
+re-roasting him would overwrite it. Only the 3rd-place winner's is replaced, by the participation
+trophy. A season where the SF action was never run has no such roast, so `crownChampionAndRoastFinals`
+still generates one for 4th as a fallback; nobody finishes unroasted.
+
+Two things fixed in passing: the commissioner's Manager Submission Status card built its Finals row
+from `getFinalsParticipants`, so the two managers in the 3rd-place game never appeared — it read
+"all submitted (2)" while two rosters were outstanding (PR #440). And `crownChampionAndRoastFinals`
+was firing `saveSeason` without awaiting or checking it, then generating roasts on top of a save
+that might have been rejected.
 
 ## 2026-08-17 — `\b` treats `_` as a word character, so italicised manager names never got shortened
 

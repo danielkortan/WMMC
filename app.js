@@ -8130,10 +8130,13 @@ function renderRosterData(managerName, isCommissioner) {
           })
           .join('')}</div>`
       : '';
-    // outcome distinguishes the standard "you're out" roast from the Finals-round podium
-    // roasts (champion, runner-up, 3rd place — the three next-year pool captains) — those
-    // aren't a Hall of Shame entry, they get their own icon/label/tint (see
+    // outcome distinguishes the standard "you're out" roast from the Finals-round result
+    // roasts — those aren't a Hall of Shame entry, they get their own icon/label/tint (see
     // .roast-banner.roast-champion/.roast-runner-up/.roast-third in styles.css).
+    //
+    // 3rd place is the odd one out and is labelled accordingly: he lost his semifinal along
+    // with 4th, and the 3rd-place game only settled which of them drafts earlier next season.
+    // Calling it a bronze medal would credit him with a run he didn't have.
     const outcome = roast.outcome || 'eliminated';
     const PODIUM_BANNER = {
       champion: {
@@ -8142,7 +8145,7 @@ function renderRosterData(managerName, isCommissioner) {
         label: 'CHAMPION &mdash; Whit Merrifield Memorial Cup Winner (sort of a big deal)',
       },
       runner_up: { cls: 'roast-runner-up', flame: '🥈', label: 'RUNNER-UP &mdash; So Close, Yet So Far' },
-      third: { cls: 'roast-third', flame: '🥉', label: '3RD PLACE &mdash; A Real Accomplishment*' },
+      third: { cls: 'roast-third', flame: '🥉', label: '3RD PLACE &mdash; Participation Trophy, Pot 1 Draft Slot' },
     };
     const podium = PODIUM_BANNER[outcome];
     const bannerClass = podium ? `roast-banner ${podium.cls}` : 'roast-banner';
@@ -14789,11 +14792,11 @@ function renderWeeklyUploadSections() {
     } else if (i === 13) {
       // Week 14 (SF Week 2) - End Semifinals.
       //
-      // Unlike the Quarterfinals, this transition dumps NOBODY. The semifinal knocks nobody
-      // out of the schedule: its two winners play the Championship and its two losers play
-      // the 3rd-place game, and both of those games are contested over the SAME Finals weeks.
-      // All four semifinalists therefore submit a Finals roster, and there is no Hall of
-      // Shame until the season actually ends. See advanceToFinalsAndThirdPlace.
+      // This transition eliminates like the Quarterfinals do — both losers are out of the Cup
+      // and get roasted for it — but it dumps NO rosters. Its two winners play the Championship
+      // and its two losers play the 3rd-place game, and both games run over the SAME Finals
+      // weeks, so all four semifinalists submit a Finals roster. See
+      // advanceToFinalsAndThirdPlace.
       const sfFinalized = finalized.includes('SF');
       const sfAdvanced = (sd.losers_dumped || []).includes('SF');
       html += `<div style="margin-top:0.75rem;">
@@ -14804,11 +14807,12 @@ function renderWeeklyUploadSections() {
       </div>`;
       if (sfFinalized) {
         html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-accent" onclick="advanceToFinalsAndThirdPlace()">${sfAdvanced ? 'Repost' : 'Post'} Semifinal Results &amp; Finals/3rd-Place Preview</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Posts the semifinal results and a preview of both Finals-week games to Slack. Nobody is eliminated here &mdash; all four semifinalists keep their Finals submission (two for the Championship, two for the 3rd-place game). Safe to run again.</span>
+          <button class="btn btn-sm btn-danger" onclick="advanceToFinalsAndThirdPlace()">Advance to the Finals &amp; 3rd-Place Game${sfAdvanced ? ' (Re-run)' : ''}</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Marks the two SF losers out of the Cup, roasts them, and posts the results plus a preview of both Finals-week games. <strong>No roster is dumped</strong> &mdash; all four semifinalists still submit for Finals week (two for the Championship, two for the 3rd-place game, which sets next year's draft position). Safe to run again.</span>
         </div>`;
         if (sfAdvanced) {
-          html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Semifinal results and previews posted to Slack.</span></div>`;
+          html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF losers roasted. Results and previews posted to Slack.</span></div>`;
+          html += roastRepairToolsHtml('SF');
         }
       }
     } else if (i === 15) {
@@ -15237,19 +15241,21 @@ window.dumpPlayoffLosers = async function (round) {
   init();
 };
 
-// The Semifinals → Finals transition. The counterpart to dumpPlayoffLosers, and deliberately
-// NOT a dump: losing a semifinal eliminates nobody.
+// The Semifinals → Finals transition. Like dumpPlayoffLosers it DOES eliminate: losing a
+// semifinal ends a manager's run at the Cup, and he is roasted for it that night.
 //
-// Both Finals-week games are played over the SAME two weeks — the Championship between the SF
-// winners and the 3rd-place game between the SF losers — so all four semifinalists need a
-// Finals-period roster, and all four keep submitting. Nothing here deletes a submission and
-// nothing here writes sd.eliminated; the season's only remaining elimination happens at
-// "Crown Champion", where 4th place is settled by the 3rd-place game.
+// What it does NOT do is take his roster away. The two losers still play the 3rd-place game,
+// which is contested over the SAME two weeks as the Championship, so all four semifinalists
+// submit a Finals-period roster and all four keep scoring. Those are two different questions and
+// the code answers them separately: `sd.eliminated[m] = 'SF'` records that his Cup run ended in
+// the semifinal, while `lastRoundPlayed` (js/eligibility.js) maps that forward to 'Finals' so he
+// stays eligible for the round he is still playing. Deleting his submission — which is what this
+// action used to do — took a roster off a manager for a game he had not played yet.
 //
-// It is also the repair for seasons transitioned before this was understood, which is why it is
-// re-runnable and idempotent: it clears any stale sd.eliminated[...] = 'SF' markers (they blocked
-// the two 3rd-place managers out of the Finals submission form) and any 'your season is over'
-// roast wrongly stored against the SF round (server-authoritative, so it takes an endpoint).
+// The 3rd-place game is for next season's draft position (Pot 1 covers 1st–3rd), not for a
+// trophy, and the Slack preview says so rather than selling it as a live title race.
+//
+// Re-runnable: roasts are generate-or-reuse server-side, and everything else here is idempotent.
 window.advanceToFinalsAndThirdPlace = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -15261,35 +15267,27 @@ window.advanceToFinalsAndThirdPlace = async function () {
     alert('Finals participants not determined yet — make sure the semifinals are finalized and scores are uploaded.');
     return;
   }
-  const thirdPlacePair = sfParticipants.filter((m) => !finalsParticipants.includes(m));
+  const losers = sfParticipants.filter((m) => !finalsParticipants.includes(m));
 
-  // Withdraw any SF-round roast first: those were written as eliminations, and they render on
-  // the manager's roster page as a "season over" banner while he is still playing.
-  const clearedRoasts = await clearRoastsForRound('SF');
-  if (clearedRoasts === null) return; // already alerted
+  if (!sd.eliminated) sd.eliminated = {};
+  losers.forEach((m) => {
+    sd.eliminated[m] = 'SF';
+  });
+  sd.losers_dumped = sd.losers_dumped || [];
+  if (!sd.losers_dumped.includes('SF')) sd.losers_dumped.push('SF');
 
-  // Re-read after the roast delete adopted a new _rev, so this save isn't rejected as stale.
-  const fresh = getSeasons();
-  const freshSd = fresh[SELECTED_SEASON];
-  if (!freshSd) return;
-  const unblocked = [];
-  for (const [m, r] of Object.entries(freshSd.eliminated || {})) {
-    if (r === 'SF') {
-      delete freshSd.eliminated[m];
-      unblocked.push(m);
-    }
+  if (!(await saveSeason(SELECTED_SEASON, sd))) return; // saveSeason already alerted/reloaded
+
+  // Sequential, like every other roast path: each generate-roast is a read-modify-write of
+  // db.json, so concurrent calls would clobber each other's stored roast.
+  for (const m of losers) {
+    await generateRoastForManager(m, 'SF');
   }
-  freshSd.losers_dumped = freshSd.losers_dumped || [];
-  if (!freshSd.losers_dumped.includes('SF')) freshSd.losers_dumped.push('SF');
-
-  if (!(await saveSeason(SELECTED_SEASON, freshSd))) return; // saveSeason already alerted/reloaded
-
-  // No roasts to pass: the server builds this post as results + the Finals/3rd-place preview.
-  const posted = await postCombinedRoastsToSlack('SF', null, []);
+  const posted = await postCombinedRoastsToSlack('SF', null, losers);
   alert(
-    `Finals: ${finalsParticipants.join(' vs ')}. 3rd-place game: ${thirdPlacePair.join(' vs ')}. ` +
-      `All four submit a Finals roster.` +
-      (unblocked.length ? ` Cleared stale elimination marks for ${unblocked.join(', ')}.` : '') +
+    `Out of the Cup: ${losers.join(', ')} — roasted, and now playing for 3rd and next year's draft position. ` +
+      `Finals: ${finalsParticipants.join(' vs ')}. ` +
+      `All four still submit a Finals roster.` +
       (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
   );
   renderWeeklyUploadSections();
@@ -15298,12 +15296,14 @@ window.advanceToFinalsAndThirdPlace = async function () {
 
 // Delete every stored roast for a round. sd.roasts is server-authoritative (a full-season save
 // can only ADD to it), so this is the only way to withdraw one. Returns the removed managers, or
-// null on failure after alerting.
+// null on failure after alerting. Exposed on `window` because the commissioner console is the
+// only caller — there is no button for it, by design: withdrawing a roast is a repair, not a
+// routine action.
 //
 // The local mirror is NOT optional here: the server merges an incoming save's roasts UNDER its
 // own (`{...incoming, ...stored}`), so a following full-season save still carrying the deleted
 // roasts would put every one of them straight back.
-async function clearRoastsForRound(round) {
+window.clearRoastsForRound = async function (round) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/${round}`, { method: 'DELETE' });
     const data = await resp.json().catch(() => ({}));
@@ -15325,17 +15325,26 @@ async function clearRoastsForRound(round) {
     alert(`Could not clear ${round} roasts: ${e.message}`);
     return null;
   }
-}
+};
 
 // Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
-// bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
-// bookkeeping — the runner-up genuinely did lose the Championship), generate roasts for
-// ALL FOUR participants, and post the combined "season is over" Slack message. Only 4th
-// place gets the plain elimination banner — the top 3 finishers (champion, runner-up, 3rd)
-// are next year's pool-selection captains, so they get the podium treatment (silver/gold/
-// bronze banner + captain reminder) instead of "Hall of Shame", even though the runner-up
-// and 4th place lost the same round. There's no next round to prune submissions from, so
-// this is a separate action rather than folded into finalizeRound('Finals', ...).
+// bracket, generate the season-ending roasts, and post the combined "season is over" Slack
+// message. There's no next round to prune submissions from, so this is a separate action
+// rather than folded into finalizeRound('Finals', ...).
+//
+// Who gets what, and why it is not simply "top 3 = podium":
+//   champion / runner-up — contested the Cup and lost it in the final week. Podium treatment.
+//   3rd place           — was knocked out at the semifinal along with 4th; the 3rd-place game
+//                         only settles which of them drafts earlier next year. A participation
+//                         trophy, not a bronze medal, and it says so.
+//   4th place           — nothing new. Both semifinal losers were already roasted at "Advance
+//                         to the Finals & 3rd-Place Game", and sd.roasts holds ONE roast per
+//                         manager, so re-roasting 4th here would overwrite the roast he already
+//                         has. He keeps it. (A season where the SF action was never run has no
+//                         such roast, so one is generated as a fallback.)
+//
+// sd.eliminated follows the same reading: it records the round a manager's run at the CUP ended,
+// so both semifinal losers keep 'SF' and only the runner-up is stamped 'Finals'.
 window.crownChampionAndRoastFinals = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -15366,28 +15375,29 @@ window.crownChampionAndRoastFinals = async function () {
   const third = winnerOf(thirdA, thirdB);
   const fourth = third === thirdA ? thirdB : thirdA;
 
-  // Top-3 podium finishers — captains for next year's pool selection — get the podium
-  // roast/banner treatment. Only 4th place is a plain elimination.
   const podiumRoles = [];
   if (champion) podiumRoles.push({ manager: champion, outcome: 'champion' });
   if (runnerUp) podiumRoles.push({ manager: runnerUp, outcome: 'runner_up' });
   if (third) podiumRoles.push({ manager: third, outcome: 'third' });
 
-  const losers = [fourth].filter(Boolean);
-  if (losers.length === 0 && podiumRoles.length === 0) {
+  // 4th place keeps the semifinal roast he already has. Only roast him here if he somehow has
+  // none — a season where the SF advance action was never run — so nobody finishes unroasted.
+  const fourthHasRoast = !!(fourth && (sd.roasts || {})[fourth] && (sd.roasts || {})[fourth].text);
+  const losers = [fourth].filter((m) => m && !fourthHasRoast);
+  if (podiumRoles.length === 0 && losers.length === 0) {
     alert('Could not determine Finals results — make sure scores are uploaded.');
     return;
   }
 
   if (!sd.eliminated) sd.eliminated = {};
-  // Bracket bookkeeping: the runner-up and 4th place both genuinely lost the Championship/
-  // 3rd-place game this round, regardless of which roast banner they get.
-  [runnerUp, fourth].filter(Boolean).forEach((m) => {
-    sd.eliminated[m] = 'Finals';
-  });
+  // The runner-up's Cup run ended in the Finals. The two semifinal losers' ended at the
+  // semifinal and are already stamped 'SF' — 4th place must not be overwritten to 'Finals'
+  // here, or the record would say he was still alive going into the last week when he wasn't.
+  if (runnerUp) sd.eliminated[runnerUp] = 'Finals';
+  if (fourth && !sd.eliminated[fourth]) sd.eliminated[fourth] = 'SF';
   sd.losers_dumped = sd.losers_dumped || [];
-  sd.losers_dumped.push('Finals');
-  saveSeason(SELECTED_SEASON, sd);
+  if (!sd.losers_dumped.includes('Finals')) sd.losers_dumped.push('Finals');
+  if (!(await saveSeason(SELECTED_SEASON, sd))) return; // saveSeason already alerted/reloaded
 
   for (const m of losers) {
     await generateRoastForManager(m, 'Finals');

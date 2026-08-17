@@ -125,9 +125,15 @@ export function previewEdge(a, b) {
 
 // One upcoming matchup, as a Slack mrkdwn section.
 //
-//   matchup — { label, emoji?, teams: [team, team] }, each team
+//   matchup — { label, emoji?, stakes?, teams: [team, team] }, each team
 //             { name, seed?, playoffPoints, roundPoints: [{ round, points }], top: [{ name, points }],
 //               history: managerPlayoffHistory result | null }
+//
+// `stakes` is the one line that says what the game is actually FOR, and it is not decoration.
+// Both Finals-week games are previewed side by side, and without it the 3rd-place game reads
+// like a second title race — when in truth both its managers are already out of the Cup and are
+// playing for next season's draft position. Overselling that is the thing this section must not
+// do. Omitted, no stakes line is printed.
 //
 // Returns '' unless both sides are known — a half-built preview is worse than none.
 export function buildMatchupPreview(matchup) {
@@ -136,6 +142,7 @@ export function buildMatchupPreview(matchup) {
   const [a, b] = teams;
   const emoji = matchup.emoji || '\u{1F3C6}';
   const lines = [`${emoji} *${matchup.label}* — ${previewSeeded(a)} vs ${previewSeeded(b)}`];
+  if (matchup.stakes) lines.push(`> ${matchup.stakes}`);
   for (const t of teams) {
     lines.push(
       `> *${t.name}* — ${fmtPreviewScore(t.playoffPoints)} pts in the bracket${previewSplitLine(t)}${previewTopLine(t)}`

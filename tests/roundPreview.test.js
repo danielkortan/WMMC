@@ -147,6 +147,24 @@ describe('buildMatchupPreview', () => {
     assert.doesNotMatch(out, /undefined/);
   });
 
+  it('prints the stakes line directly under the heading, above the managers', () => {
+    const out = buildMatchupPreview({
+      label: '3rd Place',
+      stakes: '_Both out of the Cup at the semifinal._',
+      teams: [team({ name: 'Carl' }), team({ name: 'Dave' })],
+    });
+    const lines = out.split('\n');
+    assert.match(lines[0], /\*3rd Place\*/);
+    assert.equal(lines[1], '> _Both out of the Cup at the semifinal._');
+    assert.match(lines[2], /\*Carl\*/);
+  });
+
+  it('omits the stakes line entirely when none is given', () => {
+    const out = buildMatchupPreview({ label: 'Championship', teams: [team(), team({ name: 'Bob' })] });
+    assert.match(out.split('\n')[1], /\*Alice\*/);
+    assert.doesNotMatch(out, /undefined/);
+  });
+
   it('refuses to render a half-known matchup', () => {
     assert.equal(buildMatchupPreview({ label: 'Championship', teams: [team()] }), '');
     assert.equal(buildMatchupPreview({ label: 'Championship', teams: [team(), { name: '' }] }), '');

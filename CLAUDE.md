@@ -125,17 +125,27 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 - `js/anthropic.js` (canonical, unit-tested) ↔ `server.js` — `anthropicReplyText` / `describeAnthropicReply`. **Never read `data.content[0].text`.** A model that emits a `thinking` block puts it at index 0, so `content[0].text` is `undefined`, the call looks empty, and the caller silently ships its static fallback on an HTTP 200 with tokens billed. That is exactly what happened to the daily Hot Takes, the elimination roasts and the season-opening roast — for months, and it is what the 2026-08-03 entry misread as a missing `ANTHROPIC_API_KEY`. Walk the `content` array and join every text block; `anthropicReplyText` does. When it comes back empty, log `describeAnthropicReply(data)` — the block types, `stop_reason` and token usage are what tell a refusal apart from a `max_tokens` cut-off mid-thinking. Keep `max_tokens` generous for the same reason: thinking spends the same budget.
 
-- **Only three rounds eliminate anyone: Pool Play, the Quarterfinals and the Finals.** The
-  SEMIFINALS do not. Its two winners play the Championship, its two losers play the 3rd-place
-  game, and both games run over the SAME two Finals weeks — so all four semifinalists submit a
-  Finals-period roster and all four keep scoring. `lastRoundPlayed` (`js/eligibility.js` ↔
-  `server.js`) is where that lives: it maps a stored `sd.eliminated[m] === 'SF'` forward to
-  'Finals' on READ, so seasons transitioned before this was understood behave correctly without
-  a data migration. Nothing should ever write `sd.eliminated[m] = 'SF'` again — the SF transition
-  is `advanceToFinalsAndThirdPlace` (app.js), which deletes no submission, marks nobody
-  eliminated, and clears stale 'SF' markers and roasts when re-run. The server enforces it
-  independently: the round-end post clears its roast set for `round === 'SF'` rather than
-  trusting the caller.
+- **"Eliminated" and "still playing" are two different questions, and the SEMIFINAL is where they
+  come apart.** Losing a semifinal ends a manager's run at the Cup — he is eliminated, roasted for
+  it that night, and cannot win anything. It does NOT end his season: the two SF losers play the
+  3rd-place game, which runs over the SAME two Finals weeks as the Championship, so all four
+  semifinalists submit a Finals-period roster and all four keep scoring. The 3rd-place game is for
+  next season's draft position only (Pot 1 covers 1st–3rd) — never describe it as a podium, a
+  medal, or a live title race.
+  - `sd.eliminated[m]` answers the FIRST question: the round a manager's run at the Cup ended.
+    Both semifinal losers are stamped `'SF'` — including the one who goes on to win 3rd place, and
+    including 4th place, whom `crownChampionAndRoastFinals` must NOT overwrite to `'Finals'`.
+  - `lastRoundPlayed` (`js/eligibility.js` ↔ `server.js`) answers the SECOND: it maps `'SF'`
+    forward to `'Finals'` on READ, which is what keeps those two eligible to submit and to score
+    in the round they are still playing. Everything gating on elimination goes through
+    `isManagerActiveInRound`, never through a hardcoded round list.
+  - The SF transition is `advanceToFinalsAndThirdPlace` (app.js). It marks both losers eliminated
+    and roasts them — but **deletes no submission**. Taking a roster off a manager for a game he
+    has not played yet is the bug this whole area was rebuilt around.
+  - `sd.roasts` holds ONE roast per manager, so a manager roasted at the semifinal is not roasted
+    again at the Finals: 4th place keeps his SF roast, and only the 3rd-place winner's is replaced
+    (by the `third` participation-trophy roast). Season-end Slack therefore has two sections, not
+    one "top 3" podium — the Cup pair, then 3rd on his own.
 
 - `js/roundPreview.js` (canonical, unit-tested) ↔ `server.js` — the round-end post's forward-
   looking section (`buildRoundPreviewBlock` and friends). Same must-stay-identical rule, guarded
@@ -143,7 +153,10 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   them, so it can't disagree with the scoreboard. The server-only glue that feeds it
   (`buildNextRoundPreview`, `topBracketPerformers`) lives in `server.js`, takes its pairings from
   `computePlayoffPairs` — the same function the results block above it uses — and scores top
-  performers through `managerWeekSubtotal` rather than the `sd.rosters` cache. Its two trailing lines are
+  performers through `managerWeekSubtotal` rather than the `sd.rosters` cache. Each matchup
+  carries a `stakes` line, and the 3rd-place one earning its place is the whole reason the field
+  exists: previewed beside the Championship without it, a game between two eliminated managers
+  reads as a second title race. Its two trailing lines are
   labelled (`_History:_ …`) rather than wrapped whole in italics, which is now a style choice
   rather than a workaround — the `\b`-vs-underscore bug that made it necessary was fixed in
   `shortenManagerNamesInSlack` itself.

@@ -15168,6 +15168,12 @@ const ROAST_INTENSITY = {
 const PODIUM_OUTCOMES = new Set(['champion', 'runner_up', 'third']);
 function withCaptainReminder(text, manager, outcome) {
   if (!PODIUM_OUTCOMES.has(outcome)) return text;
+  // For 3rd place the draft slot is not a footnote to a medal — it IS the prize, and the only
+  // one. Saying "top-3 finisher" to a manager who went out at the semifinal reads as a promotion
+  // he did not get, so his reminder names the mechanic instead.
+  if (outcome === 'third') {
+    return `${text} It does buy something real, mind you: ${manager} lands in Pot 1 and captains a pool in next year's selection.`;
+  }
   return `${text} Reminder: as a top-3 finisher, ${manager} is now a team captain for next year's pool selection process.`;
 }
 
@@ -16168,7 +16174,7 @@ ${ROAST_VOICE}
 
 Write the roast now. No preamble, no labels — just the roast.`;
   } else if (outcome === 'third') {
-    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. ${manager} just WON the 3rd-place game — a real result, but a hollow one (it only exists because two other managers were better than both players in it). Write a sarcastic "congratulations, sort of" roast. Keep it to 2-3 sentences max.
+    prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. ${manager} just WON the 3rd-place game. Be clear-eyed about what that is: he was knocked out of the Cup at the SEMIFINAL, two weeks ago, alongside the manager he just beat. The 3rd-place game is not a podium — it decides which of two eliminated managers picks earlier in next season's draft (a Pot 1 slot). It is a participation trophy with a draft pick stapled to it. Write a sarcastic "congratulations, sort of" roast that lands on exactly that. Do NOT call it a medal, a podium finish, or a bronze. Keep it to 2-3 sentences max.
 
 3rd-place finisher: ${manager}
 3rd-place game result: ${matchup ? `${manager} ${matchup.myScore} – ${matchup.opponentScore} ${matchup.opponent}` : 'won the 3rd-place game'}
@@ -16473,9 +16479,15 @@ function previewEdge(a, b) {
 
 // One upcoming matchup, as a Slack mrkdwn section.
 //
-//   matchup — { label, emoji?, teams: [team, team] }, each team
+//   matchup — { label, emoji?, stakes?, teams: [team, team] }, each team
 //             { name, seed?, playoffPoints, roundPoints: [{ round, points }], top: [{ name, points }],
 //               history: managerPlayoffHistory result | null }
+//
+// `stakes` is the one line that says what the game is actually FOR, and it is not decoration.
+// Both Finals-week games are previewed side by side, and without it the 3rd-place game reads
+// like a second title race — when in truth both its managers are already out of the Cup and are
+// playing for next season's draft position. Overselling that is the thing this section must not
+// do. Omitted, no stakes line is printed.
 //
 // Returns '' unless both sides are known — a half-built preview is worse than none.
 function buildMatchupPreview(matchup) {
@@ -16484,6 +16496,7 @@ function buildMatchupPreview(matchup) {
   const [a, b] = teams;
   const emoji = matchup.emoji || '\u{1F3C6}';
   const lines = [`${emoji} *${matchup.label}* — ${previewSeeded(a)} vs ${previewSeeded(b)}`];
+  if (matchup.stakes) lines.push(`> ${matchup.stakes}`);
   for (const t of teams) {
     lines.push(
       `> *${t.name}* — ${fmtPreviewScore(t.playoffPoints)} pts in the bracket${previewSplitLine(t)}${previewTopLine(t)}`
@@ -16562,6 +16575,15 @@ function buildNextRoundPreview(sd, round, year) {
 
   const played = BRACKET_ROUNDS_BEFORE.SF;
   const emojiFor = { Championship: '\u{1F3C6}', '3rd Place': '\u{1F949}' };
+  // What each game is actually for. The 3rd-place line is the important one: both its managers
+  // lost their semifinal and are out of the Cup, and the game only settles which of them drafts
+  // earlier next season (Pot 1 covers 1st–3rd). Previewed beside the Championship without this,
+  // it reads like a second title race.
+  const stakesFor = {
+    Championship: '_For the Whit Merrifield Memorial Cup._',
+    '3rd Place':
+      "_Both out of the Cup at the semifinal. This one is for 3rd, and for a Pot 1 slot in next year's draft._",
+  };
 
   const teamFacts = (name) => {
     const roundPoints = played.map((r) => ({ round: r, points: computed.score(r, name).total }));
@@ -16582,6 +16604,7 @@ function buildNextRoundPreview(sd, round, year) {
       .map((p) => ({
         label: p.label,
         emoji: emojiFor[p.label] || '\u{1F3C6}',
+        stakes: stakesFor[p.label] || '',
         teams: [teamFacts(p.a), teamFacts(p.b)],
       })),
   });
@@ -16767,11 +16790,6 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     if (r && r.round === round && r.text && (r.outcome || 'eliminated') === 'eliminated') toRoast.add(m);
   }
   for (const m of podiumManagers) toRoast.delete(m);
-  // The semifinal eliminates nobody: both losers play the 3rd-place game over the Finals weeks.
-  // Enforced here rather than trusted from the caller, because seasons finalized BEFORE that fix
-  // still carry sd.eliminated / sd.roasts entries stamped 'SF' — and a Hall of Shame built from
-  // them would tell two managers their season is over while they are still playing.
-  if (round === 'SF') toRoast.clear();
 
   // Built up front so the "is there a post to make at all?" check below can see it: a
   // Semifinals post carries no roasts by design, and previewing the two Finals-week games is
@@ -16955,7 +16973,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
         : round === 'QF'
           ? `:fire: *Quarterfinals eliminations.* ${entries.length} manager${plural} out in the first round of the bracket — welcome to the Hall of Shame:`
           : round === 'SF'
-            ? `:rotating_light: *Semifinals eliminations.* ${entries.length} manager${plural} came within one win of the championship and fell short — welcome to the Hall of Shame:`
+            ? `:rotating_light: *Semifinals eliminations.* ${entries.length} manager${plural} came within one win of the Championship and fell short — out of the Cup, and into the 3rd-place game. Welcome to the Hall of Shame:`
             : `:skull: *The season is over.* ${entries.length} manager${plural} finished one game short of the Whit Merrifield Memorial Cup — welcome to the Hall of Shame:`;
     // Slack mrkdwn: each roast as a bolded name, the head-to-head result it came from, then
     // a block-quoted body. The result line means a reader can see WHY someone is in here
@@ -16975,17 +16993,35 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     mainBlock = `${header}\n\n${sections.join('\n\n')}`;
   }
 
-  // Finals only: a second section for the top-3 podium finishers (champion, runner-up,
-  // 3rd place) — not "Hall of Shame" (they're captains for next year, not knocked out),
-  // so it gets its own header and trophy emoji.
+  // Finals only. Two sections, not one, because "top 3" is not one kind of finish:
+  //
+  //   champion / runner-up — contested the Cup in the final week. Trophy header.
+  //   3rd place            — lost his semifinal a fortnight ago along with 4th; the 3rd-place
+  //                          game only settled which of them drafts earlier next season. Filing
+  //                          him under the same "podium" header as the two managers who played
+  //                          for the Cup overstates what he won, so he gets his own line and it
+  //                          calls the thing what it is.
+  //
+  // Both still carry the captain reminder — the draft slot is the actual prize, and for 3rd it
+  // is the ONLY prize.
+  const sectionFor = ([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`;
+  const cupEntries = podiumEntries.filter(([, r]) => r.outcome !== 'third');
+  const thirdEntries = podiumEntries.filter(([, r]) => r.outcome === 'third');
+
   let podiumBlock = '';
-  if (podiumEntries.length > 0) {
-    const podiumPlural = podiumEntries.length > 1 ? 's' : '';
-    const podiumHeader = `:trophy: *A word for the podium, because nobody's safe.* ${podiumEntries.length} manager${podiumPlural} finished top-3 this season — and they're your next pool captains:`;
-    const podiumSections = podiumEntries.map(
-      ([manager, r]) => `*${manager}*\n> ${String(r.text).trim().replace(/\n/g, '\n> ')}`
-    );
-    podiumBlock = `${podiumHeader}\n\n${podiumSections.join('\n\n')}`;
+  if (cupEntries.length > 0) {
+    const podiumPlural = cupEntries.length > 1 ? 's' : '';
+    const podiumHeader = `:trophy: *A word for the two who played for it, because nobody's safe.* ${cupEntries.length} manager${podiumPlural} went to the final week with the Cup on the line — and they're your next pool captains:`;
+    podiumBlock = `${podiumHeader}\n\n${cupEntries.map(sectionFor).join('\n\n')}`;
+  }
+
+  let thirdBlock = '';
+  if (thirdEntries.length > 0) {
+    // Raw emoji, not a shortcode: `:third_place_medal:` is unvetted here, and Slack prints an
+    // unknown shortcode as literal text (see the `:tickets:` incident in CLAUDE.md). \u{1F949}
+    // is the same bronze medal the matchup builder already ships.
+    const thirdHeader = `\u{1F949} *And the participation trophy.* Knocked out at the semifinal, then won the game that decides who picks first next year:`;
+    thirdBlock = `${thirdHeader}\n\n${thirdEntries.map(sectionFor).join('\n\n')}`;
   }
 
   // Only the hard deadline rides the round-end post now; the full submission walkthrough
@@ -16993,7 +17029,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const reminder = buildDeadlineReminderLine(sd, round);
   // Preview last, above the deadline: the post reads backwards through the round just played
   // and then forwards into the games the deadline is for.
-  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, previewBlock, reminder].filter(Boolean).join('\n\n');
+  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, thirdBlock, previewBlock, reminder]
+    .filter(Boolean)
+    .join('\n\n');
 
   try {
     await postScoreboardChannelSlack(messageBody);
