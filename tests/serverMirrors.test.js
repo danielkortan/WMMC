@@ -80,6 +80,19 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries shortenManagerNamesInSlack from js/utils.js verbatim', () => {
+    assert.equal(
+      extractFunction(SERVER, 'shortenManagerNamesInSlack'),
+      extractFunction(read('js/utils.js'), 'shortenManagerNamesInSlack')
+    );
+  });
+
+  it('carries the NAME_EDGE the shortener is built on', () => {
+    const line = "const NAME_EDGE = '[A-Za-z0-9]';";
+    assert.ok(SERVER.includes(line), 'server.js is missing NAME_EDGE');
+    assert.ok(read('js/utils.js').includes(line), 'js/utils.js is missing NAME_EDGE');
+  });
+
   it('carries normalizeName from js/utils.js verbatim (the pre-existing pair)', () => {
     assert.equal(extractFunction(SERVER, 'normalizeName'), extractFunction(read('js/utils.js'), 'normalizeName'));
   });

@@ -120,17 +120,12 @@ function managerShortNameMap(db = null) {
   return map;
 }
 
-// Rewrite full manager names to their short form throughout an outbound Slack payload —
-// strings, arrays and every string field of a block object. Applied at the send boundary so
-// EVERY post inherits it, including the prose ones (swap notifications, elimination roasts,
-// alerts) that assemble their text from templates rather than from a name map.
-//
-// Whole-name, word-bounded matches only, so "Ryan Sullivan" becomes "Ryan S." while "Ryan"
-// on its own is left alone — which also makes the pass idempotent, so a builder that already
-// shortened its own names (buildScoreboardBlocks does, because its commentary needs the map
-// anyway) is not touched twice. The one thing it cannot tell apart is a manager who shares a
-// full name with an MLB player; nobody in this league does, and the failure would be a
-// cosmetic short name on a player row.
+// Mirror of shortenManagerNamesInSlack (+ its NAME_EDGE) in js/utils.js — canonical and
+// unit-tested there, kept byte-identical here because the server can't import the ESM copy
+// (tests/serverMirrors.test.js enforces it). See that file for why the boundary is spelled
+// out instead of using `\b`: `\b` counts underscore as part of a word, and underscore is
+// Slack's italic marker, so `_Ryan Sullivan_` used to match at neither end.
+const NAME_EDGE = '[A-Za-z0-9]';
 function shortenManagerNamesInSlack(value, map) {
   const entries = Object.entries(map || {}).filter(([full, short]) => full !== short);
   if (entries.length === 0) return value;
@@ -145,7 +140,8 @@ function shortenManagerNamesInSlack(value, map) {
         // follows the full name: English collapses the abbreviation period into the sentence
         // period, and "…outscored Ryan S.." is the giveaway that a name got templated in.
         const tail = short.endsWith('.') ? '\\.?' : '';
-        out = out.replace(new RegExp(`\\b${full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b${tail}`, 'g'), short);
+        const escaped = full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(new RegExp(`(?<!${NAME_EDGE})${escaped}(?!${NAME_EDGE})${tail}`, 'g'), short);
       }
       return out;
     }
