@@ -7248,15 +7248,21 @@ function roundParticipants(sd, round) {
   return names;
 }
 
-// Mirrors of js/eligibility.js ELIMINATION_ROUND_ORDER / isManagerActiveInRound / isManagerInRound
-// — keep the copies identical (same rule as SCORING / detectScoreSwings; the server can't import
-// the ESM module). `sd.eliminated[manager]` is the round a manager went out IN, so 'QF' means they
-// PLAYED the quarterfinals: active iff elimIdx >= roundIdx.
+// Mirrors of js/eligibility.js ELIMINATION_ROUND_ORDER / lastRoundPlayed / isManagerActiveInRound
+// / isManagerInRound — keep the copies identical (same rule as SCORING / detectScoreSwings; the
+// server can't import the ESM module). `sd.eliminated[manager]` is the round a manager went out IN,
+// so 'QF' means they PLAYED the quarterfinals: active iff elimIdx >= roundIdx. The semifinal is the
+// exception the ladder can't express on its own — its two losers play the 3rd-place game over the
+// FINALS weeks — which is what lastRoundPlayed normalizes.
 const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
+function lastRoundPlayed(eliminatedRound) {
+  return eliminatedRound === 'SF' ? 'Finals' : eliminatedRound;
+}
+
 function isManagerActiveInRound(round, eliminatedRound) {
   if (!round || round === 'PP1' || round === 'PP2') return true;
   if (!eliminatedRound) return true;
-  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(eliminatedRound);
+  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(lastRoundPlayed(eliminatedRound));
   const roundIdx = ELIMINATION_ROUND_ORDER.indexOf(round);
   if (elimIdx < 0 || roundIdx < 0) return true;
   return elimIdx >= roundIdx;
@@ -7449,7 +7455,17 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
     if (final) footer = `Advancing to the Semifinals: ${pairs.map((p) => `*${p.leader}*`).join(', ')}`;
   } else if (round === 'SF') {
     heading = final ? '\u{1F3C1} *Semifinal Results*' : '\u{1F94A} *Semifinal Matchups*';
-    if (final) footer = `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}`;
+    // Both halves, because the semifinal sends nobody home: the winners play the Championship
+    // and the losers play the 3rd-place game, over the same two Finals weeks. Naming only the
+    // Finals pair is what made this round read as an elimination when it never was one.
+    if (final) {
+      const losers = pairs.map((p) => (p.leader === p.a ? p.b : p.a)).filter(Boolean);
+      footer =
+        `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}` +
+        (losers.length === 2
+          ? `\n\u{1F949} 3rd-place game: *${losers[0]}* vs *${losers[1]}* \u{2014} same two weeks.`
+          : '');
+    }
   } else if (round === 'Finals') {
     heading = final ? '\u{1F3C1} *Finals Results*' : '\u{1F94A} *Championship & 3rd Place*';
     if (final) {
@@ -16316,6 +16332,265 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   }
 });
 
+// DELETE /api/seasons/:year/roasts/:round — remove every stored roast for a round (commissioner
+// only). sd.roasts is server-authoritative — a full-season save can only ever ADD to it (see the
+// save guard) — so a roast written in error cannot be withdrawn from the client without this.
+//
+// It exists because of one specific error: before the 3rd-place-game fix, "Advance winners" roasted
+// the two semifinal losers as ELIMINATED, and that roast renders on their roster page as a "your
+// season is over" banner while they are still playing the 3rd-place game. The Semifinals advance
+// action calls this to clear that. Returns the managers whose roasts were removed.
+app.delete('/api/seasons/:year/roasts/:round', requireCommissioner, (req, res) => {
+  const { year, round } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
+    return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const removed = [];
+  for (const [manager, r] of Object.entries(sd.roasts || {})) {
+    if (r && r.round === round) {
+      delete sd.roasts[manager];
+      removed.push(manager);
+    }
+  }
+
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'roasts_cleared', { year, round, managers: removed }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true, round, removed, _rev: computeSeasonRev(sd) });
+});
+
+// ============================================================
+// Next-round preview — mirror of js/roundPreview.js
+// ============================================================
+// Canonical copy + unit tests live in js/roundPreview.js; server.js cannot import the ESM
+// module, so the two must stay byte-identical (tests/serverMirrors.test.js enforces it).
+// Pure formatting only — the fact-gathering that feeds it (buildNextRoundPreview, below)
+// is server-only glue, because it reads season data.
+function fmtPreviewScore(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  const s = v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+
+// "(1) Alice" when the seed is known, "Alice" when it isn't.
+function previewSeeded(team) {
+  return team.seed ? `(${team.seed}) ${team.name}` : team.name;
+}
+
+// "QF 610.2 · SF 594.3" — the per-round splits behind the playoff total, so a manager who
+// peaked early reads differently from one who is getting hotter.
+function previewSplitLine(team) {
+  const parts = (team.roundPoints || [])
+    .filter((r) => r && r.round)
+    .map((r) => `${r.round} ${fmtPreviewScore(r.points)}`);
+  return parts.length ? ` (${parts.join(' \u{00B7} ')})` : '';
+}
+
+// The two or three players who actually carried this manager through the bracket. Named with
+// their points because "his best hitter" is worth nothing without the number attached.
+function previewTopLine(team) {
+  const top = (team.top || []).filter((p) => p && p.name).slice(0, 3);
+  if (!top.length) return '';
+  return ` \u{00B7} carried by ${top.map((p) => `${p.name} ${fmtPreviewScore(p.points)}`).join(', ')}`;
+}
+
+// 1 -> '1st', 2 -> '2nd', 3 -> '3rd', 11 -> '11th'.
+function previewOrdinal(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '';
+  const rem100 = v % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${v}th`;
+  return `${v}${['th', 'st', 'nd', 'rd'][v % 10] || 'th'}`;
+}
+
+const previewPlural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// One manager's career, in the single most interesting sentence available about it — chosen
+// by how much it raises the stakes of the game being previewed, most loaded first. Never
+// invents a fact: a manager with no finished season on record is simply described as such.
+//
+// `history` is a js/history.js managerPlayoffHistory result. `label` is the matchup label, so
+// a 3rd-place-game preview doesn't tell somebody he is chasing a Cup he has already lost.
+function previewHistoryFact(name, history, label = 'Championship') {
+  if (!history || !history.seasonsPlayed) {
+    return `${name} has no finished WMMC season on record — everything from here is a first.`;
+  }
+  const seasons = previewPlural(history.seasonsPlayed, 'season');
+
+  if (history.titleCount > 0) {
+    return history.titleCount === 1
+      ? `${name} won it in ${history.lastTitle}.`
+      : `${name} has ${previewPlural(history.titleCount, 'Cup')}, most recently ${history.lastTitle}.`;
+  }
+  if (history.neverMadeFinals && label === 'Championship') {
+    return `${name} has never reached a Final in ${seasons} — this is the first.`;
+  }
+  if (history.finalsAppearances > 0) {
+    return `${name} has ${previewPlural(history.finalsAppearances, 'Final')} and no Cup${
+      history.lastYearInFinals ? `, the last in ${history.lastYearInFinals}` : ''
+    }.`;
+  }
+  if (history.sfExitCount > 0) {
+    return `${name} has lost ${previewPlural(history.sfExitCount, 'semifinal')}${
+      history.lastYearInSemis ? `, the last in ${history.lastYearInSemis}` : ''
+    }, and never got past one.`;
+  }
+  if (history.neverPastQF) {
+    return `${name} had never won a playoff game before this year, across ${seasons}.`;
+  }
+  const best = history.seasons.reduce((lo, s) => (lo === null || s.place < lo.place ? s : lo), null);
+  return best
+    ? `${name}'s best finish is ${previewOrdinal(best.place)}, in ${best.year}.`
+    : `${name} is ${seasons} into his WMMC career.`;
+}
+
+// Who the form likes, and by how much — stated as form and labelled as form. Returns '' when
+// neither manager has any bracket scoring to compare, because a pick from nothing is a guess
+// wearing a number.
+function previewEdge(a, b) {
+  const pa = Number(a.playoffPoints) || 0;
+  const pb = Number(b.playoffPoints) || 0;
+  if (pa <= 0 && pb <= 0) return '';
+  const gap = Math.round(Math.abs(pa - pb) * 10) / 10;
+  if (gap < 1) {
+    return `Dead level across the bracket — ${fmtPreviewScore(pa)} apiece. Fresh rosters decide this one entirely.`;
+  }
+  const leader = pa > pb ? a : b;
+  // The gap against the bigger of the two totals, so "62 points" reads as the rounding error
+  // or the chasm it actually is instead of as a bare number.
+  const share = gap / Math.max(pa, pb);
+  const strength =
+    share >= 0.1
+      ? 'and it has not been close'
+      : share >= 0.03
+        ? 'a real gap, but a survivable one'
+        : 'which is close enough to nothing';
+  return `Form likes ${leader.name} — ${fmtPreviewScore(gap)} more points across the bracket, ${strength}. Both rosters reset for these weeks, so treat it as form, not a forecast.`;
+}
+
+// One upcoming matchup, as a Slack mrkdwn section.
+//
+//   matchup — { label, emoji?, teams: [team, team] }, each team
+//             { name, seed?, playoffPoints, roundPoints: [{ round, points }], top: [{ name, points }],
+//               history: managerPlayoffHistory result | null }
+//
+// Returns '' unless both sides are known — a half-built preview is worse than none.
+function buildMatchupPreview(matchup) {
+  const teams = ((matchup && matchup.teams) || []).filter((t) => t && t.name);
+  if (teams.length !== 2) return '';
+  const [a, b] = teams;
+  const emoji = matchup.emoji || '\u{1F3C6}';
+  const lines = [`${emoji} *${matchup.label}* — ${previewSeeded(a)} vs ${previewSeeded(b)}`];
+  for (const t of teams) {
+    lines.push(
+      `> *${t.name}* — ${fmtPreviewScore(t.playoffPoints)} pts in the bracket${previewSplitLine(t)}${previewTopLine(t)}`
+    );
+  }
+  // Both trailing lines are labelled rather than wrapped whole in italics, and that is load
+  // bearing: Slack's italic marker is `_`, `_` is a word character, and the shortening pass that
+  // rewrites full manager names at the send boundary matches on `\b` — so a line that OPENS with
+  // `_Alice Adams …` is the one place a manager's full name survives into a post while every
+  // other mention of him is short. Keep a non-name word first.
+  const facts = teams.map((t) => previewHistoryFact(t.name, t.history, matchup.label)).filter(Boolean);
+  if (facts.length) lines.push(`> _History:_ ${facts.join(' ')}`);
+  const edge = previewEdge(a, b);
+  if (edge) lines.push(`> _Early edge:_ ${edge}`);
+  return lines.join('\n');
+}
+
+// The whole preview section for a round-end post: a heading plus one block per upcoming
+// matchup. Returns '' when nothing is previewable, so a caller can append it unconditionally.
+function buildRoundPreviewBlock({ heading = null, matchups = [] } = {}) {
+  const blocks = (matchups || []).map(buildMatchupPreview).filter(Boolean);
+  if (!blocks.length) return '';
+  const head = heading || '\u{1F52E} *Up next*';
+  return [head, ...blocks].join('\n\n');
+}
+
+// The rounds a manager has already played, in order, at the point `round` has just finished.
+// Pool play is deliberately excluded: the preview is about bracket form, and a 10-week pool
+// total would swamp two playoff rounds and turn "form" back into "seeding".
+const BRACKET_ROUNDS_BEFORE = { QF: ['QF'], SF: ['QF', 'SF'] };
+
+// The players who actually carried a manager through the bracket so far, best first.
+//
+// Scored through managerWeekSubtotal — the same date-windowed pass the scoreboard totals come
+// from — rather than off the sd.rosters cache, so a player who was swapped in mid-round is
+// credited for exactly the days he was rostered, and one swapped out is not credited past his
+// drop date. (sd.rosters is a derived cache and is not swap-honored; see CLAUDE.md.)
+function topBracketPerformers(sd, manager, rounds, limit = 3) {
+  const totals = {};
+  const sources = [
+    [sd.weekly_batting || [], 'batter', 'batters'],
+    [sd.weekly_pitching || [], 'pitcher', 'pitchers'],
+  ];
+  const roundSet = new Set(rounds);
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (!roundSet.has(schedWeek.round)) return;
+    for (const [rows, playerKey, listKey] of sources) {
+      const detail = [];
+      managerWeekSubtotal(sd, manager, schedWeek, idx, rows, playerKey, listKey, detail);
+      for (const d of detail) totals[d.player] = (totals[d.player] || 0) + d.score;
+    }
+  });
+  return Object.entries(totals)
+    .map(([name, points]) => ({ name, points: Math.round(points * 100) / 100 }))
+    .filter((p) => p.points > 0)
+    .sort((a, b) => b.points - a.points || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+// The forward-looking block on a round-end post: every game of the NEXT round, with each
+// manager's bracket form, who carried him there, and one career fact apiece.
+//
+// Only the Semifinals transition is wired up, and for a reason: it is the only round-end post
+// with nothing else to say. Pool Play announces a playoff field, the Quarterfinals stack four
+// eliminations — but nobody is eliminated in the semifinals (the two losers play the 3rd-place
+// game over the Finals weeks), so without this the SF post would be a results block and a
+// deadline. Both Finals-week games get previewed: the Championship and the 3rd-place game.
+//
+// The pairings come from computePlayoffPairs — the SAME function the results block above it is
+// built from — so a preview can never name a matchup the post itself contradicts. Returns ''
+// when the bracket isn't derivable yet, so the caller can append unconditionally.
+function buildNextRoundPreview(sd, round, year) {
+  if (round !== 'SF') return '';
+  const computed = computePlayoffPairs(sd, 'Finals');
+  if (!computed) return '';
+
+  const played = BRACKET_ROUNDS_BEFORE.SF;
+  const emojiFor = { Championship: '\u{1F3C6}', '3rd Place': '\u{1F949}' };
+
+  const teamFacts = (name) => {
+    const roundPoints = played.map((r) => ({ round: r, points: computed.score(r, name).total }));
+    return {
+      name,
+      seed: computed.seedRank[name] || null,
+      playoffPoints: Math.round(roundPoints.reduce((s, r) => s + r.points, 0) * 100) / 100,
+      roundPoints,
+      top: topBracketPerformers(sd, name, played),
+      history: managerPlayoffHistory(name, WMMC_HISTORICAL_RESULTS, { throughYear: year }),
+    };
+  };
+
+  return buildRoundPreviewBlock({
+    heading: '\u{1F52E} *Up next — both Finals-week games*',
+    matchups: computed.pairs
+      .filter((p) => p.a && p.b)
+      .map((p) => ({
+        label: p.label,
+        emoji: emojiFor[p.label] || '\u{1F3C6}',
+        teams: [teamFacts(p.a), teamFacts(p.b)],
+      })),
+  });
+}
+
 const NEXT_ROUND_BY_ROUND = {
   PP: { round: 'QF', label: 'The Quarterfinals', period: 'qf' },
   QF: { round: 'SF', label: 'The Semifinals', period: 'sf' },
@@ -16457,6 +16732,11 @@ function buildSubmissionWindowBlock(sd, todayISO) {
 // before the post — the first live post silently dropped a manager because it trusted the
 // stored roasts alone. `regenerate: true` re-rolls every roast for the round (the repost
 // button uses this).
+//
+// A round-end post does NOT require a roast. The Semifinals eliminate nobody — their two
+// losers go to the 3rd-place game, played out over the Finals weeks — so the SF post is
+// results plus the Finals/3rd-place preview and no Hall of Shame at all. Only a post with
+// nothing to say (no results, no roasts, no preview) 404s.
 app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
@@ -16491,8 +16771,18 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     if (r && r.round === round && r.text && (r.outcome || 'eliminated') === 'eliminated') toRoast.add(m);
   }
   for (const m of podiumManagers) toRoast.delete(m);
-  if (toRoast.size === 0 && podiumList.length === 0) {
-    return res.status(404).json({ error: `No eliminated managers or stored roasts for round ${round}` });
+  // The semifinal eliminates nobody: both losers play the 3rd-place game over the Finals weeks.
+  // Enforced here rather than trusted from the caller, because seasons finalized BEFORE that fix
+  // still carry sd.eliminated / sd.roasts entries stamped 'SF' — and a Hall of Shame built from
+  // them would tell two managers their season is over while they are still playing.
+  if (round === 'SF') toRoast.clear();
+
+  // Built up front so the "is there a post to make at all?" check below can see it: a
+  // Semifinals post carries no roasts by design, and previewing the two Finals-week games is
+  // the entire reason it goes out.
+  const previewBlock = buildNextRoundPreview(sd, round, year);
+  if (toRoast.size === 0 && podiumList.length === 0 && !previewBlock) {
+    return res.status(404).json({ error: `Nothing to post for round ${round} — no eliminations, roasts or preview` });
   }
 
   // Generate what's missing (or everything, on regenerate) BEFORE composing the post.
@@ -16619,7 +16909,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const podiumEntries = podiumList
     .filter((w) => podiumRoastByManager[w.manager])
     .map((w) => [w.manager, { text: podiumRoastByManager[w.manager], outcome: w.outcome }]);
-  if (entries.length === 0 && podiumEntries.length === 0) {
+  // Every roast we meant to write failed. Only a 500 when roasts were the point of the post —
+  // a preview-only round (SF) never had any to lose.
+  if (entries.length === 0 && podiumEntries.length === 0 && toRoast.size > 0) {
     return res.status(500).json({ error: 'Roast generation failed for every eliminated manager' });
   }
 
@@ -16703,7 +16995,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   // Only the hard deadline rides the round-end post now; the full submission walkthrough
   // moved to the Friday scoreboard post (buildSubmissionWindowBlock), where it is actionable.
   const reminder = buildDeadlineReminderLine(sd, round);
-  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, reminder].filter(Boolean).join('\n\n');
+  // Preview last, above the deadline: the post reads backwards through the round just played
+  // and then forwards into the games the deadline is for.
+  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, previewBlock, reminder].filter(Boolean).join('\n\n');
 
   try {
     await postScoreboardChannelSlack(messageBody);
@@ -16718,6 +17012,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
         round,
         managers: entries.length,
         podium: podiumEntries.length,
+        preview: !!previewBlock,
         regenerated: Object.keys(freshTexts).length,
       },
       req.get('X-User-Email')

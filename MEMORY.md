@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
 | 2026-08-12 | Branch cleanup, and why `staging` stays                                                           | [MEMORY](#2026-08-12-branch-cleanup-and-why-staging-stays)                                                                        |
 | 2026-08-11 | The scoreboard showed the bracket twice; the odds to advance moved onto the real one              | [MEMORY](#2026-08-11-the-scoreboard-showed-the-bracket-twice-the-odds-to-advance-moved-onto-the-real-one)                         |
 | 2026-08-08 | Hot Takes read like a stat line: units, direction, and number density                             | [MEMORY](#2026-08-08-hot-takes-read-like-a-stat-line-units-direction-and-number-density)                                          |
@@ -97,6 +98,65 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-17 — The semifinal was never an elimination round; the 3rd-place game lost its two rosters
+
+**The bug.** "End Semifinals → Advance Finals Teams & Dump SF Loser Rosters" treated the semifinal
+like the quarterfinal: it deleted the two losers' Finals submissions and stamped
+`sd.eliminated[loser] = 'SF'`. But the semifinal eliminates nobody. Its losers play the **3rd-place
+game, and the 3rd-place game is contested over the same two Finals weeks** as the Championship —
+`SEASON_SCHEDULE` has literally said `Finals / 3rd Place - Week 1` all along. So the dump deleted a
+roster a manager had already submitted for a game he was still playing, and then locked both of
+them out of resubmitting: `isManagerActiveInRound('Finals', 'SF')` was `false`, and the submission
+card rendered "Season ended in Semifinals."
+
+`js/playoffStatus.js` had the ladder right the whole time (SF ends → the two losers flip to a
+**live** Consolation). `js/eligibility.js` and the dump action did not. Two models of the same
+bracket, and the wrong one owned the submission form.
+
+**The fix is one function, applied on read.** `lastRoundPlayed(eliminatedRound)` maps `'SF'` →
+`'Finals'`, and `isManagerActiveInRound` runs its index lookup through it. Deliberately a read-time
+normalization and not a data migration: it repairs every season already stamped the old way,
+including this one, the moment it deploys — no db.json surgery, nothing to get wrong at 4am. The
+pair is mirrored into `server.js` and is now guarded by `tests/serverMirrors.test.js`.
+
+Downstream of that, app.js grew ONE `isManagerEliminatedForPeriod` helper (period → round, then ask
+the shared rule) replacing the two hardcoded `['PP','QF','SF']` lists that had been kept in step by
+hand — the submission card and the submission-warning banner.
+
+**The SF transition is now its own action.** `dumpPlayoffLosers` is quarterfinals-only and says so
+if called otherwise. `advanceToFinalsAndThirdPlace` deletes no submission, writes no elimination,
+and is idempotent so it doubles as the repair: re-running it clears stale `'SF'` elimination marks
+and withdraws the "your season is over" roasts wrongly stored against the SF round. Those roasts
+needed a new endpoint — `DELETE /api/seasons/:year/roasts/:round` — because `sd.roasts` is
+server-authoritative and a full-season save can only ever ADD to it. **The local mirror in
+`clearRoastsForRound` is load-bearing for the same reason**: the server merges an incoming save's
+roasts UNDER its own, so a following save still carrying the deleted text would put all of it back.
+The server independently clears its roast set for `round === 'SF'` rather than trusting the caller.
+
+**The SF post had nothing left to say, so it got a preview.** New pure module `js/roundPreview.js`
+(mirrored, unit-tested): each Finals-week game with both managers' bracket form, the per-round
+split behind it, who carried them there, one career fact apiece from `managerPlayoffHistory`, and an
+"early edge". The edge line is labelled **form, not a forecast**, on purpose — every playoff round
+opens a fresh submission period, so semifinal points are evidence about the manager and not about a
+roster that does not exist yet. Pairings come from `computePlayoffPairs`, the same function the
+results block above it uses, so the preview can never name a matchup the post contradicts; top
+performers come through `managerWeekSubtotal`, not the `sd.rosters` cache, so a mid-round swap is
+credited for exactly its own days. The SF results footer now names the 3rd-place pair too.
+
+**A live gotcha found by actually posting it.** The history line originally rendered as
+`_Alice Adams has never…_`. Slack's italic marker is `_`, `_` is a word character, and
+`shortenManagerNamesInSlack` matches on `\b` — so a full name at the HEAD of an italic run is the
+one mention in a post that never gets shortened, while every other mention of the same manager
+does. Fixed here by labelling the line (`_History:_ …`) so a non-name word comes first. **The
+shortener itself is still wrong for this case and is untouched** — changing name-boundary semantics
+for every post in the league, mid-playoffs, to fix a cosmetic issue is not a trade worth making
+unasked.
+
+Verified against a synthetic 2026 season on a scratch `DB_PATH` with the webhook pointed at a local
+sink: the SF post carries no Hall of Shame even with stale `'SF'` marks still in the data, the QF
+post is unchanged, and in the real browser the SF loser gets a live Finals submission form while the
+QF loser still reads "Season ended in Quarterfinals."
 
 ## 2026-08-12 — Branch cleanup, and why `staging` stays
 

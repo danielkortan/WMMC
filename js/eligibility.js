@@ -197,6 +197,21 @@ export function isGameDateEligible(
 // PP1/PP2.
 export const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
 
+// The LAST schedule round a manager still plays, given the round they lost in.
+//
+// For every round but one this is that round itself. The SEMIFINAL is the exception, and it is
+// the whole reason this helper exists: losing a semifinal knocks nobody out of the schedule.
+// The two SF losers play the 3rd-place game, and the 3rd-place game is contested over the
+// FINALS weeks (see SEASON_SCHEDULE: 'Finals / 3rd Place - Week 1' and 'Week 2'). So all four
+// semifinalists are active in the Finals round — two in the Championship, two in the 3rd-place
+// game — and all four submit a Finals-period roster.
+//
+// Applied on READ rather than by rewriting stored values, so the seasons written before this fix
+// (where "Advance winners" did stamp sd.eliminated[loser] = 'SF') behave correctly too.
+export function lastRoundPlayed(eliminatedRound) {
+  return eliminatedRound === 'SF' ? 'Finals' : eliminatedRound;
+}
+
 // Is a manager eliminated in `eliminatedRound` still competing in schedule round `round`?
 // A manager eliminated IN a round still PLAYED that round — 'QF' is out of SF and Finals, not QF.
 // `eliminatedRound` is null/undefined for a manager who was never eliminated. An unrecognized
@@ -204,7 +219,7 @@ export const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
 export function isManagerActiveInRound(round, eliminatedRound) {
   if (!round || round === 'PP1' || round === 'PP2') return true;
   if (!eliminatedRound) return true;
-  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(eliminatedRound);
+  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(lastRoundPlayed(eliminatedRound));
   const roundIdx = ELIMINATION_ROUND_ORDER.indexOf(round);
   if (elimIdx < 0 || roundIdx < 0) return true;
   return elimIdx >= roundIdx;

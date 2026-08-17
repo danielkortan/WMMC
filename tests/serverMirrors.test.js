@@ -84,6 +84,27 @@ describe('server.js mirrors of js/ modules', () => {
     assert.equal(extractFunction(SERVER, 'normalizeName'), extractFunction(read('js/utils.js'), 'normalizeName'));
   });
 
+  it('carries js/roundPreview.js verbatim', () => {
+    const canonical = canonicalTail(read('js/roundPreview.js'), 'export function fmtPreviewScore');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/roundPreview.js — the round-preview formatters must be identical in both'
+    );
+  });
+
+  // The elimination ladder. lastRoundPlayed is the one that encodes "the semifinal knocks
+  // nobody out of the schedule", so a drift here would put the 3rd-place game's two managers
+  // back where this pair was added to get them out of: unable to submit a Finals roster.
+  for (const name of ['lastRoundPlayed', 'isManagerActiveInRound', 'isManagerInRound']) {
+    it(`carries ${name} from js/eligibility.js verbatim`, () => {
+      assert.equal(
+        extractFunction(SERVER, name),
+        extractFunction(read('js/eligibility.js'), name),
+        `server.js has drifted from js/eligibility.js in ${name} — the elimination ladder must be identical in both`
+      );
+    });
+  }
+
   // The odds engine is the oldest untested mirror pair in the repo. These are the functions
   // whose two copies are byte-identical — the rest of the engine (computeTeamQualityFactors,
   // gameFactor) differs only in the name of the local clamp helper, which server.js has to

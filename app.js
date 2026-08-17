@@ -501,6 +501,23 @@ function isManagerQualifiedForPeriod(managerName, period, sd) {
   return false;
 }
 
+// The schedule round a period's submission is for. The Finals period covers BOTH Finals-week
+// games — the Championship and the 3rd-place game — which is why all four semifinalists submit
+// for it (see isManagerEliminatedForPeriod).
+const PERIOD_SUBMISSION_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+
+// Is this manager's season already over before `period` starts? The rule itself is the shared
+// one in js/eligibility.js (mirrored in server.js), reached here on `window` — so the submission
+// card, the submission-warning banner and the server all read the same ladder rather than three
+// copies of a hardcoded round list. In particular: a manager who lost the SEMIFINAL is NOT
+// finished — they play the 3rd-place game over the Finals weeks, and need a Finals roster.
+function isManagerEliminatedForPeriod(sd, managerName, period) {
+  const elim = sd && sd.eliminated && sd.eliminated[managerName];
+  if (!elim) return false;
+  const round = PERIOD_SUBMISSION_ROUND[period];
+  return !!round && !isManagerActiveInRound(round, elim);
+}
+
 // ---- Period Submission Data Helpers ----
 
 function getPeriodSub(sd, period, manager) {
@@ -9927,10 +9944,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     <p class="text-muted" style="margin-bottom:0.75rem;">Submit your roster for ${periodLabel}: 4 batters and 3 pitchers</p>`;
 
   const eliminatedInRound = seasonData && seasonData.eliminated && seasonData.eliminated[managerName];
-  const periodIsEliminated =
-    eliminatedInRound &&
-    ((period === 'sf' && ['PP', 'QF'].includes(eliminatedInRound)) ||
-      (period === 'finals' && ['PP', 'QF', 'SF'].includes(eliminatedInRound)));
+  const periodIsEliminated = isManagerEliminatedForPeriod(seasonData, managerName, period);
 
   if (!qualified && !isApproved) {
     html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
@@ -14773,23 +14787,29 @@ function renderWeeklyUploadSections() {
         html += roastRepairToolsHtml('QF');
       }
     } else if (i === 13) {
-      // Week 14 (SF Week 2) - End Semifinals
+      // Week 14 (SF Week 2) - End Semifinals.
+      //
+      // Unlike the Quarterfinals, this transition dumps NOBODY. The semifinal knocks nobody
+      // out of the schedule: its two winners play the Championship and its two losers play
+      // the 3rd-place game, and both of those games are contested over the SAME Finals weeks.
+      // All four semifinalists therefore submit a Finals roster, and there is no Hall of
+      // Shame until the season actually ends. See advanceToFinalsAndThirdPlace.
       const sfFinalized = finalized.includes('SF');
-      const sfDumped = (sd.losers_dumped || []).includes('SF');
+      const sfAdvanced = (sd.losers_dumped || []).includes('SF');
       html += `<div style="margin-top:0.75rem;">
         <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF')" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${sfFinalized ? 'Semifinals Ended' : 'End Semifinals'}
         </button>
-        ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to finals.</span>'}
+        ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to the Finals and losers to the 3rd-place game.</span>'}
       </div>`;
-      if (sfFinalized && !sfDumped) {
+      if (sfFinalized) {
         html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('SF')">Advance Finals Teams &amp; Dump SF Loser Rosters</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, generates roasts, and posts the Hall of Shame to Slack.</span>
+          <button class="btn btn-sm btn-accent" onclick="advanceToFinalsAndThirdPlace()">${sfAdvanced ? 'Repost' : 'Post'} Semifinal Results &amp; Finals/3rd-Place Preview</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Posts the semifinal results and a preview of both Finals-week games to Slack. Nobody is eliminated here &mdash; all four semifinalists keep their Finals submission (two for the Championship, two for the 3rd-place game). Safe to run again.</span>
         </div>`;
-      } else if (sfDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
-        html += roastRepairToolsHtml('SF');
+        if (sfAdvanced) {
+          html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Semifinal results and previews posted to Slack.</span></div>`;
+        }
       }
     } else if (i === 15) {
       // Week 16 (Finals Week 2) - End Finals
@@ -15153,25 +15173,26 @@ window.finalizeRound = async function (roundKey) {
 };
 
 // Remove losing managers' next-round submissions, mark them eliminated, trigger roasts.
-// round = 'QF' (dumps QF losers from SF) or 'SF' (dumps SF losers from Finals).
+//
+// QUARTERFINALS ONLY. The semifinal looks like the same transition and is not: its losers play
+// the 3rd-place game over the Finals weeks, so nothing of theirs may be dumped and nobody is
+// marked eliminated. That transition is advanceToFinalsAndThirdPlace, below.
 window.dumpPlayoffLosers = async function (round) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  const nextPeriod = round === 'QF' ? 'sf' : round === 'SF' ? 'finals' : null;
-  if (!nextPeriod) return;
-
-  let losers;
-  if (round === 'QF') {
-    const qfQualifiers = getQFQualifiers(sd) || [];
-    const sfParticipants = getSFParticipants(sd) || [];
-    losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
-  } else {
-    const sfParticipants = getSFParticipants(sd) || [];
-    const finalsParticipants = getFinalsParticipants(sd) || [];
-    losers = sfParticipants.filter((m) => !finalsParticipants.includes(m));
+  if (round !== 'QF') {
+    alert(
+      'Only the quarterfinals eliminate anyone. Use "Post Semifinal Results & Finals/3rd-Place Preview" for the semifinals — all four semifinalists play on.'
+    );
+    return;
   }
+  const nextPeriod = 'sf';
+
+  const qfQualifiers = getQFQualifiers(sd) || [];
+  const sfParticipants = getSFParticipants(sd) || [];
+  const losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
 
   if (losers.length === 0) {
     alert('No losers identified — make sure the round is finalized and scores are uploaded.');
@@ -15215,6 +15236,96 @@ window.dumpPlayoffLosers = async function (round) {
   renderWeeklyUploadSections();
   init();
 };
+
+// The Semifinals → Finals transition. The counterpart to dumpPlayoffLosers, and deliberately
+// NOT a dump: losing a semifinal eliminates nobody.
+//
+// Both Finals-week games are played over the SAME two weeks — the Championship between the SF
+// winners and the 3rd-place game between the SF losers — so all four semifinalists need a
+// Finals-period roster, and all four keep submitting. Nothing here deletes a submission and
+// nothing here writes sd.eliminated; the season's only remaining elimination happens at
+// "Crown Champion", where 4th place is settled by the 3rd-place game.
+//
+// It is also the repair for seasons transitioned before this was understood, which is why it is
+// re-runnable and idempotent: it clears any stale sd.eliminated[...] = 'SF' markers (they blocked
+// the two 3rd-place managers out of the Finals submission form) and any 'your season is over'
+// roast wrongly stored against the SF round (server-authoritative, so it takes an endpoint).
+window.advanceToFinalsAndThirdPlace = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+
+  const sfParticipants = getSFParticipants(sd) || [];
+  const finalsParticipants = getFinalsParticipants(sd) || [];
+  if (sfParticipants.length < 4 || finalsParticipants.length < 2) {
+    alert('Finals participants not determined yet — make sure the semifinals are finalized and scores are uploaded.');
+    return;
+  }
+  const thirdPlacePair = sfParticipants.filter((m) => !finalsParticipants.includes(m));
+
+  // Withdraw any SF-round roast first: those were written as eliminations, and they render on
+  // the manager's roster page as a "season over" banner while he is still playing.
+  const clearedRoasts = await clearRoastsForRound('SF');
+  if (clearedRoasts === null) return; // already alerted
+
+  // Re-read after the roast delete adopted a new _rev, so this save isn't rejected as stale.
+  const fresh = getSeasons();
+  const freshSd = fresh[SELECTED_SEASON];
+  if (!freshSd) return;
+  const unblocked = [];
+  for (const [m, r] of Object.entries(freshSd.eliminated || {})) {
+    if (r === 'SF') {
+      delete freshSd.eliminated[m];
+      unblocked.push(m);
+    }
+  }
+  freshSd.losers_dumped = freshSd.losers_dumped || [];
+  if (!freshSd.losers_dumped.includes('SF')) freshSd.losers_dumped.push('SF');
+
+  if (!(await saveSeason(SELECTED_SEASON, freshSd))) return; // saveSeason already alerted/reloaded
+
+  // No roasts to pass: the server builds this post as results + the Finals/3rd-place preview.
+  const posted = await postCombinedRoastsToSlack('SF', null, []);
+  alert(
+    `Finals: ${finalsParticipants.join(' vs ')}. 3rd-place game: ${thirdPlacePair.join(' vs ')}. ` +
+      `All four submit a Finals roster.` +
+      (unblocked.length ? ` Cleared stale elimination marks for ${unblocked.join(', ')}.` : '') +
+      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
+  );
+  renderWeeklyUploadSections();
+  init();
+};
+
+// Delete every stored roast for a round. sd.roasts is server-authoritative (a full-season save
+// can only ADD to it), so this is the only way to withdraw one. Returns the removed managers, or
+// null on failure after alerting.
+//
+// The local mirror is NOT optional here: the server merges an incoming save's roasts UNDER its
+// own (`{...incoming, ...stored}`), so a following full-season save still carrying the deleted
+// roasts would put every one of them straight back.
+async function clearRoastsForRound(round) {
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/${round}`, { method: 'DELETE' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(`Could not clear ${round} roasts: ${data.error || resp.status}`);
+      return null;
+    }
+    const removed = data.removed || [];
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (sd && sd.roasts) {
+      for (const m of removed) delete sd.roasts[m];
+      setSeasonsLocal(seasons);
+    }
+    adoptRev(data._rev);
+    return removed;
+  } catch (e) {
+    console.error('clearRoastsForRound failed:', e);
+    alert(`Could not clear ${round} roasts: ${e.message}`);
+    return null;
+  }
+}
 
 // Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
 // bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
@@ -15441,11 +15552,9 @@ function updateSubmissionWarningBanner() {
 
   // SF/Finals "qualification" is open to everyone (see isManagerQualifiedForPeriod) —
   // an eliminated manager is filtered here instead, mirroring the submission card's
-  // "Season ended" state so the banner never nags a knocked-out manager.
-  const elim = sd.eliminated && sd.eliminated[me.name];
-  const isEliminatedFor = (period) =>
-    !!elim &&
-    ((period === 'sf' && ['PP', 'QF'].includes(elim)) || (period === 'finals' && ['PP', 'QF', 'SF'].includes(elim)));
+  // "Season ended" state so the banner never nags a knocked-out manager. A semifinal
+  // loser is NOT knocked out (3rd-place game), so this still nags them for a Finals roster.
+  const isEliminatedFor = (period) => isManagerEliminatedForPeriod(sd, me.name, period);
 
   // During a between-periods break (e.g. the All-Star break) the upcoming round's
   // window may not have opened yet — windows open the Friday before the round — but

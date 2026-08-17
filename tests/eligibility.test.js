@@ -9,6 +9,7 @@ import {
   rosterStatusForManager,
   managerWeekWindow,
   mergeWeekWindows,
+  lastRoundPlayed,
   isManagerActiveInRound,
   isManagerInRound,
 } from '../js/eligibility.js';
@@ -385,6 +386,20 @@ describe('mergeWeekWindows', () => {
   });
 });
 
+describe('lastRoundPlayed', () => {
+  it('maps a semifinal loss forward to the Finals weeks (the 3rd-place game)', () => {
+    assert.equal(lastRoundPlayed('SF'), 'Finals');
+  });
+
+  it('leaves every other round alone', () => {
+    assert.equal(lastRoundPlayed('PP'), 'PP');
+    assert.equal(lastRoundPlayed('QF'), 'QF');
+    assert.equal(lastRoundPlayed('Finals'), 'Finals');
+    assert.equal(lastRoundPlayed(null), null);
+    assert.equal(lastRoundPlayed(undefined), undefined);
+  });
+});
+
 describe('isManagerActiveInRound', () => {
   it('never restricts pool play — every manager plays PP1 and PP2', () => {
     assert.equal(isManagerActiveInRound('PP1', 'PP'), true);
@@ -402,8 +417,14 @@ describe('isManagerActiveInRound', () => {
     assert.equal(isManagerActiveInRound('QF', 'QF'), true); // lost the QF — but played it
     assert.equal(isManagerActiveInRound('SF', 'QF'), false);
     assert.equal(isManagerActiveInRound('SF', 'SF'), true);
-    assert.equal(isManagerActiveInRound('Finals', 'SF'), false);
     assert.equal(isManagerActiveInRound('Finals', 'Finals'), true); // runner-up / 4th place
+  });
+
+  it('losing the SEMIFINAL is not an elimination — the 3rd-place game runs in the Finals weeks', () => {
+    assert.equal(isManagerActiveInRound('Finals', 'SF'), true);
+    // ...and it is only the semifinal that works this way.
+    assert.equal(isManagerActiveInRound('Finals', 'QF'), false);
+    assert.equal(isManagerActiveInRound('Finals', 'PP'), false);
   });
 
   it('a manager who was never eliminated is active everywhere', () => {
