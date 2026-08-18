@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-18 | A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked        | [MEMORY](#2026-08-18-a-swap-on-a-rounds-last-day-stamped-an-add-date-in-the-next-period-and-the-roster-leaked)                    |
 | 2026-08-17 | `\b` treats `_` as a word character, so italicised manager names never got shortened              | [MEMORY](#2026-08-17-b-treats-_-as-a-word-character-so-italicised-manager-names-never-got-shortened)                              |
 | 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
 | 2026-08-12 | Branch cleanup, and why `staging` stays                                                           | [MEMORY](#2026-08-12-branch-cleanup-and-why-staging-stays)                                                                        |
@@ -99,6 +100,52 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-18 — A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked
+
+**The report.** Jamie Rogers' Finals roster showed four pitchers on a three-pitcher staff: Sale,
+Luzardo and Crochet tagged `Added Aug 17`, plus Nick Lodolo tagged with a bare week range. The
+swap that brought Lodolo in was `SF · Week 2`, approved, dates correct on its face.
+
+**Two facts unlock it.** First, the screen was **Finals Week 1**, not SF Week 2 — SF Week 2 is
+Aug 10–16 and Aug 17–23 is the Finals. Second, the three "Added Aug 17" pitchers are exactly what
+an approved period submission stamps (`add_date = the period's Week 1 start`), and Lodolo had **no**
+`roster_dates` entry under `Finals|Week 1` at all — which is why his tag fell through to the plain
+week range while the others read `Added`. That difference is the tell, and it is worth remembering
+as a diagnostic: on a period's first week, `Added <period start>` means submitted, a bare week
+range means arrived some other way.
+
+**The mechanism.** The swap was submitted Sun Aug 16, the last day of SF Week 2, with CIN already
+playing. The game-started rule gives `drop_date = today, add_date = tomorrow` — and tomorrow was
+Aug 17, the first day of a new submission period. The entry was written into the `SF|Week 2`
+bucket, correctly, but **the eligibility scan selects by DATE, not by which bucket the entry sits
+in**: `add_date >= periodStart && add_date <= weekEnd`. For `Finals|Week 1`, `periodStart` is
+Aug 17, so an SF-bucket entry cleared a Finals filter. `getWeekRoster`, `rebuildRosterArraysFromDates`
+and `managerWeekSubtotal` all share that shape, so it was a scoring bug, not a display bug.
+
+The control case was sitting in the same data: **Hayden Wesneski**, added Aug 15, never dropped,
+same `SF|Week 2` bucket — and he did NOT carry over. Only the add date exactly equal to the period
+start leaked. The period guard works; the date was wrong.
+
+**It also did nothing for the semifinal.** `drop_date` is inclusive, so Cantillo scored all of
+SF Week 2 anyway and Lodolo's window never opened in it. A Drop Swap was consumed for zero effect.
+Both harms come from the same date, which is why the fix is a refusal rather than a repair:
+`checkSwapEffectiveWindow` (`js/swaps.js` ↔ `server.js`, mirror-tested) rejects the submission
+before `sd.swaps.push`, so no allotment is spent. Auto path only — a scheduled date was already
+bounded on both `POST /swaps` and `PUT /swaps/:id`. PR #442.
+
+**Undo was not enough, and that is the lesson worth keeping.** Undoing the swap cleaned
+`roster_dates` — the source of truth — but Lodolo stayed on the Finals roster and would have kept
+scoring, because `rebuildRosterArraysFromDates` had already pushed him into
+`sd.rosters[mgr]['Finals|Week 1'].pitchers` and **that heal is purely additive by design**: it
+cannot remove anything, and the undo only cleans the swap's own `week_key`. `managerWeekSubtotal`
+seeds eligibility with `...weekRoster[listKey]`, so a stale array entry scores even with no date
+window behind it. `POST /roster-remove` was what actually cleared it.
+
+So: a derived cache that only ever grows is not self-healing, and "the source of truth is correct
+now" does not mean the scoreboard is. Teaching the heal to PRUNE players no longer active by dates
+is the open follow-up — deliberately not folded into #442, because it moves every manager's
+arrays and needs its own before/after totals vet.
 
 ## 2026-08-17 — `\b` treats `_` as a word character, so italicised manager names never got shortened
 
