@@ -42,6 +42,7 @@ const projectGlobals = {
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
   checkSwapLimit: 'readonly',
+  checkSwapEffectiveWindow: 'readonly',
   periodStartForRound: 'readonly',
   rosterStatusAsOf: 'readonly',
   rosterStatusForManager: 'readonly',
