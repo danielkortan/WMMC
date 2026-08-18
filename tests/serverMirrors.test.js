@@ -73,6 +73,14 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries the swap effective-window rule from js/swaps.js verbatim', () => {
+    const canonical = canonicalTail(read('js/swaps.js'), 'const ROUND_WINDOW_LABELS');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/swaps.js — checkSwapEffectiveWindow and its labels must be identical in both'
+    );
+  });
+
   it('carries shortManagerNames from js/utils.js verbatim', () => {
     assert.equal(
       extractFunction(SERVER, 'shortManagerNames'),

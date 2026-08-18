@@ -1562,6 +1562,45 @@ function checkSwapLimit(swaps, managerName, reason, round) {
   return null;
 }
 
+// Round labels for the effective-window message below. Spelled out locally, the same way
+// checkSwapLimit spells out its playoff labels, so the mirrored block stays self-contained
+// (server.js has its own ROUND_LABELS, keyed without the articles this needs).
+const ROUND_WINDOW_LABELS = {
+  PP1: 'Pool Play 1',
+  PP2: 'Pool Play 2',
+  QF: 'the Quarterfinals',
+  SF: 'the Semifinals',
+  Finals: 'the Finals',
+};
+
+// A swap is charged to the round it was submitted in and may only move that round's roster. When
+// the computed add date falls past the round's last day, the swap cannot do either half of its
+// job: drop_date is inclusive, so the outgoing player still scores the whole round, and the
+// incoming player's window never opens inside it. The add date then lands in the NEXT period,
+// where the date-windowed eligibility scan honors it by date and quietly puts the player on a
+// roster that was never submitted — crossing a period boundary the league's rules do not allow.
+//
+// Both failure modes come from the same date, so refuse the swap at submission instead of
+// recording one that cannot do what it says. This is the AUTO path's problem specifically: an
+// explicitly scheduled date is already bounded at submission ("no later than the end of the
+// current round"), but the game-started rule can roll the add to tomorrow with nobody choosing
+// it — and on a round's final day, tomorrow belongs to the next period.
+//
+// `addDate` and `roundEnd` are ISO 'YYYY-MM-DD' (lexicographic compare). Returns null when the
+// swap can still take effect this round, or a user-facing error string when it cannot.
+function checkSwapEffectiveWindow(addDate, roundEnd, round, playerIn) {
+  if (!addDate || !roundEnd || addDate <= roundEnd) return null;
+  const label = ROUND_WINDOW_LABELS[round] || round;
+  const who = playerIn || 'the incoming player';
+  return (
+    `A game has already started today, so this swap cannot take effect until ${addDate} — ` +
+    `and ${label} ends ${roundEnd}. It would score nothing this round, and ${who} would instead be ` +
+    `added inside the next period, landing on a roster you never submitted. ` +
+    `The swap was not recorded and none of your swaps have been used — pick ${who} in your next ` +
+    `roster submission instead.`
+  );
+}
+
 // Server port of the client's getCurrentScheduleRound: which schedule round contains today's ET
 // date. Between weeks (e.g. the All-Star break or a round gap) it returns the UPCOMING round —
 // that's the roster a swap made in the gap affects, so that's the round it's charged against.
@@ -1869,6 +1908,19 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
       swap.teams_started = [];
     } else {
       const eff = await computeSwapEffectiveDatesServer(sd, swap.player_out, swap.player_in);
+      // The game-started rule can roll the add to tomorrow — and on a round's final day, tomorrow
+      // belongs to the NEXT period. Such a swap cannot move this round (the outgoing player keeps
+      // it in full, the incoming one never opens a window in it) and its add date leaks the
+      // incoming player into a roster they were never submitted to. Refuse before the swap is
+      // recorded, so no allotment is consumed. The scheduled branch above is already bounded by
+      // its own end-of-round check; this is the auto path, where nobody chose the date.
+      const windowError = checkSwapEffectiveWindow(
+        eff.add_date,
+        scheduleRoundEndDate(sd, round),
+        round,
+        swap.player_in
+      );
+      if (windowError) return res.status(400).json({ error: windowError, code: 'effective_date_past_round' });
       swap.effective_date = eff.effective_date;
       swap.drop_date = eff.drop_date;
       swap.add_date = eff.add_date;

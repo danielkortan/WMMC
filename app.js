@@ -10318,6 +10318,20 @@ window.submitSwapRequest = async function (managerName, ev) {
     }
     const { effective_date, drop_date, add_date, teams_started } = eff;
 
+    // Same guard the server enforces (js/swaps.js): on a round's final day the game-started rule
+    // rolls the add into the next period, where the swap can only do harm — it scores nothing this
+    // round and adds the incoming player to a roster that was never submitted. Fast feedback here;
+    // the server refuses authoritatively. Only the auto path can hit this — a scheduled date is
+    // already bounded by the end-of-round check above.
+    if (!requestedEff) {
+      const windowError = checkSwapEffectiveWindow(add_date, scheduleRoundEnd(sd, round), round, playerIn);
+      if (windowError) {
+        errEl.textContent = windowError;
+        errEl.style.display = 'block';
+        return;
+      }
+    }
+
     const swap = {
       email: LOGGED_IN_EMAIL,
       manager: managerName,
