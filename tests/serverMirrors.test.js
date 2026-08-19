@@ -45,6 +45,23 @@ function extractFunction(source, name) {
   throw new Error(`unbalanced braces in ${name}`);
 }
 
+// One top-level `const NAME = { ... };` declaration, located by brace matching for the same
+// reason extractFunction exists: the comment above it legitimately differs between the files.
+function extractConstObject(source, name) {
+  const at = source.search(new RegExp(`^(?:export )?const ${name}\\b`, 'm'));
+  assert.notEqual(at, -1, `no top-level const ${name}`);
+  const open = source.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(at, i + 1).replace(/^export /, '');
+    }
+  }
+  throw new Error(`unbalanced braces in ${name}`);
+}
+
 describe('server.js mirrors of js/ modules', () => {
   it('carries js/history.js verbatim', () => {
     const canonical = canonicalTail(read('js/history.js'), 'export const WMMC_HISTORICAL_RESULTS');
@@ -86,6 +103,22 @@ describe('server.js mirrors of js/ modules', () => {
     assert.ok(
       SERVER.includes(canonical),
       'server.js has drifted from js/swaps.js — checkSwapEffectiveWindow and its labels must be identical in both'
+    );
+  });
+
+  // The Slack swap notification renders this label too, so the league can never see one name for
+  // a swap type in the app and another in Slack.
+  it('carries the swap reason labels from js/swaps.js verbatim', () => {
+    const canonical = read('js/swaps.js');
+    assert.equal(
+      extractConstObject(SERVER, 'SWAP_REASON_LABELS'),
+      extractConstObject(canonical, 'SWAP_REASON_LABELS'),
+      'server.js has drifted from js/swaps.js — SWAP_REASON_LABELS must be identical in both'
+    );
+    assert.equal(
+      extractFunction(SERVER, 'swapReasonLabel'),
+      extractFunction(canonical, 'swapReasonLabel'),
+      'server.js has drifted from js/swaps.js — swapReasonLabel must be identical in both'
     );
   });
 
