@@ -56,6 +56,22 @@ export function checkSwapLimit(swaps, managerName, reason, round) {
   return null;
 }
 
+// Display labels for the reason menus. The STORED value is unchanged and always will be:
+// 'IL Swap' is written on every swap record in db.json going back to the first season, it is what
+// checkSwapLimit above and the server's IL gate both compare against, and relabelling a menu is
+// not a reason to migrate data. This maps the stored value to what a manager reads, nothing more.
+//
+// Client-only — deliberately NOT mirrored in server.js, which never renders a reason menu.
+export const SWAP_REASON_LABELS = {
+  'IL Swap': 'IL/RST Swap',
+};
+
+// The label to show for a stored reason. Unknown reasons pass through unchanged, so a record
+// carrying a reason this map has never heard of still renders as itself.
+export function swapReasonLabel(reason) {
+  return SWAP_REASON_LABELS[reason] || reason || '';
+}
+
 // Round labels for the effective-window message below. Spelled out locally, the same way
 // checkSwapLimit spells out its playoff labels, so the mirrored block stays self-contained
 // (server.js has its own ROUND_LABELS, keyed without the articles this needs).

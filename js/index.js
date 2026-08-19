@@ -34,7 +34,7 @@ import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
 import { oddsWindowForDate, bracketOddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
-import { checkSwapLimit, checkSwapEffectiveWindow } from './swaps.js';
+import { checkSwapLimit, checkSwapEffectiveWindow, swapReasonLabel } from './swaps.js';
 import {
   addDaysISO,
   periodBounds,
@@ -110,6 +110,7 @@ Object.assign(window, {
   orderWithSwapChains,
   checkSwapLimit,
   checkSwapEffectiveWindow,
+  swapReasonLabel,
   addDaysISO,
   periodBounds,
   nextViableEffectiveDate,

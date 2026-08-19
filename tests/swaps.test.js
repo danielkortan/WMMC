@@ -1,6 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkSwapLimit, checkSwapEffectiveWindow, FREE_SWAP_REASON, PLAYOFF_LIMITED_REASONS } from '../js/swaps.js';
+import {
+  checkSwapLimit,
+  checkSwapEffectiveWindow,
+  swapReasonLabel,
+  SWAP_REASON_LABELS,
+  FREE_SWAP_REASON,
+  PLAYOFF_LIMITED_REASONS,
+} from '../js/swaps.js';
 
 const swap = (over = {}) => ({
   manager: 'Alice',
@@ -162,5 +169,35 @@ describe('checkSwapEffectiveWindow', () => {
   it('is inert when either date is missing', () => {
     assert.equal(checkSwapEffectiveWindow('', '2026-08-16', 'SF', 'X'), null);
     assert.equal(checkSwapEffectiveWindow('2026-08-17', null, 'SF', 'X'), null);
+  });
+});
+
+describe('swapReasonLabel', () => {
+  it('shows an IL Swap as IL/RST, since the Restricted List now qualifies', () => {
+    assert.equal(swapReasonLabel('IL Swap'), 'IL/RST Swap');
+  });
+
+  // The whole point of the map: relabelling the menu must not change what gets written to
+  // db.json, because checkSwapLimit and the server's IL gate both compare against the stored
+  // string and every historical swap already carries it.
+  it('leaves the stored value alone — the map is keyed by it, never replaces it', () => {
+    assert.equal(SWAP_REASON_LABELS['IL Swap'], 'IL/RST Swap');
+    assert.equal(checkSwapLimit([], 'Alice', 'IL Swap', 'QF'), null);
+  });
+
+  it('passes through every reason it has no label for', () => {
+    for (const reason of [FREE_SWAP_REASON, 'Drop Swap', 'Trade Swap', 'Commissioner Swap']) {
+      assert.equal(swapReasonLabel(reason), reason);
+    }
+  });
+
+  it('passes through an unknown reason unchanged', () => {
+    assert.equal(swapReasonLabel('Some Future Swap'), 'Some Future Swap');
+  });
+
+  it('renders a missing reason as an empty string rather than undefined', () => {
+    assert.equal(swapReasonLabel(''), '');
+    assert.equal(swapReasonLabel(undefined), '');
+    assert.equal(swapReasonLabel(null), '');
   });
 });
