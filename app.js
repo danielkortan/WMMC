@@ -1263,7 +1263,104 @@ function mirrorSubmissionLocally(period, manager, submission) {
   setSeasonsLocal(seasons);
 }
 
-async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
+// ---- Late-submission window (server-authoritative) ----
+//
+// Whether a period's roster deadline has passed — and, if it has, which day a roster submitted
+// now would start on — is decided by the SERVER (GET /submission-window/:period). It has to be:
+// the answer depends on today's real first pitch, which only the server can look up, and on a
+// clock a manager cannot set. app.js's own getPeriodDeadline stays for instant rendering and for
+// the plain open/closed question; this cache is what the late-mode UI actually offers buttons on.
+//
+// Keyed by period. A period with nothing cached renders its normal (non-late) form, so a failed
+// or in-flight fetch degrades to today's behavior rather than to a wrong effective date.
+const SUBMISSION_WINDOWS = {};
+const SUBMISSION_WINDOWS_AT = {};
+const SUBMISSION_WINDOWS_INFLIGHT = {};
+// How long a cached answer is trusted. The only thing that moves inside a period is "has today's
+// first pitch happened", so a minute is plenty — and it keeps a roster page that re-renders on
+// every click from re-asking the MLB schedule each time.
+const SUBMISSION_WINDOW_TTL_MS = 60 * 1000;
+
+// Record a window the server handed back alongside a write, so the next render reads the same
+// answer the stamp was made from instead of a stale one.
+function cacheSubmissionWindow(period, win) {
+  if (!win) return;
+  SUBMISSION_WINDOWS[period] = win;
+  SUBMISSION_WINDOWS_AT[period] = Date.now();
+}
+
+// Fetch a period's window, honoring the TTL cache. Deduplicated per period, because several
+// callers ask for the same one in the same tick.
+async function loadSubmissionWindow(period, { force = false } = {}) {
+  const fresh = SUBMISSION_WINDOWS_AT[period] && Date.now() - SUBMISSION_WINDOWS_AT[period] < SUBMISSION_WINDOW_TTL_MS;
+  if (!force && fresh) return SUBMISSION_WINDOWS[period];
+  if (SUBMISSION_WINDOWS_INFLIGHT[period]) return SUBMISSION_WINDOWS_INFLIGHT[period];
+  const req = (async () => {
+    try {
+      const resp = await fetch(`/api/seasons/${SELECTED_SEASON}/submission-window/${period}`);
+      if (!resp.ok) return null;
+      const win = await resp.json();
+      cacheSubmissionWindow(period, win);
+      return win;
+    } catch (_) {
+      return null;
+    } finally {
+      delete SUBMISSION_WINDOWS_INFLIGHT[period];
+    }
+  })();
+  SUBMISSION_WINDOWS_INFLIGHT[period] = req;
+  return req;
+}
+
+// Ask the server about every period whose card is on screen, then re-render ONCE if any answer
+// moved. Called after the roster page paints, so the first paint never waits on the network and a
+// season whose server predates this endpoint simply keeps rendering the way it always did.
+async function refreshSubmissionWindows(periods, rerender) {
+  const snapshot = () => periods.map((p) => JSON.stringify(SUBMISSION_WINDOWS[p] || null)).join('|');
+  const before = snapshot();
+  await Promise.all(periods.map((p) => loadSubmissionWindow(p)));
+  if (snapshot() !== before && typeof rerender === 'function') rerender();
+}
+
+// Is this period past its lock, per the server? Unknown (nothing cached) reads as NOT late — see
+// the cache comment above.
+function periodIsLate(period) {
+  const win = SUBMISSION_WINDOWS[period];
+  return !!(win && win.is_late);
+}
+
+// The date a roster submitted right now would take effect, per the server. Null when the period
+// has no viable day left (or we haven't asked yet).
+function periodEffectiveDate(period) {
+  const win = SUBMISSION_WINDOWS[period];
+  return (win && win.effective_date) || null;
+}
+
+// Is this period still running — i.e. is there any of it left to play? Late mode only makes sense
+// while there is: once a period has ENDED, a manager who never submitted for it has nothing left
+// to gain, and leaving the form up would put a permanent "you missed Pool Play 1" card on the
+// roster page for the rest of the season. A late submission or plea already on file keeps the
+// card alive past that, so a request in flight can still be seen through.
+function periodStillRunning(period, sub) {
+  const win = SUBMISSION_WINDOWS[period];
+  if (!win) return false;
+  if (submissionLateState(sub).late) return true;
+  return !win.period_end || (!!win.today_et && win.today_et <= win.period_end);
+}
+
+// 'YYYY-MM-DD' rendered as a human date, pinned to noon UTC so the printed calendar day can't
+// shift with the reader's timezone.
+function fmtEffectiveDate(iso) {
+  if (!iso) return '';
+  return new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+async function persistSubmission(period, manager, sub, { quiet = false, forgivenessReason = null } = {}) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/submissions`, {
       method: 'POST',
@@ -1273,14 +1370,20 @@ async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
         batters: sub.batters || [],
         pitchers: sub.pitchers || [],
         status: sub.status || 'draft',
+        // Present only on a "Beg Commish for Forgiveness" submission. Its presence is what turns
+        // the submission into a plea; the effective date it earns is the commissioner's to set.
+        ...(forgivenessReason ? { forgiveness_reason: forgivenessReason } : {}),
       }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.error || `Server error (${resp.status})`);
     }
-    const { submission, _rev } = await resp.json();
+    const { submission, window: subWindow, _rev } = await resp.json();
     mirrorSubmissionLocally(period, manager, submission);
+    // The POST resolved the window server-side anyway; keep it so the card re-renders against
+    // the same answer the stamp was made from instead of a stale one.
+    cacheSubmissionWindow(period, subWindow);
     adoptRev(_rev);
     return submission;
   } catch (e) {
@@ -8209,6 +8312,12 @@ function renderRosterData(managerName, isCommissioner) {
   html += `</div>`;
 
   container.innerHTML = html;
+  // Late-submission state is the server's to decide (SUBMISSION_WINDOWS). Ask AFTER painting, so
+  // the page never waits on the network, and re-render only if an answer actually moved — which
+  // is what turns a closed period back into a late-mode form.
+  if (isActive) {
+    refreshSubmissionWindows(['pp1', 'pp2', 'qf', 'sf', 'finals'], () => renderRosterData(managerName, isCommissioner));
+  }
   // The Swaps tab's "All Swaps" list is the shared swap log scoped to this manager — it renders
   // into its container after the innerHTML above, and keeps its own expand/filter state.
   renderSwapLog(ROSTER_SWAP_LOG_ID, false, managerName);
@@ -9712,6 +9821,11 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const poolPitCount = (seasonData.pitchers_pool || []).length;
     const poolReady = poolBatCount > 0 && poolPitCount > 0;
 
+    // Same late mode as the playoff periods: PP1 closes at its own first pitch, and a manager who
+    // misses opening day still drafts — his roster just starts on the next day he can't already
+    // have watched. See buildLateSubmissionBanner.
+    const pp1Late = !isApproved && poolReady && periodIsLate('pp1') && periodStillRunning('pp1', submission);
+
     html += `<div class="card initial-submission-section" id="period-submission-card-pp1" style="margin-top:1rem;">
       <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">Pool Play 1</span>
@@ -9754,7 +9868,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">${deadlineNote}</p>
         </div>`;
       }
-    } else if (poolReady && !isPeriodTimeOpen(seasonData, 'pp1')) {
+    } else if (poolReady && !isPeriodTimeOpen(seasonData, 'pp1') && !pp1Late) {
       // Window not yet open, or already closed (PP1 has begun) — no editable form, no submit.
       // Mirrors the playoff-period cards so stray PP1 submissions can't land mid-season.
       const pp1OpenDate = getPeriodOpenDate(seasonData, 'pp1');
@@ -9772,7 +9886,9 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         html += `<p class="text-muted" style="font-size:0.85rem;">Submission window has closed.</p>`;
       }
     } else if (poolReady) {
-      // Editable submission form (only when pool is available and the window is open)
+      // Editable submission form (only when pool is available and the window is open — or when it
+      // has closed and this manager is submitting late)
+      if (pp1Late) html += buildLateSubmissionBanner('pp1', 'Pool Play 1', submission);
       if (isPending) {
         html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>`;
       }
@@ -9824,7 +9940,16 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
       }
 
       // Submit button
-      if (!isPending) {
+      if (pp1Late) {
+        html += buildLateSubmissionControls(
+          'pp1',
+          'Pool Play 1',
+          managerName,
+          submittedBatters,
+          submittedPitchers,
+          submission
+        );
+      } else if (!isPending) {
         const allSelected = submittedBatters.length === 4 && submittedPitchers.length === 3;
         const missingBatters = 4 - submittedBatters.length;
         const missingPitchers = 3 - submittedPitchers.length;
@@ -9866,6 +9991,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
               <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(sub.pitchers || []).join(', ') || 'None'}</div>
             </div>
             <div id="initial-edit-${m.name.replace(/\s+/g, '-')}" style="display:none;"></div>
+            ${buildForgivenessControls('pp1', m.name, sub)}
             <div class="swap-pending-actions">
               <button class="btn btn-sm btn-success" onclick="approveInitialSubmission('${safeName}')">Approve</button>
               <button class="btn btn-sm btn-secondary" onclick="editInitialSubmission('${safeName}')">Edit</button>
@@ -9904,6 +10030,149 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
 
   html += '</div>'; // .player-swaps-section
   return html;
+}
+
+// ---- Late submission UI ----
+//
+// A manager who misses a period's lock keeps his form. What changes is the date his roster
+// starts on, and that has to be said plainly on the card before he picks anyone — the difference
+// between a roster that counts from Monday and one that counts from Wednesday is most of the
+// round. Two paths from here:
+//
+//   Submit  — take the automatic next-viable date and get on with it. Still goes to the
+//             commissioner for the same approval every roster gets.
+//   Beg     — ask the commissioner to back-date it instead. The roster is filed with NO effective
+//             date; the commissioner names one when he rules.
+//
+// Both render only when the SERVER says the period is late (see SUBMISSION_WINDOWS).
+
+// The explanation box. Shown at the top of a late period's form, in whatever state the manager
+// has already left it.
+function buildLateSubmissionBanner(period, periodLabel, sub) {
+  const state = submissionLateState(sub);
+  const win = SUBMISSION_WINDOWS[period] || {};
+  const auto = periodEffectiveDate(period);
+  const lockStr = win.lock_at
+    ? new Date(win.lock_at).toLocaleString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+    : null;
+
+  if (state.forgivenessPending) {
+    return `<div style="padding:0.75rem;background:#e7f1ff;border-radius:6px;border:1px solid #6ea8fe;margin-bottom:0.75rem;">
+      <p style="font-size:0.9rem;margin:0 0 0.35rem;color:#084298;font-weight:600;">Your plea is with the commissioner</p>
+      <p style="font-size:0.82rem;margin:0;color:#084298;">He decides which day your ${esc(periodLabel)} roster starts on. If he says no, it still counts &mdash; from ${esc(fmtEffectiveDate(state.autoEffectiveDate) || 'the next viable day')}.</p>
+      ${state.reason ? `<p style="font-size:0.8rem;margin:0.5rem 0 0;color:#084298;font-style:italic;">&ldquo;${esc(state.reason)}&rdquo;</p>` : ''}
+    </div>`;
+  }
+
+  const verdict =
+    state.forgiveness === 'granted' && state.effectiveDate
+      ? `The commissioner back-dated it to <strong>${esc(fmtEffectiveDate(state.effectiveDate))}</strong>.`
+      : state.forgiveness === 'denied'
+        ? `The commissioner denied the back-date, so it counts from <strong>${esc(fmtEffectiveDate(state.effectiveDate) || 'the next viable day')}</strong>.`
+        : auto
+          ? `Anything you submit now counts from <strong>${esc(fmtEffectiveDate(auto))}</strong> &mdash; you cannot pick up points from a day that has already been played.`
+          : `The ${esc(periodLabel)} period is over, so there is no day left for a new roster to start on. Only the commissioner can still back-date one.`;
+
+  return `<div style="padding:0.75rem;background:#fff3cd;border-radius:6px;border:1px solid #ffc107;margin-bottom:0.75rem;">
+    <p style="font-size:0.9rem;margin:0 0 0.35rem;color:#856404;font-weight:600;">You missed the ${esc(periodLabel)} roster deadline${lockStr ? ` (${esc(lockStr)})` : ''}</p>
+    <p style="font-size:0.82rem;margin:0;color:#856404;">${verdict}</p>
+  </div>`;
+}
+
+// The Submit / Beg controls that replace the ordinary "Submit for Approval" button on a late
+// period. `sub` may be undefined — a manager who never started a roster is the common case here.
+function buildLateSubmissionControls(period, periodLabel, managerName, batters, pitchers, sub) {
+  const safeMgr = jsStr(managerName);
+  const state = submissionLateState(sub);
+  const status = (sub && sub.status) || 'draft';
+  const auto = periodEffectiveDate(period);
+
+  if (status === 'pending') {
+    const line = state.forgivenessPending
+      ? 'Waiting on the commissioner to rule on your plea and set the date.'
+      : `Waiting on commissioner approval. It counts from <strong>${esc(fmtEffectiveDate(state.effectiveDate) || 'the next viable day')}</strong>.`;
+    return `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+      <p class="text-muted" style="font-size:0.82rem;margin:0;">${line}</p>
+    </div>`;
+  }
+
+  const rosterComplete = (batters || []).length === 4 && (pitchers || []).length === 3;
+  const actions = lateSubmissionActions({
+    isLate: true,
+    hasApproved: status === 'approved',
+    forgiveness: state.forgiveness,
+    effectiveDate: auto,
+    rosterComplete,
+  });
+
+  const missing = [];
+  if ((batters || []).length < 4) missing.push(`${4 - batters.length} batter${batters.length < 3 ? 's' : ''}`);
+  if ((pitchers || []).length < 3) missing.push(`${3 - pitchers.length} pitcher${pitchers.length < 2 ? 's' : ''}`);
+
+  const dead = ' disabled style="opacity:0.45;cursor:not-allowed;"';
+  const submitLabel = auto ? `Submit &mdash; starts ${esc(fmtEffectiveDate(auto))}` : 'Submit';
+  const pleaId = `late-plea-${period}`;
+
+  let html = `<div style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:0.5rem;">
+    <button class="btn btn-primary"${actions.canSubmit ? '' : dead} onclick="${actions.canSubmit ? `submitLateRoster('${period}','${safeMgr}')` : ''}">${submitLabel}</button>
+    <button class="btn btn-secondary"${actions.canBeg ? '' : dead} onclick="${actions.canBeg ? `toggleForgivenessForm('${period}')` : ''}">Beg Commish for Forgiveness</button>
+  </div>`;
+
+  if (!rosterComplete) {
+    html += `<p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">Still need: ${missing.join(' and ')}.</p>`;
+  } else if (!actions.canSubmit && actions.reason === 'period_over') {
+    html += `<p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">No day is left in ${esc(periodLabel)} for a roster to start on &mdash; begging is your only option.</p>`;
+  } else {
+    html += `<p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">Submitting takes the automatic date. Begging sends it to the commissioner instead, and he chooses which day it counts from.</p>`;
+  }
+
+  html += `<div id="${pleaId}" style="display:none;margin-top:0.75rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+    <label for="${pleaId}-text" style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.35rem;">Why should the commissioner back-date your roster?</label>
+    <textarea id="${pleaId}-text" class="form-input" rows="3" style="width:100%;" placeholder="Make your case. The commissioner sees this, and so does Slack."></textarea>
+    <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
+      <button class="btn btn-sm btn-primary" onclick="sendForgivenessRequest('${period}','${safeMgr}')">Send to Commissioner</button>
+      <button class="btn btn-sm btn-secondary" onclick="toggleForgivenessForm('${period}')">Cancel</button>
+    </div>
+  </div>`;
+
+  return html;
+}
+
+// The commissioner's half: the extra context and controls attached to a late manager's row in the
+// pending queue. A plain late submission just needs its start date shown before Approve is
+// pressed; a plea needs a date picker, because granting it IS choosing the date.
+function buildForgivenessControls(period, managerName, sub) {
+  const state = submissionLateState(sub);
+  if (!state.late) return '';
+  const safeName = jsStr(managerName);
+  const win = SUBMISSION_WINDOWS[period] || {};
+  const inputId = `forgive-date-${period}-${managerName.replace(/[^A-Za-z0-9]/g, '-')}`;
+
+  if (!state.forgivenessPending) {
+    const granted = state.forgivenessGranted ? ' (back-dated by you)' : '';
+    return `<div style="padding:0.4rem 0.5rem;margin:0.35rem 0;background:#fff3cd;border-radius:4px;border:1px solid #ffc107;font-size:0.8rem;color:#856404;">
+      <strong>Late submission.</strong> Approving starts this roster on ${esc(fmtEffectiveDate(state.effectiveDate) || 'the next viable day')}${granted}.
+    </div>`;
+  }
+
+  const defaultDate = win.period_start || state.autoEffectiveDate || '';
+  return `<div style="padding:0.5rem;margin:0.35rem 0;background:#e7f1ff;border-radius:4px;border:1px solid #6ea8fe;">
+    <div style="font-size:0.8rem;color:#084298;font-weight:600;margin-bottom:0.25rem;">Asking for forgiveness</div>
+    ${state.reason ? `<div style="font-size:0.8rem;color:#084298;font-style:italic;margin-bottom:0.4rem;">&ldquo;${esc(state.reason)}&rdquo;</div>` : ''}
+    <div style="font-size:0.78rem;color:#084298;margin-bottom:0.4rem;">Without forgiveness this roster starts ${esc(fmtEffectiveDate(state.autoEffectiveDate) || 'on the next viable day')}. Granting lets you set any day inside the period &mdash; including its first.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;">
+      <input type="date" id="${inputId}" class="form-input" style="max-width:11rem;" value="${esc(defaultDate)}"${win.period_start ? ` min="${esc(win.period_start)}"` : ''}${win.period_end ? ` max="${esc(win.period_end)}"` : ''}>
+      <button class="btn btn-sm btn-success" onclick="decideForgiveness('${period}','${safeName}','grant','${inputId}')">Grant Back-Date</button>
+      <button class="btn btn-sm btn-danger" onclick="decideForgiveness('${period}','${safeName}','deny','${inputId}')">Deny</button>
+    </div>
+  </div>`;
 }
 
 // Build a submission card for a given period (pp2, qf, sf, finals)
@@ -9946,6 +10215,18 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
   const eliminatedInRound = seasonData && seasonData.eliminated && seasonData.eliminated[managerName];
   const periodIsEliminated = isManagerEliminatedForPeriod(seasonData, managerName, period);
 
+  // Late mode: the SERVER says this period's lock has passed and this manager still has no
+  // approved roster for it. The form stays up — what changes is the date it starts on and the
+  // buttons underneath it. Gated on the server's answer rather than the local deadline so a
+  // manager's clock (or a missing period_deadlines entry) can never move his start date.
+  const lateMode =
+    !isApproved &&
+    poolReady &&
+    qualified &&
+    !periodIsEliminated &&
+    periodIsLate(period) &&
+    periodStillRunning(period, sub);
+
   if (!qualified && !isApproved) {
     html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
       <p class="text-muted" style="font-size:0.85rem;margin:0;">You have not qualified for ${periodLabel}.</p>
@@ -9980,7 +10261,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     }
   } else if (!poolReady) {
     html += `<p class="text-muted" style="font-size:0.85rem;">Waiting for commissioner to upload player pool. If you expect it to be ready, <a href="#" onclick="location.reload();return false;">refresh the page</a>.</p>`;
-  } else if (!isOpen) {
+  } else if (!isOpen && !lateMode) {
     if (openDate && Date.now() < openDate.getTime()) {
       const openStr = openDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
       html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
@@ -9993,11 +10274,12 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     }
   } else {
     // Editable form
+    if (lateMode) html += buildLateSubmissionBanner(period, periodLabel, sub);
     if (isPending) {
       html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>
       <p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">You can still modify your roster until the commissioner approves it.</p>`;
     }
-    if (deadline) {
+    if (deadline && !lateMode) {
       html += `<p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">Submission deadline: <strong>${fmtDeadline(deadline)}</strong></p>`;
     }
 
@@ -10044,7 +10326,9 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
       </div>`;
     }
 
-    if (!isPending) {
+    if (lateMode) {
+      html += buildLateSubmissionControls(period, periodLabel, managerName, batters, pitchers, sub);
+    } else if (!isPending) {
       const allSelected = batters.length === 4 && pitchers.length === 3;
       const missing = [];
       if (batters.length < 4) missing.push(`${4 - batters.length} batter${batters.length < 3 ? 's' : ''}`);
@@ -10075,6 +10359,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
             <div style="font-size:0.82rem;"><strong>Batters:</strong> ${(s.batters || []).join(', ') || 'None'}</div>
             <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(s.pitchers || []).join(', ') || 'None'}</div>
           </div>
+          ${buildForgivenessControls(period, m.name, s)}
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
             <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
@@ -10735,11 +11020,23 @@ function renderSubmissionStatusTable() {
         else if (isPending) pending++;
         else notSub++;
 
+        // Late state rides the two cells that already exist rather than adding a column: a
+        // missing roster on a locked period says so, and a submitted-late one shows the day it
+        // actually starts counting from, which is the number the commissioner is approving.
+        const late = submissionLateState(sub);
+        const lateOpen = !isSubmitted && periodIsLate(period);
         const notCell = !isSubmitted
-          ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted</td>`
+          ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted${lateOpen ? '<div style="font-weight:500;font-size:0.72rem;">deadline passed</div>' : ''}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+        const lateNote = late.late
+          ? `<div style="font-weight:500;font-size:0.72rem;">${
+              late.forgivenessPending
+                ? 'late &middot; begging'
+                : `late &middot; from ${esc(late.effectiveDate || 'TBD')}`
+            }</div>`
+          : '';
         const subCell = isSubmitted
-          ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}</td>`
+          ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}${lateNote}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
         const appCell = isApproved
           ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
@@ -11654,6 +11951,7 @@ function renderPendingSwapRequests() {
             <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map((p) => displayPlayer(p, sd)).join(', ') || 'None'}</span>
           </div>
           <div id="comm-initial-edit-${idSafe}" style="display:none;"></div>
+          ${buildForgivenessControls(period, m.name, sub)}
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="${approveFn}('${safeName}')">Approve</button>
             <button class="btn btn-sm btn-secondary" onclick="${editFn}('${safeName}')">Edit</button>
@@ -11673,6 +11971,7 @@ function renderPendingSwapRequests() {
             <span><strong>Batters:</strong> ${(sub.batters || []).map((b) => displayPlayer(b, sd)).join(', ') || 'None'}</span>
             <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map((p) => displayPlayer(p, sd)).join(', ') || 'None'}</span>
           </div>
+          ${buildForgivenessControls(period, m.name, sub)}
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
             <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
@@ -11733,6 +12032,10 @@ function renderPendingSwapRequests() {
   }
 
   container.innerHTML = html;
+  // The late-submission rows in this queue (buildForgivenessControls) need the server's window —
+  // its period bounds are the min/max on the commissioner's back-date picker. Fetched after the
+  // paint, re-rendering only if an answer moved.
+  refreshSubmissionWindows(['pp1', 'pp2', 'qf', 'sf', 'finals'], renderPendingSwapRequests);
 }
 
 // Navigate to a manager's roster page from commissioner pending swaps
@@ -12943,9 +13246,13 @@ window.approveInitialSubmission = async function (manager) {
     return;
   }
 
+  // A late roster with no effective date cannot be approved — see submissionAddDate.
+  if (blockLateApprovalWithoutDate(sub, manager, 'Pool Play 1')) return;
+
   sub.status = 'approved';
   // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
-  if (!(await persistSubmission('pp1', manager, sub))) return;
+  const saved = await persistSubmission('pp1', manager, sub);
+  if (!saved) return;
 
   // Add all players to Week 1 roster
   const firstWeek = SEASON_SCHEDULE[0];
@@ -12954,8 +13261,10 @@ window.approveInitialSubmission = async function (manager) {
   if (!sd.rosters[manager]) sd.rosters[manager] = {};
   if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
 
-  // Use the PP1 Week 1 start date as each player's add_date
-  const pp1StartDate = sd.schedule_dates && sd.schedule_dates[0] ? sd.schedule_dates[0].start : null;
+  // Each player's add_date: normally PP1's own first day, but a roster submitted after opening
+  // day starts on the effective date the server stamped instead (submissionAddDate).
+  const weekOneStart = sd.schedule_dates && sd.schedule_dates[0] ? sd.schedule_dates[0].start : null;
+  const pp1StartDate = submissionAddDate(saved, weekOneStart);
   if (pp1StartDate) {
     if (!sd.roster_dates) sd.roster_dates = {};
     if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
@@ -12966,7 +13275,7 @@ window.approveInitialSubmission = async function (manager) {
   // legitimately advanced so repairCarryForwardRosters doesn't purge the approved roster as a
   // speculative future write.
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  if (pp1StartDate && pp1StartDate > todayET) {
+  if (weekOneStart && weekOneStart > todayET) {
     if (!Array.isArray(sd.advanced_weeks)) sd.advanced_weeks = [];
     if (!sd.advanced_weeks.includes(0)) sd.advanced_weeks.push(0);
   }
@@ -13198,6 +13507,152 @@ window.submitPeriodRoster = async function (period, manager) {
   renderRosterData(manager, isComm);
 };
 
+// ---- Late-submission actions ----
+
+// Submit a roster after its period's lock, taking the automatic next-viable effective date. The
+// date is re-read from the server first: the manager may have had this page open since before
+// first pitch, and the button label he is about to press must be the date he actually gets.
+window.submitLateRoster = async function (period, manager) {
+  const label = PERIOD_LABELS[period] || period;
+  const win = await loadSubmissionWindow(period, { force: true });
+  if (!win || !win.is_late) {
+    // The window re-opened under us (a commissioner moved the schedule, or the clock was wrong).
+    // Fall through to the ordinary path rather than filing a late roster that isn't one.
+    return window.submitPeriodRoster(period, manager);
+  }
+  if (!win.effective_date) {
+    alert(
+      `${label} is over — there is no day left for a new roster to start on.\n\n` +
+        'Use "Beg Commish for Forgiveness" instead; only the commissioner can back-date it now.'
+    );
+    const isComm = isLoggedInCommissioner();
+    renderRosterData(manager, isComm);
+    return;
+  }
+  if (
+    !confirm(
+      `You missed the ${label} deadline, so this roster counts from ${fmtEffectiveDate(win.effective_date)} ` +
+        `— not from the start of the period.\n\nSubmit it for approval?`
+    )
+  ) {
+    return;
+  }
+  await window.submitPeriodRoster(period, manager);
+};
+
+// Show/hide the plea box under a late period's Beg button.
+window.toggleForgivenessForm = function (period) {
+  const box = document.getElementById(`late-plea-${period}`);
+  if (!box) return;
+  const showing = box.style.display !== 'none';
+  box.style.display = showing ? 'none' : 'block';
+  if (!showing) {
+    const ta = document.getElementById(`late-plea-${period}-text`);
+    if (ta) ta.focus();
+  }
+};
+
+// File the roster as a plea instead of a submission: it goes to the commissioner with NO
+// effective date, and he chooses which day it counts from.
+window.sendForgivenessRequest = async function (period, manager) {
+  const label = PERIOD_LABELS[period] || period;
+  const ta = document.getElementById(`late-plea-${period}-text`);
+  const reason = ((ta && ta.value) || '').trim();
+  if (!reason) {
+    alert('Tell the commissioner why. A blank plea is just a late submission.');
+    if (ta) ta.focus();
+    return;
+  }
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = getPeriodSub(sd, period, manager);
+  if (!sub) return;
+  if ((sub.batters || []).length !== 4 || (sub.pitchers || []).length !== 3) {
+    alert('You must select exactly 4 batters and 3 pitchers before begging for forgiveness.');
+    return;
+  }
+  if (!confirm(`Send your ${label} roster to the commissioner and ask him to back-date it?`)) return;
+
+  sub.status = 'pending';
+  if (!(await persistSubmission(period, manager, sub, { forgivenessReason: reason }))) return;
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = isLoggedInCommissioner();
+  renderRosterData(manager, isComm);
+};
+
+// The commissioner's ruling. Granting takes the date out of the picker — the server validates it
+// against the period's own bounds, because this is the one path that can start a roster earlier
+// than the automatic rule allows. Denying needs no date: the roster drops to the automatic one.
+window.decideForgiveness = async function (period, manager, decision, inputId) {
+  const label = PERIOD_LABELS[period] || period;
+  const input = document.getElementById(inputId);
+  const effectiveDate = input ? input.value : '';
+  if (decision === 'grant') {
+    if (!effectiveDate) {
+      alert('Pick the date this roster should start counting from.');
+      return;
+    }
+    if (
+      !confirm(
+        `Back-date ${manager}'s ${label} roster to ${fmtEffectiveDate(effectiveDate)}?\n\n` +
+          'Every player on it will be added as of that date and will score from then on.'
+      )
+    ) {
+      return;
+    }
+  } else if (!confirm(`Deny ${manager}'s request? His roster still counts, from the automatic date.`)) {
+    return;
+  }
+
+  try {
+    const resp = await apiFetch(
+      `/api/seasons/${SELECTED_SEASON}/submissions/${period}/${encodeURIComponent(manager)}/forgiveness`,
+      { method: 'POST', body: JSON.stringify({ decision, effective_date: effectiveDate || undefined }) }
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    const { submission, window: subWindow, _rev } = await resp.json();
+    mirrorSubmissionLocally(period, manager, submission);
+    cacheSubmissionWindow(period, subWindow);
+    adoptRev(_rev);
+  } catch (e) {
+    alert(`Could not record that decision — ${e.message}. Please try again.`);
+    return;
+  }
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = isLoggedInCommissioner();
+  renderRosterData(manager, isComm);
+};
+
+// The add_date every player on an approved submission gets. Normally the period's first day; for
+// a LATE roster, the effective date the server stamped (or the commissioner back-dated to).
+//
+// Returns null when a late roster has no effective date at all — a plea nobody has ruled on, or a
+// period that ran out. Approving that would silently back-date the roster to the period start,
+// which is the exact thing the whole feature exists to prevent, so callers refuse instead.
+function submissionAddDate(sub, periodStartDate) {
+  const state = submissionLateState(sub);
+  if (!state.late) return periodStartDate;
+  return state.effectiveDate || null;
+}
+
+// Shared guard for both approval paths. Returns true when approval must not proceed.
+function blockLateApprovalWithoutDate(sub, manager, periodLabel) {
+  const state = submissionLateState(sub);
+  if (!state.late || state.effectiveDate) return false;
+  alert(
+    `${manager}'s ${periodLabel} roster was submitted late and has no effective date yet.\n\n` +
+      (state.forgivenessPending
+        ? 'Rule on the forgiveness request first — granting it is how the date gets set.'
+        : 'The period has no viable day left. Grant forgiveness with a date to approve this roster.')
+  );
+  return true;
+}
+
 window.approvePeriodSubmission = async function (period, manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -13225,9 +13680,13 @@ window.approvePeriodSubmission = async function (period, manager) {
     return;
   }
 
+  // A late roster with no effective date cannot be approved — see submissionAddDate.
+  if (blockLateApprovalWithoutDate(sub, manager, PERIOD_LABELS[period] || period)) return;
+
   sub.status = 'approved';
   // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
-  if (!(await persistSubmission(period, manager, sub))) return;
+  const saved = await persistSubmission(period, manager, sub);
+  if (!saved) return;
 
   // Set the first week of the corresponding round to EXACTLY the submission.
   const firstEntry = roundKey ? SEASON_SCHEDULE.find((s) => s.round === roundKey && s.week === 'Week 1') : null;
@@ -13251,11 +13710,18 @@ window.approvePeriodSubmission = async function (period, manager) {
     // a resurrected holdover left an approved manager with a 5th batter). In-period swaps happen
     // after approval and are re-applied by repairCarryForwardRosters from the swap records.
     sd.rosters[manager][weekKey] = { batters: [...(sub.batters || [])], pitchers: [...(sub.pitchers || [])] };
-    if (weekStart) {
+    // The add_date is the scoring invariant's own unit, so a LATE roster needs no special case
+    // anywhere downstream — it simply carries a later add_date and scores a shorter window. The
+    // week key stays the period's first week either way: managerWeekSubtotal and
+    // rebuildRosterArraysFromDates both pool a manager's dates across the period's weeks and
+    // filter by each week's end, so an add_date landing in Week 2 scores in Week 2 and nowhere
+    // earlier.
+    const addDate = submissionAddDate(saved, weekStart);
+    if (addDate) {
       if (!sd.roster_dates) sd.roster_dates = {};
       if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
       const dates = {};
-      for (const p of [...(sub.batters || []), ...(sub.pitchers || [])]) dates[p] = { add_date: weekStart };
+      for (const p of [...(sub.batters || []), ...(sub.pitchers || [])]) dates[p] = { add_date: addDate };
       sd.roster_dates[manager][weekKey] = dates;
     }
   }
@@ -15570,6 +16036,10 @@ function updateSubmissionWarningBanner() {
   // loser is NOT knocked out (3rd-place game), so this still nags them for a Finals roster.
   const isEliminatedFor = (period) => isManagerEliminatedForPeriod(sd, me.name, period);
 
+  // Whether a period is LATE is the server's call (SUBMISSION_WINDOWS). Ask in the background and
+  // re-run this banner if an answer moved; the TTL cache keeps it from re-asking on every render.
+  refreshSubmissionWindows(['pp1', 'pp2', 'qf', 'sf', 'finals'], updateSubmissionWarningBanner);
+
   // During a between-periods break (e.g. the All-Star break) the upcoming round's
   // window may not have opened yet — windows open the Friday before the round — but
   // the break is exactly when managers think about their next lineup. Warn for the
@@ -15581,7 +16051,11 @@ function updateSubmissionWarningBanner() {
   const warnings = [];
   for (const period of ['pp1', 'pp2', 'qf', 'sf', 'finals']) {
     let opensAt = null;
-    if (!isPeriodWindowConfirmedOpen(sd, period)) {
+    // A period whose lock has passed used to fall out of this loop entirely — the banner went
+    // quiet on exactly the manager who most needed it. It now warns louder instead: he can still
+    // submit, and every day he waits is a day his roster doesn't score.
+    const late = periodIsLate(period) && periodStillRunning(period, getPeriodSub(sd, period, me.name));
+    if (!late && !isPeriodWindowConfirmedOpen(sd, period)) {
       if (period !== upcomingPeriod) continue;
       const deadline = getPeriodDeadline(sd, period);
       if (deadline && Date.now() >= deadline.getTime()) continue;
@@ -15592,7 +16066,7 @@ function updateSubmissionWarningBanner() {
     if (isEliminatedFor(period)) continue;
     const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push({ period, label: PERIOD_LABELS[period] || period, opensAt });
+      warnings.push({ period, label: PERIOD_LABELS[period] || period, opensAt, late });
     }
   }
 
@@ -15606,6 +16080,16 @@ function updateSubmissionWarningBanner() {
       // The period lives inside the <strong>: the desktop banner lays the item out
       // with inline-flex, so a bare trailing "." would become its own flex item
       // with a stray gap before it.
+      if (w.late) {
+        const eff = periodEffectiveDate(w.period);
+        const effNote = eff
+          ? ` You can still submit &mdash; it would count from <strong>${fmtEffectiveDate(eff)}.</strong>`
+          : ' Only the commissioner can still back-date it.';
+        return (
+          `<span class="sub-warn-item">⏰ You missed the <strong>${w.label}</strong> roster deadline.${effNote}` +
+          ` <a href="#" onclick="goToSubmission('${w.period}');return false;">Submit late &rarr;</a></span>`
+        );
+      }
       const opensNote = w.opensAt
         ? ` Submissions open <strong>${w.opensAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}.</strong>`
         : '';

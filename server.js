@@ -2607,6 +2607,254 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireAuth, (req, res) => {
   res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 });
 
+// ---- Late roster submissions (mirror of js/lateSubmission.js) ----
+//
+// A manager who misses a period's lock keeps his submission form; the roster just starts on the
+// next day he can't already have seen played. The rules below are the canonical copy from
+// js/lateSubmission.js, which the server can't import (ESM) — CLAUDE.md's "edit both copies"
+// rule applies, and tests/serverMirrors.test.js enforces it. The server-only glue that feeds
+// them (today's real first pitch, the stamping on POST /submissions, the commissioner's
+// forgiveness decision) follows underneath.
+const LATE_FALLBACK_FIRST_PITCH_HOUR_ET = 11;
+
+// The three states a "Beg Commish for Forgiveness" request can be in. A request that is DENIED
+// is not thrown away — the roster still lands, it just lands on the automatic next-viable date
+// instead of the back-date the manager asked for.
+const FORGIVENESS_STATES = ['pending', 'granted', 'denied'];
+
+// ISO date shifted by whole days, done in UTC so a server running in any zone can't slide the
+// calendar day underneath it.
+function addDaysISO(iso, days) {
+  if (!iso) return null;
+  const d = new Date(iso + 'T00:00:00Z');
+  if (Number.isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// First and last calendar day of a period, read off the season's own schedule_dates by round.
+// Returns null when the schedule doesn't cover the round — callers must treat that as "unknown"
+// rather than "unbounded", because an unbounded window is how add/drop scoring gets corrupted.
+function periodBounds(round, schedule, scheduleDates) {
+  if (!round || !Array.isArray(schedule) || !Array.isArray(scheduleDates)) return null;
+  let start = null;
+  let end = null;
+  let firstWeekKey = null;
+  for (let i = 0; i < schedule.length && i < scheduleDates.length; i++) {
+    if (schedule[i].round !== round) continue;
+    const dates = scheduleDates[i];
+    if (!dates) continue;
+    if (start === null && dates.start) {
+      start = dates.start;
+      firstWeekKey = `${schedule[i].round}|${schedule[i].week}`;
+    }
+    if (dates.end) end = dates.end;
+  }
+  return start ? { start, end: end || null, firstWeekKey } : null;
+}
+
+// The date a submission made "now" should take effect. `dayHasStarted` is whether today's MLB
+// slate has already begun (the server answers that from the real schedule; see the fallback
+// helper below for when it can't).
+//
+// Returns null when there is no viable day left — the period has already ended, so nothing a
+// manager submits now can score, and only a commissioner back-date can salvage it.
+function nextViableEffectiveDate({ periodStart, periodEnd = null, todayET, dayHasStarted = false }) {
+  if (!periodStart || !todayET) return null;
+  // The period hasn't started yet: this isn't late at all, and the roster starts with the period.
+  if (todayET < periodStart) return periodStart;
+  const candidate = dayHasStarted ? addDaysISO(todayET, 1) : todayET;
+  if (!candidate) return null;
+  const effective = candidate < periodStart ? periodStart : candidate;
+  if (periodEnd && effective > periodEnd) return null;
+  return effective;
+}
+
+// A commissioner-chosen effective date, held inside the period. Back-dating is the entire
+// privilege being granted here, so any day of the period is allowed — including its first, which
+// makes the late roster score exactly as if it had been in on time. Anything outside the period
+// is rejected rather than silently clamped: a date the commissioner didn't mean is worse than an
+// error he can see.
+function validateForgivenessDate(dateISO, periodStart, periodEnd) {
+  if (!dateISO || !/^\d{4}-\d{2}-\d{2}$/.test(dateISO)) {
+    return { ok: false, error: 'effective_date must be an ISO YYYY-MM-DD date' };
+  }
+  if (!periodStart) return { ok: false, error: 'This period has no start date in the schedule yet' };
+  if (dateISO < periodStart) {
+    return { ok: false, error: `Effective date cannot be before the period starts (${periodStart})` };
+  }
+  if (periodEnd && dateISO > periodEnd) {
+    return { ok: false, error: `Effective date cannot be after the period ends (${periodEnd})` };
+  }
+  return { ok: true, effective_date: dateISO };
+}
+
+// Has today's slate already begun, when the MLB schedule could NOT be consulted? `etHour` is the
+// current hour in America/New_York on a 24-hour clock. See the constant above for why this
+// deliberately reads early.
+function dayHasStartedFallback(etHour, cutoffHour = LATE_FALLBACK_FIRST_PITCH_HOUR_ET) {
+  return Number.isFinite(etHour) && etHour >= cutoffHour;
+}
+
+// Is a submission arriving now past its period's lock? `deadlineMs` is the lock instant (first
+// pitch − 5 minutes); a season with no configured deadline can't be late, because there is no
+// published time to have missed.
+function isSubmissionLate(deadlineMs, nowMs) {
+  return Number.isFinite(deadlineMs) && Number.isFinite(nowMs) && nowMs >= deadlineMs;
+}
+
+// The late/forgiveness facts carried on a stored submission record, normalized so the manager
+// card, the commissioner queue, the status table and the server all read one shape rather than
+// each poking at raw fields. Tolerates a record written before this feature existed (everything
+// reads false/null), which is what makes it safe on an in-flight season.
+function submissionLateState(sub) {
+  const s = sub || {};
+  const forgiveness = FORGIVENESS_STATES.includes(s.forgiveness_status) ? s.forgiveness_status : null;
+  return {
+    late: !!s.late,
+    effectiveDate: s.effective_date || null,
+    forgiveness,
+    forgivenessPending: forgiveness === 'pending',
+    forgivenessGranted: forgiveness === 'granted',
+    reason: s.forgiveness_reason || null,
+    // What the automatic rule offered at submission time. Kept alongside a granted back-date so
+    // the audit trail shows what the forgiveness was actually worth.
+    autoEffectiveDate: s.auto_effective_date || null,
+  };
+}
+
+// What a manager may do with a period whose lock has passed. Split out from the rendering so the
+// rule — rather than the markup — is what the tests pin down.
+//
+//   canSubmit  — take the automatic effective date and get on with it.
+//   canBeg     — ask the commissioner for a back-date instead.
+//
+// A manager whose roster is already approved has nothing to do here. A pending forgiveness
+// request locks both buttons: it is with the commissioner, and letting the manager keep
+// resubmitting underneath a decision he asked for is how two rosters end up half-applied.
+function lateSubmissionActions({
+  isLate = false,
+  hasApproved = false,
+  forgiveness = null,
+  effectiveDate = null,
+  rosterComplete = false,
+} = {}) {
+  if (!isLate || hasApproved) return { canSubmit: false, canBeg: false, reason: null };
+  if (forgiveness === 'pending') {
+    return { canSubmit: false, canBeg: false, reason: 'awaiting_forgiveness' };
+  }
+  return {
+    // With no viable day left, a plain submit would score nothing — only a back-date can help.
+    canSubmit: !!effectiveDate && rosterComplete,
+    canBeg: rosterComplete,
+    reason: effectiveDate ? null : 'period_over',
+  };
+}
+
+// The submission period a schedule round belongs to, and back. Two names for one thing because
+// the buckets are keyed lowercase ('finals') and the schedule by round ('Finals').
+const PERIOD_TO_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+
+// The current hour in America/New_York on a 24-hour clock, for the no-network fallback.
+function currentHourET(nowMs) {
+  const hour = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    hourCycle: 'h23',
+  }).format(new Date(nowMs));
+  const n = Number(hour);
+  return Number.isFinite(n) ? n % 24 : NaN;
+}
+
+// Earliest first pitch on a given date, or null when the slate is empty or unreachable. Thin
+// wrapper over fetchFirstPitchToday that swallows the network failure, because every caller here
+// has a working answer without it and none of them may block a manager's submission.
+async function firstPitchOn(dateISO) {
+  try {
+    return await fetchFirstPitchToday(dateISO);
+  } catch (e) {
+    console.error(`[Late submission] Could not read the ${dateISO} slate: ${e.message}`);
+    return null;
+  }
+}
+
+// The instant a period's rosters lock: five minutes before its first pitch.
+//
+// Prefers the commissioner's explicit sd.period_deadlines[period] — the same field the client's
+// getPeriodDeadline reads, so the two agree whenever it is set (which is the normal case; Season
+// Setup autofills it). With nothing stored, the real first pitch of the period's opening day is
+// fetched rather than guessed at from a time-of-day table, which would be a fourth copy of a
+// season-specific constant.
+//
+// Returns null when neither is available. That is deliberately read downstream as "no published
+// deadline to have missed": with no lock we cannot prove a manager is late, and wrongly flagging
+// an on-time roster would push its start date forward for nothing.
+async function periodLockMs(sd, period) {
+  const explicit = sd && sd.period_deadlines && sd.period_deadlines[period];
+  if (explicit) {
+    const t = Date.parse(explicit);
+    if (Number.isFinite(t)) return t - 5 * 60 * 1000;
+  }
+  const bounds = periodBounds(PERIOD_TO_ROUND[period], SEASON_SCHEDULE, sd && sd.schedule_dates);
+  if (!bounds) return null;
+  const firstPitch = await firstPitchOn(bounds.start);
+  return firstPitch === null ? null : firstPitch - 5 * 60 * 1000;
+}
+
+// Has today's MLB slate already begun? This is the one fact the "next viable day" rule needs
+// that isn't in our own data, so it comes from the real schedule.
+//
+// An EMPTY slate counts as not started: there is no box score to have read, so today is still a
+// viable effective date. An unreachable API degrades to the ET-clock fallback rather than
+// blocking anything — a manager must never be unable to submit because statsapi.mlb.com is down.
+async function mlbDayHasStarted(todayISO, nowMs) {
+  const firstPitch = await firstPitchOn(todayISO);
+  if (firstPitch === null) return dayHasStartedFallback(currentHourET(nowMs));
+  return nowMs >= firstPitch;
+}
+
+// Everything a client needs to render a period's submission window, and everything the POST
+// handler needs to stamp one: the period's bounds, its lock, whether we are past it, and the
+// effective date a submission made right now would carry.
+//
+// This is the AUTHORITY on both questions. The client has its own copy of the deadline rule for
+// instant rendering, but it runs on the manager's clock and its own fallback table; the answer
+// that decides whether a roster is flagged late — and what date it starts on — is this one.
+async function resolveSubmissionWindow(sd, period, nowMs = Date.now()) {
+  const bounds = periodBounds(PERIOD_TO_ROUND[period], SEASON_SCHEDULE, sd && sd.schedule_dates);
+  const lockMs = await periodLockMs(sd, period);
+  const late = isSubmissionLate(lockMs, nowMs);
+  const todayET = new Date(nowMs).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Only pay for the second schedule round-trip when it can change the answer. On time, the
+  // roster starts with the period, exactly as it always has.
+  const dayHasStarted = late ? await mlbDayHasStarted(todayET, nowMs) : false;
+  const effectiveDate = late
+    ? nextViableEffectiveDate({
+        periodStart: bounds && bounds.start,
+        periodEnd: bounds && bounds.end,
+        todayET,
+        dayHasStarted,
+      })
+    : bounds && bounds.start;
+  return {
+    period,
+    round: PERIOD_TO_ROUND[period] || null,
+    period_start: (bounds && bounds.start) || null,
+    period_end: (bounds && bounds.end) || null,
+    first_week_key: (bounds && bounds.firstWeekKey) || null,
+    lock_at: Number.isFinite(lockMs) ? new Date(lockMs).toISOString() : null,
+    is_late: late,
+    day_has_started: dayHasStarted,
+    today_et: todayET,
+    effective_date: effectiveDate || null,
+  };
+}
+
+// submissionLateState and lateSubmissionActions are carried here only to keep this block a
+// verbatim mirror of js/lateSubmission.js (tests/serverMirrors.test.js compares the two as text).
+// They are the client's half of the feature; the server has no caller for them.
+const _lateSubmissionClientHelpers = [submissionLateState, lateSubmissionActions];
+
 // ---- Atomic roster-submission endpoints (PP1 + PP2/playoff periods) ----
 //
 // Roster submissions used to ride the full-season save (POST /api/seasons/:year), whose
@@ -2628,14 +2876,46 @@ function submissionBucket(sd, period) {
   return sd.period_submissions[period];
 }
 
-// POST /api/seasons/:year/submissions — upsert one manager's submission for a period.
-// Body: { period, manager, batters[], pitchers[], status }. The server stamps
-// submitted_at / approved_at so timestamps reflect the real moment, not a client clock.
-app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
+// GET /api/seasons/:year/submission-window/:period — the authoritative state of one period's
+// submission window: when it locks, whether that lock has passed, and what effective date a
+// roster submitted RIGHT NOW would carry.
+//
+// The client has its own copy of the deadline rule for instant rendering, but it runs on the
+// manager's clock and cannot see today's real first pitch. This endpoint is what the submission
+// card asks before it offers a late manager anything, so the date on the button is the date the
+// server will actually stamp.
+app.get('/api/seasons/:year/submission-window/:period', async (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
   }
-  const { period, manager, batters, pitchers, status } = req.body || {};
+  const { period } = req.params;
+  if (!SUBMISSION_PERIODS.includes(period)) return res.status(400).json({ error: 'Invalid period' });
+  const sd = (readDB().seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  try {
+    res.json(await resolveSubmissionWindow(sd, period));
+  } catch (e) {
+    console.error(`[Late submission] window resolve failed for ${period}:`, e.message);
+    res.status(500).json({ error: 'Could not resolve the submission window' });
+  }
+});
+
+// POST /api/seasons/:year/submissions — upsert one manager's submission for a period.
+// Body: { period, manager, batters[], pitchers[], status, forgiveness_reason? }. The server
+// stamps submitted_at / approved_at so timestamps reflect the real moment, not a client clock —
+// and, for the same reason, it is the server that decides whether a submission is LATE and what
+// date it takes effect. A client-supplied effective date is never read: that field is the
+// players' add_date, i.e. the core scoring invariant, and a manager must not be able to choose
+// his own start day after seeing a box score.
+//
+// Passing `forgiveness_reason` turns the submission into a plea: it is filed for the commissioner
+// with forgiveness_status 'pending' and NO effective date, because the whole point of the request
+// is that the commissioner picks that date (see the forgiveness endpoint below).
+app.post('/api/seasons/:year/submissions', requireAuth, async (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { period, manager, batters, pitchers, status, forgiveness_reason: forgivenessReason } = req.body || {};
   if (
     !manager ||
     !SUBMISSION_PERIODS.includes(period) ||
@@ -2644,6 +2924,9 @@ app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
     !['draft', 'pending', 'approved'].includes(status)
   ) {
     return res.status(400).json({ error: 'period, manager, batters[], pitchers[] and a valid status are required' });
+  }
+  if (forgivenessReason != null && typeof forgivenessReason !== 'string') {
+    return res.status(400).json({ error: 'forgiveness_reason must be a string' });
   }
   const db = readDB();
   const sd = (db.seasons || {})[req.params.year];
@@ -2661,19 +2944,149 @@ app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
     if (status === 'approved') submission.approved_at = now;
     else delete submission.approved_at;
   }
+
+  // ---- Late-submission stamping ----
+  //
+  // Back to draft wipes the whole late/forgiveness story: the manager is editing again, and a
+  // stale effective date left lying around would be applied by the next approval.
+  let window = null;
+  if (status === 'draft') {
+    delete submission.late;
+    delete submission.effective_date;
+    delete submission.auto_effective_date;
+    delete submission.forgiveness_status;
+    delete submission.forgiveness_reason;
+    delete submission.forgiveness_decided_at;
+  } else if (status === 'pending') {
+    // A fresh submission (or resubmission) is re-dated against the clock as it stands now.
+    // The one thing that survives is a GRANTED back-date: the commissioner already ruled on this
+    // roster, and re-deriving it here would quietly revoke the forgiveness he gave.
+    window = await resolveSubmissionWindow(sd, period);
+    submission.late = window.is_late;
+    if (!window.is_late) {
+      delete submission.effective_date;
+      delete submission.auto_effective_date;
+      delete submission.forgiveness_status;
+      delete submission.forgiveness_reason;
+      delete submission.forgiveness_decided_at;
+    } else if (forgivenessReason) {
+      submission.forgiveness_status = 'pending';
+      submission.forgiveness_reason = forgivenessReason.slice(0, 1000);
+      submission.auto_effective_date = window.effective_date || null;
+      // No effective date yet — the commissioner sets it when he rules.
+      delete submission.effective_date;
+      delete submission.forgiveness_decided_at;
+    } else if (submission.forgiveness_status !== 'granted') {
+      submission.auto_effective_date = window.effective_date || null;
+      submission.effective_date = window.effective_date || null;
+      if (submission.forgiveness_status === 'pending') delete submission.forgiveness_status;
+    }
+  }
+
   bucket[manager] = submission;
 
   db.seasons[req.params.year] = sd;
   addAuditEntry(
     db,
     'submission_saved',
-    { year: req.params.year, period, manager, status, batters: batters.length, pitchers: pitchers.length },
+    {
+      year: req.params.year,
+      period,
+      manager,
+      status,
+      batters: batters.length,
+      pitchers: pitchers.length,
+      late: !!submission.late,
+      effective_date: submission.effective_date || null,
+      forgiveness: submission.forgiveness_status || null,
+    },
     req.get('X-User-Email')
   );
   writeDB(db);
+
+  // Tell the commissioner in Slack, but only about the two things he has to act on that the
+  // normal pending queue doesn't already make obvious: a roster that will start mid-period, and
+  // a plea to back-date one. A failed post must never fail the submission.
+  if (status === 'pending' && submission.late) {
+    const label = (ROUND_LABELS[PERIOD_TO_ROUND[period]] || period).toString();
+    const text =
+      submission.forgiveness_status === 'pending'
+        ? `:pray: *${manager}* missed the ${label} roster deadline and is asking for forgiveness.\n` +
+          `> ${submission.forgiveness_reason}\n` +
+          `Approve it in the app and pick the effective date — or deny, and it starts ` +
+          `${submission.auto_effective_date || 'whenever the next viable day is'}.`
+        : `:hourglass_flowing_sand: *${manager}* submitted a LATE ${label} roster. ` +
+          `It takes effect ${submission.effective_date || '— no viable day is left in the period'}.`;
+    postSlack(text).catch((e) => console.error('[Late submission] Slack notice failed:', e.message));
+  }
+
   // Changed a submission bucket (a hashed field) — hand back the new token so a following
   // full-season save doesn't falsely 409.
-  res.json({ ok: true, submission, _rev: computeSeasonRev(sd) });
+  res.json({ ok: true, submission, window, _rev: computeSeasonRev(sd) });
+});
+
+// POST /api/seasons/:year/submissions/:period/:manager/forgiveness — the commissioner's ruling on
+// a "Beg Commish for Forgiveness" request. Body: { decision: 'grant' | 'deny', effective_date? }.
+//
+// GRANT is the back-date: the commissioner names any day inside the period, up to and including
+// its first, and that becomes the roster's add_date at approval. This is the only path in the app
+// by which a roster can start earlier than the automatic next-viable-day rule allows, which is
+// why it is commissioner-only, validated against the period's own bounds, and audited.
+//
+// DENY does not throw the roster away — it drops back to the automatic date, so a manager who
+// asked and was refused is exactly where he'd have been had he just hit Submit.
+app.post('/api/seasons/:year/submissions/:period/:manager/forgiveness', requireCommissioner, async (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { period } = req.params;
+  const manager = decodeURIComponent(req.params.manager);
+  if (!SUBMISSION_PERIODS.includes(period)) return res.status(400).json({ error: 'Invalid period' });
+  const { decision, effective_date: effectiveDate } = req.body || {};
+  if (decision !== 'grant' && decision !== 'deny') {
+    return res.status(400).json({ error: "decision must be 'grant' or 'deny'" });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const bucket = submissionBucket(sd, period);
+  const submission = bucket[manager];
+  if (!submission) return res.status(404).json({ error: 'No submission on file for that manager and period' });
+
+  const window = await resolveSubmissionWindow(sd, period);
+  if (decision === 'grant') {
+    const check = validateForgivenessDate(effectiveDate, window.period_start, window.period_end);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    submission.forgiveness_status = 'granted';
+    submission.effective_date = check.effective_date;
+  } else {
+    submission.forgiveness_status = 'denied';
+    // Fall back to whatever the automatic rule offered when he asked; if that was never recorded
+    // (or the period has since run out), re-derive it from the clock as it stands now.
+    submission.effective_date = submission.auto_effective_date || window.effective_date || null;
+  }
+  submission.late = true;
+  submission.forgiveness_decided_at = new Date().toISOString();
+  bucket[manager] = submission;
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'submission_forgiveness',
+    { year: req.params.year, period, manager, decision, effective_date: submission.effective_date || null },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+
+  const label = (ROUND_LABELS[PERIOD_TO_ROUND[period]] || period).toString();
+  const text =
+    decision === 'grant'
+      ? `:tada: The commissioner granted *${manager}* forgiveness on his late ${label} roster — it counts from ${submission.effective_date}.`
+      : `:no_entry: The commissioner denied *${manager}* forgiveness on his late ${label} roster — it starts ${submission.effective_date || 'nowhere; the period is over'}.`;
+  postSlack(text).catch((e) => console.error('[Late submission] Slack notice failed:', e.message));
+
+  res.json({ ok: true, submission, window, _rev: computeSeasonRev(sd) });
 });
 
 // PUT /api/seasons/:year/schedule — atomically set the per-week schedule_dates (and the optional

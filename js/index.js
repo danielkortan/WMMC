@@ -36,6 +36,15 @@ import { oddsWindowForDate, bracketOddsWindowForDate, formatOddsPct } from './pl
 import { orderWithSwapChains } from './rosterOrder.js';
 import { checkSwapLimit, checkSwapEffectiveWindow } from './swaps.js';
 import {
+  addDaysISO,
+  periodBounds,
+  nextViableEffectiveDate,
+  validateForgivenessDate,
+  isSubmissionLate,
+  submissionLateState,
+  lateSubmissionActions,
+} from './lateSubmission.js';
+import {
   periodStartForRound,
   rosterStatusAsOf,
   rosterStatusForManager,
@@ -98,6 +107,13 @@ Object.assign(window, {
   orderWithSwapChains,
   checkSwapLimit,
   checkSwapEffectiveWindow,
+  addDaysISO,
+  periodBounds,
+  nextViableEffectiveDate,
+  validateForgivenessDate,
+  isSubmissionLate,
+  submissionLateState,
+  lateSubmissionActions,
   periodStartForRound,
   rosterStatusAsOf,
   rosterStatusForManager,

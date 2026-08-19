@@ -73,6 +73,14 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries js/lateSubmission.js verbatim', () => {
+    const canonical = canonicalTail(read('js/lateSubmission.js'), 'export const LATE_FALLBACK_FIRST_PITCH_HOUR_ET');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/lateSubmission.js — the late-submission effective-date rules must be identical in both'
+    );
+  });
+
   it('carries the swap effective-window rule from js/swaps.js verbatim', () => {
     const canonical = canonicalTail(read('js/swaps.js'), 'const ROUND_WINDOW_LABELS');
     assert.ok(
