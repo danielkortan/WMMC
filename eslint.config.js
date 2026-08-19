@@ -42,6 +42,7 @@ const projectGlobals = {
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
   checkSwapLimit: 'readonly',
+  swapReasonLabel: 'readonly',
   checkSwapEffectiveWindow: 'readonly',
   submissionLateState: 'readonly',
   lateSubmissionActions: 'readonly',

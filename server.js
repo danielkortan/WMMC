@@ -1721,8 +1721,31 @@ function buildSwapSlackText(sd, swap, headline) {
   ].join('\n');
 }
 
-// IL status codes on MLB roster entries: 7-day (concussion), 10-day, 15-day, and 60-day lists.
-const MLB_IL_STATUS_CODES = new Set(['D7', 'D10', 'D15', 'D60']);
+// Roster-entry status codes that qualify a player to be dropped in an IL/RST swap. Verified
+// against the live API on 2026-08-19 with scripts/mlb-roster-status.js --sweep, which is how to
+// re-check this list rather than reasoning about it:
+//
+//   D7 / D10 / D15 / D60  the injured lists, by length (D7 is the concussion list)
+//   ILF                   "Injured - Full Season" — a real IL designation, 240 players league-wide
+//   RA                    "Rehab Assignment" — still on the IL; a rehabbing player has not been
+//                         activated, so his roster entry reads RA rather than a D-code
+//   RST                   "Restricted List" — not an injury, but the same league situation from a
+//                         manager's side: unavailable through no fault of his own
+//
+// Codes NOT in this set that look like they might belong: RM is "Reassigned to Minors" (300
+// players, better than ten times the RL) and DEV is the Development List. Neither is an
+// unavailability the league grants a free swap for.
+const IL_SWAP_ELIGIBLE_STATUS_CODES = new Set(['D7', 'D10', 'D15', 'D60', 'ILF', 'RA', 'RST']);
+
+// The rejection both the submission and the reason-change path return, so the two cannot drift.
+function notEligibleForILSwapError(playerName, status) {
+  return (
+    `${playerName} is not on the official MLB injured list or restricted list` +
+    `${status ? ` (current status: ${status})` : ''}. ` +
+    `An IL/RST swap requires the player you're dropping to be on the IL or the Restricted List — ` +
+    `use your Free, Drop, or Trade swap instead.`
+  );
+}
 
 // Look up a player's official MLB roster status to verify an IL swap, then read the player's
 // current roster entry. Identity comes from the stable MLB person id in sd.mlb_ids (the source
@@ -1766,8 +1789,10 @@ async function fetchPlayerILStatus(sd, season, playerName) {
       return { checked: false, reason: 'no_roster_entry' };
     }
     // Codes are the primary signal; live descriptions read "Injured 60-Day" (not
-    // "60-Day Injured List"), and "Injured" appears only in IL statuses.
-    const onIL = MLB_IL_STATUS_CODES.has(status.code) || /injured/i.test(status.description || '');
+    // "60-Day Injured List"), and "Injured" appears only in IL statuses. The description test is
+    // kept as a catch-all for an injury code MLB adds later, but it is no longer load-bearing:
+    // ILF used to clear the gate through it alone, which is why it is now named in the set.
+    const onIL = IL_SWAP_ELIGIBLE_STATUS_CODES.has(status.code) || /injured/i.test(status.description || '');
     return { checked: true, onIL, status: status.description || status.code };
   } catch (e) {
     console.error(`IL status lookup failed for ${playerName} (id ${mlbId}):`, e.message);
@@ -1850,10 +1875,7 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
       const il = await fetchPlayerILStatus(sd, req.params.year, swap.player_out);
       if (il.checked && !il.onIL) {
         return res.status(400).json({
-          error:
-            `${swap.player_out} is not on the official MLB injured list` +
-            `${il.status ? ` (current status: ${il.status})` : ''}. ` +
-            `An IL swap requires the player you're dropping to be on the IL — use your Free, Drop, or Trade swap instead.`,
+          error: notEligibleForILSwapError(swap.player_out, il.status),
           code: 'not_on_il',
         });
       }
@@ -2165,10 +2187,7 @@ app.put('/api/seasons/:year/swaps/:id', requireAuth, async (req, res) => {
         const il = await fetchPlayerILStatus(sd, req.params.year, swap.player_out);
         if (il.checked && !il.onIL) {
           return res.status(400).json({
-            error:
-              `${swap.player_out} is not on the official MLB injured list` +
-              `${il.status ? ` (current status: ${il.status})` : ''}. ` +
-              `An IL swap requires the player you're dropping to be on the IL — use your Free, Drop, or Trade swap instead.`,
+            error: notEligibleForILSwapError(swap.player_out, il.status),
             code: 'not_on_il',
           });
         }
