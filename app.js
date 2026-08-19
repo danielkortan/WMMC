@@ -518,6 +518,39 @@ function isManagerEliminatedForPeriod(sd, managerName, period) {
   return !!round && !isManagerActiveInRound(round, elim);
 }
 
+// The Finals period's two-game field: the Championship pair (SF winners) and, with the four
+// semifinalists, the 3rd-place pair. Both are null until the semifinals are finalized. Derived
+// once per caller because each read runs the bracket.
+function finalsGameField(sd) {
+  if (!sd) return { finalists: null, semifinalists: null };
+  return { finalists: getFinalsParticipants(sd), semifinalists: getSFParticipants(sd) };
+}
+
+// What to call a submission period ON ONE MANAGER'S CARD. Every period but the Finals is the
+// same game for everybody. The Finals period is two — the Championship and the 3rd-place game,
+// played over the same two weeks by all four semifinalists — so a manager who lost his semifinal
+// was being told to submit a "Finals" roster for a game he isn't in. Name his actual game; the
+// rule is js/eligibility.js's finalsGameLabel, which falls back to naming both when the
+// semifinals aren't finalized yet. Pass `field` when rendering several managers in one pass.
+function submissionPeriodLabel(sd, period, managerName, field = null) {
+  const base = PERIOD_LABELS[period] || period;
+  if (period !== 'finals') return base;
+  return finalsGameLabel(managerName, field || finalsGameField(sd));
+}
+
+// What to call it on a surface that spans MANAGERS (a commissioner's approval queue, the
+// submission status table) — there, the period really is both games.
+function periodLabelForAll(period) {
+  return period === 'finals' ? FINALS_GAME_LABELS.unknown : PERIOD_LABELS[period] || period;
+}
+
+// The label for one of `manager`'s periods, read straight off the selected season — for the
+// confirm/alert strings, which have a manager and a period and nothing else in hand.
+function periodLabelForManager(period, manager) {
+  const seasons = getSeasons();
+  return submissionPeriodLabel(seasons[SELECTED_SEASON], period, manager);
+}
+
 // ---- Period Submission Data Helpers ----
 
 function getPeriodSub(sd, period, manager) {
@@ -10006,13 +10039,16 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     html += `</div>`; // .initial-submission-section
 
     // ---- PP2 / Playoff Period Submission Cards ----
+    // The card is titled for the manager it is being rendered for, which only matters in the
+    // Finals period: two of its four submitters are playing the 3rd-place game, not the Finals.
     const periodOrder = [
-      { period: 'pp2', label: 'Pool Play 2', qualCheck: true },
-      { period: 'qf', label: 'Quarterfinals', qualCheck: true },
-      { period: 'sf', label: 'Semifinals', qualCheck: true },
-      { period: 'finals', label: 'Finals', qualCheck: true },
+      { period: 'pp2', qualCheck: true },
+      { period: 'qf', qualCheck: true },
+      { period: 'sf', qualCheck: true },
+      { period: 'finals', qualCheck: true },
     ];
-    for (const { period, label } of periodOrder) {
+    for (const { period } of periodOrder) {
+      const label = submissionPeriodLabel(seasonData, period, managerName);
       const openDate = getPeriodOpenDate(seasonData, period);
       const deadline = getPeriodDeadline(seasonData, period);
       const qualified = isManagerQualifiedForPeriod(managerName, period, seasonData);
@@ -10341,7 +10377,12 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     }
   }
 
-  // Commissioner approval section for this period
+  // Commissioner approval section for this period.
+  //
+  // The queue spans managers, so its heading uses the period's neutral name (in the Finals
+  // period, both games) rather than the card owner's — but each row is one manager, and in the
+  // Finals period which of the two games he submitted for is the thing being approved, so it
+  // rides next to his name.
   if (isCommissioner) {
     const allManagers = getManagers().filter((m) => m.active !== false);
     const pendingPeriod = allManagers.filter((m) => {
@@ -10349,12 +10390,18 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
       return s && s.status === 'pending';
     });
     if (pendingPeriod.length > 0) {
-      html += `<div class="swap-pending-card" style="margin-top:1rem;"><h4>Pending ${periodLabel} Approvals</h4>`;
+      const field = period === 'finals' ? finalsGameField(seasonData) : null;
+      html += `<div class="swap-pending-card" style="margin-top:1rem;"><h4>Pending ${periodLabelForAll(period)} Approvals</h4>`;
       pendingPeriod.forEach((m) => {
         const s = getPeriodSub(seasonData, period, m.name);
         const safeName = jsStr(m.name);
+        const gameLabel = field ? submissionPeriodLabel(seasonData, period, m.name, field) : '';
+        const gameTag =
+          gameLabel && gameLabel !== FINALS_GAME_LABELS.unknown
+            ? `<span class="text-muted" style="font-size:0.78rem;">${esc(gameLabel)}</span>`
+            : '';
         html += `<div class="swap-pending-item">
-          <div class="swap-pending-header"><strong>${esc(m.name)}</strong><span class="swap-badge swap-badge-pending">Pending</span></div>
+          <div class="swap-pending-header"><span style="display:flex;align-items:baseline;gap:0.4rem;"><strong>${esc(m.name)}</strong>${gameTag}</span><span class="swap-badge swap-badge-pending">Pending</span></div>
           <div style="padding:0.5rem 0;">
             <div style="font-size:0.82rem;"><strong>Batters:</strong> ${(s.batters || []).join(', ') || 'None'}</div>
             <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(s.pitchers || []).join(', ') || 'None'}</div>
@@ -10988,18 +11035,26 @@ function renderSubmissionStatusTable() {
 
   // Managers to show for a period: Pool Play = all active managers; playoff rounds = only the
   // managers who advanced to that round (null until the prior round is finalized).
+  //
+  // The Finals period is the exception: ALL FOUR semifinalists submit for it — two for the
+  // Championship, two for the 3rd-place game played over the same two weeks — so listing only
+  // the two finalists hid half the rosters the commissioner has to chase and approve.
   const participantsFor = (period) => {
     if (period === 'pp1' || period === 'pp2') return activeManagers;
     if (period === 'qf') return getQFQualifiers(sd);
-    if (period === 'sf') return getSFParticipants(sd);
-    if (period === 'finals') return getFinalsParticipants(sd);
+    if (period === 'sf' || period === 'finals') return getSFParticipants(sd);
     return null;
   };
+
+  // Which of the two Finals-week games each of those four is in, once the semifinals are
+  // finalized. Derived once — every read of it runs the bracket.
+  const finalsField = finalsGameField(sd);
 
   const pendingNote = {
     qf: 'Advancing managers appear here once Pool Play is finalized.',
     sf: 'Semifinalists appear here once the Quarterfinals are finalized.',
-    finals: 'Finalists appear here once the Semifinals are finalized.',
+    finals:
+      'All four semifinalists appear here once the Quarterfinals are finalized — two play the Finals, two the 3rd-place game.',
   };
 
   const muted = (txt) => `<p class="text-muted" style="font-size:0.85rem;margin:0.5rem 0;">${txt}</p>`;
@@ -11042,7 +11097,13 @@ function renderSubmissionStatusTable() {
           ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
-        return `<tr><td style="font-weight:500;">${esc(name)}</td>${notCell}${subCell}${appCell}</tr>`;
+        // In the Finals period the row says which of the two games this roster is for.
+        const game = period === 'finals' ? submissionPeriodLabel(sd, period, name, finalsField) : '';
+        const gameNote =
+          game && game !== FINALS_GAME_LABELS.unknown
+            ? `<div class="text-muted" style="font-weight:400;font-size:0.72rem;">${esc(game)}</div>`
+            : '';
+        return `<tr><td style="font-weight:500;">${esc(name)}${gameNote}</td>${notCell}${subCell}${appCell}</tr>`;
       })
       .join('');
     const table =
@@ -11085,7 +11146,7 @@ function renderSubmissionStatusTable() {
     const openAttr = period === defaultOpen ? ' open' : '';
     html +=
       `<details class="sub-status-period"${openAttr}>` +
-      `<summary><span class="sub-status-label">${PERIOD_LABELS[period]}</span>` +
+      `<summary><span class="sub-status-label">${periodLabelForAll(period)}</span>` +
       `<span class="sub-status-meta">${meta}</span></summary>${body}</details>`;
   });
 
@@ -13513,7 +13574,7 @@ window.submitPeriodRoster = async function (period, manager) {
 // date is re-read from the server first: the manager may have had this page open since before
 // first pitch, and the button label he is about to press must be the date he actually gets.
 window.submitLateRoster = async function (period, manager) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   const win = await loadSubmissionWindow(period, { force: true });
   if (!win || !win.is_late) {
     // The window re-opened under us (a commissioner moved the schedule, or the clock was wrong).
@@ -13555,7 +13616,7 @@ window.toggleForgivenessForm = function (period) {
 // File the roster as a plea instead of a submission: it goes to the commissioner with NO
 // effective date, and he chooses which day it counts from.
 window.sendForgivenessRequest = async function (period, manager) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   const ta = document.getElementById(`late-plea-${period}-text`);
   const reason = ((ta && ta.value) || '').trim();
   if (!reason) {
@@ -13585,7 +13646,7 @@ window.sendForgivenessRequest = async function (period, manager) {
 // against the period's own bounds, because this is the one path that can start a roster earlier
 // than the automatic rule allows. Denying needs no date: the roster drops to the automatic one.
 window.decideForgiveness = async function (period, manager, decision, inputId) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   const input = document.getElementById(inputId);
   const effectiveDate = input ? input.value : '';
   if (decision === 'grant') {
@@ -13681,7 +13742,7 @@ window.approvePeriodSubmission = async function (period, manager) {
   }
 
   // A late roster with no effective date cannot be approved — see submissionAddDate.
-  if (blockLateApprovalWithoutDate(sub, manager, PERIOD_LABELS[period] || period)) return;
+  if (blockLateApprovalWithoutDate(sub, manager, periodLabelForManager(period, manager))) return;
 
   sub.status = 'approved';
   // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
@@ -13734,7 +13795,7 @@ window.approvePeriodSubmission = async function (period, manager) {
 };
 
 window.denyPeriodSubmission = async function (period, manager) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   if (!confirm(`Deny ${label} submission for ${manager}? Their selection will be reset to draft.`)) return;
   const draft = { batters: [], pitchers: [], status: 'draft' };
   if (!(await persistSubmission(period, manager, draft))) return;
@@ -13748,7 +13809,7 @@ window.denyPeriodSubmission = async function (period, manager) {
 // which leaves an empty 'draft' record behind — this deletes the entry entirely. The manager's
 // actual roster (sd.rosters) is untouched; only the submission artifact is removed.
 window.deletePeriodSubmission = async function (period, manager) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   if (
     !confirm(
       `Delete ${manager}'s ${label} submission record entirely?\n\n` +
@@ -13776,7 +13837,7 @@ window.editApprovedPeriodSubmission = async function (period, manager) {
     return;
   }
 
-  const label = PERIOD_LABELS[period] || period;
+  const label = submissionPeriodLabel(sd, period, manager);
   if (
     !confirm(
       `Editing your ${label} submission will un-approve your current roster and require commissioner re-approval.\n\n` +
@@ -16066,7 +16127,9 @@ function updateSubmissionWarningBanner() {
     if (isEliminatedFor(period)) continue;
     const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push({ period, label: PERIOD_LABELS[period] || period, opensAt, late });
+      // Named for THIS manager: a semifinal loser is warned about his 3rd-place-game roster,
+      // not about a Finals roster he has no game for.
+      warnings.push({ period, label: submissionPeriodLabel(sd, period, me.name), opensAt, late });
     }
   }
 

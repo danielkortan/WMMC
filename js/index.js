@@ -52,6 +52,9 @@ import {
   managerWeekWindow,
   lastRoundPlayed,
   isManagerActiveInRound,
+  FINALS_GAME_LABELS,
+  finalsGameFor,
+  finalsGameLabel,
 } from './eligibility.js';
 import {
   buildSnapshot,
@@ -121,6 +124,9 @@ Object.assign(window, {
   managerWeekWindow,
   lastRoundPlayed,
   isManagerActiveInRound,
+  FINALS_GAME_LABELS,
+  finalsGameFor,
+  finalsGameLabel,
   buildSnapshot,
   realRosterForRound,
   rosterOverrides,
