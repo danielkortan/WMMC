@@ -155,7 +155,12 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   is `advanceToFinalsAndThirdPlace` (app.js), which deletes no submission, marks nobody
   eliminated, and clears stale 'SF' markers and roasts when re-run. The server enforces it
   independently: the round-end post clears its roast set for `round === 'SF'` rather than
-  trusting the caller.
+  trusting the caller. **"The Finals period" and "the Finals" are not the same set** — the period
+  is two games, and any surface that names it for ONE manager must name his game, via
+  `finalsGameFor`/`finalsGameLabel` (`js/eligibility.js`, unit-tested) and app.js's
+  `submissionPeriodLabel`; surfaces spanning managers use `periodLabelForAll` ("Finals / 3rd
+  Place"), and anything listing the period's participants wants all four semifinalists, not
+  `getFinalsParticipants`.
 
 - `js/roundPreview.js` (canonical, unit-tested) ↔ `server.js` — the round-end post's forward-
   looking section (`buildRoundPreviewBlock` and friends). Same must-stay-identical rule, guarded

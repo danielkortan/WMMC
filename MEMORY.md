@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-19 | The 3rd-place game's two managers were told to submit a "Finals" roster                           | [MEMORY](#2026-08-19-the-3rd-place-games-two-managers-were-told-to-submit-a-finals-roster)                                        |
 | 2026-08-19 | IL swaps now cover the Restricted List, and two IL statuses the gate had been missing             | [MEMORY](#2026-08-19-il-swaps-now-cover-the-restricted-list-and-two-il-statuses-the-gate-had-been-missing)                        |
 | 2026-08-19 | Missing a roster deadline stopped being a dead end: late submissions, and begging the commish     | [MEMORY](#2026-08-19-missing-a-roster-deadline-stopped-being-a-dead-end-late-submissions-and-begging-the-commish)                 |
 | 2026-08-18 | A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked        | [MEMORY](#2026-08-18-a-swap-on-a-rounds-last-day-stamped-an-add-date-in-the-next-period-and-the-roster-leaked)                    |
@@ -102,6 +103,42 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-19 — The 3rd-place game's two managers were told to submit a "Finals" roster
+
+**The situation.** Every submission surface calls the last period "Finals" — the card's badge,
+its "Submit your roster for Finals" line, the yellow warning banner, the late-deadline banner,
+every confirm dialog. But that period is TWO games over the same two weeks: the Championship
+between the semifinal winners and the 3rd-place game between the losers (see the 2026-08-17
+entry — the semifinal eliminates nobody). So half the managers submitting were being told to
+file a roster for a game they had already lost their way out of.
+
+**The fix is a label, derived rather than assumed.** `finalsGameFor` / `finalsGameLabel`
+(js/eligibility.js, unit-tested) take the round's field — the finalists (SF winners) and all four
+semifinalists — and name the game the manager is actually in: **Finals**, **3rd Place Game**, or,
+when the semifinals aren't finalized yet, **Finals / 3rd Place**. That last case is the one worth
+being deliberate about: with no field known, naming one game would tell a semifinalist he is in
+the Championship. Both games, or nothing.
+
+**Which surface gets which name.** app.js's `submissionPeriodLabel` names a period for ONE
+manager (card, warning banner, late banner, every confirm/alert that already had a manager in
+hand); `periodLabelForAll` names it for surfaces that span managers (the commissioner's approval
+queue heading, the submission status table's section), where it really is both games. In between,
+per-row: the approval queue tags each pending manager with his game, because in that period which
+of the two he submitted for is the thing being approved.
+
+**The bug found next door.** The commissioner's submission status table listed the Finals section
+from `getFinalsParticipants` — the two finalists. But all four semifinalists submit a Finals-period
+roster, so the table hid half the rosters he has to chase and approve, and its counts said "of 2"
+when they were of 4. It now lists `getSFParticipants` with each row labelled by game. Same root
+cause as the 2026-08-17 entry: "Finals period" and "the Finals" are not the same set.
+
+**Verified in the running app** (scratch season sitting in Finals Week 1, QF+SF finalized):
+Sullivan/Gillespie (the SF losers) see `3RD PLACE GAME — Player Submission` and a banner reading
+"Your 3rd Place Game lineup is not submitted"; Kortan/McCallum see Finals. With the deadline moved
+into the past, late mode reads "You missed the 3rd Place Game roster deadline". The commissioner's
+queue reads "Pending Finals / 3rd Place Approvals" with per-manager game tags, and the status table
+shows all four semifinalists — 2 pending, 2 not submitted, of 4.
 
 ## 2026-08-19 — IL swaps now cover the Restricted List, and two IL statuses the gate had been missing
 
