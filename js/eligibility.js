@@ -239,3 +239,35 @@ export function isManagerInRound(manager, round, { participants = null, eliminat
   if (field.length) return field.includes(manager);
   return isManagerActiveInRound(round, (eliminated || {})[manager]);
 }
+
+// ---- Which Finals-week game a manager is actually playing ----
+//
+// The Finals period is TWO games run over the SAME two weeks: the Championship between the
+// semifinal winners, and the 3rd-place game between the semifinal losers. All four semifinalists
+// submit a roster for it (see lastRoundPlayed), which is why every submission surface calls that
+// period "Finals" — and why two of those four managers are told, on every card and every banner,
+// to submit for a game they are not in.
+//
+// Given the round's field, name the game the manager is in. When the semifinal isn't finalized
+// yet the field isn't known, and the honest answer is both games at once — never a guess, because
+// guessing here tells a manager he's in the Championship.
+export const FINALS_GAME_LABELS = {
+  finals: 'Finals',
+  third: '3rd Place Game',
+  unknown: 'Finals / 3rd Place',
+};
+
+// 'finals' | 'third' | null (unknown). `finalists` are the SF winners, `semifinalists` all four.
+export function finalsGameFor(manager, { finalists = null, semifinalists = null } = {}) {
+  if (!manager) return null;
+  const fin = (finalists || []).filter((n) => typeof n === 'string' && n);
+  if (fin.includes(manager)) return 'finals';
+  const sf = (semifinalists || []).filter((n) => typeof n === 'string' && n);
+  if (fin.length && sf.includes(manager)) return 'third';
+  return null;
+}
+
+// The label to print for that manager's Finals-period submission.
+export function finalsGameLabel(manager, field = {}) {
+  return FINALS_GAME_LABELS[finalsGameFor(manager, field) || 'unknown'];
+}
