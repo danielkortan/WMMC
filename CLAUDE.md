@@ -47,7 +47,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
 - `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
-- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `history.js` (the finished-season record + per-manager career facts — mirrored in `server.js`), `playoffCommentary.js` (the daily playoff post's "Hot Takes" — pure, mirrored in `server.js`, no frontend caller yet), `roundPreview.js` (the round-end post's next-round preview — pure, mirrored in `server.js`, server-only caller), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `history.js` (the finished-season record + per-manager career facts — mirrored in `server.js`), `playoffCommentary.js` (the daily playoff post's "Hot Takes" — pure, mirrored in `server.js`, no frontend caller yet), `lateSubmission.js` (when a roster submitted after its period's lock takes effect — pure, mirrored in `server.js`), `roundPreview.js` (the round-end post's next-round preview — pure, mirrored in `server.js`, server-only caller), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
 - `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
@@ -115,6 +115,26 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - **Appearance rate is why a projection is not "his team's remaining games".** A per-game scoring rate is a rate per APPEARANCE, so multiplying it by team games projects a starting pitcher to take every turn. `expectedAppearanceRate` corrects it from the player's own observed appearances, shrunk toward a positional prior. The denominator matters more than it looks: it must be measured over the SAME span as the numerator, which rules out the team's MLB season game count (MLB starts in late March, the WMMC season in May — a full-season denominator over a WMMC-season numerator files every everyday bat as a part-timer). `teamGamesInSpan` therefore derives games-per-day from the REMAINING schedule and applies it to the days we have stats for that player. `projectManager` carries the appearance risk into the variance via the law of total variance, not just the scaled-down mean — for a pitcher who may get two starts or three, that is most of the uncertainty.
 
 - `checkSwapLimit` (+ `FREE_SWAP_REASON`/`PLAYOFF_LIMITED_REASONS`) exists in **both** `js/swaps.js` (canonical, unit-tested; the swap form's pre-check) and `server.js` (the enforcing copy at swap submission). Same rule as `detectScoreSwings`: the two copies must stay identical — edit both. **`SWAP_REASON_LABELS`/`swapReasonLabel` in the same file are the exception: client-only, deliberately NOT mirrored**, because the server never renders a reason menu. They map the STORED reason to what a manager reads (`'IL Swap'` → `'IL/RST Swap'`); the stored string never changes, since every historical swap in `db.json` carries it and both `checkSwapLimit` and the server's IL gate compare against it. Relabel there, never rename the value. Relatedly, the client's `getCurrentScheduleRound` (app.js) and the server's `currentScheduleRound` implement the same round-detection rule (between weeks → the upcoming round) and must stay in step.
+
+- **A LATE roster submission is not a special case in the scoring engine — it is just a later
+  `add_date`.** `js/lateSubmission.js` (canonical, unit-tested) ↔ `server.js`, on the same
+  must-stay-identical footing as the pairs above and guarded by `tests/serverMirrors.test.js`. The
+  rule: submit before the day's first pitch → effective TODAY; after it → TOMORROW; never before
+  the period starts, never past its end (null = no viable day left). That date becomes every
+  player's `add_date` when the commissioner approves, so `managerWeekSubtotal` and
+  `rebuildRosterArraysFromDates` clip the window with the machinery they already have. **The
+  SERVER decides both "is this late" and "which date"** (`resolveSubmissionWindow`, exposed as
+  `GET /api/seasons/:year/submission-window/:period`, and stamped onto the record by
+  `POST /submissions`): it needs today's real first pitch from the MLB Stats API and a clock the
+  manager cannot set, and the date is the scoring invariant's own unit — a manager choosing it
+  after reading a box score is the whole thing this prevents. app.js keeps `getPeriodDeadline`
+  for instant rendering and the plain open/closed question, but late mode renders off
+  `SUBMISSION_WINDOWS`, the server's answer. **"Beg Commish for Forgiveness"** files the roster
+  with `forgiveness_status: 'pending'` and NO effective date; `POST .../forgiveness` is the only
+  path that can start a roster earlier than the automatic rule, which is why it is
+  commissioner-only and validated against the period's own bounds. Approving a late submission
+  that has no effective date is blocked client-side (`blockLateApprovalWithoutDate`) — without
+  that guard it would silently fall back to the period start, i.e. a free back-date.
 
 - `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.) The one permitted difference: the `js/scoring.js` entries carry a `label` for the UI and the `server.js` ones do not — `round` and `week` must match exactly.
 - `ROUND_LABELS` is a fourth `server.js` ↔ `js/scoring.js` duplicate, on the same must-stay-identical footing as the three above. (Not to be confused with `app.js`'s `ROUND_LABELS_FOR_ROAST`, which is keyed by bracket stage, where Pool Play is one thing.)

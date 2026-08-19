@@ -44,6 +44,8 @@ const projectGlobals = {
   checkSwapLimit: 'readonly',
   swapReasonLabel: 'readonly',
   checkSwapEffectiveWindow: 'readonly',
+  submissionLateState: 'readonly',
+  lateSubmissionActions: 'readonly',
   periodStartForRound: 'readonly',
   rosterStatusAsOf: 'readonly',
   rosterStatusForManager: 'readonly',
