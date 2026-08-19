@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-19 | IL swaps now cover the Restricted List, and two IL statuses the gate had been missing             | [MEMORY](#2026-08-19-il-swaps-now-cover-the-restricted-list-and-two-il-statuses-the-gate-had-been-missing)                        |
 | 2026-08-18 | A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked        | [MEMORY](#2026-08-18-a-swap-on-a-rounds-last-day-stamped-an-add-date-in-the-next-period-and-the-roster-leaked)                    |
 | 2026-08-17 | `\b` treats `_` as a word character, so italicised manager names never got shortened              | [MEMORY](#2026-08-17-b-treats-_-as-a-word-character-so-italicised-manager-names-never-got-shortened)                              |
 | 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
@@ -100,6 +101,46 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-19 — IL swaps now cover the Restricted List, and two IL statuses the gate had been missing
+
+**The ask.** Ketel Marte was on the Restricted List, not the IL, and the league wanted RL to count
+for an IL swap. The first question was purely factual: what does the MLB Stats API actually return
+for that status?
+
+**Nobody could answer it from memory, and the wrong guess was waiting.** `RM` looks like the
+Restricted List and is not — it is **"Reassigned to Minors", 300 players league-wide** against the
+RL's 28. Adding `RM` to the code set would have opened IL swaps to every minor-league reassignment
+in baseball. The real code is **`RST`**. This is the whole argument for
+`scripts/mlb-roster-status.js`: it hits `/api/v1/people/:id?hydrate=rosterEntries` and, with
+`--sweep`, enumerates every status code across all 30 full rosters with the gate's verdict for
+each. Re-run it rather than reasoning about codes. (The full observed table lives in the script's
+header.)
+
+**The sweep found two pre-existing gaps, which is the part nobody asked for.** `ILF`
+("Injured - Full Season", **240 players** — the second-largest injured population in the league)
+was clearing the gate _only_ through the `/injured/i` description fallback; its code was never in
+`MLB_IL_STATUS_CODES`. That regex was load-bearing without anyone knowing. And `RA`
+("Rehab Assignment") was rejected outright, though a rehabbing player has not been activated and is
+still on the IL. Both are now named in the set, renamed `IL_SWAP_ELIGIBLE_STATUS_CODES` since it
+no longer means only "injured". The regex stays as a catch-all for codes MLB adds later, but
+nothing depends on it now.
+
+**The menu was relabelled, not renamed.** Managers see "IL/RST Swap"; the stored value is still
+`'IL Swap'`. That distinction is the load-bearing one: the string is written on every swap record
+in `db.json` back to the first season, and both `checkSwapLimit` and the server's gate compare
+against it. `swapReasonLabel` (`js/swaps.js`, client-only, deliberately not mirrored in
+`server.js`) maps stored value → display text at the six render sites, and passes through anything
+it has no label for. No data migration, no historical record reinterpreted.
+
+**Verified in the browser, not only in tests.** The bridge — `app.js` calling the bare global
+`swapReasonLabel`, populated by `js/index.js` — is the kind of thing unit tests cannot catch. Drove
+the running app with Playwright to My Roster → Swaps: the option renders `value="IL Swap"` with
+visible text `IL/RST Swap`, no page errors.
+
+**Still open, deliberately.** The Slack swap notification prints the stored `'IL Swap'` rather than
+the label. Left alone: its `Reason:` line already appends `(MLB status: Restricted List)` from
+`il_status`, so the post is self-explanatory, and the server has no business owning display labels.
 
 ## 2026-08-18 — A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked
 

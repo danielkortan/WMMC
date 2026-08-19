@@ -9566,7 +9566,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           <label for="swap-reason">Transaction Reason</label>
           <select id="swap-reason" class="form-select">
             <option value="">Select reason...</option>
-            ${SWAP_REASONS.map((r) => `<option value="${r}">${r}</option>`).join('')}
+            ${SWAP_REASONS.map((r) => `<option value="${r}">${swapReasonLabel(r)}</option>`).join('')}
           </select>
         </div>
         <div class="swap-form-field">
@@ -10625,7 +10625,7 @@ window.editSwapInline = function (swapId) {
       <div class="swap-form-field">
         <label>Reason</label>
         <select id="edit-reason-${swapId}" class="form-select">
-          ${SWAP_REASONS.map((r) => `<option value="${r}" ${r === swap.reason ? 'selected' : ''}>${r}</option>`).join('')}
+          ${SWAP_REASONS.map((r) => `<option value="${r}" ${r === swap.reason ? 'selected' : ''}>${swapReasonLabel(r)}</option>`).join('')}
         </select>
       </div>
       <div class="swap-form-field">
@@ -10960,11 +10960,11 @@ function swapDetailHtml(s, sd, containerId, editable) {
   if (editable) {
     const reason = s.reason || '';
     const opts = COMMISSIONER_SWAP_REASONS.map(
-      (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(r)}</option>`
+      (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(swapReasonLabel(r))}</option>`
     ).join('');
     reasonVal = `<select class="swap-detail-reason" onclick="event.stopPropagation()" onchange="saveSwapLogReason('${containerId}','${s.id}', this.value)">${opts}</select>`;
   } else {
-    reasonVal = esc(s.reason || '—');
+    reasonVal = s.reason ? esc(swapReasonLabel(s.reason)) : '—';
   }
 
   let items = '';
@@ -11026,7 +11026,7 @@ function managerSwapActionsHtml(s, sd, containerId) {
   const minDate = tomorrowET(); // strictly forward, same rule the submission path enforces
   const maxDate = scheduleRoundEnd(sd, s.round || (getCurrentScheduleRound(sd) || {}).round);
   const reasonOpts = SWAP_REASONS.map(
-    (r) => `<option value="${esc(r)}"${r === s.reason ? ' selected' : ''}>${esc(r)}</option>`
+    (r) => `<option value="${esc(r)}"${r === s.reason ? ' selected' : ''}>${esc(swapReasonLabel(r))}</option>`
   ).join('');
 
   return `<div class="swap-detail-actions">
@@ -11137,11 +11137,11 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
     let reasonCell;
     if (editable) {
       const opts = COMMISSIONER_SWAP_REASONS.map(
-        (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(r)}</option>`
+        (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(swapReasonLabel(r))}</option>`
       ).join('');
       reasonCell = `<select onclick="event.stopPropagation()" onchange="saveSwapLogReason('${containerId}','${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
     } else {
-      reasonCell = esc(reason);
+      reasonCell = esc(swapReasonLabel(reason));
     }
     html += `<tr class="swap-log-row${isOpen ? ' swap-log-row-open' : ''}" onclick="toggleSwapDetail('${containerId}','${s.id}')">
       <td class="swap-log-caret">${isOpen ? '▾' : '▸'}</td>
