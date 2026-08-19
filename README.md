@@ -7,6 +7,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Multi-Season Management** — Create, manage, and archive multiple seasons
 - **Configurable Scoring** — Per-stat batting and pitching point rubrics (currently hardcoded; see [Scoring Rubric](#scoring-rubric))
 - **Roster Management** — Per-week rosters with a manager-initiated swap workflow that auto-applies on submission: the server enforces per-round swap limits (pool play: one Free Swap per PP round, unlimited IL/Drop/Trade; playoffs: one Free/Drop/Trade swap per round, unlimited IL), verifies IL swaps against the player's official MLB injured-list status, and computes effective dates from the live schedule (a player whose game has started swaps effective tomorrow). Swaps the integrity guard flags fall back to commissioner review; the commissioner can undo any applied swap
+- **Late Roster Submissions** — A manager who misses a period's roster deadline keeps his submission form; what moves is the date the roster starts on. Submitting before the day's first pitch takes effect today, submitting after it takes effect tomorrow — never earlier than the period starts, and never on a day whose box scores are already in. Alongside **Submit**, a **Beg Commish for Forgiveness** button files the roster as a plea instead: the commissioner reads the manager's case and picks the effective date himself, up to and including the period's first day (a full back-date). Denying a plea doesn't discard the roster — it drops to the automatic date. The effective date becomes each player's `add_date` at approval, so scoring needs no special case: a late roster simply scores a shorter window
 - **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
@@ -145,6 +146,18 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 | `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                                                                        |
 | `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store odds now — pool-play odds during PP2 Weeks 4–5, head-to-head bracket odds in a playoff round's final week. |
 
+### Roster Submissions
+
+| Method   | Endpoint                                                      | Description                                                                                                                                                         |
+| -------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/seasons/:year/submission-window/:period`                | Authoritative state of one period's window: bounds, lock time, whether it has passed, and the effective date a roster submitted right now would carry.              |
+| `POST`   | `/api/seasons/:year/submissions`                              | Upsert one manager's submission for a period. The server stamps the timestamps, the `late` flag and the effective date; `forgiveness_reason` files it as a plea.    |
+| `POST`   | `/api/seasons/:year/submissions/:period/:manager/forgiveness` | Commissioner ruling on a plea — `{ decision: 'grant' \| 'deny', effective_date? }`. Granting back-dates the roster to any day inside the period. Commissioner only. |
+| `DELETE` | `/api/seasons/:year/submissions/:period/:manager`             | Remove one submission record entirely.                                                                                                                              |
+| `DELETE` | `/api/seasons/:year/submissions`                              | Clear every submission for a season. Commissioner only.                                                                                                             |
+
+**Why the server owns the effective date.** It is the players' `add_date` — the core scoring invariant's own unit — so a manager must not be able to choose it after seeing a box score. Deciding it needs today's real first pitch (fetched from the MLB Stats API) and a clock the manager cannot set, so the client renders what this endpoint says rather than computing its own. If the schedule can't be reached the server falls back to an 11:00 AM ET cutoff, which errs toward pushing the roster to the next day.
+
 ### Player Dates & Daily Stats
 
 | Method   | Endpoint                          | Description                                              |
@@ -258,6 +271,7 @@ WMMC/
 │                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
 │                          #   anthropic.js — Messages API reply shape (never index content[0])
 │                          #   history.js — finished-season record + per-manager career facts
+│                          #   lateSubmission.js — when a roster submitted after its lock takes effect
 │                          #   playoffCommentary.js — daily playoff post "Hot Takes" (server-only caller)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)

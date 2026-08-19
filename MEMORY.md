@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-19 | Missing a roster deadline stopped being a dead end: late submissions, and begging the commish     | [MEMORY](#2026-08-19-missing-a-roster-deadline-stopped-being-a-dead-end-late-submissions-and-begging-the-commish)                 |
 | 2026-08-18 | A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked        | [MEMORY](#2026-08-18-a-swap-on-a-rounds-last-day-stamped-an-add-date-in-the-next-period-and-the-roster-leaked)                    |
 | 2026-08-17 | `\b` treats `_` as a word character, so italicised manager names never got shortened              | [MEMORY](#2026-08-17-b-treats-_-as-a-word-character-so-italicised-manager-names-never-got-shortened)                              |
 | 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
@@ -100,6 +101,64 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-19 — Missing a roster deadline stopped being a dead end: late submissions, and begging the commish
+
+**The situation.** Finals Week 1 opened Aug 17. By Aug 19 one manager (Thally) still had no
+Finals roster, and the app had nothing to offer him: past a period's lock the submission card
+rendered the single line "Submission window has closed." and no form. The only route back in was
+the commissioner editing data by hand.
+
+**The rule we chose.** A missed deadline moves the roster's START DATE; it does not remove the
+roster. Submit before the day's first pitch and it takes effect today; submit after it and it
+takes effect tomorrow. Never earlier than the period starts, never past its end. That is the
+whole design: a late manager still plays, but he can never read a finished box score and then buy
+into it.
+
+**Why it needed almost no new scoring code.** The effective date IS the players' `add_date`. Once
+approval stamps that instead of the period's Week 1 start, `managerWeekSubtotal`,
+`managerRowScoreForWeek` and `rebuildRosterArraysFromDates` clip the window with machinery that
+has existed since the invariant was written. Verified against the real engine on a scratch season:
+three identical Aaron Judge days (Aug 17/18/19, 14 pts each) scored **42** with `add_date`
+Aug 17, **14** with Aug 19, and **0** with Aug 20. One field, three answers, no special case.
+
+**The server owns the date, and that is not incidental.** Two inputs decide it — has today's slate
+started (MLB Stats API) and what day is it (a clock) — and a manager controls neither on the
+server. The date is the scoring invariant's own unit, so letting a client propose it is letting a
+manager pick his own start day after seeing the results. `resolveSubmissionWindow` answers both
+questions; `GET /api/seasons/:year/submission-window/:period` exposes it for rendering and
+`POST /submissions` stamps it. app.js keeps `getPeriodDeadline` for instant rendering, but late
+mode reads `SUBMISSION_WINDOWS` — the server's answer — so a wrong local clock or a missing
+`period_deadlines` entry can never move a start date.
+
+**"Beg Commish for Forgiveness".** The second button files the roster as a plea:
+`forgiveness_status: 'pending'`, no effective date, a Slack ping with the manager's case.
+`POST .../forgiveness` is commissioner-only and is the ONLY path that can start a roster earlier
+than the automatic rule — the date comes out of a picker bounded to the period, and the server
+re-validates it. Denying does not discard the roster: it drops to the automatic date, so a manager
+who asked and was refused is exactly where he'd have been had he just hit Submit.
+
+**Two guards worth keeping.** (1) Approving a late submission with no effective date is blocked
+client-side — without it, the old code path falls back to the period's Week 1 start, which is a
+free back-date handed out by a misclick. (2) Late mode only renders while the period is still
+RUNNING (or a late record already exists). Without that, every manager without a PP1 submission
+on file would carry a permanent "you missed Pool Play 1" form on their roster page for the rest of
+the season.
+
+**What the banner does now.** The submission-warning banner used to go silent once a deadline
+passed — quiet on exactly the manager who most needed it. It now says "You missed the Finals
+roster deadline. You can still submit — it would count from Wednesday, Aug 19." Every day he
+ignores it, that date gets worse, which is the correct incentive.
+
+**Fallbacks.** An unreachable MLB schedule degrades to an 11:00 AM ET cutoff (early enough to
+cover a holiday 11:10 first pitch, and erring toward pushing to tomorrow — the safe direction). An
+EMPTY slate counts as "not started": there is no box score to have read, so today stays viable.
+The lock time itself prefers `sd.period_deadlines[period]` and otherwise fetches the period
+opening day's real first pitch rather than adding a fourth copy of a season-specific time table.
+
+**Files.** `js/lateSubmission.js` (new, canonical, 44 unit tests) mirrored into `server.js` and
+guarded by `tests/serverMirrors.test.js`; endpoints and stamping in `server.js`; late-mode card,
+plea box, commissioner picker and the approval date in `app.js`.
 
 ## 2026-08-18 — A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked
 
