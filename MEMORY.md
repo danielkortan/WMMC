@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-19 | The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror         | [MEMORY](#2026-08-19-the-slack-swap-post-said-il-swap-while-the-app-said-ilrst-the-label-became-a-mirror)                         |
 | 2026-08-19 | IL swaps now cover the Restricted List, and two IL statuses the gate had been missing             | [MEMORY](#2026-08-19-il-swaps-now-cover-the-restricted-list-and-two-il-statuses-the-gate-had-been-missing)                        |
 | 2026-08-19 | Missing a roster deadline stopped being a dead end: late submissions, and begging the commish     | [MEMORY](#2026-08-19-missing-a-roster-deadline-stopped-being-a-dead-end-late-submissions-and-begging-the-commish)                 |
 | 2026-08-18 | A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked        | [MEMORY](#2026-08-18-a-swap-on-a-rounds-last-day-stamped-an-add-date-in-the-next-period-and-the-roster-leaked)                    |
@@ -102,6 +103,38 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-19 — The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror
+
+**The gap.** Widening the IL gate to the Restricted List relabelled the reason menu to "IL/RST
+Swap" but left `swapReasonLabel` client-only, on the reasoning that the server never renders a
+reason menu. It doesn't — but `buildSwapSlackText` renders the reason, which is the same thing
+wearing a different hat. Managers picked "IL/RST Swap" in the app and then read "Reason: IL Swap"
+in Slack for the swap they had just made.
+
+**The fix is the repo's standard shape, not a special case.** `SWAP_REASON_LABELS` and
+`swapReasonLabel` are now a `js/swaps.js` ↔ `server.js` mirrored pair like everything else, and
+`tests/serverMirrors.test.js` guards them — which needed a new `extractConstObject` helper, since
+every existing guard handles a function or a whole-tail block and this is a bare const object.
+**The guard was verified by breaking it**: flipping the server copy's label to 'DRIFTED' fails the
+test, so it is not passing vacuously.
+
+**What did NOT change, and this is the important half.** The stored value is still `'IL Swap'`. The
+label is applied at exactly one server site — the `*Reason:*` line. Every other `swap.reason`
+reference in `server.js` is a comparison (`checkSwapLimit`, the IL gate, the Commissioner Swap
+check) or a persist (the audit-log entry at swap_auto_approved), and all of them were deliberately
+left reading the raw stored string. **Label at display sites; never where a reason is compared or
+written.** That rule is now in CLAUDE.md.
+
+**Verified against the real source, not a reimplementation.** `buildSwapSlackText` lives in
+`server.js` and the project doesn't unit-test that file, so the check extracted the actual function
+body out of `server.js` as text and ran it: RST, 60-day IL, unverified, all four non-IL reasons
+passing through untouched, and a missing reason still falling back to the em dash (the label
+returns `''` for a blank, which stays falsy for the existing `|| '—'`).
+
+**Still unchanged, deliberately.** `checkSwapLimit`'s own prose still says "You may still use Drop,
+IL, or Trade swaps." It is a mirrored block in both copies and it was not what was asked for;
+worth a pass if the "IL" wording is ever revisited.
 
 ## 2026-08-19 — IL swaps now cover the Restricted List, and two IL statuses the gate had been missing
 

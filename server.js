@@ -1528,6 +1528,18 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
 const FREE_SWAP_REASON = 'Free Swap (one per round)';
 const PLAYOFF_LIMITED_REASONS = [FREE_SWAP_REASON, 'Drop Swap', 'Trade Swap'];
 
+// Display labels for the reason menus AND for the Slack swap notification. Mirror of
+// js/swaps.js — see there for why the STORED value stays 'IL Swap'. Edit both.
+const SWAP_REASON_LABELS = {
+  'IL Swap': 'IL/RST Swap',
+};
+
+// The label to show for a stored reason. Unknown reasons pass through unchanged, so a record
+// carrying a reason this map has never heard of still renders as itself.
+function swapReasonLabel(reason) {
+  return SWAP_REASON_LABELS[reason] || reason || '';
+}
+
 function checkSwapLimit(swaps, managerName, reason, round) {
   // Only count approved or pending swaps (not denied/undone) for this manager in this round
   const managerSwaps = (swaps || []).filter(
@@ -1715,7 +1727,7 @@ function buildSwapSlackText(sd, swap, headline) {
     `${headline} — *${swap.manager || '?'}*${roundWeek ? ` (${roundWeek})` : ''}`,
     `*Out:* ${swap.player_out ? withTeam(swap.player_out) : '—'}${swap.drop_date ? ` — dropped ${swap.drop_date}` : ''}`,
     `*In:* ${swap.player_in ? withTeam(swap.player_in) : '—'}${swap.add_date ? ` — added ${swap.add_date}` : ''}`,
-    `*Reason:* ${swap.reason || '—'}${ilNote}`,
+    `*Reason:* ${swapReasonLabel(swap.reason) || '—'}${ilNote}`,
     `*Effective:* ${swap.effective_date || swap.add_date || '—'} · *Submitted:* ${submittedET}`,
     `🔗 <${WMMC_SITE_URL}/#swap-log|Open the Swap Log to review, edit, or undo>`,
   ].join('\n');

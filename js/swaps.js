@@ -56,12 +56,15 @@ export function checkSwapLimit(swaps, managerName, reason, round) {
   return null;
 }
 
-// Display labels for the reason menus. The STORED value is unchanged and always will be:
-// 'IL Swap' is written on every swap record in db.json going back to the first season, it is what
-// checkSwapLimit above and the server's IL gate both compare against, and relabelling a menu is
-// not a reason to migrate data. This maps the stored value to what a manager reads, nothing more.
+// Display labels for the reason menus AND for the Slack swap notification. The STORED value is
+// unchanged and always will be: 'IL Swap' is written on every swap record in db.json going back
+// to the first season, it is what checkSwapLimit above and the server's IL gate both compare
+// against, and relabelling a menu is not a reason to migrate data. This maps the stored value to
+// what a manager reads, nothing more.
 //
-// Client-only — deliberately NOT mirrored in server.js, which never renders a reason menu.
+// Mirrored in server.js (guarded by tests/serverMirrors.test.js) since the Slack post renders the
+// same label — the league should never see one name for a swap type in the app and another in
+// Slack. Edit both.
 export const SWAP_REASON_LABELS = {
   'IL Swap': 'IL/RST Swap',
 };
