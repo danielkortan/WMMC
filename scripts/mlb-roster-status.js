@@ -13,6 +13,34 @@
 // It hits the same endpoint the server does (/api/v1/people/:id?hydrate=rosterEntries) and picks
 // the "current" entry with the same rule, so its verdict line is what the swap form would do.
 //
+// Observed league-wide on 2026-08-19 (--sweep, every code in use, gate verdict as it stands):
+//
+//   A    Active                      6823   REJECTED     RA   Rehab Assignment            9   REJECTED
+//   D60  Injured 60-Day               651   allowed      RES  Reserve List (Minors)       6   REJECTED
+//   RM   Reassigned to Minors         300   REJECTED     NYR  Not Yet Reported            5   REJECTED
+//   D7   Injured 7-Day                259   allowed      TI   Temporary Inactive List     4   REJECTED
+//   ILF  Injured - Full Season        240   allowed      SU   Suspended # days            2   REJECTED
+//   DEV  Development List              85   REJECTED     ADM  Administrative Leave        1   REJECTED
+//   D15  Injured 15-Day                50   allowed      IN   Ineligible List             1   REJECTED
+//   D10  Injured 10-Day                50   allowed      TAX  Taxi Squad                  1   REJECTED
+//   RST  Restricted List               28   REJECTED     MIL  Military Leave              1   REJECTED
+//   DES  Designated for Assignment     14   REJECTED
+//
+// Three things that table settles, none of them guessable:
+//
+//   - The Restricted List code is RST, not RM. RM is "Reassigned to Minors" — 300 players, better
+//     than ten times the RL population. Adding the wrong one of those two to MLB_IL_STATUS_CODES
+//     would quietly open IL swaps to every minor-league reassignment in baseball.
+//   - ILF ("Injured - Full Season", 240 players) passes the gate ONLY through the /injured/i
+//     description fallback; its code is not in MLB_IL_STATUS_CODES. The regex is load-bearing, not
+//     a belt-and-braces extra, and the code set is incomplete as written.
+//   - RA ("Rehab Assignment") is rejected, though a player on a rehab assignment has not been
+//     activated and is still on the IL in league terms. Worth deciding on its own merits.
+//
+// Counts are org-wide, not 26-man: rosterType=fullRoster includes minor leaguers, which is why
+// Active reads 6823 rather than ~800. It is the right roster type for enumerating codes, and the
+// wrong one for reading anything into the magnitudes.
+//
 // Usage:
 //   node scripts/mlb-roster-status.js "Ketel Marte"
 //   node scripts/mlb-roster-status.js 606466
