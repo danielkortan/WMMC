@@ -192,7 +192,18 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   `seasonSuperlatives`, `collectSeasonRecapFacts`, `generateSeasonRecapWithClaude`,
   `postSeasonRecapSlack`) is server-only glue. Its emoji are **literal Unicode, not
   shortcodes**, because a recap posts once a year and there is no second chance to notice an
-  unknown one printing as `:text:`.
+  unknown one printing as `:text:`. The scoreboard reads the same flag rather than being told:
+  `renderSeasonChampionAnnouncement` draws the champion card into
+  `#season-champion-announcement` (declared BEFORE both `#scoreboard-content` and
+  `#scoreboard-bracket` on purpose — `orderScoreboardBracket` swaps those two around each
+  other, so a card rendered into either can end up second), the bracket card collapses its
+  Quarterfinals and Semifinals columns (`toggleBracketRound`) leaving the Finals — Championship
+  AND 3rd Place — open, and Pool Play stays shut. The banner strikes the outgoing champion
+  through above the new one, and only for a season this app closed: applied to every crowned
+  season it puts "New Champion" and a line through a name on the 2019 archive page.
+  `previousChampionBefore` takes the LATEST candidate across `WMMC_HISTORICAL_RESULTS` and the
+  stored seasons rather than checking the table first — that table is a deliberate two-file
+  hand edit and is routinely a year behind the season the app just closed.
 
 - **`sd.season_closed` is the off switch, and it is both a flag and a timer teardown.** It
   gates the 4am MLB sync (the only job that talks to the MLB Stats API), the 7am scoreboard

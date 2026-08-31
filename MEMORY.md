@@ -191,6 +191,42 @@ four roasts stored with the right outcomes (champion / runner_up / third / elimi
 combined post → the recap → "Scheduled jobs: all off", zero page errors, and the panel flipped
 to the closed state with the re-run and reopen buttons.
 
+**The scoreboard now looks like a season that ended.** Closing it is a state change the
+dashboard reads, not a second thing the button has to remember to do — everything below keys
+off `sd.season_closed`, so a reopen puts it all back with no separate teardown:
+
+- A champion announcement card above everything, in its own `#season-champion-announcement`
+  div declared BEFORE both `#scoreboard-content` and `#scoreboard-bracket`. That placement is
+  the load-bearing part: `orderScoreboardBracket` swaps those two around each other once pool
+  play is finalized, so anything rendered into either of them can end up second. The four
+  names come off `season_closed`; the scores are re-derived through the same `roundBreakdown`
+  the bracket card uses, so the card and the bracket below it quote the same numbers.
+- The Playoff Bracket card's rounds became individually collapsible
+  (`toggleBracketRound`), with the Quarterfinals and Semifinals collapsed on a closed season
+  and the Finals column — Championship AND 3rd Place — left open. Nothing is removed; a
+  finished bracket's job is to show who won, not to make you scan eight settled scores first.
+- Pool Play stays collapsed, and PP1/PP2 no longer spring open. `currentSectionId` goes null
+  once the schedule runs out, and `!currentSectionId` was the "open Pool Play 1" branch — so
+  without the guard the day the season ended would have put a ten-week-old table at the top of
+  the page.
+
+**The banner strikes the outgoing champion through.** `previousChampionBefore(year)` replaced
+the inline lookback, and fixed a bug in it on the way: the old version checked
+`WMMC_HISTORICAL_RESULTS` FIRST and only fell back to stored seasons, but that table is a
+deliberate hand-maintained two-file edit and therefore routinely a year behind what the app
+itself just closed. Next season's banner would have named the champion from two years ago. It
+now gathers candidates from both sources and takes the latest year, and it reads
+`season_closed.champion` off a stored season.
+
+The hand-over treatment is scoped to seasons **this app closed** — not to any season with a
+champion. Applied to every crowned season it rendered "New Champion" with a line through
+somebody on the 2019 archive page, which is a worse answer than leaving a nine-year-old banner
+alone.
+
+Verified in the browser at 1440px and at 390px (no horizontal overflow), on the closed season
+and after reopening it, plus a switch to the archived 2025 season to confirm the announcement
+card clears itself and that banner is untouched.
+
 ## 2026-08-19 — The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror
 
 **The gap.** Widening the IL gate to the Restricted List relabelled the reason menu to "IL/RST

@@ -2228,6 +2228,10 @@ function init() {
       DATA = null;
       showActiveSeason(seasonData);
     }
+    // After the branch, so it runs for both and clears itself on a season that isn't closed —
+    // switching from a closed season to a live one must not leave last year's champion card
+    // sitting above this year's scoreboard.
+    renderSeasonChampionAnnouncement(seasonData);
   } catch (e) {
     console.error('Error rendering season:', e);
   }
@@ -3200,59 +3204,83 @@ function renderScoreboard() {
   renderScoreboardContent();
 }
 
+// The most recent champion crowned BEFORE `year`, from every record we have.
+//
+// Two sources, and the winner is whichever is LATER, not whichever is checked first: the
+// hand-maintained `WMMC_HISTORICAL_RESULTS` table lags by design (adding a finished season to
+// it is a deliberate two-file edit), so the season the app itself just closed is routinely
+// newer than anything in the table. Checking the table first — which is what this used to do —
+// would hand next season's banner the champion from two years ago.
+//
+// Returns { champion, year } or null.
+function previousChampionBefore(year) {
+  const target = parseInt(year, 10);
+  const candidates = [];
+
+  for (const r of WMMC_HISTORICAL_RESULTS) {
+    const y = parseInt(r.year, 10);
+    if (y < target && r.champion) candidates.push({ champion: r.champion, year: r.year });
+  }
+
+  const seasons = getSeasons() || {};
+  for (const [yr, priorSd] of Object.entries(seasons)) {
+    if (parseInt(yr, 10) >= target || !priorSd) continue;
+    // A season this app closed itself: season_closed.champion is written by POST /close from
+    // the server's own bracket math, so it is the same answer the recap crowned.
+    if (priorSd.season_closed && priorSd.season_closed.champion) {
+      candidates.push({ champion: priorSd.season_closed.champion, year: yr });
+      continue;
+    }
+    const legacyWinner =
+      priorSd.status === 'completed' &&
+      priorSd.data &&
+      priorSd.data.bracket &&
+      priorSd.data.bracket.finals &&
+      priorSd.data.bracket.finals.winner;
+    if (legacyWinner) {
+      candidates.push({ champion: legacyWinner, year: yr });
+      continue;
+    }
+    if (priorSd.champion) candidates.push({ champion: priorSd.champion, year: yr });
+  }
+
+  if (!candidates.length) return null;
+  return candidates.reduce((best, c) => (parseInt(c.year, 10) > parseInt(best.year, 10) ? c : best));
+}
+
 function renderChampionBanner() {
   const banner = document.getElementById('champion-banner');
   banner.className = 'champion-banner';
 
-  const seasonComplete = DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner;
+  const sd = (getSeasons() || {})[SELECTED_SEASON];
+  const closed = sd && sd.season_closed && sd.season_closed.at ? sd.season_closed : null;
+  const seasonComplete = !!(DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner) || !!closed;
 
-  // Determine the reigning champion (champion of the most recent completed season)
-  let reigningChampion = null;
-  let reigningYear = null;
-  if (seasonComplete) {
-    reigningChampion = DATA.bracket.finals.winner;
-    reigningYear = SELECTED_SEASON;
-  } else {
-    // Look back through historical results for the most recent champion before this season
-    const hist = [...WMMC_HISTORICAL_RESULTS].reverse().find((r) => parseInt(r.year) < parseInt(SELECTED_SEASON));
-    if (hist) {
-      reigningChampion = hist.champion;
-      reigningYear = hist.year;
-    }
-    // Also check localStorage seasons for prior champions (active seasons that were finalized)
-    if (!reigningChampion) {
-      const seasons = getSeasons();
-      const years = Object.keys(seasons)
-        .map(Number)
-        .sort((a, b) => b - a);
-      for (const yr of years) {
-        if (String(yr) === String(SELECTED_SEASON)) continue;
-        const priorSd = seasons[yr];
-        if (!priorSd) continue;
-        if (
-          priorSd.status === 'completed' &&
-          priorSd.data &&
-          priorSd.data.bracket &&
-          priorSd.data.bracket.finals &&
-          priorSd.data.bracket.finals.winner
-        ) {
-          reigningChampion = priorSd.data.bracket.finals.winner;
-          reigningYear = yr;
-          break;
-        }
-        if (priorSd.champion) {
-          reigningChampion = priorSd.champion;
-          reigningYear = yr;
-          break;
-        }
-      }
-    }
-  }
+  // The champion crowned BY the season being viewed, if it has one. A historical season carries
+  // it on its stored bracket; an active season that has been closed carries it on
+  // season_closed, which the server wrote from computePlayoffPairs.
+  const crowned =
+    DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner
+      ? DATA.bracket.finals.winner
+      : closed
+        ? closed.champion
+        : null;
+
+  // Whoever held it going in. When this season crowned somebody, that name is the OUTGOING
+  // champion and gets struck through above the new one — the banner should read as the title
+  // changing hands, not quietly swap one name for another overnight.
+  //
+  // Scoped to seasons this app closed itself. The archived 2018-2025 seasons predate the
+  // feature and their banner has read the same way for years; rendering "New Champion" with a
+  // line through somebody on a 2019 archive page is a worse answer than leaving it alone.
+  const previous = previousChampionBefore(SELECTED_SEASON);
+  const reigningChampion = crowned || (previous && previous.champion) || null;
+  const reigningYear = crowned ? SELECTED_SEASON : previous && previous.year;
+  const outgoing = closed && crowned && previous && previous.champion !== crowned ? previous : null;
 
   // Determine footer for in-progress or preseason
   let footerHtml = '';
   if (!seasonComplete) {
-    const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
     const between = sd ? getBetweenPeriodsInfo(sd) : null;
 
@@ -3311,19 +3339,86 @@ function renderChampionBanner() {
     }
   }
 
+  // When this season crowned someone, the outgoing holder's name sits above the new one with a
+  // line through it. It is the one place in the app where the title visibly changes hands, and
+  // it costs a row of small text; showing only the new name loses the whole point of the moment.
+  const outgoingHtml = outgoing
+    ? `<div class="banner-champ-outgoing" title="${esc(outgoing.year)} champion"><s>${esc(outgoing.champion)}</s></div>`
+    : '';
   const rightHtml = reigningChampion
-    ? `<div class="banner-right" style="display:flex;align-items:center;gap:0.75rem;">
+    ? `<div class="banner-right${outgoing ? ' banner-right-handover' : ''}" style="display:flex;align-items:center;gap:0.75rem;">
         <div style="font-size:2.5rem;line-height:1;">&#127942;</div>
         <div>
-          <div class="banner-champ-label">Reigning Champion</div>
-          <div class="banner-champ-name">${reigningChampion}</div>
-          <div class="banner-champ-year">${reigningYear} WMMC Champion</div>
+          <div class="banner-champ-label">${outgoing ? 'New Champion' : 'Reigning Champion'}</div>
+          ${outgoingHtml}
+          <div class="banner-champ-name">${esc(reigningChampion)}</div>
+          <div class="banner-champ-year">${esc(String(reigningYear))} WMMC Champion</div>
         </div>
        </div>`
     : '';
 
   // Apply custom background if configured
   applyBannerBackground(banner, rightHtml, footerHtml);
+}
+
+// The end-of-season announcement card: the champion, big, above everything else on the
+// dashboard. Rendered only once the commissioner has closed the season — `sd.season_closed`
+// is written by POST /close from the server's own bracket math, the same answer the Slack
+// recap crowned, so this card cannot name a different champion than the post did.
+//
+// The four names come off that record; the scores are re-derived here through the same
+// roundBreakdown the Playoff Bracket card uses, so the numbers on this card and the numbers
+// on the bracket a few hundred pixels below it are the same numbers.
+function renderSeasonChampionAnnouncement(seasonData) {
+  const el = document.getElementById('season-champion-announcement');
+  if (!el) return;
+
+  const closed =
+    seasonData && seasonData.season_closed && seasonData.season_closed.at ? seasonData.season_closed : null;
+  if (!closed || !closed.champion) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const rosterLookup = buildRosterLookup(seasonData);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const finalsTotal = (name) =>
+    name ? roundBreakdown(seasonData, name, 'Finals', rosterLookup, weekKeyToStart).total : null;
+
+  const champTotal = finalsTotal(closed.champion);
+  const runnerUpTotal = finalsTotal(closed.runner_up);
+  const resultLine =
+    closed.runner_up && champTotal != null && runnerUpTotal != null
+      ? `def. ${esc(closed.runner_up)} ${fmt(champTotal)}&ndash;${fmt(runnerUpTotal)}`
+      : '';
+
+  const podium = [
+    { place: '2nd', medal: '&#129352;', manager: closed.runner_up },
+    { place: '3rd', medal: '&#129353;', manager: closed.third },
+    { place: '4th', medal: '', manager: closed.fourth },
+  ].filter((p) => p.manager);
+
+  const podiumHtml = podium.length
+    ? `<div class="champ-podium">${podium
+        .map((p) => {
+          const total = finalsTotal(p.manager);
+          return `<div class="champ-podium-item">
+            <span class="champ-podium-place">${p.medal ? `${p.medal} ` : ''}${p.place}</span>
+            <span class="champ-podium-name">${esc(p.manager)}</span>
+            ${total != null ? `<span class="champ-podium-score">${fmt(total)}</span>` : ''}
+          </div>`;
+        })
+        .join('')}</div>`
+    : '';
+
+  el.innerHTML = `<div class="card champ-announcement">
+    <div class="champ-announcement-trophy">&#127942;</div>
+    <div class="champ-announcement-label">${esc(String(SELECTED_SEASON))} Whit Merrifield Memorial Cup</div>
+    <div class="champ-announcement-name">${esc(closed.champion)}</div>
+    ${resultLine ? `<div class="champ-announcement-result">${resultLine}</div>` : ''}
+    ${podiumHtml}
+    <div class="champ-announcement-foot">Season complete &mdash; final results below.</div>
+  </div>`;
 }
 
 // Build base banner HTML and apply the custom background (or default gradient)
@@ -5472,13 +5567,29 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     ? `<p class="bracket-odds-legend">&#128302; % = odds to win this matchup, from ${bracketOdds.sims.toLocaleString('en-US')} simulated finishes (games left, projected starts, opponent, park) &middot; &#128274; = decided</p>`
     : '';
 
+  // Once the season is closed, the bracket opens on the games that decided it: the earlier
+  // rounds collapse to a clickable header. Nothing is removed — the whole season is one click
+  // away — but a finished bracket's job is to show who won, not to make you scan past eight
+  // settled quarterfinal scores to find out.
+  const seasonClosed = !!(seasonData.season_closed && seasonData.season_closed.at);
+  const roundOpen = (id) => !seasonClosed || id === 'finals';
+  const roundColumn = (id, label, inner) => {
+    const open = roundOpen(id);
+    return `<div class="bracket-round${open ? '' : ' bracket-round-collapsed'}" id="bracket-round-${id}">
+      <div class="bracket-round-label" onclick="toggleBracketRound('${id}')">
+        <span>${label}</span><span class="bracket-round-arrow">&#9662;</span>
+      </div>
+      <div class="bracket-round-body" id="bracket-round-body-${id}" style="display:${open ? 'block' : 'none'}">${inner}</div>
+    </div>`;
+  };
+
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
     <h2>Playoffs${tentativeLabel}</h2>
     ${oddsLegend}
     <div class="active-bracket">`;
 
   // QF column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Quarterfinals</div>';
+  let qfInner = '';
   const qfWinners = [];
   qfMatchups.forEach((m) => {
     const s1Bd = getRoundBreakdown(m.s1.name, 'QF');
@@ -5486,16 +5597,16 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const qfDone = finalized.includes('QF');
     const winner = qfDone ? roundMatchupWinner(m.s1.name, s1Bd.total, m.s2.name, s2Bd.total, seedRank) : null;
     qfWinners.push(winner);
-    html += `<div class="bracket-matchup">
+    qfInner += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       ${bracketTeamHtml(m.s1.name, `<span class="bracket-seed">${m.s1.seed}</span>`, s1Bd, winner === m.s1.name ? 'bracket-winner' : '', 'QF', m.s2.name)}
       ${bracketTeamHtml(m.s2.name, `<span class="bracket-seed">${m.s2.seed}</span>`, s2Bd, winner === m.s2.name ? 'bracket-winner' : '', 'QF', m.s1.name)}
     </div>`;
   });
-  html += '</div>';
+  html += roundColumn('qf', 'Quarterfinals', qfInner);
 
   // SF column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Semifinals</div>';
+  let sfInner = '';
   const sfMatchups = [
     { label: 'SF1', t1: qfWinners[0] || 'TBD', t2: qfWinners[1] || 'TBD' },
     { label: 'SF2', t1: qfWinners[2] || 'TBD', t2: qfWinners[3] || 'TBD' },
@@ -5513,16 +5624,16 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const loser = winner ? (winner === m.t1 ? m.t2 : m.t1) : null;
     sfWinners.push(winner);
     sfLosers.push(loser);
-    html += `<div class="bracket-matchup">
+    sfInner += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       ${bracketTeamHtml(m.t1, '', s1Bd, winner === m.t1 ? 'bracket-winner' : '', 'SF', m.t2)}
       ${bracketTeamHtml(m.t2, '', s2Bd, winner === m.t2 ? 'bracket-winner' : '', 'SF', m.t1)}
     </div>`;
   });
-  html += '</div>';
+  html += roundColumn('sf', 'Semifinals', sfInner);
 
   // Finals column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Finals</div>';
+  let finalsInner = '';
   const f1 = sfWinners[0] || 'TBD';
   const f2 = sfWinners[1] || 'TBD';
   const f1Bd = f1 !== 'TBD' ? getRoundBreakdown(f1, 'Finals') : { bat: 0, pit: 0, total: 0 };
@@ -5531,7 +5642,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const champion =
     finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? roundMatchupWinner(f1, f1Bd.total, f2, f2Bd.total, seedRank) : null;
 
-  html += `<div class="bracket-matchup">
+  finalsInner += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
     ${bracketTeamHtml(f1, '', f1Bd, champion === f1 ? 'bracket-winner bracket-champion' : '', 'Finals', f2)}
     ${bracketTeamHtml(f2, '', f2Bd, champion === f2 ? 'bracket-winner bracket-champion' : '', 'Finals', f1)}
@@ -5544,15 +5655,28 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const t2Bd = t2 !== 'TBD' ? getRoundBreakdown(t2, 'Finals') : { bat: 0, pit: 0, total: 0 };
   const thirdPlace = finalsDone && t1 !== 'TBD' && t2 !== 'TBD' ? (t1Bd.total >= t2Bd.total ? t1 : t2) : null;
 
-  html += `<div class="bracket-matchup" style="margin-top:1rem;">
+  finalsInner += `<div class="bracket-matchup" style="margin-top:1rem;">
     <div class="bracket-matchup-label">3rd Place</div>
     ${bracketTeamHtml(t1, '', t1Bd, thirdPlace === t1 ? 'bracket-winner' : '', 'Finals', t2)}
     ${bracketTeamHtml(t2, '', t2Bd, thirdPlace === t2 ? 'bracket-winner' : '', 'Finals', t1)}
   </div>`;
 
-  html += '</div></div></div>';
+  html += roundColumn('finals', 'Finals', finalsInner);
+
+  html += '</div></div>';
   return html;
 }
+
+// Expand/collapse one column of the Playoff Bracket card. Every round starts open; a closed
+// season starts with the Quarterfinals and Semifinals shut (see roundColumn).
+window.toggleBracketRound = function (roundId) {
+  const col = document.getElementById('bracket-round-' + roundId);
+  const body = document.getElementById('bracket-round-body-' + roundId);
+  if (!col || !body) return;
+  const isCollapsed = col.classList.contains('bracket-round-collapsed');
+  col.classList.toggle('bracket-round-collapsed', !isCollapsed);
+  body.style.display = isCollapsed ? 'block' : 'none';
+};
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
@@ -5764,7 +5888,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   // showActiveSeason post-render fixup enforces the same state after bracket render.
   const rounds = new Set([...batting.map((b) => b.round), ...pitching.map((p) => p.round)]);
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
-  const ppCollapsed = hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
+  // A closed season opens nothing on this card: the Playoff Bracket above already leads with
+  // the Finals, and `currentSectionId` goes null once the schedule runs out, which would
+  // otherwise fall through to "no current period, so open Pool Play 1" and put a ten-week-old
+  // table at the top of the page on the day the season ended.
+  const seasonClosed = !!(seasonData.season_closed && seasonData.season_closed.at);
+  const ppCollapsed = seasonClosed || hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
 
   // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
   // collapsed-state summary (below) can use them.
@@ -5917,7 +6046,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // Pool Play 1
-  const pp1Open = !currentSectionId || currentSectionId === 'pp1';
+  const pp1Open = !seasonClosed && (!currentSectionId || currentSectionId === 'pp1');
   html += `
     <div class="sb-section${pp1Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp1">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp1')">
@@ -5930,7 +6059,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     </div>`;
 
   // Pool Play 2
-  const pp2Open = currentSectionId === 'pp2';
+  const pp2Open = !seasonClosed && currentSectionId === 'pp2';
   html += `
     <div class="sb-section${pp2Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp2">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp2')">

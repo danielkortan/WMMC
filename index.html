@@ -114,6 +114,11 @@
       <!-- Scoreboard (Home) -->
       <section id="dashboard" class="tab-content active">
         <div class="champion-banner" id="champion-banner"></div>
+        <!-- The end-of-season champion announcement. Empty for every day of the season except
+             after "End Finals & Close Season"; declared here, above both the scoreboard and the
+             bracket, because orderScoreboardBracket only ever swaps those two around each other
+             and so can never move something past this. -->
+        <div id="season-champion-announcement"></div>
         <!-- Default order: scoreboard above bracket. Once pool play is finalized the app
              moves #scoreboard-bracket above #scoreboard-content (see orderScoreboardBracket)
              so the bracket leads and the pool-play summary/scoreboard sits below it. -->
