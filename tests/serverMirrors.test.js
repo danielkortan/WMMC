@@ -146,6 +146,17 @@ describe('server.js mirrors of js/ modules', () => {
     assert.equal(extractFunction(SERVER, 'normalizeName'), extractFunction(read('js/utils.js'), 'normalizeName'));
   });
 
+  // The refused-correction message. Its whole value is that a human can tell an attribution
+  // repair from a stat anomaly at a glance, so a server copy that has drifted into saying
+  // something the tested copy does not say is worse than no message at all.
+  it('carries js/corrections.js verbatim', () => {
+    const canonical = canonicalTail(read('js/corrections.js'), 'export const CORRECTION_ROW_LIMIT');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/corrections.js — the correction classifier and its Slack text must be identical in both'
+    );
+  });
+
   it('carries js/roundPreview.js verbatim', () => {
     const canonical = canonicalTail(read('js/roundPreview.js'), 'export function fmtPreviewScore');
     assert.ok(

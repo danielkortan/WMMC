@@ -209,6 +209,46 @@ It installs `wmmc.*` helpers:
      output to Claude with `SCOREFIX`** and it will pinpoint and patch it.
 6. **Confirm** the scoreboard looks right; the next 7am post will carry the corrected numbers.
 
+## Corrections sweep refused a week (Slack alert) — troubleshooting
+
+Every Wednesday the sweep re-syncs each completed week into a throwaway clone and measures it. A
+movement over `MLB_CORRECTION_MAX_SWING` (default 15) is **refused and posted**, never written.
+
+**Read the verdict line at the bottom of the post first.** It tells you which of two opposite
+problems this is:
+
+- **`Every row that moved changed OWNER, not score`** — a roster fix (an undone swap, a corrected
+  date) that never reached this week's cached rows. Closed weeks are never rebuilt, so the stat
+  row keeps a stale `manager` and the points sit with the wrong manager or with nobody. **Re-syncing
+  the week IS the repair:** `POST /api/mlb/sync { year, round, week }`. Do it — the alert re-fires
+  every Wednesday forever otherwise, and the scoreboard is wrong in the meantime.
+- **`Every row that moved changed SCORE, with no change of owner`** — a genuine data difference.
+  Look before writing: the classic cause is a postponed game counted in its originally scheduled
+  week (see MEMORY 2026-08-05, bug 1). Diagnose with `POST /api/mlb/resync-dryrun { year, round,
+week }` and open the gamePk before syncing.
+- **`row(s) would be ADDED or REMOVED`** — a re-sync would delete stored rows and take their
+  points with them. Never write this without knowing which rows.
+
+**A refusal is now recorded, not just posted.** `sd.correction_flags` holds every outstanding
+refusal until a later sweep finds that week clean or adopts it. **Closing the season is blocked
+while any flag stands** — those weeks feed the bracket, the placements and the permanent record.
+The close offers a confirm to override; take it only if you know what the flag is.
+
+To see the current state without waiting for Wednesday, run the sweep as a report — it returns
+`outstanding_flags` and `refusal_message` (exactly what Slack would say):
+
+```bash
+curl -s -X POST https://wmmc.live/api/mlb/apply-corrections \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"year":"2026","dryRun":true}' | jq '{flagged, outstanding_flags, refusal_message}'
+```
+
+**Note what `resync-dryrun`'s `player_diffs` cannot show you**: it compares `weekly_score`, so a row
+that only changed OWNER does not appear in it at all, and a row the re-sync would DELETE does not
+either. The refusal post's row list covers both; the dry run does not.
+
 ## Diagnosing a stats problem
 
 1. **Data check** — per-week stored daily/weekly counts + attribution. Confirms whether a week

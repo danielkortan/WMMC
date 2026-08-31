@@ -1426,6 +1426,14 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // that wiped them would silently split those two apart again.
     if (existingSd.hot_takes) sd.hot_takes = existingSd.hot_takes;
 
+    // Refused-correction flags are the same family, with one extra reason to be careful: the
+    // season close reads them to decide whether it is safe to certify. A stale save that wiped
+    // them would silently re-open the door this guard exists to hold shut. Deleted rather than
+    // merged when the server has none, so a payload carrying an old copy cannot resurrect a
+    // flag a later sweep already cleared.
+    if (existingSd.correction_flags) sd.correction_flags = existingSd.correction_flags;
+    else delete sd.correction_flags;
+
     // The season-close record is server-authoritative for the same reason: it is written only
     // by POST /close and cleared only by POST /reopen, and it is what every scheduler reads to
     // decide whether to run at all. A stale full-season save from a browser that still had the
@@ -10096,6 +10104,209 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
 // the league's history; refusing them is how it gets noticed.
 const CORRECTION_MAX_SWING = Number(process.env.MLB_CORRECTION_MAX_SWING || 15);
 
+// ============================================================
+// Late stat corrections — what a refused swing is made of
+// ============================================================
+// Mirror of js/corrections.js (canonical, unit-tested). server.js cannot import the ESM copy,
+// so the two must stay identical — tests/serverMirrors.test.js enforces it. See that module for
+// why an owner change and a score change are different problems with opposite responses.
+
+const CORRECTION_ROW_LIMIT = 6;
+
+const correctionRound2 = (n) => Math.round(n * 100) / 100;
+
+// A signed score, for prose: 31.1 reads as "+31.1", -7.3 as "-7.3".
+function fmtCorrectionDelta(n) {
+  const v = correctionRound2(n || 0);
+  return `${v > 0 ? '+' : ''}${v}`;
+}
+
+const correctionManagerLabel = (m) => m || '(nobody)';
+const correctionTypeLabel = (t) => (t === 'batting' ? 'bat' : 'pit');
+
+// One row's before/after, classified.
+//
+// `kind` answers "what changed about this row":
+//   'score'   — the numbers moved, the owner did not. A stat difference.
+//   'owner'   — the numbers are identical, the row changed hands. An attribution repair.
+//   'both'    — both moved.
+//   'added' / 'removed' — the row did not exist on one side. A re-sync creating or purging a
+//               row is neither a stat correction nor an attribution fix, and the removal case
+//               is invisible to any diff that only walks the rows that exist afterwards.
+//
+// `impact` is what the row can move on a scoreboard, which is NOT the same as its score delta:
+// an owner-only change moves the row's whole score from one manager to another, so a 31.1-point
+// row that changed hands is a 31.1-point event even though its delta is zero.
+function classifyCorrectionRow(row) {
+  const storedScore = correctionRound2(row.storedScore || 0);
+  const resyncScore = correctionRound2(row.resyncScore || 0);
+  const storedManager = row.storedManager || null;
+  const resyncManager = row.resyncManager || null;
+  const scoreDiff = correctionRound2(resyncScore - storedScore);
+  const ownerChanged = storedManager !== resyncManager;
+
+  let kind = null;
+  if (row.existedBefore === false) kind = 'added';
+  else if (row.existsAfter === false) kind = 'removed';
+  else if (scoreDiff !== 0 && ownerChanged) kind = 'both';
+  else if (scoreDiff !== 0) kind = 'score';
+  else if (ownerChanged) kind = 'owner';
+
+  const impact =
+    kind === 'owner' || kind === 'both'
+      ? Math.max(Math.abs(scoreDiff), Math.abs(resyncScore), Math.abs(storedScore))
+      : Math.abs(kind === 'removed' ? storedScore : scoreDiff);
+
+  return {
+    player: row.player,
+    type: row.type,
+    storedScore,
+    resyncScore,
+    storedManager,
+    resyncManager,
+    scoreDiff,
+    ownerChanged,
+    kind,
+    impact: correctionRound2(impact),
+  };
+}
+
+// Every row that moved, biggest first, plus the week's verdict.
+//
+// The verdict is the sentence a commissioner reads instead of opening a console:
+//   'attribution' — nothing's score changed; only owners did. A roster fix that never reached
+//                   this week. Re-syncing the week is the repair, not a risk.
+//   'stats'       — only scores changed. A genuine data difference; look before writing.
+//   'mixed'       — both, so look at the owner rows first: those are usually the repair.
+//   'none'        — nothing moved at row level (the swing came from somewhere else entirely,
+//                   which is itself worth knowing).
+function summarizeCorrectionRows(rows) {
+  const classified = (rows || [])
+    .map(classifyCorrectionRow)
+    .filter((r) => r.kind)
+    .sort((a, b) => b.impact - a.impact || String(a.player).localeCompare(String(b.player)));
+
+  const scoreMoved = classified.filter((r) => r.kind === 'score' || r.kind === 'both').length;
+  const ownerMoved = classified.filter((r) => r.kind === 'owner' || r.kind === 'both').length;
+  const structural = classified.filter((r) => r.kind === 'added' || r.kind === 'removed').length;
+
+  let verdict = 'none';
+  if (classified.length) {
+    if (scoreMoved && ownerMoved) verdict = 'mixed';
+    else if (ownerMoved) verdict = 'attribution';
+    else if (scoreMoved) verdict = 'stats';
+    // Only rows appearing or vanishing. Neither a stat correction nor an attribution fix, and
+    // worth its own name: a re-sync that would DELETE a stored row is the one shape of this
+    // that silently removes points nobody asked to remove.
+    else verdict = 'structural';
+  }
+
+  return { rows: classified, scoreMoved, ownerMoved, structural, verdict };
+}
+
+// One row as a Slack bullet. The owner case leads with the handover, because that is the whole
+// point of the line; the score case leads with the numbers, for the same reason.
+function correctionRowLine(r) {
+  const where = `\u{2022} *${r.player}* (${correctionTypeLabel(r.type)})`;
+  if (r.kind === 'added') {
+    return `${where} — row did not exist before, now ${r.resyncScore} pts (owner ${correctionManagerLabel(r.resyncManager)})`;
+  }
+  if (r.kind === 'removed') {
+    return `${where} — row would be REMOVED, was ${r.storedScore} pts (owner ${correctionManagerLabel(r.storedManager)})`;
+  }
+  if (r.kind === 'owner') {
+    return (
+      `${where} — owner changed: ${correctionManagerLabel(r.storedManager)} \u{2192} ` +
+      `${correctionManagerLabel(r.resyncManager)}, ${r.resyncScore} pts, score unchanged`
+    );
+  }
+  if (r.kind === 'both') {
+    return (
+      `${where} — owner changed: ${correctionManagerLabel(r.storedManager)} \u{2192} ` +
+      `${correctionManagerLabel(r.resyncManager)}, and score ${r.storedScore} \u{2192} ${r.resyncScore} ` +
+      `(${fmtCorrectionDelta(r.scoreDiff)})`
+    );
+  }
+  return `${where} — score ${r.storedScore} \u{2192} ${r.resyncScore} (${fmtCorrectionDelta(r.scoreDiff)}), owner unchanged`;
+}
+
+// The one line that tells the commissioner what to DO about this week.
+function correctionVerdictLine(summary) {
+  if (summary.verdict === 'attribution') {
+    return (
+      `_Every row that moved changed OWNER, not score._ That is a roster fix (an undone swap, a ` +
+      `corrected date) that never reached this closed week's cached rows — re-syncing the week is ` +
+      `the repair, not a risk. Points are currently credited to the wrong manager, or to nobody.`
+    );
+  }
+  if (summary.verdict === 'stats') {
+    return (
+      `_Every row that moved changed SCORE, with no change of owner._ That is a genuine stat ` +
+      `difference — check for a game counted in the wrong week before writing it.`
+    );
+  }
+  if (summary.verdict === 'structural') {
+    return (
+      `_${summary.structural} row(s) would be ADDED or REMOVED, with no score or owner change on ` +
+      `any existing row._ A re-sync that deletes a stored row takes its points with it — check what ` +
+      `those rows are before writing this.`
+    );
+  }
+  if (summary.verdict === 'mixed') {
+    return (
+      `_${summary.ownerMoved} row(s) changed owner and ${summary.scoreMoved} changed score._ Look at ` +
+      `the owner rows first — those are usually a roster fix that never reached this week, not an anomaly.`
+    );
+  }
+  return `_No stat row moved at all_ — the swing came from outside this week's rows. Worth a look on its own.`;
+}
+
+// The refused-week Slack post.
+//
+// `flagged` is [{ week, maxSwing, diffs: [{ manager, diff }], summary }] — already-derived
+// facts, one entry per refused week. `summary` is what summarizeCorrectionRows returned, and
+// may be absent (a caller that could not capture rows still gets the old, thinner message
+// rather than no message).
+function buildCorrectionRefusalText(flagged, threshold) {
+  const weeks = flagged || [];
+  if (!weeks.length) return '';
+
+  const head =
+    `:warning: *WMMC corrections sweep refused ${weeks.length} week(s).* A re-sync wanted to move a ` +
+    `manager by more than ${threshold} pts, which is too large to be a stat correction. Nothing was written.`;
+
+  const blocks = weeks.map((w) => {
+    const movers = (w.diffs || []).map((d) => `${d.manager} ${fmtCorrectionDelta(d.diff)}`).join(', ');
+    const lines = [`*${w.week}* — ${movers || 'no manager named'}`];
+
+    // A summary that found NO moved rows is not the same as no summary at all, and the
+    // difference matters: the first says "we looked and the swing is not in this week's rows",
+    // which is a finding; the second says "we could not look", which is a thinner message.
+    // Only the row bullets are conditional on there being rows — the verdict always prints.
+    const summary = w.summary;
+    if (summary) {
+      for (const r of summary.rows.slice(0, CORRECTION_ROW_LIMIT)) lines.push(correctionRowLine(r));
+      const hidden = summary.rows.length - CORRECTION_ROW_LIMIT;
+      if (hidden > 0) lines.push(`\u{2022} …and ${hidden} more row(s)`);
+      lines.push(correctionVerdictLine(summary));
+    }
+    return lines.join('\n');
+  });
+
+  return [head, ...blocks].join('\n\n');
+}
+
+// The same facts, compressed to one line per week for a console log.
+function correctionRefusalLogLine(flagged) {
+  return (flagged || [])
+    .map((w) => {
+      const movers = (w.diffs || []).map((d) => `${d.manager} ${fmtCorrectionDelta(d.diff)}`).join(', ');
+      const verdict = w.summary ? ` [${w.summary.verdict}]` : '';
+      return `${w.week}${verdict}: ${movers}`;
+    })
+    .join(' | ');
+}
+
 // Per-manager total differences between two score snapshots, largest first.
 function totalsDelta(before, after) {
   const out = [];
@@ -10105,6 +10316,52 @@ function totalsDelta(before, after) {
     if (Math.abs(a - b) >= 0.01) out.push({ manager, before: r2s(b), after: r2s(a), diff: r2s(a - b) });
   }
   return out.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff));
+}
+
+// One week's weekly rows as { score, manager } keyed by type + player — the raw material the
+// correction classifier needs. Both halves matter: the score answers "did the stats change",
+// the manager answers "did this row change hands", and a swing made entirely of the second kind
+// is a roster repair the sweep should not be treating as a data anomaly.
+function correctionRowSnapshot(sd, schedWeek) {
+  const snap = new Map();
+  const take = (rows, playerKey, type) => {
+    for (const r of rows || []) {
+      if (r.round !== schedWeek.round || r.week !== schedWeek.week) continue;
+      snap.set(`${type}\0${r[playerKey]}`, {
+        player: r[playerKey],
+        type,
+        score: r.weekly_score || 0,
+        manager: r.manager || null,
+      });
+    }
+  };
+  take(sd.weekly_batting, 'batter', 'batting');
+  take(sd.weekly_pitching, 'pitcher', 'pitching');
+  return snap;
+}
+
+// Before/after for every row of one week, including the rows that exist on only one side.
+// Walking the UNION rather than the post-sync rows is deliberate: a re-sync that would DELETE a
+// row is invisible to any diff built from what survives, and a deletion is exactly the kind of
+// thing worth refusing over.
+function diffCorrectionRows(before, after) {
+  const out = [];
+  for (const key of new Set([...before.keys(), ...after.keys()])) {
+    const b = before.get(key);
+    const a = after.get(key);
+    const ref = b || a;
+    out.push({
+      player: ref.player,
+      type: ref.type,
+      storedScore: b ? b.score : 0,
+      resyncScore: a ? a.score : 0,
+      storedManager: b ? b.manager : null,
+      resyncManager: a ? a.manager : null,
+      existedBefore: !!b,
+      existsAfter: !!a,
+    });
+  }
+  return out;
 }
 
 // Move one week's stat rows from a synced clone into the live season. Surgical on purpose: only
@@ -10241,6 +10498,7 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
       // twice.
       clone = JSON.parse(JSON.stringify(target));
       const before = captureScoreSnapshot(clone, todayISO).totals;
+      const beforeRows = correctionRowSnapshot(clone, schedWeek);
       await performMLBSync(clone, schedWeek, dates, { trigger: 'auto', note: 'corrections-sweep' });
       const diffs = totalsDelta(before, captureScoreSnapshot(clone, todayISO).totals);
 
@@ -10250,7 +10508,13 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
       }
       const maxSwing = Math.max(...diffs.map((d) => Math.abs(d.diff)));
       if (maxSwing > threshold) {
-        results.push({ week: label, status: 'flagged', max_swing: maxSwing, diffs });
+        // Refused. Say what the swing is MADE of, not just how big it is — a week whose rows all
+        // changed owner and none changed score is a roster fix waiting to land, and reading that
+        // off the message is the difference between a minute and an afternoon.
+        const summary = summarizeCorrectionRows(
+          diffCorrectionRows(beforeRows, correctionRowSnapshot(clone, schedWeek))
+        );
+        results.push({ week: label, status: 'flagged', max_swing: maxSwing, diffs, summary });
         continue;
       }
       adoptWeekRows(target, clone, schedWeek);
@@ -10266,6 +10530,79 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
     outcomeChanges = adopted ? diffRoundOutcomes(outcomesBefore, captureRoundOutcomes(db, target)) : [];
   }
   return { results, outcomeChanges };
+}
+
+// Remember which weeks the sweep refused, so the refusal outlives the Slack message.
+//
+// The sweep used to be stateless, which meant a refused week had no existence anywhere except a
+// post in a channel: it re-alerted every Wednesday, said the same thing, and nothing downstream
+// could know it was outstanding. That is how a season got certified on top of one. `sd`
+// carries the flags now — set when a week is refused, CLEARED the moment a later sweep finds
+// that week clean or adopts it, so a repaired week stops flagging itself with no human step.
+//
+// A week that errored is left exactly as it was: an MLB fetch that fell over is not evidence
+// that a previously refused week is fine now.
+function recordCorrectionFlags(sd, results, todayISO) {
+  const flags = sd.correction_flags && typeof sd.correction_flags === 'object' ? sd.correction_flags : {};
+  for (const r of results || []) {
+    if (r.status === 'flagged') {
+      flags[r.week] = {
+        first_seen: (flags[r.week] && flags[r.week].first_seen) || todayISO,
+        last_seen: todayISO,
+        max_swing: r.max_swing,
+        verdict: (r.summary && r.summary.verdict) || null,
+        diffs: r.diffs || [],
+        rows: (r.summary && r.summary.rows) || [],
+      };
+    } else if (r.status === 'clean' || r.status === 'applied') {
+      delete flags[r.week];
+    }
+  }
+  if (Object.keys(flags).length) sd.correction_flags = flags;
+  else delete sd.correction_flags;
+  return flags;
+}
+
+// Is there an unresolved refusal standing in the way of certifying this season?
+//
+// Written after one was allowed to matter. A week with a refused correction is, by definition, a
+// week whose stored scores the sweep believes are wrong by more than the ceiling — and a
+// completed week's scores are what the bracket, the placements, the roasts, the recap and the
+// permanent history are all computed from. Closing on top of one certifies a number the server
+// already flagged as suspect. The 2026 season closed with SF Week 2 outstanding: a 31.1-point
+// attribution repair sat refused across the semifinal that decided the Championship pairing.
+//
+// It blocks rather than warns, and takes `force` to proceed, because "close the season" is a
+// once-a-year irreversible-feeling action and the commissioner should have to say yes on
+// purpose. Returns null when there is nothing in the way.
+function correctionCloseBlock(sd, force) {
+  const flags = outstandingCorrectionFlags(sd);
+  if (!flags.length || force) return null;
+  const lines = flags.map(
+    (f) =>
+      `${f.week} (${f.managers || 'no manager named'}${f.verdict ? `, looks like a ${f.verdict} problem` : ''}, ` +
+      `first refused ${f.first_seen || 'unknown'})`
+  );
+  return {
+    error:
+      `Cannot close the season — ${flags.length} completed week(s) have a stat correction the sweep REFUSED and ` +
+      `nobody resolved: ${lines.join('; ')}. Those weeks' scores feed the bracket, the placements and the permanent ` +
+      `record. Resolve them first (re-sync the week to accept the correction, or fix the underlying data), or ` +
+      `re-run with force to close anyway.`,
+    correction_flags: flags,
+    force_required: true,
+  };
+}
+
+// The outstanding refusals, as lines a human can read in an error message or a confirm dialog.
+function outstandingCorrectionFlags(sd) {
+  return Object.entries((sd && sd.correction_flags) || {}).map(([week, f]) => ({
+    week,
+    max_swing: f.max_swing,
+    verdict: f.verdict,
+    first_seen: f.first_seen,
+    managers: (f.diffs || []).map((d) => `${d.manager} ${fmtCorrectionDelta(d.diff)}`).join(', '),
+  }));
 }
 
 // The Slack post for a correction that overturned something. Kept as its own builder, like the
@@ -10303,13 +10640,18 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
     const applied = results.filter((r) => r.status === 'applied' || r.status === 'would_apply');
     const flagged = results.filter((r) => r.status === 'flagged');
 
-    if (!dryRun && applied.length) {
-      addAuditEntry(db, 'mlb_corrections_applied', {
-        year,
-        threshold,
-        weeks: applied.map((r) => r.week),
-        outcome_changes: outcomeChanges,
-      });
+    if (!dryRun) {
+      // Flags are recorded even when nothing was adopted: a run that refuses every week still
+      // changed what we know, and a run that finds a previously refused week clean must clear it.
+      recordCorrectionFlags(sd, results, todayET);
+      if (applied.length) {
+        addAuditEntry(db, 'mlb_corrections_applied', {
+          year,
+          threshold,
+          weeks: applied.map((r) => r.week),
+          outcome_changes: outcomeChanges,
+        });
+      }
       db.seasons[year] = sd;
       writeDB(db);
     }
@@ -10320,6 +10662,10 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
       applied: applied.length,
       flagged: flagged.length,
       outcome_changes: outcomeChanges,
+      // Exactly what the Wednesday sweep would post for these refusals — so the message can be
+      // read here, on demand, instead of by waiting a week for a cron.
+      refusal_message: buildCorrectionRefusalText(flagged, threshold) || null,
+      outstanding_flags: outstandingCorrectionFlags(sd),
       results,
     });
   } catch (e) {
@@ -17591,7 +17937,7 @@ function collectSeasonRecapFacts(db, sd, year) {
 async function generateSeasonRecapWithClaude(facts) {
   if (!ANTHROPIC_API_KEY) {
     console.log('[Season recap] Using the static bank: ANTHROPIC_API_KEY is not set.');
-    return { text: fallbackSeasonRecap(facts), source: 'bank:no_api_key' };
+    return { text: fallbackSeasonRecap(facts), source: 'bank:no_api_key', reason: 'ANTHROPIC_API_KEY is not set' };
   }
 
   const s = facts.superlatives || {};
@@ -17667,14 +18013,22 @@ Write the season-in-review now.`;
         body.slice(0, 500)
       );
       console.log(`[Season recap] Using the static bank: HTTP ${resp.status}.`);
-      return { text: fallbackSeasonRecap(facts), source: `bank:http_${resp.status}` };
+      return {
+        text: fallbackSeasonRecap(facts),
+        source: `bank:http_${resp.status}`,
+        reason: `Anthropic HTTP ${resp.status}: ${body.slice(0, 200) || '(no body)'}`,
+      };
     }
     const data = await resp.json();
     const text = anthropicReplyText(data);
     if (!text) {
-      console.error(`[Season recap] Empty reply — ${describeAnthropicReply(data)}`);
+      // describeAnthropicReply is the whole reason this branch is debuggable: block types,
+      // stop_reason and token usage are what tell a refusal apart from a max_tokens cut-off
+      // mid-thinking, and without them "the API returned nothing" is true of both.
+      const shape = describeAnthropicReply(data);
+      console.error(`[Season recap] Empty reply — ${shape}`);
       console.log('[Season recap] Using the static bank: the model returned no text.');
-      return { text: fallbackSeasonRecap(facts), source: 'bank:empty_reply' };
+      return { text: fallbackSeasonRecap(facts), source: 'bank:empty_reply', reason: `empty reply — ${shape}` };
     }
     // Same guard the Hot Takes use: a decimal the fact sheet never contained is a number the
     // model made up, and a made-up number sitting above the real standings is worse than a
@@ -17686,14 +18040,18 @@ Write the season-in-review now.`;
     if (invented.length) {
       console.error(`[Season recap] Reply quoted figures not in the fact sheet: ${invented.join(', ')}`);
       console.log('[Season recap] Using the static bank: the reply quoted an unsupplied figure.');
-      return { text: fallbackSeasonRecap(facts), source: 'bank:invented_figure' };
+      return {
+        text: fallbackSeasonRecap(facts),
+        source: 'bank:invented_figure',
+        reason: `reply quoted figures not in the fact sheet: ${invented.join(', ')}`,
+      };
     }
     console.log(`[Season recap] Written by ${PLAYOFF_COMMENTARY_MODEL}.`);
     return { text: text.trim(), source: PLAYOFF_COMMENTARY_MODEL };
   } catch (e) {
     console.error('[Season recap] Anthropic call failed:', e.name, e.message);
     console.log(`[Season recap] Using the static bank: ${e.message}.`);
-    return { text: fallbackSeasonRecap(facts), source: 'bank:error' };
+    return { text: fallbackSeasonRecap(facts), source: 'bank:error', reason: `${e.name}: ${e.message}` };
   }
 }
 
@@ -17715,12 +18073,18 @@ async function postSeasonRecapSlack(db, year) {
   const text = buildSeasonRecapText(facts, wrap.text);
   if (!text) throw new Error('Season recap came out empty — no champion could be named.');
 
+  // `error` and `fallbackReason` are different questions and are kept apart on purpose:
+  // `error` means the post did not go out, `fallbackReason` means it went out in the static
+  // bank's voice instead of the model's, and says why. Collapsing them is how a season recap
+  // recorded `source: 'bank:error'` next to `error: null` — the one field that could have named
+  // the cause, empty, because a fallback is not a post failure and nothing else carried it.
+  const fallbackReason = wrap.reason || null;
   try {
     await postScoreboardChannelSlack(text);
-    return { posted: true, source: wrap.source, text, facts };
+    return { posted: true, source: wrap.source, fallbackReason, text, facts };
   } catch (e) {
     console.error('[Season recap] Slack post failed:', e.message);
-    return { posted: false, source: wrap.source, text, facts, error: e.message };
+    return { posted: false, source: wrap.source, fallbackReason, text, facts, error: e.message };
   }
 }
 
@@ -18317,6 +18681,10 @@ app.post('/api/seasons/:year/finalize-season', requireCommissioner, (req, res) =
     });
   }
 
+  // Nothing gets certified on top of a correction the sweep refused and nobody resolved.
+  const blocked = correctionCloseBlock(sd, !!(req.body && req.body.force));
+  if (blocked) return res.status(409).json(blocked);
+
   if (!Array.isArray(sd.finalized_rounds)) sd.finalized_rounds = [];
   if (!sd.finalized_rounds.includes('Finals')) sd.finalized_rounds.push('Finals');
   if (!Array.isArray(sd.losers_dumped)) sd.losers_dumped = [];
@@ -18373,6 +18741,11 @@ app.post('/api/seasons/:year/close', requireCommissioner, async (req, res) => {
     });
   }
 
+  // Same gate as finalize-season. Checked again here because /close is reachable on its own —
+  // the "Re-run Season Close" button calls it without re-finalizing.
+  const correctionBlock = correctionCloseBlock(sd, !!(req.body && req.body.force));
+  if (correctionBlock) return res.status(409).json(correctionBlock);
+
   const closedAt = new Date().toISOString();
   sd.season_closed = {
     at: (sd.season_closed && sd.season_closed.at) || closedAt,
@@ -18420,8 +18793,14 @@ app.post('/api/seasons/:year/close', requireCommissioner, async (req, res) => {
   const afterSd = (after.seasons || {})[year];
   if (afterSd && afterSd.season_closed) {
     afterSd.season_closed.recap = recap
-      ? { posted: !!recap.posted, source: recap.source, at: new Date().toISOString(), error: recap.error || null }
-      : { posted: false, source: null, at: new Date().toISOString(), error: recapError };
+      ? {
+          posted: !!recap.posted,
+          source: recap.source,
+          at: new Date().toISOString(),
+          error: recap.error || null,
+          fallback_reason: recap.fallbackReason || null,
+        }
+      : { posted: false, source: null, at: new Date().toISOString(), error: recapError, fallback_reason: null };
     writeDB(after);
   }
 
@@ -18429,7 +18808,14 @@ app.post('/api/seasons/:year/close', requireCommissioner, async (req, res) => {
     ok: true,
     placements,
     schedulers: isActiveSeason ? 'stood_down' : 'unchanged',
-    recap: recap ? { posted: recap.posted, source: recap.source, error: recap.error || null } : null,
+    recap: recap
+      ? {
+          posted: recap.posted,
+          source: recap.source,
+          error: recap.error || null,
+          fallback_reason: recap.fallbackReason || null,
+        }
+      : null,
     recap_error: recapError,
     _rev: computeSeasonRev(afterSd),
   });
@@ -19642,20 +20028,17 @@ function scheduleMLBApiSync() {
                   )
                 ).catch(() => {});
               }
+              // Record the refusals (and clear any week that has since been repaired) before the
+              // post, so the flags survive whether or not Slack takes the message.
+              recordCorrectionFlags(sd, sweep, todayET);
               if (flagged.length) {
-                // Too big to be a stat correction. A human should look before this is written.
-                const detail = flagged
-                  .map(
-                    (r) =>
-                      `${r.week}: ${r.diffs.map((d) => `${d.manager} ${d.diff > 0 ? '+' : ''}${d.diff}`).join(', ')}`
-                  )
-                  .join(' | ');
-                console.warn(`[MLB-API] Corrections sweep REFUSED ${flagged.length} week(s): ${detail}`);
-                await postSlack(
-                  `:warning: WMMC corrections sweep refused ${flagged.length} week(s) — a re-sync wanted to move ` +
-                    `a manager by more than ${CORRECTION_MAX_SWING} pts, which is too large to be a stat correction. ` +
-                    `Nothing was written. ${detail}`
-                ).catch(() => {});
+                // Too big to be a stat correction. A human should look before this is written —
+                // and the message now says which KIND of problem each week has, because an
+                // attribution repair and a bad stat feed want opposite responses.
+                console.warn(
+                  `[MLB-API] Corrections sweep REFUSED ${flagged.length} week(s): ${correctionRefusalLogLine(flagged)}`
+                );
+                await postSlack(buildCorrectionRefusalText(flagged, CORRECTION_MAX_SWING)).catch(() => {});
               }
             } catch (e) {
               console.error('[MLB-API] Corrections sweep failed:', e.message);

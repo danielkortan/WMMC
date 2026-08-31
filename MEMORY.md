@@ -10,6 +10,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
+| 2026-08-31 | A refused correction was an attribution repair, and the season closed on top of it                | [MEMORY](#2026-08-31-a-refused-correction-was-an-attribution-repair-and-the-season-closed-on-top-of-it)                           |
 | 2026-08-19 | The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror         | [MEMORY](#2026-08-19-the-slack-swap-post-said-il-swap-while-the-app-said-ilrst-the-label-became-a-mirror)                         |
 | 2026-08-19 | The 3rd-place game's two managers were told to submit a "Finals" roster                           | [MEMORY](#2026-08-19-the-3rd-place-games-two-managers-were-told-to-submit-a-finals-roster)                                        |
 | 2026-08-19 | IL swaps now cover the Restricted List, and two IL statuses the gate had been missing             | [MEMORY](#2026-08-19-il-swaps-now-cover-the-restricted-list-and-two-il-statuses-the-gate-had-been-missing)                        |
@@ -226,6 +227,61 @@ alone.
 Verified in the browser at 1440px and at 390px (no horizontal overflow), on the closed season
 and after reopening it, plus a switch to the archived 2025 season to confirm the announcement
 card clears itself and that banner is untouched.
+
+## 2026-08-31 — A refused correction was an attribution repair, and the season closed on top of it
+
+**What the alert was.** The Wednesday corrections sweep refused SF Week 2 on 8/19 and again on
+8/26: `a re-sync wanted to move a manager by more than 15 pts … SF Week 2: Jamie +31.1`. It read
+as a stat anomaly, which is what the ceiling exists to catch. It was the opposite — a repair the
+ceiling was holding out.
+
+**The actual cause.** Jamie Rogers filed a drop swap (Cantillo out, Lodolo in) on 8/16 after first
+pitch, so its effective date landed on 8/17 — past SF Week 2's end, in the next period. That is the
+bug fixed on 2026-08-18. The swap was undone. `roster_dates` and the roster arrays came back
+correctly; **the weekly row's `manager` field did not**, because `rebuildWeeklyFromDaily` only ever
+runs for the CURRENT week and SF Week 2 had closed. The row stayed stamped `Alex Thalacker` (the
+any-week fallback found him while the drop was live), Jamie had no SF|Week 2 date entry for
+Cantillo (he was added in Week 1), so `managerWeekSubtotal`'s wrong-owner gate skipped it. 31.1
+points were credited to nobody for twelve days, on the live scoreboard, not just in the sweep.
+
+**Why it took six console round-trips.** The refusal message named a number and nothing else, and
+every cheap diagnostic pointed away:
+
+- `resync-dryrun`'s `player_diffs` compares `weekly_score`. Cantillo's score never changed — only
+  his owner did — so the row driving the whole swing **did not appear in the diff at all**. The
+  three rows that did appear (Harrison, Melton, Benintendi) summed to +11.6 and were credited to
+  nobody, before and after: pure noise.
+- `data-debug`'s attribution counts distinguish attributed from null. They cannot see a row
+  stamped to the WRONG manager, and SF|Week 2 looked identical to every other week.
+- The score-guard trail showed no step-down, because the bad swap and its undo both predate the
+  21-day window.
+  The one fact that would have ended it immediately — _the score didn't move, the owner did_ — was
+  computable the whole time and printed nowhere.
+
+**What shipped.** `js/corrections.js` (canonical, unit-tested) ↔ `server.js`, guarded by
+`tests/serverMirrors.test.js`. It classifies every moved row as `owner` / `score` / `both` /
+`added` / `removed`, ranks by what the row can MOVE (an owner-only change has a delta of 0 and an
+impact of its full score — sorting by delta buries exactly the row that matters), and gives the
+week a verdict: `attribution` says re-syncing is the repair, `stats` says look before writing.
+`sweepStatCorrections` captures before/after row snapshots over the UNION of both sides, so a
+re-sync that would DELETE a row is visible too — the dry-run endpoint still can't see that.
+
+**The expensive part.** The sweep was stateless: a refused week existed only as a Slack post, so
+nothing downstream could know one was outstanding. **The 2026 season was closed on 8/31 with SF
+Week 2 still refused** — the semifinal that decided the Championship pairing. It survived: Jamie
+beat Sullivan 509.05 to 483.65 uncorrected, 540.15 after, and the placements are unchanged. It
+survived by 25.4 points while 31.1 were misfiled. `sd.correction_flags` now persists refusals
+(cleared automatically when a later sweep finds the week clean), and both `finalize-season` and
+`/close` refuse to certify over one without `force`.
+
+**Also fixed, same family.** The season recap recorded `source: 'bank:error'` beside
+`error: null` — a fallback is not a post failure, so nothing carried the reason. `error` (the post
+failed) and `fallback_reason` (it went out in the bank's voice, and why) are separate fields now,
+and the empty-reply branch records `describeAnthropicReply(data)`.
+
+**Worth knowing next time.** A big swing on a CLOSED week is more likely to be a stale derived
+cache than bad stat data, because closed weeks are the only ones nothing ever rebuilds. Check the
+row's owner before its score.
 
 ## 2026-08-19 — The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror
 
