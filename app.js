@@ -2476,7 +2476,11 @@ function renderDailyContent(d) {
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No schedule week found for ${d.date}.`;
+    if (statusEl) {
+      statusEl.textContent = d.season_closed
+        ? 'The season is over — live scoring is off.'
+        : `No schedule week found for ${d.date}.`;
+    }
     if (managersEl) managersEl.innerHTML = '';
     return;
   }
@@ -2652,6 +2656,11 @@ function renderDailyContent(d) {
 }
 
 function shouldKeepPolling(data) {
+  // A closed season stops the loop dead rather than winding down through the grace window.
+  // The grace exists so a tab stays live between the last out of one game and the first pitch
+  // of the next; there is no next one, and the server is answering this endpoint without
+  // touching the MLB API at all now.
+  if (data?.season_closed) return false;
   const hasLive = (data?.summary?.games_live ?? 0) > 0;
   const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
   return hasLive || withinGrace;
@@ -2714,7 +2723,11 @@ function renderLiveContent(d) {
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No active schedule week for ${d.today}.`;
+    if (statusEl) {
+      statusEl.textContent = d.season_closed
+        ? 'The season is over — live scoring is off.'
+        : `No active schedule week for ${d.today}.`;
+    }
     if (managersEl) managersEl.innerHTML = '';
     if (gamesEl) gamesEl.innerHTML = '';
     return;
@@ -15353,22 +15366,43 @@ function renderWeeklyUploadSections() {
         }
       }
     } else if (i === 15) {
-      // Week 16 (Finals Week 2) - End Finals
-      const finalsFinalized = finalized.includes('Finals');
-      const finalsDumped = (sd.losers_dumped || []).includes('Finals');
-      html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals')" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
-          ${finalsFinalized ? 'Season Complete' : 'End Finals'}
-        </button>
-        ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
+      // Week 16 (Finals Week 2) — End Finals & Close Season.
+      //
+      // ONE button, deliberately. This used to be two: "End Finals" wrote a flag, and every
+      // visible thing a season ending is supposed to produce — the four roasts, the Hall of
+      // Shame post — sat behind a second button that only appeared afterwards. A season ended
+      // with neither, because nobody knew to press it. The whole close is one action now, and
+      // it is re-runnable, which is what the second button underneath is for.
+      const closed = sd.season_closed && sd.season_closed.at;
+      if (!closed) {
+        const finalsFinalized = finalized.includes('Finals');
+        html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm btn-accent" onclick="endFinalsAndCloseSeason()">End Finals &amp; Close Season</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">
+          Crowns the champion, roasts all four Finals-week managers, posts the Hall of Shame and the season recap to Slack, and turns off every scheduled job &mdash; no more daily syncs, Slack posts or MLB polling.
+        </span>
       </div>`;
-      if (finalsFinalized && !finalsDumped) {
-        html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-danger" onclick="crownChampionAndRoastFinals()">Crown Champion &amp; Roast Runner-up/4th</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Marks the runner-up and 4th-place manager eliminated, generates their roasts, and posts the season-ending Hall of Shame to Slack.</span>
-        </div>`;
-      } else if (finalsDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Champion crowned. Runner-up/4th roasted.</span></div>`;
+        if (finalsFinalized) {
+          html += `<div style="margin-top:0.5rem;"><span class="text-muted" style="font-size:0.78rem;">The Finals round is already marked finalized, but the season has not been closed &mdash; run this to finish it.</span></div>`;
+        }
+      } else {
+        const closedOn = fmtServerTimestamp(sd.season_closed.at);
+        const recap = sd.season_closed.recap || {};
+        const recapNote = recap.posted
+          ? `Season recap posted${recap.source ? ` (written by ${esc(String(recap.source))})` : ''}.`
+          : `Season recap did NOT post${recap.error ? `: ${esc(String(recap.error))}` : ''}. Re-run to try again.`;
+        html += `<div style="margin-top:0.75rem;">
+        <span class="success-text" style="font-size:0.78rem;">Season closed ${esc(closedOn)}. Champion: ${esc(sd.season_closed.champion || '?')}. All scheduled jobs are off.</span>
+        <div class="${recap.posted ? 'text-muted' : 'error-text'}" style="font-size:0.78rem;margin-top:0.25rem;">${recapNote}</div>
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-secondary" onclick="rerunSeasonClose()">Re-run Season Close</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls all four Finals roasts, reposts the Hall of Shame <em>and</em> the season recap, and re-asserts the shutdown. Safe to run again.</span>
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-danger" onclick="reopenSeason()">Reopen Season</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Turns the scheduled jobs back on (daily sync, 7am Slack post, auto-advance, live scoring). Nothing about the roasts, the recap or the standings changes.</span>
+      </div>`;
         html += roastRepairToolsHtml('Finals');
       }
     }
@@ -15868,82 +15902,184 @@ async function clearRoastsForRound(round) {
   }
 }
 
-// Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
-// bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
-// bookkeeping — the runner-up genuinely did lose the Championship), generate roasts for
-// ALL FOUR participants, and post the combined "season is over" Slack message. Only 4th
-// place gets the plain elimination banner — the top 3 finishers (champion, runner-up, 3rd)
-// are next year's pool-selection captains, so they get the podium treatment (silver/gold/
-// bronze banner + captain reminder) instead of "Hall of Shame", even though the runner-up
-// and 4th place lost the same round. There's no next round to prune submissions from, so
-// this is a separate action rather than folded into finalizeRound('Finals', ...).
-window.crownChampionAndRoastFinals = async function () {
+// End the season, in one action.
+//
+// Everything a season ending is supposed to produce, in the order the league sees it:
+//
+//   1. Finalize the Finals round server-side, which also records the runner-up and the
+//      4th-place manager as eliminated and hands back the authoritative placements.
+//   2. A roast for each of the four managers who played the Finals weeks. Only 4th place gets
+//      the plain elimination banner — the champion, the runner-up and the 3rd-place winner are
+//      next year's pool-selection captains, so they get the podium treatment instead, even
+//      though the runner-up lost the same round 4th place did.
+//   3. The combined "the season is over" Hall of Shame post.
+//   4. The season recap — final standings, superlatives, career notes, a written wrap — and
+//      the shutdown: every scheduled job off, no more syncs, Slack posts or MLB polling.
+//
+// The placements come from the SERVER (`/final-placements`), not from bracket math run here,
+// so the podium the roasts are written for and the podium the recap crowns are the same
+// answer computed once. Sequential throughout: each generate-roast is a read-modify-write of
+// db.json, so concurrent calls would clobber each other's stored roast.
+//
+// `regenerate` re-rolls every stored roast instead of keeping what is there — the difference
+// between the first run and the Re-run button.
+async function runSeasonClose({ regenerate = false } = {}) {
+  const setBusy = (msg) => {
+    const el = document.getElementById('weekly-upload-sections');
+    if (el) el.style.opacity = '0.6';
+    console.log(`[Season close] ${msg}`);
+  };
+  const clearBusy = () => {
+    const el = document.getElementById('weekly-upload-sections');
+    if (el) el.style.opacity = '';
+  };
+
+  try {
+    setBusy('Finalizing the Finals round…');
+    const finResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/finalize-season`, { method: 'POST' });
+    const finData = await finResp.json().catch(() => ({}));
+    if (!finResp.ok) {
+      alert(`Could not close the season: ${finData.error || finResp.status}`);
+      return false;
+    }
+    adoptRev(finData._rev);
+    const p = finData.placements || {};
+    if (!p.champion) {
+      alert('Could not determine a champion — make sure the Finals scores are uploaded.');
+      return false;
+    }
+
+    // Re-sync so the eliminations the server just wrote are in the local cache before any
+    // save fired by a re-render can echo a copy that predates them.
+    await resyncSeasonsFromServer();
+
+    const podiumRoles = [
+      { manager: p.champion, outcome: 'champion' },
+      p.runnerUp ? { manager: p.runnerUp, outcome: 'runner_up' } : null,
+      p.third ? { manager: p.third, outcome: 'third' } : null,
+    ].filter(Boolean);
+    const losers = [p.fourth].filter(Boolean);
+
+    setBusy('Writing the roasts…');
+    for (const m of losers) await generateRoastForManager(m, 'Finals');
+    for (const w of podiumRoles) await generateRoastForManager(w.manager, 'Finals', w.outcome);
+
+    setBusy('Posting the Hall of Shame…');
+    const roastsPosted = await postCombinedRoastsToSlack('Finals', null, losers, regenerate, podiumRoles);
+
+    setBusy('Posting the season recap and standing the schedulers down…');
+    const closeResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/close`, { method: 'POST', body: '{}' });
+    const closeData = await closeResp.json().catch(() => ({}));
+    if (!closeResp.ok) {
+      alert(
+        `Roasts are done, but closing the season failed: ${closeData.error || closeResp.status}\n\n` +
+          'The scheduled jobs may still be running. Use "Re-run Season Close" once the problem is fixed.'
+      );
+      return false;
+    }
+    adoptRev(closeData._rev);
+    await resyncSeasonsFromServer();
+
+    const recap = closeData.recap || {};
+    alert(
+      `Season closed.\n\nChampion: ${p.champion}\nRunner-up: ${p.runnerUp}\n3rd place: ${p.third}\n4th place: ${p.fourth}\n\n` +
+        `Roasts: ${roastsPosted ? 'posted to Slack' : 'POST FAILED — check the browser console'}\n` +
+        `Season recap: ${recap.posted ? `posted (written by ${recap.source})` : `NOT POSTED${recap.error || closeData.recap_error ? ` — ${recap.error || closeData.recap_error}` : ''}`}\n` +
+        `Scheduled jobs: ${closeData.schedulers === 'stood_down' ? 'all off' : 'unchanged (this is not the active season)'}`
+    );
+    return true;
+  } catch (e) {
+    console.error('Season close failed:', e);
+    alert(`Season close failed: ${e.message}`);
+    return false;
+  } finally {
+    clearBusy();
+    renderWeeklyUploadSections();
+    init();
+  }
+}
+
+window.endFinalsAndCloseSeason = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
-
-  const matchups = playoffRoundMatchups(sd, 'Finals');
-  if (!matchups) {
-    alert('Finals participants not determined yet — make sure QF and SF are finalized.');
+  if (
+    !confirm(
+      'End the Finals and close the season?\n\nThis crowns the champion, roasts all four Finals-week managers, ' +
+        'posts the Hall of Shame and the season recap to Slack, and turns OFF every scheduled job — the daily ' +
+        'stat sync, the 7am Slack post, the Sunday auto-advance and live scoring.\n\nIt can be undone with "Reopen Season".'
+    )
+  ) {
     return;
   }
-
-  const rosterLookup = buildRosterLookup(sd);
-  const weekKeyToStart = buildWeekKeyToStart();
-  const seedRank = seedRankLookup(sd);
-  const winnerOf = (a, b) =>
-    roundMatchupWinner(
-      a,
-      roundBreakdown(sd, a, 'Finals', rosterLookup, weekKeyToStart).total,
-      b,
-      roundBreakdown(sd, b, 'Finals', rosterLookup, weekKeyToStart).total,
-      seedRank
-    );
-
-  const [champA, champB] = matchups[0].teams.map((t) => t.name);
-  const [thirdA, thirdB] = matchups[1].teams.map((t) => t.name);
-  const champion = winnerOf(champA, champB);
-  const runnerUp = champion === champA ? champB : champA;
-  const third = winnerOf(thirdA, thirdB);
-  const fourth = third === thirdA ? thirdB : thirdA;
-
-  // Top-3 podium finishers — captains for next year's pool selection — get the podium
-  // roast/banner treatment. Only 4th place is a plain elimination.
-  const podiumRoles = [];
-  if (champion) podiumRoles.push({ manager: champion, outcome: 'champion' });
-  if (runnerUp) podiumRoles.push({ manager: runnerUp, outcome: 'runner_up' });
-  if (third) podiumRoles.push({ manager: third, outcome: 'third' });
-
-  const losers = [fourth].filter(Boolean);
-  if (losers.length === 0 && podiumRoles.length === 0) {
-    alert('Could not determine Finals results — make sure scores are uploaded.');
-    return;
-  }
-
-  if (!sd.eliminated) sd.eliminated = {};
-  // Bracket bookkeeping: the runner-up and 4th place both genuinely lost the Championship/
-  // 3rd-place game this round, regardless of which roast banner they get.
-  [runnerUp, fourth].filter(Boolean).forEach((m) => {
-    sd.eliminated[m] = 'Finals';
-  });
-  sd.losers_dumped = sd.losers_dumped || [];
-  sd.losers_dumped.push('Finals');
-  saveSeason(SELECTED_SEASON, sd);
-
-  for (const m of losers) {
-    await generateRoastForManager(m, 'Finals');
-  }
-  for (const w of podiumRoles) {
-    await generateRoastForManager(w.manager, 'Finals', w.outcome);
-  }
-  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, podiumRoles);
-  alert(
-    `Champion: ${champion}. Runner-up: ${runnerUp}. 3rd place: ${third}. 4th place: ${fourth}.` +
-      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
-  );
-  renderWeeklyUploadSections();
-  init();
+  await runSeasonClose();
 };
+
+// Re-run the whole close. Every step of it is idempotent, so this is the one repair action for
+// the lot: a Slack post that failed, a batch of roasts that all came from the static bank, a
+// recap written before a late stat correction, or a shutdown that needs re-asserting after the
+// season was reopened and closed again.
+window.rerunSeasonClose = async function () {
+  if (
+    !confirm(
+      'Re-run the season close?\n\nThis RE-ROLLS all four Finals roasts and posts a NEW Hall of Shame message and a ' +
+        'NEW season recap to the scoreboard channel. It cannot edit the messages already there.'
+    )
+  ) {
+    return;
+  }
+  await runSeasonClose({ regenerate: true });
+};
+
+// Turn the scheduled jobs back on. Deliberately touches nothing else: the roasts, the recap and
+// the standings stay exactly as they are. Reopening is for "a stat correction is still coming"
+// or "I clicked that a week early", not for un-crowning anybody.
+window.reopenSeason = async function () {
+  if (
+    !confirm(
+      'Reopen the season?\n\nThe daily stat sync, the 7am Slack post, the Sunday auto-advance and live scoring all ' +
+        'start running again. The roasts, the recap and the final standings are left alone.'
+    )
+  ) {
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/reopen`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(`Could not reopen the season: ${data.error || resp.status}`);
+      return;
+    }
+    adoptRev(data._rev);
+    await resyncSeasonsFromServer();
+    alert('Season reopened. All scheduled jobs are running again.');
+  } catch (e) {
+    console.error('Season reopen failed:', e);
+    alert(`Could not reopen the season: ${e.message}`);
+  } finally {
+    renderWeeklyUploadSections();
+    init();
+  }
+};
+
+// Pull the server's seasons back into the local cache. Every commissioner action that writes
+// through an atomic endpoint needs this: the server's copy is authoritative for roasts,
+// submissions and the season-close record, and a following full-season save built on a stale
+// local copy is how those get rolled back.
+async function resyncSeasonsFromServer() {
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (!fresh.ok) return false;
+    const serverSeasons = await fresh.json();
+    if (serverSeasons && Object.keys(serverSeasons).length > 0) {
+      setSeasonsLocal(serverSeasons);
+      return true;
+    }
+  } catch (e) {
+    console.error('Season re-sync failed:', e);
+  }
+  return false;
+}
 
 // Call the server to generate and store a roast. `outcome` defaults to the standard
 // "you're eliminated" roast; pass 'champion', 'runner_up', or 'third' for the Finals-round
@@ -15955,13 +16091,7 @@ async function generateRoastForManager(manager, round, outcome) {
       body: JSON.stringify({ manager, round, outcome: outcome || 'eliminated' }),
     });
     // Re-sync seasons from server so roasts appear immediately
-    const fresh = await fetch('/api/seasons');
-    if (fresh.ok) {
-      const serverSeasons = await fresh.json();
-      if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        setSeasonsLocal(serverSeasons);
-      }
-    }
+    await resyncSeasonsFromServer();
   } catch (e) {
     console.error('Roast generation failed for', manager, e);
   }
@@ -16055,15 +16185,7 @@ window.repostRoundRoasts = async function (round) {
   const ok = await postCombinedRoastsToSlack(round, qualifiers, losers, true, podium.length ? podium : undefined);
 
   // Re-sync so the regenerated roasts show on roster pages immediately.
-  try {
-    const fresh = await fetch('/api/seasons');
-    if (fresh.ok) {
-      const serverSeasons = await fresh.json();
-      if (serverSeasons && Object.keys(serverSeasons).length > 0) setSeasonsLocal(serverSeasons);
-    }
-  } catch (e) {
-    console.error('Season re-sync after roast repost failed:', e);
-  }
+  await resyncSeasonsFromServer();
   alert(ok ? 'Roasts regenerated and reposted to Slack.' : 'Slack repost failed — check the browser console.');
   renderWeeklyUploadSections();
 };

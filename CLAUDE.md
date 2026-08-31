@@ -47,7 +47,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
 - `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
-- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `history.js` (the finished-season record + per-manager career facts — mirrored in `server.js`), `playoffCommentary.js` (the daily playoff post's "Hot Takes" — pure, mirrored in `server.js`, no frontend caller yet), `lateSubmission.js` (when a roster submitted after its period's lock takes effect — pure, mirrored in `server.js`), `roundPreview.js` (the round-end post's next-round preview — pure, mirrored in `server.js`, server-only caller), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `history.js` (the finished-season record + per-manager career facts — mirrored in `server.js`), `playoffCommentary.js` (the daily playoff post's "Hot Takes" — pure, mirrored in `server.js`, no frontend caller yet), `lateSubmission.js` (when a roster submitted after its period's lock takes effect — pure, mirrored in `server.js`), `roundPreview.js` (the round-end post's next-round preview — pure, mirrored in `server.js`, server-only caller), `seasonRecap.js` (the end-of-season Slack recap — pure, mirrored in `server.js`, server-only caller), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
 - `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
@@ -139,7 +139,7 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.) The one permitted difference: the `js/scoring.js` entries carry a `label` for the UI and the `server.js` ones do not — `round` and `week` must match exactly.
 - `ROUND_LABELS` is a fourth `server.js` ↔ `js/scoring.js` duplicate, on the same must-stay-identical footing as the three above. (Not to be confused with `app.js`'s `ROUND_LABELS_FOR_ROAST`, which is keyed by bracket stage, where Pool Play is one thing.)
 
-- **`tests/serverMirrors.test.js` mechanizes the "edit both copies" rule** for the pairs it covers — it reads `server.js` as text and fails if a mirrored block has drifted from its `js/` original. It runs no server code. When you intentionally change a mirrored helper, change it in `js/` too and the test goes green again. It currently guards `normalizeName`, `shortManagerNames`, `shortenManagerNamesInSlack`, `js/history.js`, `js/playoffCommentary.js`, `js/roundPreview.js`, the elimination ladder (`lastRoundPlayed`/`isManagerActiveInRound`/`isManagerInRound` from `js/eligibility.js`) and ten functions of the odds engine; extending it to the remaining older pairs (`SCORING`, `detectScoreSwings`) would be a straight win. It has already earned its keep — adding the odds-engine pairs immediately caught a comment that had gone missing from the `server.js` copy of `makeNormalSampler`.
+- **`tests/serverMirrors.test.js` mechanizes the "edit both copies" rule** for the pairs it covers — it reads `server.js` as text and fails if a mirrored block has drifted from its `js/` original. It runs no server code. When you intentionally change a mirrored helper, change it in `js/` too and the test goes green again. It currently guards `normalizeName`, `shortManagerNames`, `shortenManagerNamesInSlack`, `js/history.js`, `js/playoffCommentary.js`, `js/roundPreview.js`, `js/seasonRecap.js`, the elimination ladder (`lastRoundPlayed`/`isManagerActiveInRound`/`isManagerInRound` from `js/eligibility.js`) and ten functions of the odds engine; extending it to the remaining older pairs (`SCORING`, `detectScoreSwings`) would be a straight win. It has already earned its keep — adding the odds-engine pairs immediately caught a comment that had gone missing from the `server.js` copy of `makeNormalSampler`.
 
 - `js/history.js` (canonical, unit-tested) ↔ `server.js` — `WMMC_HISTORICAL_RESULTS` plus `managerPlayoffHistory`/`exitStageForPlace`/`canonicalManagerName`. Same must-stay-identical rule. **Adding a finished season is now a two-file edit**: the table in `js/history.js` (which `app.js` reads off `window` for the Hall of Fame — it no longer holds its own copy) and the mirror in `server.js` (which the daily playoff Slack commentary reads). `HISTORICAL_NAME_ALIASES` maps a manager's old spelling to their current `db.managers` name (`Dan Kortan` → `Daniel Kortan`); the Hall of Fame does **not** apply it yet, so its all-time records still split that career in two — a real bug, just not this file's.
 
@@ -172,6 +172,42 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   labelled (`_History:_ …`) rather than wrapped whole in italics, which is now a style choice
   rather than a workaround — the `\b`-vs-underscore bug that made it necessary was fixed in
   `shortenManagerNamesInSlack` itself.
+
+- **Ending the season is ONE action, and it turns everything off.** "End Finals & Close
+  Season" (`endFinalsAndCloseSeason` → `runSeasonClose`, app.js) drives the whole thing:
+  `POST /finalize-season` (idempotent state write — `eliminated` for the runner-up and 4th
+  ONLY, since the champion and the 3rd-place winner did not go out), four `generate-roast`
+  calls, the existing combined `roasts/slack` post, then `POST /close` for the season recap
+  and the scheduler stand-down. It used to be two buttons and the second one produced all the
+  visible output, which is how a season ended with no roasts and no last word in the channel.
+  **The podium comes from the SERVER** — `finalPlacements` reads `computePlayoffPairs(sd,
+'Finals')`, the same function the Slack results block and the bracket card use, exposed as
+  `GET /final-placements` — so the podium the roasts are written for and the podium the recap
+  crowns are one answer. `finalsScored` is load-bearing: `computePlayoffPairs` resolves a 0-0
+  matchup on the better seed, so before the last week's stats are uploaded it will crown the
+  higher seed of a game nobody has played; `/finalize-season` and `/close` both 409 on it.
+  `js/seasonRecap.js` (canonical, unit-tested) ↔ `server.js` is the recap text itself, on the
+  same must-stay-identical footing as `js/roundPreview.js` and guarded by
+  `tests/serverMirrors.test.js`; the fact-gathering that feeds it (`finalPlacements`,
+  `seasonSuperlatives`, `collectSeasonRecapFacts`, `generateSeasonRecapWithClaude`,
+  `postSeasonRecapSlack`) is server-only glue. Its emoji are **literal Unicode, not
+  shortcodes**, because a recap posts once a year and there is no second chance to notice an
+  unknown one printing as `:text:`.
+
+- **`sd.season_closed` is the off switch, and it is both a flag and a timer teardown.** It
+  gates the 4am MLB sync (the only job that talks to the MLB Stats API), the 7am scoreboard
+  post, the Sunday auto-advance, the Google Sheets sync, the season-welcome post, and
+  `/api/mlb/live` — that last one at the ENDPOINT, because it is what the Live tab polls every
+  two minutes per open browser, not something the cron controls. The flag alone would leave
+  timers firing into a no-op; the teardown alone would last until the next deploy, because an
+  in-memory `setTimeout` does not survive a restart and boot re-arms everything. So boot calls
+  `armSchedulers()` and each `schedule*()` declines to arm itself when the flag is set. Scoped
+  to the **active** season, which is what makes it self-clearing: point `active_season` at next
+  year and the schedulers come back with nothing to remember to unset. Server-authoritative in
+  the full-season save — preserved when the server has one, **deleted** when it does not — so a
+  stale browser tab cannot switch the 4am sync back on, and a stale save cannot undo a reopen.
+  `POST /reopen` (the "Reopen Season" button) clears it and re-arms; it touches nothing about
+  the roasts, the recap or the standings.
 
 - `js/playoffCommentary.js` (canonical, unit-tested) ↔ `server.js` — the "Hot Takes" line banks and the lead-change/blowout/history rules on the daily playoff post, plus `commentaryFactSheet` / `commentaryMentionsUnknownScore` / `tidyCommentaryLine`, which are the pure half of the Anthropic path. Pure throughout: it is handed already-derived facts, so it can never disagree with the scoreboard about a score. Same must-stay-identical rule.
 
