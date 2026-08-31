@@ -7958,6 +7958,8 @@ function buildPlayoffMatchupsSlackText(
 
   let heading;
   let footer = '';
+  // Rendered ABOVE the heading rather than below the matchups — see the Finals branch.
+  let podium = '';
   if (round === 'QF') {
     heading = final ? '\u{1F3C1} *Quarterfinal Results*' : '\u{1F94A} *Quarterfinal Matchups*';
     if (final) footer = `Advancing to the Semifinals: ${pairs.map((p) => `*${p.leader}*`).join(', ')}`;
@@ -7978,8 +7980,13 @@ function buildPlayoffMatchupsSlackText(
     heading = final ? '\u{1F3C1} *Finals Results*' : '\u{1F94A} *Championship & 3rd Place*';
     // The season's last automatic post, so it says the whole finish outright rather than
     // leaving the reader to infer three of the four places from two matchup blocks: one line
-    // per podium step, each naming who beat whom and by how much. Scores go through the same
-    // `fmt` the matchup lines use, so a number can never appear twice in one post wearing two
+    // per podium step, each naming who beat whom and by how much.
+    //
+    // This is the ONE section that goes ABOVE its own heading. The champion is the single
+    // fact the whole post exists to deliver, and Slack folds a long message behind "View
+    // Full Message" from the bottom — so it leads, the rest of the podium sits under it, and
+    // the matchup detail that backs it up follows. Scores go through the same `fmt` the
+    // matchup lines use, so a number can never appear twice in one post wearing two
     // different faces.
     if (final && pairs.length === 2) {
       const [champGame, thirdGame] = pairs;
@@ -7992,9 +7999,9 @@ function buildPlayoffMatchupsSlackText(
         return `${fmt(w)}\u{2013}${fmt(l)} (by ${fmt(w - l)})`;
       };
       const season = year ? `${year} ` : '';
-      footer =
+      podium =
         `\u{1F947} *${champGame.leader} is the ${season}Champion!*\n` +
-        `${champGame.leader} defeats ${runnerUp} ${result(champGame)} to win the Whit Merrifield Memorial Cup. \u{1F3C6}\n\n` +
+        `Defeats ${runnerUp} ${result(champGame)} to win the Whit Merrifield Memorial Cup. \u{1F3C6}\n\n` +
         `\u{1F948} *${runnerUp}* \u{2014} runner-up\n` +
         `\u{1F949} *${thirdGame.leader}* takes 3rd \u{2014} defeats ${fourth} ${result(thirdGame)}\n` +
         `\u{1F4A9} *${fourth}* \u{2014} 4th place`;
@@ -8010,6 +8017,7 @@ function buildPlayoffMatchupsSlackText(
     : '';
 
   return (
+    (podium ? `${podium}\n\n` : '') +
     `${heading}\n\n` +
     pairs.map((p) => matchupText(p.label, p.r, p.a, p.b, p.leader)).join('\n\n') +
     (footer ? `\n\n${footer}` : '') +
