@@ -7913,7 +7913,11 @@ function bracketOddsForPost(sd, todayISO, round) {
 // play's odds sat, next to the name they belong to, and high enough in the post that Slack's
 // "View Full Message" fold can never swallow them. Also dropped when `final`: a finished
 // round's outcome is a fact, not a probability.
-function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals = null, advanceOdds = null } = {}) {
+function buildPlayoffMatchupsSlackText(
+  sd,
+  round,
+  { final = false, dailyTotals = null, advanceOdds = null, year = null } = {}
+) {
   const computed = computePlayoffPairs(sd, round);
   if (!computed) return null;
   const { pairs, score, seedRank } = computed;
@@ -7924,7 +7928,19 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
     return s.endsWith('.0') ? s.slice(0, -2) : s;
   };
 
+  // Win/loss marks on a wrap-up post. Every round but the Finals is a plain advance/out, so
+  // a check and a cross say it all. The Finals is the one round where the four managers finish
+  // in four DIFFERENT places, and the medals say which without the reader having to work out
+  // that the 3rd-place game is the other pair: gold/silver decide the Cup, bronze and the
+  // ignominious fourth decide the consolation game. Unicode literals rather than Slack
+  // shortcodes, like the rest of this builder — an unknown shortcode prints as literal text.
+  const marksFor = (label) => {
+    if (round !== 'Finals') return { win: '\u{2705}', loss: '\u{274C}' };
+    return label === 'Championship' ? { win: '\u{1F947}', loss: '\u{1F948}' } : { win: '\u{1F949}', loss: '\u{1F4A9}' };
+  };
+
   const matchupText = (label, r, a, b, leader) => {
+    const marks = marksFor(label);
     const line = (name) => {
       const s = score(r, name);
       const seedTag = seedRank[name] ? `(${seedRank[name]}) ` : '';
@@ -7934,7 +7950,7 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
         ? ` \u{00B7} ${formatOddsPct(o.advance_pct / 100, o.clinched)}${o.clinched ? ' \u{1F512}' : ''}`
         : '';
       const core = `${seedTag}${name} — ${fmt(s.total)}${delta}${oddsTag}`;
-      const mark = final ? (name === leader ? ' \u{2705}' : ' \u{274C}') : '';
+      const mark = final ? ` ${name === leader ? marks.win : marks.loss}` : '';
       return `\u{25B8} ${name === leader ? `*${core}*` : core} _(B: ${fmt(s.batting)} | P: ${fmt(s.pitching)})_${mark}`;
     };
     return `*${label}*\n${line(a)}\n${line(b)}`;
@@ -7960,8 +7976,28 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
     }
   } else if (round === 'Finals') {
     heading = final ? '\u{1F3C1} *Finals Results*' : '\u{1F94A} *Championship & 3rd Place*';
-    if (final) {
-      footer = `\u{1F3C6} *${pairs[0].leader} wins the Whit Merrifield Memorial Cup!* \u{1F949} ${pairs[1].leader} takes 3rd place.`;
+    // The season's last automatic post, so it says the whole finish outright rather than
+    // leaving the reader to infer three of the four places from two matchup blocks: one line
+    // per podium step, each naming who beat whom and by how much. Scores go through the same
+    // `fmt` the matchup lines use, so a number can never appear twice in one post wearing two
+    // different faces.
+    if (final && pairs.length === 2) {
+      const [champGame, thirdGame] = pairs;
+      const loserOf = (p) => (p.leader === p.a ? p.b : p.a);
+      const runnerUp = loserOf(champGame);
+      const fourth = loserOf(thirdGame);
+      const result = (p) => {
+        const w = score(p.r, p.leader).total;
+        const l = score(p.r, loserOf(p)).total;
+        return `${fmt(w)}\u{2013}${fmt(l)} (by ${fmt(w - l)})`;
+      };
+      const season = year ? `${year} ` : '';
+      footer =
+        `\u{1F947} *${champGame.leader} is the ${season}Champion!*\n` +
+        `${champGame.leader} defeats ${runnerUp} ${result(champGame)} to win the Whit Merrifield Memorial Cup. \u{1F3C6}\n\n` +
+        `\u{1F948} *${runnerUp}* \u{2014} runner-up\n` +
+        `\u{1F949} *${thirdGame.leader}* takes 3rd \u{2014} defeats ${fourth} ${result(thirdGame)}\n` +
+        `\u{1F4A9} *${fourth}* \u{2014} 4th place`;
     }
   }
 
@@ -8133,6 +8169,7 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   if (isPlayoffRound) {
     playoffText = buildPlayoffMatchupsSlackText(seasonData, currentRound, {
       final: !!summaryRound,
+      year,
       dailyTotals: roundDailyTotals,
       // Odds to advance, in the round's final week. Server-computed (4am sync / pre-post
       // backstop) and only read here, so the % beside a manager and the score beside it
@@ -17436,7 +17473,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     // daily scoreboard posts, so Slack can never disagree with itself about who won. Until
     // now a QF or SF round-end post opened straight into the roasts and never once said who
     // had actually advanced.
-    const results = buildPlayoffMatchupsSlackText(sd, round, { final: true });
+    const results = buildPlayoffMatchupsSlackText(sd, round, { final: true, year });
     if (results) summary = `${results}\n\n`;
   }
 
