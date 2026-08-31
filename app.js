@@ -16063,10 +16063,34 @@ async function runSeasonClose({ regenerate = false } = {}) {
     if (el) el.style.opacity = '';
   };
 
+  // A refused stat correction on a completed week blocks the close server-side. It is a real
+  // stop — those weeks feed the bracket and the permanent record — but it is the commissioner's
+  // call, not ours, so the block is offered as a decision rather than a dead end.
+  let force = false;
+  const finalize = () =>
+    apiFetch(`/api/seasons/${SELECTED_SEASON}/finalize-season`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
+
   try {
     setBusy('Finalizing the Finals round…');
-    const finResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/finalize-season`, { method: 'POST' });
-    const finData = await finResp.json().catch(() => ({}));
+    let finResp = await finalize();
+    let finData = await finResp.json().catch(() => ({}));
+    if (!finResp.ok && finData.force_required) {
+      const detail = (finData.correction_flags || [])
+        .map((f) => `  • ${f.week} — ${f.managers || 'no manager named'}${f.verdict ? ` (${f.verdict})` : ''}`)
+        .join('\n');
+      const proceed = confirm(
+        `${finData.error}\n\nOutstanding:\n${detail}\n\n` +
+          'OK = close the season anyway (the placements and the permanent record will be built on ' +
+          'these scores).\nCancel = stop, and resolve the week first.'
+      );
+      if (!proceed) return false;
+      force = true;
+      finResp = await finalize();
+      finData = await finResp.json().catch(() => ({}));
+    }
     if (!finResp.ok) {
       alert(`Could not close the season: ${finData.error || finResp.status}`);
       return false;
@@ -16097,7 +16121,11 @@ async function runSeasonClose({ regenerate = false } = {}) {
     const roastsPosted = await postCombinedRoastsToSlack('Finals', null, losers, regenerate, podiumRoles);
 
     setBusy('Posting the season recap and standing the schedulers down…');
-    const closeResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/close`, { method: 'POST', body: '{}' });
+    // Carries the same force decision — /close re-checks the correction flags independently.
+    const closeResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
     const closeData = await closeResp.json().catch(() => ({}));
     if (!closeResp.ok) {
       alert(
@@ -16113,7 +16141,7 @@ async function runSeasonClose({ regenerate = false } = {}) {
     alert(
       `Season closed.\n\nChampion: ${p.champion}\nRunner-up: ${p.runnerUp}\n3rd place: ${p.third}\n4th place: ${p.fourth}\n\n` +
         `Roasts: ${roastsPosted ? 'posted to Slack' : 'POST FAILED — check the browser console'}\n` +
-        `Season recap: ${recap.posted ? `posted (written by ${recap.source})` : `NOT POSTED${recap.error || closeData.recap_error ? ` — ${recap.error || closeData.recap_error}` : ''}`}\n` +
+        `Season recap: ${recap.posted ? `posted (written by ${recap.source})${recap.fallback_reason ? ` — fell back to the static bank: ${recap.fallback_reason}` : ''}` : `NOT POSTED${recap.error || closeData.recap_error ? ` — ${recap.error || closeData.recap_error}` : ''}`}\n` +
         `Scheduled jobs: ${closeData.schedulers === 'stood_down' ? 'all off' : 'unchanged (this is not the active season)'}`
     );
     return true;
