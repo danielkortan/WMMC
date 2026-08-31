@@ -2228,6 +2228,10 @@ function init() {
       DATA = null;
       showActiveSeason(seasonData);
     }
+    // After the branch, so it runs for both and clears itself on a season that isn't closed —
+    // switching from a closed season to a live one must not leave last year's champion card
+    // sitting above this year's scoreboard.
+    renderSeasonChampionAnnouncement(seasonData);
   } catch (e) {
     console.error('Error rendering season:', e);
   }
@@ -2476,7 +2480,11 @@ function renderDailyContent(d) {
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No schedule week found for ${d.date}.`;
+    if (statusEl) {
+      statusEl.textContent = d.season_closed
+        ? 'The season is over — live scoring is off.'
+        : `No schedule week found for ${d.date}.`;
+    }
     if (managersEl) managersEl.innerHTML = '';
     return;
   }
@@ -2652,6 +2660,11 @@ function renderDailyContent(d) {
 }
 
 function shouldKeepPolling(data) {
+  // A closed season stops the loop dead rather than winding down through the grace window.
+  // The grace exists so a tab stays live between the last out of one game and the first pitch
+  // of the next; there is no next one, and the server is answering this endpoint without
+  // touching the MLB API at all now.
+  if (data?.season_closed) return false;
   const hasLive = (data?.summary?.games_live ?? 0) > 0;
   const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
   return hasLive || withinGrace;
@@ -2714,7 +2727,11 @@ function renderLiveContent(d) {
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No active schedule week for ${d.today}.`;
+    if (statusEl) {
+      statusEl.textContent = d.season_closed
+        ? 'The season is over — live scoring is off.'
+        : `No active schedule week for ${d.today}.`;
+    }
     if (managersEl) managersEl.innerHTML = '';
     if (gamesEl) gamesEl.innerHTML = '';
     return;
@@ -3187,59 +3204,83 @@ function renderScoreboard() {
   renderScoreboardContent();
 }
 
+// The most recent champion crowned BEFORE `year`, from every record we have.
+//
+// Two sources, and the winner is whichever is LATER, not whichever is checked first: the
+// hand-maintained `WMMC_HISTORICAL_RESULTS` table lags by design (adding a finished season to
+// it is a deliberate two-file edit), so the season the app itself just closed is routinely
+// newer than anything in the table. Checking the table first — which is what this used to do —
+// would hand next season's banner the champion from two years ago.
+//
+// Returns { champion, year } or null.
+function previousChampionBefore(year) {
+  const target = parseInt(year, 10);
+  const candidates = [];
+
+  for (const r of WMMC_HISTORICAL_RESULTS) {
+    const y = parseInt(r.year, 10);
+    if (y < target && r.champion) candidates.push({ champion: r.champion, year: r.year });
+  }
+
+  const seasons = getSeasons() || {};
+  for (const [yr, priorSd] of Object.entries(seasons)) {
+    if (parseInt(yr, 10) >= target || !priorSd) continue;
+    // A season this app closed itself: season_closed.champion is written by POST /close from
+    // the server's own bracket math, so it is the same answer the recap crowned.
+    if (priorSd.season_closed && priorSd.season_closed.champion) {
+      candidates.push({ champion: priorSd.season_closed.champion, year: yr });
+      continue;
+    }
+    const legacyWinner =
+      priorSd.status === 'completed' &&
+      priorSd.data &&
+      priorSd.data.bracket &&
+      priorSd.data.bracket.finals &&
+      priorSd.data.bracket.finals.winner;
+    if (legacyWinner) {
+      candidates.push({ champion: legacyWinner, year: yr });
+      continue;
+    }
+    if (priorSd.champion) candidates.push({ champion: priorSd.champion, year: yr });
+  }
+
+  if (!candidates.length) return null;
+  return candidates.reduce((best, c) => (parseInt(c.year, 10) > parseInt(best.year, 10) ? c : best));
+}
+
 function renderChampionBanner() {
   const banner = document.getElementById('champion-banner');
   banner.className = 'champion-banner';
 
-  const seasonComplete = DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner;
+  const sd = (getSeasons() || {})[SELECTED_SEASON];
+  const closed = sd && sd.season_closed && sd.season_closed.at ? sd.season_closed : null;
+  const seasonComplete = !!(DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner) || !!closed;
 
-  // Determine the reigning champion (champion of the most recent completed season)
-  let reigningChampion = null;
-  let reigningYear = null;
-  if (seasonComplete) {
-    reigningChampion = DATA.bracket.finals.winner;
-    reigningYear = SELECTED_SEASON;
-  } else {
-    // Look back through historical results for the most recent champion before this season
-    const hist = [...WMMC_HISTORICAL_RESULTS].reverse().find((r) => parseInt(r.year) < parseInt(SELECTED_SEASON));
-    if (hist) {
-      reigningChampion = hist.champion;
-      reigningYear = hist.year;
-    }
-    // Also check localStorage seasons for prior champions (active seasons that were finalized)
-    if (!reigningChampion) {
-      const seasons = getSeasons();
-      const years = Object.keys(seasons)
-        .map(Number)
-        .sort((a, b) => b - a);
-      for (const yr of years) {
-        if (String(yr) === String(SELECTED_SEASON)) continue;
-        const priorSd = seasons[yr];
-        if (!priorSd) continue;
-        if (
-          priorSd.status === 'completed' &&
-          priorSd.data &&
-          priorSd.data.bracket &&
-          priorSd.data.bracket.finals &&
-          priorSd.data.bracket.finals.winner
-        ) {
-          reigningChampion = priorSd.data.bracket.finals.winner;
-          reigningYear = yr;
-          break;
-        }
-        if (priorSd.champion) {
-          reigningChampion = priorSd.champion;
-          reigningYear = yr;
-          break;
-        }
-      }
-    }
-  }
+  // The champion crowned BY the season being viewed, if it has one. A historical season carries
+  // it on its stored bracket; an active season that has been closed carries it on
+  // season_closed, which the server wrote from computePlayoffPairs.
+  const crowned =
+    DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner
+      ? DATA.bracket.finals.winner
+      : closed
+        ? closed.champion
+        : null;
+
+  // Whoever held it going in. When this season crowned somebody, that name is the OUTGOING
+  // champion and gets struck through above the new one — the banner should read as the title
+  // changing hands, not quietly swap one name for another overnight.
+  //
+  // Scoped to seasons this app closed itself. The archived 2018-2025 seasons predate the
+  // feature and their banner has read the same way for years; rendering "New Champion" with a
+  // line through somebody on a 2019 archive page is a worse answer than leaving it alone.
+  const previous = previousChampionBefore(SELECTED_SEASON);
+  const reigningChampion = crowned || (previous && previous.champion) || null;
+  const reigningYear = crowned ? SELECTED_SEASON : previous && previous.year;
+  const outgoing = closed && crowned && previous && previous.champion !== crowned ? previous : null;
 
   // Determine footer for in-progress or preseason
   let footerHtml = '';
   if (!seasonComplete) {
-    const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
     const between = sd ? getBetweenPeriodsInfo(sd) : null;
 
@@ -3298,19 +3339,86 @@ function renderChampionBanner() {
     }
   }
 
+  // When this season crowned someone, the outgoing holder's name sits above the new one with a
+  // line through it. It is the one place in the app where the title visibly changes hands, and
+  // it costs a row of small text; showing only the new name loses the whole point of the moment.
+  const outgoingHtml = outgoing
+    ? `<div class="banner-champ-outgoing" title="${esc(outgoing.year)} champion"><s>${esc(outgoing.champion)}</s></div>`
+    : '';
   const rightHtml = reigningChampion
-    ? `<div class="banner-right" style="display:flex;align-items:center;gap:0.75rem;">
+    ? `<div class="banner-right${outgoing ? ' banner-right-handover' : ''}" style="display:flex;align-items:center;gap:0.75rem;">
         <div style="font-size:2.5rem;line-height:1;">&#127942;</div>
         <div>
-          <div class="banner-champ-label">Reigning Champion</div>
-          <div class="banner-champ-name">${reigningChampion}</div>
-          <div class="banner-champ-year">${reigningYear} WMMC Champion</div>
+          <div class="banner-champ-label">${outgoing ? 'New Champion' : 'Reigning Champion'}</div>
+          ${outgoingHtml}
+          <div class="banner-champ-name">${esc(reigningChampion)}</div>
+          <div class="banner-champ-year">${esc(String(reigningYear))} WMMC Champion</div>
         </div>
        </div>`
     : '';
 
   // Apply custom background if configured
   applyBannerBackground(banner, rightHtml, footerHtml);
+}
+
+// The end-of-season announcement card: the champion, big, above everything else on the
+// dashboard. Rendered only once the commissioner has closed the season — `sd.season_closed`
+// is written by POST /close from the server's own bracket math, the same answer the Slack
+// recap crowned, so this card cannot name a different champion than the post did.
+//
+// The four names come off that record; the scores are re-derived here through the same
+// roundBreakdown the Playoff Bracket card uses, so the numbers on this card and the numbers
+// on the bracket a few hundred pixels below it are the same numbers.
+function renderSeasonChampionAnnouncement(seasonData) {
+  const el = document.getElementById('season-champion-announcement');
+  if (!el) return;
+
+  const closed =
+    seasonData && seasonData.season_closed && seasonData.season_closed.at ? seasonData.season_closed : null;
+  if (!closed || !closed.champion) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const rosterLookup = buildRosterLookup(seasonData);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const finalsTotal = (name) =>
+    name ? roundBreakdown(seasonData, name, 'Finals', rosterLookup, weekKeyToStart).total : null;
+
+  const champTotal = finalsTotal(closed.champion);
+  const runnerUpTotal = finalsTotal(closed.runner_up);
+  const resultLine =
+    closed.runner_up && champTotal != null && runnerUpTotal != null
+      ? `def. ${esc(closed.runner_up)} ${fmt(champTotal)}&ndash;${fmt(runnerUpTotal)}`
+      : '';
+
+  const podium = [
+    { place: '2nd', medal: '&#129352;', manager: closed.runner_up },
+    { place: '3rd', medal: '&#129353;', manager: closed.third },
+    { place: '4th', medal: '', manager: closed.fourth },
+  ].filter((p) => p.manager);
+
+  const podiumHtml = podium.length
+    ? `<div class="champ-podium">${podium
+        .map((p) => {
+          const total = finalsTotal(p.manager);
+          return `<div class="champ-podium-item">
+            <span class="champ-podium-place">${p.medal ? `${p.medal} ` : ''}${p.place}</span>
+            <span class="champ-podium-name">${esc(p.manager)}</span>
+            ${total != null ? `<span class="champ-podium-score">${fmt(total)}</span>` : ''}
+          </div>`;
+        })
+        .join('')}</div>`
+    : '';
+
+  el.innerHTML = `<div class="card champ-announcement">
+    <div class="champ-announcement-trophy">&#127942;</div>
+    <div class="champ-announcement-label">${esc(String(SELECTED_SEASON))} Whit Merrifield Memorial Cup</div>
+    <div class="champ-announcement-name">${esc(closed.champion)}</div>
+    ${resultLine ? `<div class="champ-announcement-result">${resultLine}</div>` : ''}
+    ${podiumHtml}
+    <div class="champ-announcement-foot">Season complete &mdash; final results below.</div>
+  </div>`;
 }
 
 // Build base banner HTML and apply the custom background (or default gradient)
@@ -5459,13 +5567,29 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     ? `<p class="bracket-odds-legend">&#128302; % = odds to win this matchup, from ${bracketOdds.sims.toLocaleString('en-US')} simulated finishes (games left, projected starts, opponent, park) &middot; &#128274; = decided</p>`
     : '';
 
+  // Once the season is closed, the bracket opens on the games that decided it: the earlier
+  // rounds collapse to a clickable header. Nothing is removed — the whole season is one click
+  // away — but a finished bracket's job is to show who won, not to make you scan past eight
+  // settled quarterfinal scores to find out.
+  const seasonClosed = !!(seasonData.season_closed && seasonData.season_closed.at);
+  const roundOpen = (id) => !seasonClosed || id === 'finals';
+  const roundColumn = (id, label, inner) => {
+    const open = roundOpen(id);
+    return `<div class="bracket-round${open ? '' : ' bracket-round-collapsed'}" id="bracket-round-${id}">
+      <div class="bracket-round-label" onclick="toggleBracketRound('${id}')">
+        <span>${label}</span><span class="bracket-round-arrow">&#9662;</span>
+      </div>
+      <div class="bracket-round-body" id="bracket-round-body-${id}" style="display:${open ? 'block' : 'none'}">${inner}</div>
+    </div>`;
+  };
+
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
     <h2>Playoffs${tentativeLabel}</h2>
     ${oddsLegend}
     <div class="active-bracket">`;
 
   // QF column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Quarterfinals</div>';
+  let qfInner = '';
   const qfWinners = [];
   qfMatchups.forEach((m) => {
     const s1Bd = getRoundBreakdown(m.s1.name, 'QF');
@@ -5473,16 +5597,16 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const qfDone = finalized.includes('QF');
     const winner = qfDone ? roundMatchupWinner(m.s1.name, s1Bd.total, m.s2.name, s2Bd.total, seedRank) : null;
     qfWinners.push(winner);
-    html += `<div class="bracket-matchup">
+    qfInner += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       ${bracketTeamHtml(m.s1.name, `<span class="bracket-seed">${m.s1.seed}</span>`, s1Bd, winner === m.s1.name ? 'bracket-winner' : '', 'QF', m.s2.name)}
       ${bracketTeamHtml(m.s2.name, `<span class="bracket-seed">${m.s2.seed}</span>`, s2Bd, winner === m.s2.name ? 'bracket-winner' : '', 'QF', m.s1.name)}
     </div>`;
   });
-  html += '</div>';
+  html += roundColumn('qf', 'Quarterfinals', qfInner);
 
   // SF column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Semifinals</div>';
+  let sfInner = '';
   const sfMatchups = [
     { label: 'SF1', t1: qfWinners[0] || 'TBD', t2: qfWinners[1] || 'TBD' },
     { label: 'SF2', t1: qfWinners[2] || 'TBD', t2: qfWinners[3] || 'TBD' },
@@ -5500,16 +5624,16 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const loser = winner ? (winner === m.t1 ? m.t2 : m.t1) : null;
     sfWinners.push(winner);
     sfLosers.push(loser);
-    html += `<div class="bracket-matchup">
+    sfInner += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       ${bracketTeamHtml(m.t1, '', s1Bd, winner === m.t1 ? 'bracket-winner' : '', 'SF', m.t2)}
       ${bracketTeamHtml(m.t2, '', s2Bd, winner === m.t2 ? 'bracket-winner' : '', 'SF', m.t1)}
     </div>`;
   });
-  html += '</div>';
+  html += roundColumn('sf', 'Semifinals', sfInner);
 
   // Finals column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Finals</div>';
+  let finalsInner = '';
   const f1 = sfWinners[0] || 'TBD';
   const f2 = sfWinners[1] || 'TBD';
   const f1Bd = f1 !== 'TBD' ? getRoundBreakdown(f1, 'Finals') : { bat: 0, pit: 0, total: 0 };
@@ -5518,7 +5642,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const champion =
     finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? roundMatchupWinner(f1, f1Bd.total, f2, f2Bd.total, seedRank) : null;
 
-  html += `<div class="bracket-matchup">
+  finalsInner += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
     ${bracketTeamHtml(f1, '', f1Bd, champion === f1 ? 'bracket-winner bracket-champion' : '', 'Finals', f2)}
     ${bracketTeamHtml(f2, '', f2Bd, champion === f2 ? 'bracket-winner bracket-champion' : '', 'Finals', f1)}
@@ -5531,15 +5655,28 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const t2Bd = t2 !== 'TBD' ? getRoundBreakdown(t2, 'Finals') : { bat: 0, pit: 0, total: 0 };
   const thirdPlace = finalsDone && t1 !== 'TBD' && t2 !== 'TBD' ? (t1Bd.total >= t2Bd.total ? t1 : t2) : null;
 
-  html += `<div class="bracket-matchup" style="margin-top:1rem;">
+  finalsInner += `<div class="bracket-matchup" style="margin-top:1rem;">
     <div class="bracket-matchup-label">3rd Place</div>
     ${bracketTeamHtml(t1, '', t1Bd, thirdPlace === t1 ? 'bracket-winner' : '', 'Finals', t2)}
     ${bracketTeamHtml(t2, '', t2Bd, thirdPlace === t2 ? 'bracket-winner' : '', 'Finals', t1)}
   </div>`;
 
-  html += '</div></div></div>';
+  html += roundColumn('finals', 'Finals', finalsInner);
+
+  html += '</div></div>';
   return html;
 }
+
+// Expand/collapse one column of the Playoff Bracket card. Every round starts open; a closed
+// season starts with the Quarterfinals and Semifinals shut (see roundColumn).
+window.toggleBracketRound = function (roundId) {
+  const col = document.getElementById('bracket-round-' + roundId);
+  const body = document.getElementById('bracket-round-body-' + roundId);
+  if (!col || !body) return;
+  const isCollapsed = col.classList.contains('bracket-round-collapsed');
+  col.classList.toggle('bracket-round-collapsed', !isCollapsed);
+  body.style.display = isCollapsed ? 'block' : 'none';
+};
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
@@ -5751,7 +5888,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   // showActiveSeason post-render fixup enforces the same state after bracket render.
   const rounds = new Set([...batting.map((b) => b.round), ...pitching.map((p) => p.round)]);
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
-  const ppCollapsed = hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
+  // A closed season opens nothing on this card: the Playoff Bracket above already leads with
+  // the Finals, and `currentSectionId` goes null once the schedule runs out, which would
+  // otherwise fall through to "no current period, so open Pool Play 1" and put a ten-week-old
+  // table at the top of the page on the day the season ended.
+  const seasonClosed = !!(seasonData.season_closed && seasonData.season_closed.at);
+  const ppCollapsed = seasonClosed || hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
 
   // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
   // collapsed-state summary (below) can use them.
@@ -5904,7 +6046,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // Pool Play 1
-  const pp1Open = !currentSectionId || currentSectionId === 'pp1';
+  const pp1Open = !seasonClosed && (!currentSectionId || currentSectionId === 'pp1');
   html += `
     <div class="sb-section${pp1Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp1">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp1')">
@@ -5917,7 +6059,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     </div>`;
 
   // Pool Play 2
-  const pp2Open = currentSectionId === 'pp2';
+  const pp2Open = !seasonClosed && currentSectionId === 'pp2';
   html += `
     <div class="sb-section${pp2Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp2">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp2')">
@@ -15353,22 +15495,43 @@ function renderWeeklyUploadSections() {
         }
       }
     } else if (i === 15) {
-      // Week 16 (Finals Week 2) - End Finals
-      const finalsFinalized = finalized.includes('Finals');
-      const finalsDumped = (sd.losers_dumped || []).includes('Finals');
-      html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals')" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
-          ${finalsFinalized ? 'Season Complete' : 'End Finals'}
-        </button>
-        ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
+      // Week 16 (Finals Week 2) — End Finals & Close Season.
+      //
+      // ONE button, deliberately. This used to be two: "End Finals" wrote a flag, and every
+      // visible thing a season ending is supposed to produce — the four roasts, the Hall of
+      // Shame post — sat behind a second button that only appeared afterwards. A season ended
+      // with neither, because nobody knew to press it. The whole close is one action now, and
+      // it is re-runnable, which is what the second button underneath is for.
+      const closed = sd.season_closed && sd.season_closed.at;
+      if (!closed) {
+        const finalsFinalized = finalized.includes('Finals');
+        html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm btn-accent" onclick="endFinalsAndCloseSeason()">End Finals &amp; Close Season</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">
+          Crowns the champion, roasts all four Finals-week managers, posts the Hall of Shame and the season recap to Slack, and turns off every scheduled job &mdash; no more daily syncs, Slack posts or MLB polling.
+        </span>
       </div>`;
-      if (finalsFinalized && !finalsDumped) {
-        html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-danger" onclick="crownChampionAndRoastFinals()">Crown Champion &amp; Roast Runner-up/4th</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Marks the runner-up and 4th-place manager eliminated, generates their roasts, and posts the season-ending Hall of Shame to Slack.</span>
-        </div>`;
-      } else if (finalsDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Champion crowned. Runner-up/4th roasted.</span></div>`;
+        if (finalsFinalized) {
+          html += `<div style="margin-top:0.5rem;"><span class="text-muted" style="font-size:0.78rem;">The Finals round is already marked finalized, but the season has not been closed &mdash; run this to finish it.</span></div>`;
+        }
+      } else {
+        const closedOn = fmtServerTimestamp(sd.season_closed.at);
+        const recap = sd.season_closed.recap || {};
+        const recapNote = recap.posted
+          ? `Season recap posted${recap.source ? ` (written by ${esc(String(recap.source))})` : ''}.`
+          : `Season recap did NOT post${recap.error ? `: ${esc(String(recap.error))}` : ''}. Re-run to try again.`;
+        html += `<div style="margin-top:0.75rem;">
+        <span class="success-text" style="font-size:0.78rem;">Season closed ${esc(closedOn)}. Champion: ${esc(sd.season_closed.champion || '?')}. All scheduled jobs are off.</span>
+        <div class="${recap.posted ? 'text-muted' : 'error-text'}" style="font-size:0.78rem;margin-top:0.25rem;">${recapNote}</div>
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-secondary" onclick="rerunSeasonClose()">Re-run Season Close</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls all four Finals roasts, reposts the Hall of Shame <em>and</em> the season recap, and re-asserts the shutdown. Safe to run again.</span>
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-danger" onclick="reopenSeason()">Reopen Season</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Turns the scheduled jobs back on (daily sync, 7am Slack post, auto-advance, live scoring). Nothing about the roasts, the recap or the standings changes.</span>
+      </div>`;
         html += roastRepairToolsHtml('Finals');
       }
     }
@@ -15868,82 +16031,184 @@ async function clearRoastsForRound(round) {
   }
 }
 
-// Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
-// bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
-// bookkeeping — the runner-up genuinely did lose the Championship), generate roasts for
-// ALL FOUR participants, and post the combined "season is over" Slack message. Only 4th
-// place gets the plain elimination banner — the top 3 finishers (champion, runner-up, 3rd)
-// are next year's pool-selection captains, so they get the podium treatment (silver/gold/
-// bronze banner + captain reminder) instead of "Hall of Shame", even though the runner-up
-// and 4th place lost the same round. There's no next round to prune submissions from, so
-// this is a separate action rather than folded into finalizeRound('Finals', ...).
-window.crownChampionAndRoastFinals = async function () {
+// End the season, in one action.
+//
+// Everything a season ending is supposed to produce, in the order the league sees it:
+//
+//   1. Finalize the Finals round server-side, which also records the runner-up and the
+//      4th-place manager as eliminated and hands back the authoritative placements.
+//   2. A roast for each of the four managers who played the Finals weeks. Only 4th place gets
+//      the plain elimination banner — the champion, the runner-up and the 3rd-place winner are
+//      next year's pool-selection captains, so they get the podium treatment instead, even
+//      though the runner-up lost the same round 4th place did.
+//   3. The combined "the season is over" Hall of Shame post.
+//   4. The season recap — final standings, superlatives, career notes, a written wrap — and
+//      the shutdown: every scheduled job off, no more syncs, Slack posts or MLB polling.
+//
+// The placements come from the SERVER (`/final-placements`), not from bracket math run here,
+// so the podium the roasts are written for and the podium the recap crowns are the same
+// answer computed once. Sequential throughout: each generate-roast is a read-modify-write of
+// db.json, so concurrent calls would clobber each other's stored roast.
+//
+// `regenerate` re-rolls every stored roast instead of keeping what is there — the difference
+// between the first run and the Re-run button.
+async function runSeasonClose({ regenerate = false } = {}) {
+  const setBusy = (msg) => {
+    const el = document.getElementById('weekly-upload-sections');
+    if (el) el.style.opacity = '0.6';
+    console.log(`[Season close] ${msg}`);
+  };
+  const clearBusy = () => {
+    const el = document.getElementById('weekly-upload-sections');
+    if (el) el.style.opacity = '';
+  };
+
+  try {
+    setBusy('Finalizing the Finals round…');
+    const finResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/finalize-season`, { method: 'POST' });
+    const finData = await finResp.json().catch(() => ({}));
+    if (!finResp.ok) {
+      alert(`Could not close the season: ${finData.error || finResp.status}`);
+      return false;
+    }
+    adoptRev(finData._rev);
+    const p = finData.placements || {};
+    if (!p.champion) {
+      alert('Could not determine a champion — make sure the Finals scores are uploaded.');
+      return false;
+    }
+
+    // Re-sync so the eliminations the server just wrote are in the local cache before any
+    // save fired by a re-render can echo a copy that predates them.
+    await resyncSeasonsFromServer();
+
+    const podiumRoles = [
+      { manager: p.champion, outcome: 'champion' },
+      p.runnerUp ? { manager: p.runnerUp, outcome: 'runner_up' } : null,
+      p.third ? { manager: p.third, outcome: 'third' } : null,
+    ].filter(Boolean);
+    const losers = [p.fourth].filter(Boolean);
+
+    setBusy('Writing the roasts…');
+    for (const m of losers) await generateRoastForManager(m, 'Finals');
+    for (const w of podiumRoles) await generateRoastForManager(w.manager, 'Finals', w.outcome);
+
+    setBusy('Posting the Hall of Shame…');
+    const roastsPosted = await postCombinedRoastsToSlack('Finals', null, losers, regenerate, podiumRoles);
+
+    setBusy('Posting the season recap and standing the schedulers down…');
+    const closeResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/close`, { method: 'POST', body: '{}' });
+    const closeData = await closeResp.json().catch(() => ({}));
+    if (!closeResp.ok) {
+      alert(
+        `Roasts are done, but closing the season failed: ${closeData.error || closeResp.status}\n\n` +
+          'The scheduled jobs may still be running. Use "Re-run Season Close" once the problem is fixed.'
+      );
+      return false;
+    }
+    adoptRev(closeData._rev);
+    await resyncSeasonsFromServer();
+
+    const recap = closeData.recap || {};
+    alert(
+      `Season closed.\n\nChampion: ${p.champion}\nRunner-up: ${p.runnerUp}\n3rd place: ${p.third}\n4th place: ${p.fourth}\n\n` +
+        `Roasts: ${roastsPosted ? 'posted to Slack' : 'POST FAILED — check the browser console'}\n` +
+        `Season recap: ${recap.posted ? `posted (written by ${recap.source})` : `NOT POSTED${recap.error || closeData.recap_error ? ` — ${recap.error || closeData.recap_error}` : ''}`}\n` +
+        `Scheduled jobs: ${closeData.schedulers === 'stood_down' ? 'all off' : 'unchanged (this is not the active season)'}`
+    );
+    return true;
+  } catch (e) {
+    console.error('Season close failed:', e);
+    alert(`Season close failed: ${e.message}`);
+    return false;
+  } finally {
+    clearBusy();
+    renderWeeklyUploadSections();
+    init();
+  }
+}
+
+window.endFinalsAndCloseSeason = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
-
-  const matchups = playoffRoundMatchups(sd, 'Finals');
-  if (!matchups) {
-    alert('Finals participants not determined yet — make sure QF and SF are finalized.');
+  if (
+    !confirm(
+      'End the Finals and close the season?\n\nThis crowns the champion, roasts all four Finals-week managers, ' +
+        'posts the Hall of Shame and the season recap to Slack, and turns OFF every scheduled job — the daily ' +
+        'stat sync, the 7am Slack post, the Sunday auto-advance and live scoring.\n\nIt can be undone with "Reopen Season".'
+    )
+  ) {
     return;
   }
-
-  const rosterLookup = buildRosterLookup(sd);
-  const weekKeyToStart = buildWeekKeyToStart();
-  const seedRank = seedRankLookup(sd);
-  const winnerOf = (a, b) =>
-    roundMatchupWinner(
-      a,
-      roundBreakdown(sd, a, 'Finals', rosterLookup, weekKeyToStart).total,
-      b,
-      roundBreakdown(sd, b, 'Finals', rosterLookup, weekKeyToStart).total,
-      seedRank
-    );
-
-  const [champA, champB] = matchups[0].teams.map((t) => t.name);
-  const [thirdA, thirdB] = matchups[1].teams.map((t) => t.name);
-  const champion = winnerOf(champA, champB);
-  const runnerUp = champion === champA ? champB : champA;
-  const third = winnerOf(thirdA, thirdB);
-  const fourth = third === thirdA ? thirdB : thirdA;
-
-  // Top-3 podium finishers — captains for next year's pool selection — get the podium
-  // roast/banner treatment. Only 4th place is a plain elimination.
-  const podiumRoles = [];
-  if (champion) podiumRoles.push({ manager: champion, outcome: 'champion' });
-  if (runnerUp) podiumRoles.push({ manager: runnerUp, outcome: 'runner_up' });
-  if (third) podiumRoles.push({ manager: third, outcome: 'third' });
-
-  const losers = [fourth].filter(Boolean);
-  if (losers.length === 0 && podiumRoles.length === 0) {
-    alert('Could not determine Finals results — make sure scores are uploaded.');
-    return;
-  }
-
-  if (!sd.eliminated) sd.eliminated = {};
-  // Bracket bookkeeping: the runner-up and 4th place both genuinely lost the Championship/
-  // 3rd-place game this round, regardless of which roast banner they get.
-  [runnerUp, fourth].filter(Boolean).forEach((m) => {
-    sd.eliminated[m] = 'Finals';
-  });
-  sd.losers_dumped = sd.losers_dumped || [];
-  sd.losers_dumped.push('Finals');
-  saveSeason(SELECTED_SEASON, sd);
-
-  for (const m of losers) {
-    await generateRoastForManager(m, 'Finals');
-  }
-  for (const w of podiumRoles) {
-    await generateRoastForManager(w.manager, 'Finals', w.outcome);
-  }
-  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, podiumRoles);
-  alert(
-    `Champion: ${champion}. Runner-up: ${runnerUp}. 3rd place: ${third}. 4th place: ${fourth}.` +
-      (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
-  );
-  renderWeeklyUploadSections();
-  init();
+  await runSeasonClose();
 };
+
+// Re-run the whole close. Every step of it is idempotent, so this is the one repair action for
+// the lot: a Slack post that failed, a batch of roasts that all came from the static bank, a
+// recap written before a late stat correction, or a shutdown that needs re-asserting after the
+// season was reopened and closed again.
+window.rerunSeasonClose = async function () {
+  if (
+    !confirm(
+      'Re-run the season close?\n\nThis RE-ROLLS all four Finals roasts and posts a NEW Hall of Shame message and a ' +
+        'NEW season recap to the scoreboard channel. It cannot edit the messages already there.'
+    )
+  ) {
+    return;
+  }
+  await runSeasonClose({ regenerate: true });
+};
+
+// Turn the scheduled jobs back on. Deliberately touches nothing else: the roasts, the recap and
+// the standings stay exactly as they are. Reopening is for "a stat correction is still coming"
+// or "I clicked that a week early", not for un-crowning anybody.
+window.reopenSeason = async function () {
+  if (
+    !confirm(
+      'Reopen the season?\n\nThe daily stat sync, the 7am Slack post, the Sunday auto-advance and live scoring all ' +
+        'start running again. The roasts, the recap and the final standings are left alone.'
+    )
+  ) {
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/reopen`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(`Could not reopen the season: ${data.error || resp.status}`);
+      return;
+    }
+    adoptRev(data._rev);
+    await resyncSeasonsFromServer();
+    alert('Season reopened. All scheduled jobs are running again.');
+  } catch (e) {
+    console.error('Season reopen failed:', e);
+    alert(`Could not reopen the season: ${e.message}`);
+  } finally {
+    renderWeeklyUploadSections();
+    init();
+  }
+};
+
+// Pull the server's seasons back into the local cache. Every commissioner action that writes
+// through an atomic endpoint needs this: the server's copy is authoritative for roasts,
+// submissions and the season-close record, and a following full-season save built on a stale
+// local copy is how those get rolled back.
+async function resyncSeasonsFromServer() {
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (!fresh.ok) return false;
+    const serverSeasons = await fresh.json();
+    if (serverSeasons && Object.keys(serverSeasons).length > 0) {
+      setSeasonsLocal(serverSeasons);
+      return true;
+    }
+  } catch (e) {
+    console.error('Season re-sync failed:', e);
+  }
+  return false;
+}
 
 // Call the server to generate and store a roast. `outcome` defaults to the standard
 // "you're eliminated" roast; pass 'champion', 'runner_up', or 'third' for the Finals-round
@@ -15955,13 +16220,7 @@ async function generateRoastForManager(manager, round, outcome) {
       body: JSON.stringify({ manager, round, outcome: outcome || 'eliminated' }),
     });
     // Re-sync seasons from server so roasts appear immediately
-    const fresh = await fetch('/api/seasons');
-    if (fresh.ok) {
-      const serverSeasons = await fresh.json();
-      if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        setSeasonsLocal(serverSeasons);
-      }
-    }
+    await resyncSeasonsFromServer();
   } catch (e) {
     console.error('Roast generation failed for', manager, e);
   }
@@ -16055,15 +16314,7 @@ window.repostRoundRoasts = async function (round) {
   const ok = await postCombinedRoastsToSlack(round, qualifiers, losers, true, podium.length ? podium : undefined);
 
   // Re-sync so the regenerated roasts show on roster pages immediately.
-  try {
-    const fresh = await fetch('/api/seasons');
-    if (fresh.ok) {
-      const serverSeasons = await fresh.json();
-      if (serverSeasons && Object.keys(serverSeasons).length > 0) setSeasonsLocal(serverSeasons);
-    }
-  } catch (e) {
-    console.error('Season re-sync after roast repost failed:', e);
-  }
+  await resyncSeasonsFromServer();
   alert(ok ? 'Roasts regenerated and reposted to Slack.' : 'Slack repost failed — check the browser console.');
   renderWeeklyUploadSections();
 };

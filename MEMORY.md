@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
 | 2026-08-19 | The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror         | [MEMORY](#2026-08-19-the-slack-swap-post-said-il-swap-while-the-app-said-ilrst-the-label-became-a-mirror)                         |
 | 2026-08-19 | The 3rd-place game's two managers were told to submit a "Finals" roster                           | [MEMORY](#2026-08-19-the-3rd-place-games-two-managers-were-told-to-submit-a-finals-roster)                                        |
 | 2026-08-19 | IL swaps now cover the Restricted List, and two IL statuses the gate had been missing             | [MEMORY](#2026-08-19-il-swaps-now-cover-the-restricted-list-and-two-il-statuses-the-gate-had-been-missing)                        |
@@ -104,6 +105,127 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-31 — "End Finals" produced neither roasts nor a recap, and left every scheduler running
+
+**What happened.** The commissioner clicked "End Finals", the button greyed out to "Season
+Complete", and nothing else happened: no roasts on the four Finals-week managers' roster pages,
+no end-of-season post in Slack, and every scheduled job still running.
+
+**None of it was a bug.** `finalizeRound('Finals')` only ever pushed `'Finals'` onto
+`sd.finalized_rounds` and saved. The roasts and the Slack post lived behind a SECOND button —
+"Crown Champion & Roast Runner-up/4th" — that only appeared _after_ the first one was pressed,
+and nothing told anybody it was there. A season recap did not exist anywhere in the codebase,
+and nothing had ever turned the schedulers off; the season simply aged out of
+`isWithinSyncWindow` and `scoreboardAutoPostPlan` a day or two later.
+
+The lesson generalises past this button: **a two-step destructive-ish action whose second step
+is the one that produces all the visible output is a one-step action with a trap in it.** The
+first step's own success message ("Season finalized!") is what makes it a trap.
+
+**Now it is one action.** `endFinalsAndCloseSeason` → `runSeasonClose`, which drives:
+
+1. `POST /finalize-season` — idempotent state write (finalized_rounds, losers_dumped, and
+   `eliminated` for the runner-up and 4th only). Returns the placements.
+2. Four `POST /generate-roast` calls — 4th place `eliminated`, the top three by podium outcome.
+3. `POST /roasts/slack` — the existing combined results + Hall of Shame + podium post.
+4. `POST /close` — the new season recap, then the scheduler stand-down.
+
+**The placements come from the server, once.** New `finalPlacements(db, sd)` reads
+`computePlayoffPairs(sd, 'Finals')` — the same function the Slack results block and the bracket
+card use — so the podium the roasts are written for and the podium the recap crowns cannot
+disagree. `GET /final-placements` exposes it; the client no longer runs its own bracket math
+for this. Below the podium the order is 5th–8th by quarterfinal points, then everyone else by
+pool-play total.
+
+**`finalsScored` is the guard that matters.** `computePlayoffPairs` resolves a 0-0 matchup on
+the better seed, which is right as a tie-break and catastrophic as an answer to "who won"
+before the last week's stats are uploaded — it will cheerfully crown the higher seed of a game
+nobody has played. Found by running the whole flow against the staging fixture, whose bracket
+weeks are all empty: it produced a complete, confident, entirely wrong podium. Both writing
+endpoints now 409 on it.
+
+**The recap** is `js/seasonRecap.js` (pure, unit-tested) ↔ `server.js`, guarded by
+`tests/serverMirrors.test.js` — same footing as `js/roundPreview.js`, and for the same reason:
+it is handed already-derived facts and only shapes them, so it can't disagree with the
+scoreboard about a score. Podium with both games' scores, final standings, superlatives,
+career notes, and a written wrap on `PLAYOFF_COMMENTARY_MODEL` (not Haiku — it sits directly
+above a table of real totals and quotes them, exactly like Hot Takes). Every failure path
+returns a four-voice fallback bank, so an outage changes who wrote the season's last post, not
+whether one goes out. Its emoji are literal Unicode rather than shortcodes: a recap posts once
+a year with no second chance to notice a `:tickets:`.
+
+Two things the first live-fire run caught that no unit test would have:
+
+- **A score written from the winner's side reads as a lie on the loser's line.** `> *2nd —
+Drew* — lost the Championship 832.5–781.1` says Drew scored the winning total. `gameLine`
+  now takes the manager it is being written for.
+- Manager names are shortened at the send boundary, so the recap says "Alex" throughout even
+  though every builder writes full names. Working as designed — worth knowing before you go
+  looking for where it happens.
+
+**Closing turns everything off, and it is reversible.** `sd.season_closed` gates the 4am MLB
+sync (the only job that talks to the MLB API), the 7am scoreboard post, the Sunday
+auto-advance, the Google Sheets sync, the season-welcome post, and `/api/mlb/live` — which is
+the one the Live tab polls every two minutes per open browser, so it had to be gated at the
+endpoint, not just in the cron. It is deliberately BOTH a flag and a timer teardown: the flag
+alone leaves timers firing into a no-op, and tearing timers down alone lasts until the next
+deploy, because boot re-arms everything. Boot now calls `armSchedulers()` and each
+`schedule*()` declines to arm itself — verified by restarting against a closed season and
+seeing four "not armed" lines and nothing scheduled.
+
+It is scoped to the **active** season, which is what makes it self-clearing: point
+`active_season` at next year and the schedulers come back with no flag to remember to unset.
+`season_closed` is server-authoritative in the full-season save (preserved when the server has
+one, **deleted** when it does not) — otherwise a stale browser tab would switch the 4am sync
+back on, and a stale save would undo a reopen.
+
+**"Re-run Season Close"** re-rolls all four roasts and reposts both messages; **"Reopen
+Season"** turns the machinery back on and touches nothing about the roasts, the recap or the
+standings. Reopening is for "a stat correction is still coming" and "I clicked that a week
+early", not for un-crowning anybody.
+
+**Verified** against a scratch `DB_PATH` — the staging fixture extended through QF/SF/Finals,
+webhook pointed at a local sink — by clicking the real button in a real browser: confirm →
+four roasts stored with the right outcomes (champion / runner_up / third / eliminated) → the
+combined post → the recap → "Scheduled jobs: all off", zero page errors, and the panel flipped
+to the closed state with the re-run and reopen buttons.
+
+**The scoreboard now looks like a season that ended.** Closing it is a state change the
+dashboard reads, not a second thing the button has to remember to do — everything below keys
+off `sd.season_closed`, so a reopen puts it all back with no separate teardown:
+
+- A champion announcement card above everything, in its own `#season-champion-announcement`
+  div declared BEFORE both `#scoreboard-content` and `#scoreboard-bracket`. That placement is
+  the load-bearing part: `orderScoreboardBracket` swaps those two around each other once pool
+  play is finalized, so anything rendered into either of them can end up second. The four
+  names come off `season_closed`; the scores are re-derived through the same `roundBreakdown`
+  the bracket card uses, so the card and the bracket below it quote the same numbers.
+- The Playoff Bracket card's rounds became individually collapsible
+  (`toggleBracketRound`), with the Quarterfinals and Semifinals collapsed on a closed season
+  and the Finals column — Championship AND 3rd Place — left open. Nothing is removed; a
+  finished bracket's job is to show who won, not to make you scan eight settled scores first.
+- Pool Play stays collapsed, and PP1/PP2 no longer spring open. `currentSectionId` goes null
+  once the schedule runs out, and `!currentSectionId` was the "open Pool Play 1" branch — so
+  without the guard the day the season ended would have put a ten-week-old table at the top of
+  the page.
+
+**The banner strikes the outgoing champion through.** `previousChampionBefore(year)` replaced
+the inline lookback, and fixed a bug in it on the way: the old version checked
+`WMMC_HISTORICAL_RESULTS` FIRST and only fell back to stored seasons, but that table is a
+deliberate hand-maintained two-file edit and therefore routinely a year behind what the app
+itself just closed. Next season's banner would have named the champion from two years ago. It
+now gathers candidates from both sources and takes the latest year, and it reads
+`season_closed.champion` off a stored season.
+
+The hand-over treatment is scoped to seasons **this app closed** — not to any season with a
+champion. Applied to every crowned season it rendered "New Champion" with a line through
+somebody on the 2019 archive page, which is a worse answer than leaving a nine-year-old banner
+alone.
+
+Verified in the browser at 1440px and at 390px (no horizontal overflow), on the closed season
+and after reopening it, plus a switch to the archived 2025 season to confirm the announcement
+card clears itself and that banner is untouched.
 
 ## 2026-08-19 — The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror
 
