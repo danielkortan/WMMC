@@ -9,6 +9,16 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
+| 2026-08-31 | A refused correction was an attribution repair, and the season closed on top of it                | [MEMORY](#2026-08-31-a-refused-correction-was-an-attribution-repair-and-the-season-closed-on-top-of-it)                           |
+| 2026-08-19 | The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror         | [MEMORY](#2026-08-19-the-slack-swap-post-said-il-swap-while-the-app-said-ilrst-the-label-became-a-mirror)                         |
+| 2026-08-19 | The 3rd-place game's two managers were told to submit a "Finals" roster                           | [MEMORY](#2026-08-19-the-3rd-place-games-two-managers-were-told-to-submit-a-finals-roster)                                        |
+| 2026-08-19 | IL swaps now cover the Restricted List, and two IL statuses the gate had been missing             | [MEMORY](#2026-08-19-il-swaps-now-cover-the-restricted-list-and-two-il-statuses-the-gate-had-been-missing)                        |
+| 2026-08-19 | Missing a roster deadline stopped being a dead end: late submissions, and begging the commish     | [MEMORY](#2026-08-19-missing-a-roster-deadline-stopped-being-a-dead-end-late-submissions-and-begging-the-commish)                 |
+| 2026-08-18 | A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked        | [MEMORY](#2026-08-18-a-swap-on-a-rounds-last-day-stamped-an-add-date-in-the-next-period-and-the-roster-leaked)                    |
+| 2026-08-17 | `\b` treats `_` as a word character, so italicised manager names never got shortened              | [MEMORY](#2026-08-17-b-treats-_-as-a-word-character-so-italicised-manager-names-never-got-shortened)                              |
+| 2026-08-17 | The semifinal was never an elimination round; the 3rd-place game lost its two rosters             | [MEMORY](#2026-08-17-the-semifinal-was-never-an-elimination-round-the-3rd-place-game-lost-its-two-rosters)                        |
+| 2026-08-12 | Branch cleanup, and why `staging` stays                                                           | [MEMORY](#2026-08-12-branch-cleanup-and-why-staging-stays)                                                                        |
 | 2026-08-11 | The scoreboard showed the bracket twice; the odds to advance moved onto the real one              | [MEMORY](#2026-08-11-the-scoreboard-showed-the-bracket-twice-the-odds-to-advance-moved-onto-the-real-one)                         |
 | 2026-08-08 | Hot Takes read like a stat line: units, direction, and number density                             | [MEMORY](#2026-08-08-hot-takes-read-like-a-stat-line-units-direction-and-number-density)                                          |
 | 2026-08-07 | Odds to advance in every round's final week, and the appearance-rate bug it exposed               | [MEMORY](#2026-08-07-odds-to-advance-in-every-rounds-final-week-and-the-appearance-rate-bug-it-exposed)                           |
@@ -96,6 +106,523 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-08-31 — "End Finals" produced neither roasts nor a recap, and left every scheduler running
+
+**What happened.** The commissioner clicked "End Finals", the button greyed out to "Season
+Complete", and nothing else happened: no roasts on the four Finals-week managers' roster pages,
+no end-of-season post in Slack, and every scheduled job still running.
+
+**None of it was a bug.** `finalizeRound('Finals')` only ever pushed `'Finals'` onto
+`sd.finalized_rounds` and saved. The roasts and the Slack post lived behind a SECOND button —
+"Crown Champion & Roast Runner-up/4th" — that only appeared _after_ the first one was pressed,
+and nothing told anybody it was there. A season recap did not exist anywhere in the codebase,
+and nothing had ever turned the schedulers off; the season simply aged out of
+`isWithinSyncWindow` and `scoreboardAutoPostPlan` a day or two later.
+
+The lesson generalises past this button: **a two-step destructive-ish action whose second step
+is the one that produces all the visible output is a one-step action with a trap in it.** The
+first step's own success message ("Season finalized!") is what makes it a trap.
+
+**Now it is one action.** `endFinalsAndCloseSeason` → `runSeasonClose`, which drives:
+
+1. `POST /finalize-season` — idempotent state write (finalized_rounds, losers_dumped, and
+   `eliminated` for the runner-up and 4th only). Returns the placements.
+2. Four `POST /generate-roast` calls — 4th place `eliminated`, the top three by podium outcome.
+3. `POST /roasts/slack` — the existing combined results + Hall of Shame + podium post.
+4. `POST /close` — the new season recap, then the scheduler stand-down.
+
+**The placements come from the server, once.** New `finalPlacements(db, sd)` reads
+`computePlayoffPairs(sd, 'Finals')` — the same function the Slack results block and the bracket
+card use — so the podium the roasts are written for and the podium the recap crowns cannot
+disagree. `GET /final-placements` exposes it; the client no longer runs its own bracket math
+for this. Below the podium the order is 5th–8th by quarterfinal points, then everyone else by
+pool-play total.
+
+**`finalsScored` is the guard that matters.** `computePlayoffPairs` resolves a 0-0 matchup on
+the better seed, which is right as a tie-break and catastrophic as an answer to "who won"
+before the last week's stats are uploaded — it will cheerfully crown the higher seed of a game
+nobody has played. Found by running the whole flow against the staging fixture, whose bracket
+weeks are all empty: it produced a complete, confident, entirely wrong podium. Both writing
+endpoints now 409 on it.
+
+**The recap** is `js/seasonRecap.js` (pure, unit-tested) ↔ `server.js`, guarded by
+`tests/serverMirrors.test.js` — same footing as `js/roundPreview.js`, and for the same reason:
+it is handed already-derived facts and only shapes them, so it can't disagree with the
+scoreboard about a score. Podium with both games' scores, final standings, superlatives,
+career notes, and a written wrap on `PLAYOFF_COMMENTARY_MODEL` (not Haiku — it sits directly
+above a table of real totals and quotes them, exactly like Hot Takes). Every failure path
+returns a four-voice fallback bank, so an outage changes who wrote the season's last post, not
+whether one goes out. Its emoji are literal Unicode rather than shortcodes: a recap posts once
+a year with no second chance to notice a `:tickets:`.
+
+Two things the first live-fire run caught that no unit test would have:
+
+- **A score written from the winner's side reads as a lie on the loser's line.** `> *2nd —
+Drew* — lost the Championship 832.5–781.1` says Drew scored the winning total. `gameLine`
+  now takes the manager it is being written for.
+- Manager names are shortened at the send boundary, so the recap says "Alex" throughout even
+  though every builder writes full names. Working as designed — worth knowing before you go
+  looking for where it happens.
+
+**Closing turns everything off, and it is reversible.** `sd.season_closed` gates the 4am MLB
+sync (the only job that talks to the MLB API), the 7am scoreboard post, the Sunday
+auto-advance, the Google Sheets sync, the season-welcome post, and `/api/mlb/live` — which is
+the one the Live tab polls every two minutes per open browser, so it had to be gated at the
+endpoint, not just in the cron. It is deliberately BOTH a flag and a timer teardown: the flag
+alone leaves timers firing into a no-op, and tearing timers down alone lasts until the next
+deploy, because boot re-arms everything. Boot now calls `armSchedulers()` and each
+`schedule*()` declines to arm itself — verified by restarting against a closed season and
+seeing four "not armed" lines and nothing scheduled.
+
+It is scoped to the **active** season, which is what makes it self-clearing: point
+`active_season` at next year and the schedulers come back with no flag to remember to unset.
+`season_closed` is server-authoritative in the full-season save (preserved when the server has
+one, **deleted** when it does not) — otherwise a stale browser tab would switch the 4am sync
+back on, and a stale save would undo a reopen.
+
+**"Re-run Season Close"** re-rolls all four roasts and reposts both messages; **"Reopen
+Season"** turns the machinery back on and touches nothing about the roasts, the recap or the
+standings. Reopening is for "a stat correction is still coming" and "I clicked that a week
+early", not for un-crowning anybody.
+
+**Verified** against a scratch `DB_PATH` — the staging fixture extended through QF/SF/Finals,
+webhook pointed at a local sink — by clicking the real button in a real browser: confirm →
+four roasts stored with the right outcomes (champion / runner_up / third / eliminated) → the
+combined post → the recap → "Scheduled jobs: all off", zero page errors, and the panel flipped
+to the closed state with the re-run and reopen buttons.
+
+**The scoreboard now looks like a season that ended.** Closing it is a state change the
+dashboard reads, not a second thing the button has to remember to do — everything below keys
+off `sd.season_closed`, so a reopen puts it all back with no separate teardown:
+
+- A champion announcement card above everything, in its own `#season-champion-announcement`
+  div declared BEFORE both `#scoreboard-content` and `#scoreboard-bracket`. That placement is
+  the load-bearing part: `orderScoreboardBracket` swaps those two around each other once pool
+  play is finalized, so anything rendered into either of them can end up second. The four
+  names come off `season_closed`; the scores are re-derived through the same `roundBreakdown`
+  the bracket card uses, so the card and the bracket below it quote the same numbers.
+- The Playoff Bracket card's rounds became individually collapsible
+  (`toggleBracketRound`), with the Quarterfinals and Semifinals collapsed on a closed season
+  and the Finals column — Championship AND 3rd Place — left open. Nothing is removed; a
+  finished bracket's job is to show who won, not to make you scan eight settled scores first.
+- Pool Play stays collapsed, and PP1/PP2 no longer spring open. `currentSectionId` goes null
+  once the schedule runs out, and `!currentSectionId` was the "open Pool Play 1" branch — so
+  without the guard the day the season ended would have put a ten-week-old table at the top of
+  the page.
+
+**The banner strikes the outgoing champion through.** `previousChampionBefore(year)` replaced
+the inline lookback, and fixed a bug in it on the way: the old version checked
+`WMMC_HISTORICAL_RESULTS` FIRST and only fell back to stored seasons, but that table is a
+deliberate hand-maintained two-file edit and therefore routinely a year behind what the app
+itself just closed. Next season's banner would have named the champion from two years ago. It
+now gathers candidates from both sources and takes the latest year, and it reads
+`season_closed.champion` off a stored season.
+
+The hand-over treatment is scoped to seasons **this app closed** — not to any season with a
+champion. Applied to every crowned season it rendered "New Champion" with a line through
+somebody on the 2019 archive page, which is a worse answer than leaving a nine-year-old banner
+alone.
+
+Verified in the browser at 1440px and at 390px (no horizontal overflow), on the closed season
+and after reopening it, plus a switch to the archived 2025 season to confirm the announcement
+card clears itself and that banner is untouched.
+
+## 2026-08-31 — A refused correction was an attribution repair, and the season closed on top of it
+
+**What the alert was.** The Wednesday corrections sweep refused SF Week 2 on 8/19 and again on
+8/26: `a re-sync wanted to move a manager by more than 15 pts … SF Week 2: Jamie +31.1`. It read
+as a stat anomaly, which is what the ceiling exists to catch. It was the opposite — a repair the
+ceiling was holding out.
+
+**The actual cause.** Jamie Rogers filed a drop swap (Cantillo out, Lodolo in) on 8/16 after first
+pitch, so its effective date landed on 8/17 — past SF Week 2's end, in the next period. That is the
+bug fixed on 2026-08-18. The swap was undone. `roster_dates` and the roster arrays came back
+correctly; **the weekly row's `manager` field did not**, because `rebuildWeeklyFromDaily` only ever
+runs for the CURRENT week and SF Week 2 had closed. The row stayed stamped `Alex Thalacker` (the
+any-week fallback found him while the drop was live), Jamie had no SF|Week 2 date entry for
+Cantillo (he was added in Week 1), so `managerWeekSubtotal`'s wrong-owner gate skipped it. 31.1
+points were credited to nobody for twelve days, on the live scoreboard, not just in the sweep.
+
+**Why it took six console round-trips.** The refusal message named a number and nothing else, and
+every cheap diagnostic pointed away:
+
+- `resync-dryrun`'s `player_diffs` compares `weekly_score`. Cantillo's score never changed — only
+  his owner did — so the row driving the whole swing **did not appear in the diff at all**. The
+  three rows that did appear (Harrison, Melton, Benintendi) summed to +11.6 and were credited to
+  nobody, before and after: pure noise.
+- `data-debug`'s attribution counts distinguish attributed from null. They cannot see a row
+  stamped to the WRONG manager, and SF|Week 2 looked identical to every other week.
+- The score-guard trail showed no step-down, because the bad swap and its undo both predate the
+  21-day window.
+  The one fact that would have ended it immediately — _the score didn't move, the owner did_ — was
+  computable the whole time and printed nowhere.
+
+**What shipped.** `js/corrections.js` (canonical, unit-tested) ↔ `server.js`, guarded by
+`tests/serverMirrors.test.js`. It classifies every moved row as `owner` / `score` / `both` /
+`added` / `removed`, ranks by what the row can MOVE (an owner-only change has a delta of 0 and an
+impact of its full score — sorting by delta buries exactly the row that matters), and gives the
+week a verdict: `attribution` says re-syncing is the repair, `stats` says look before writing.
+`sweepStatCorrections` captures before/after row snapshots over the UNION of both sides, so a
+re-sync that would DELETE a row is visible too — the dry-run endpoint still can't see that.
+
+**The expensive part.** The sweep was stateless: a refused week existed only as a Slack post, so
+nothing downstream could know one was outstanding. **The 2026 season was closed on 8/31 with SF
+Week 2 still refused** — the semifinal that decided the Championship pairing. It survived: Jamie
+beat Sullivan 509.05 to 483.65 uncorrected, 540.15 after, and the placements are unchanged. It
+survived by 25.4 points while 31.1 were misfiled. `sd.correction_flags` now persists refusals
+(cleared automatically when a later sweep finds the week clean), and both `finalize-season` and
+`/close` refuse to certify over one without `force`.
+
+**Also fixed, same family.** The season recap recorded `source: 'bank:error'` beside
+`error: null` — a fallback is not a post failure, so nothing carried the reason. `error` (the post
+failed) and `fallback_reason` (it went out in the bank's voice, and why) are separate fields now,
+and the empty-reply branch records `describeAnthropicReply(data)`.
+
+**Worth knowing next time.** A big swing on a CLOSED week is more likely to be a stale derived
+cache than bad stat data, because closed weeks are the only ones nothing ever rebuilds. Check the
+row's owner before its score.
+
+## 2026-08-19 — The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror
+
+**The gap.** Widening the IL gate to the Restricted List relabelled the reason menu to "IL/RST
+Swap" but left `swapReasonLabel` client-only, on the reasoning that the server never renders a
+reason menu. It doesn't — but `buildSwapSlackText` renders the reason, which is the same thing
+wearing a different hat. Managers picked "IL/RST Swap" in the app and then read "Reason: IL Swap"
+in Slack for the swap they had just made.
+
+**The fix is the repo's standard shape, not a special case.** `SWAP_REASON_LABELS` and
+`swapReasonLabel` are now a `js/swaps.js` ↔ `server.js` mirrored pair like everything else, and
+`tests/serverMirrors.test.js` guards them — which needed a new `extractConstObject` helper, since
+every existing guard handles a function or a whole-tail block and this is a bare const object.
+**The guard was verified by breaking it**: flipping the server copy's label to 'DRIFTED' fails the
+test, so it is not passing vacuously.
+
+**What did NOT change, and this is the important half.** The stored value is still `'IL Swap'`. The
+label is applied at exactly one server site — the `*Reason:*` line. Every other `swap.reason`
+reference in `server.js` is a comparison (`checkSwapLimit`, the IL gate, the Commissioner Swap
+check) or a persist (the audit-log entry at swap_auto_approved), and all of them were deliberately
+left reading the raw stored string. **Label at display sites; never where a reason is compared or
+written.** That rule is now in CLAUDE.md.
+
+**Verified against the real source, not a reimplementation.** `buildSwapSlackText` lives in
+`server.js` and the project doesn't unit-test that file, so the check extracted the actual function
+body out of `server.js` as text and ran it: RST, 60-day IL, unverified, all four non-IL reasons
+passing through untouched, and a missing reason still falling back to the em dash (the label
+returns `''` for a blank, which stays falsy for the existing `|| '—'`).
+
+**Still unchanged, deliberately.** `checkSwapLimit`'s own prose still says "You may still use Drop,
+IL, or Trade swaps." It is a mirrored block in both copies and it was not what was asked for;
+worth a pass if the "IL" wording is ever revisited.
+
+## 2026-08-19 — The 3rd-place game's two managers were told to submit a "Finals" roster
+
+**The situation.** Every submission surface calls the last period "Finals" — the card's badge,
+its "Submit your roster for Finals" line, the yellow warning banner, the late-deadline banner,
+every confirm dialog. But that period is TWO games over the same two weeks: the Championship
+between the semifinal winners and the 3rd-place game between the losers (see the 2026-08-17
+entry — the semifinal eliminates nobody). So half the managers submitting were being told to
+file a roster for a game they had already lost their way out of.
+
+**The fix is a label, derived rather than assumed.** `finalsGameFor` / `finalsGameLabel`
+(js/eligibility.js, unit-tested) take the round's field — the finalists (SF winners) and all four
+semifinalists — and name the game the manager is actually in: **Finals**, **3rd Place Game**, or,
+when the semifinals aren't finalized yet, **Finals / 3rd Place**. That last case is the one worth
+being deliberate about: with no field known, naming one game would tell a semifinalist he is in
+the Championship. Both games, or nothing.
+
+**Which surface gets which name.** app.js's `submissionPeriodLabel` names a period for ONE
+manager (card, warning banner, late banner, every confirm/alert that already had a manager in
+hand); `periodLabelForAll` names it for surfaces that span managers (the commissioner's approval
+queue heading, the submission status table's section), where it really is both games. In between,
+per-row: the approval queue tags each pending manager with his game, because in that period which
+of the two he submitted for is the thing being approved.
+
+**The bug found next door.** The commissioner's submission status table listed the Finals section
+from `getFinalsParticipants` — the two finalists. But all four semifinalists submit a Finals-period
+roster, so the table hid half the rosters he has to chase and approve, and its counts said "of 2"
+when they were of 4. It now lists `getSFParticipants` with each row labelled by game. Same root
+cause as the 2026-08-17 entry: "Finals period" and "the Finals" are not the same set.
+
+**Verified in the running app** (scratch season sitting in Finals Week 1, QF+SF finalized):
+Sullivan/Gillespie (the SF losers) see `3RD PLACE GAME — Player Submission` and a banner reading
+"Your 3rd Place Game lineup is not submitted"; Kortan/McCallum see Finals. With the deadline moved
+into the past, late mode reads "You missed the 3rd Place Game roster deadline". The commissioner's
+queue reads "Pending Finals / 3rd Place Approvals" with per-manager game tags, and the status table
+shows all four semifinalists — 2 pending, 2 not submitted, of 4.
+
+## 2026-08-19 — IL swaps now cover the Restricted List, and two IL statuses the gate had been missing
+
+**The ask.** Ketel Marte was on the Restricted List, not the IL, and the league wanted RL to count
+for an IL swap. The first question was purely factual: what does the MLB Stats API actually return
+for that status?
+
+**Nobody could answer it from memory, and the wrong guess was waiting.** `RM` looks like the
+Restricted List and is not — it is **"Reassigned to Minors", 300 players league-wide** against the
+RL's 28. Adding `RM` to the code set would have opened IL swaps to every minor-league reassignment
+in baseball. The real code is **`RST`**. This is the whole argument for
+`scripts/mlb-roster-status.js`: it hits `/api/v1/people/:id?hydrate=rosterEntries` and, with
+`--sweep`, enumerates every status code across all 30 full rosters with the gate's verdict for
+each. Re-run it rather than reasoning about codes. (The full observed table lives in the script's
+header.)
+
+**The sweep found two pre-existing gaps, which is the part nobody asked for.** `ILF`
+("Injured - Full Season", **240 players** — the second-largest injured population in the league)
+was clearing the gate _only_ through the `/injured/i` description fallback; its code was never in
+`MLB_IL_STATUS_CODES`. That regex was load-bearing without anyone knowing. And `RA`
+("Rehab Assignment") was rejected outright, though a rehabbing player has not been activated and is
+still on the IL. Both are now named in the set, renamed `IL_SWAP_ELIGIBLE_STATUS_CODES` since it
+no longer means only "injured". The regex stays as a catch-all for codes MLB adds later, but
+nothing depends on it now.
+
+**The menu was relabelled, not renamed.** Managers see "IL/RST Swap"; the stored value is still
+`'IL Swap'`. That distinction is the load-bearing one: the string is written on every swap record
+in `db.json` back to the first season, and both `checkSwapLimit` and the server's gate compare
+against it. `swapReasonLabel` (`js/swaps.js`, client-only, deliberately not mirrored in
+`server.js`) maps stored value → display text at the six render sites, and passes through anything
+it has no label for. No data migration, no historical record reinterpreted.
+
+**Verified in the browser, not only in tests.** The bridge — `app.js` calling the bare global
+`swapReasonLabel`, populated by `js/index.js` — is the kind of thing unit tests cannot catch. Drove
+the running app with Playwright to My Roster → Swaps: the option renders `value="IL Swap"` with
+visible text `IL/RST Swap`, no page errors.
+
+**Still open, deliberately.** The Slack swap notification prints the stored `'IL Swap'` rather than
+the label. Left alone: its `Reason:` line already appends `(MLB status: Restricted List)` from
+`il_status`, so the post is self-explanatory, and the server has no business owning display labels.
+
+## 2026-08-19 — Missing a roster deadline stopped being a dead end: late submissions, and begging the commish
+
+**The situation.** Finals Week 1 opened Aug 17. By Aug 19 one manager (Thally) still had no
+Finals roster, and the app had nothing to offer him: past a period's lock the submission card
+rendered the single line "Submission window has closed." and no form. The only route back in was
+the commissioner editing data by hand.
+
+**The rule we chose.** A missed deadline moves the roster's START DATE; it does not remove the
+roster. Submit before the day's first pitch and it takes effect today; submit after it and it
+takes effect tomorrow. Never earlier than the period starts, never past its end. That is the
+whole design: a late manager still plays, but he can never read a finished box score and then buy
+into it.
+
+**Why it needed almost no new scoring code.** The effective date IS the players' `add_date`. Once
+approval stamps that instead of the period's Week 1 start, `managerWeekSubtotal`,
+`managerRowScoreForWeek` and `rebuildRosterArraysFromDates` clip the window with machinery that
+has existed since the invariant was written. Verified against the real engine on a scratch season:
+three identical Aaron Judge days (Aug 17/18/19, 14 pts each) scored **42** with `add_date`
+Aug 17, **14** with Aug 19, and **0** with Aug 20. One field, three answers, no special case.
+
+**The server owns the date, and that is not incidental.** Two inputs decide it — has today's slate
+started (MLB Stats API) and what day is it (a clock) — and a manager controls neither on the
+server. The date is the scoring invariant's own unit, so letting a client propose it is letting a
+manager pick his own start day after seeing the results. `resolveSubmissionWindow` answers both
+questions; `GET /api/seasons/:year/submission-window/:period` exposes it for rendering and
+`POST /submissions` stamps it. app.js keeps `getPeriodDeadline` for instant rendering, but late
+mode reads `SUBMISSION_WINDOWS` — the server's answer — so a wrong local clock or a missing
+`period_deadlines` entry can never move a start date.
+
+**"Beg Commish for Forgiveness".** The second button files the roster as a plea:
+`forgiveness_status: 'pending'`, no effective date, a Slack ping with the manager's case.
+`POST .../forgiveness` is commissioner-only and is the ONLY path that can start a roster earlier
+than the automatic rule — the date comes out of a picker bounded to the period, and the server
+re-validates it. Denying does not discard the roster: it drops to the automatic date, so a manager
+who asked and was refused is exactly where he'd have been had he just hit Submit.
+
+**Two guards worth keeping.** (1) Approving a late submission with no effective date is blocked
+client-side — without it, the old code path falls back to the period's Week 1 start, which is a
+free back-date handed out by a misclick. (2) Late mode only renders while the period is still
+RUNNING (or a late record already exists). Without that, every manager without a PP1 submission
+on file would carry a permanent "you missed Pool Play 1" form on their roster page for the rest of
+the season.
+
+**What the banner does now.** The submission-warning banner used to go silent once a deadline
+passed — quiet on exactly the manager who most needed it. It now says "You missed the Finals
+roster deadline. You can still submit — it would count from Wednesday, Aug 19." Every day he
+ignores it, that date gets worse, which is the correct incentive.
+
+**Fallbacks.** An unreachable MLB schedule degrades to an 11:00 AM ET cutoff (early enough to
+cover a holiday 11:10 first pitch, and erring toward pushing to tomorrow — the safe direction). An
+EMPTY slate counts as "not started": there is no box score to have read, so today stays viable.
+The lock time itself prefers `sd.period_deadlines[period]` and otherwise fetches the period
+opening day's real first pitch rather than adding a fourth copy of a season-specific time table.
+
+**Files.** `js/lateSubmission.js` (new, canonical, 44 unit tests) mirrored into `server.js` and
+guarded by `tests/serverMirrors.test.js`; endpoints and stamping in `server.js`; late-mode card,
+plea box, commissioner picker and the approval date in `app.js`.
+
+## 2026-08-18 — A swap on a round's last day stamped an add date in the NEXT period, and the roster leaked
+
+**The report.** Jamie Rogers' Finals roster showed four pitchers on a three-pitcher staff: Sale,
+Luzardo and Crochet tagged `Added Aug 17`, plus Nick Lodolo tagged with a bare week range. The
+swap that brought Lodolo in was `SF · Week 2`, approved, dates correct on its face.
+
+**Two facts unlock it.** First, the screen was **Finals Week 1**, not SF Week 2 — SF Week 2 is
+Aug 10–16 and Aug 17–23 is the Finals. Second, the three "Added Aug 17" pitchers are exactly what
+an approved period submission stamps (`add_date = the period's Week 1 start`), and Lodolo had **no**
+`roster_dates` entry under `Finals|Week 1` at all — which is why his tag fell through to the plain
+week range while the others read `Added`. That difference is the tell, and it is worth remembering
+as a diagnostic: on a period's first week, `Added <period start>` means submitted, a bare week
+range means arrived some other way.
+
+**The mechanism.** The swap was submitted Sun Aug 16, the last day of SF Week 2, with CIN already
+playing. The game-started rule gives `drop_date = today, add_date = tomorrow` — and tomorrow was
+Aug 17, the first day of a new submission period. The entry was written into the `SF|Week 2`
+bucket, correctly, but **the eligibility scan selects by DATE, not by which bucket the entry sits
+in**: `add_date >= periodStart && add_date <= weekEnd`. For `Finals|Week 1`, `periodStart` is
+Aug 17, so an SF-bucket entry cleared a Finals filter. `getWeekRoster`, `rebuildRosterArraysFromDates`
+and `managerWeekSubtotal` all share that shape, so it was a scoring bug, not a display bug.
+
+The control case was sitting in the same data: **Hayden Wesneski**, added Aug 15, never dropped,
+same `SF|Week 2` bucket — and he did NOT carry over. Only the add date exactly equal to the period
+start leaked. The period guard works; the date was wrong.
+
+**It also did nothing for the semifinal.** `drop_date` is inclusive, so Cantillo scored all of
+SF Week 2 anyway and Lodolo's window never opened in it. A Drop Swap was consumed for zero effect.
+Both harms come from the same date, which is why the fix is a refusal rather than a repair:
+`checkSwapEffectiveWindow` (`js/swaps.js` ↔ `server.js`, mirror-tested) rejects the submission
+before `sd.swaps.push`, so no allotment is spent. Auto path only — a scheduled date was already
+bounded on both `POST /swaps` and `PUT /swaps/:id`. PR #442.
+
+**Undo was not enough, and that is the lesson worth keeping.** Undoing the swap cleaned
+`roster_dates` — the source of truth — but Lodolo stayed on the Finals roster and would have kept
+scoring, because `rebuildRosterArraysFromDates` had already pushed him into
+`sd.rosters[mgr]['Finals|Week 1'].pitchers` and **that heal is purely additive by design**: it
+cannot remove anything, and the undo only cleans the swap's own `week_key`. `managerWeekSubtotal`
+seeds eligibility with `...weekRoster[listKey]`, so a stale array entry scores even with no date
+window behind it. `POST /roster-remove` was what actually cleared it.
+
+So: a derived cache that only ever grows is not self-healing, and "the source of truth is correct
+now" does not mean the scoreboard is. Teaching the heal to PRUNE players no longer active by dates
+is the open follow-up — deliberately not folded into #442, because it moves every manager's
+arrays and needs its own before/after totals vet.
+
+## 2026-08-17 — `\b` treats `_` as a word character, so italicised manager names never got shortened
+
+Found while building the round-end preview (entry below), fixed here on its own once the
+commissioner asked for it.
+
+`shortenManagerNamesInSlack` rewrote full names to short ones with `\bFull Name\b`. `\b` is
+defined against `\w`, and **`\w` includes underscore** — which is Slack's italic marker. So
+`_Ryan Sullivan_` failed the boundary test at BOTH ends and came out long, while `*Ryan Sullivan*`
+and `Ryan Sullivan.` in the same post came out short. One post, one manager, two different names.
+`*` and `~` were always fine; only `_` was ever affected, which is why this survived so long.
+
+The fix is one constant: `NAME_EDGE = '[A-Za-z0-9]'`, used as `(?<!…)name(?!…)` instead of `\b`.
+That is _exactly_ the `\b` semantics minus underscore — verified by diffing old against new over
+markup, punctuation and glued-letter cases: only the underscore cases move, everything else is
+byte-identical. Letters and digits delimit a name; markup and punctuation do not.
+
+**The function moved to `js/utils.js` to get it under test.** It was server-only, and the project
+rule is that tests cover pure `js/` modules — so a boundary regex that every Slack post in the
+league depends on had no test at all, which is the actual reason the bug lasted. It is now the
+canonical copy (mirrored back into `server.js`, guarded by `tests/serverMirrors.test.js`) with
+twelve cases, including the italic regression and the "still refuses to match a name glued to
+letters or digits" case that keeps the fix from being over-broad. No frontend caller, same as
+`js/playoffCommentary.js`.
+
+Verified live as well as in unit tests: with two fixture managers renamed to share a first name,
+a real SF round-end post through a local webhook sink rendered `_History:_ Ryan D. …` and
+`*Ryan D.* vs *Ryan C.*` — one name for the same manager everywhere in the post.
+
+## 2026-08-17 — The semifinal was never an elimination round; the 3rd-place game lost its two rosters
+
+**The bug.** "End Semifinals → Advance Finals Teams & Dump SF Loser Rosters" treated the semifinal
+like the quarterfinal: it deleted the two losers' Finals submissions and stamped
+`sd.eliminated[loser] = 'SF'`. But the semifinal eliminates nobody. Its losers play the **3rd-place
+game, and the 3rd-place game is contested over the same two Finals weeks** as the Championship —
+`SEASON_SCHEDULE` has literally said `Finals / 3rd Place - Week 1` all along. So the dump deleted a
+roster a manager had already submitted for a game he was still playing, and then locked both of
+them out of resubmitting: `isManagerActiveInRound('Finals', 'SF')` was `false`, and the submission
+card rendered "Season ended in Semifinals."
+
+`js/playoffStatus.js` had the ladder right the whole time (SF ends → the two losers flip to a
+**live** Consolation). `js/eligibility.js` and the dump action did not. Two models of the same
+bracket, and the wrong one owned the submission form.
+
+**The fix is one function, applied on read.** `lastRoundPlayed(eliminatedRound)` maps `'SF'` →
+`'Finals'`, and `isManagerActiveInRound` runs its index lookup through it. Deliberately a read-time
+normalization and not a data migration: it repairs every season already stamped the old way,
+including this one, the moment it deploys — no db.json surgery, nothing to get wrong at 4am. The
+pair is mirrored into `server.js` and is now guarded by `tests/serverMirrors.test.js`.
+
+Downstream of that, app.js grew ONE `isManagerEliminatedForPeriod` helper (period → round, then ask
+the shared rule) replacing the two hardcoded `['PP','QF','SF']` lists that had been kept in step by
+hand — the submission card and the submission-warning banner.
+
+**The SF transition is now its own action.** `dumpPlayoffLosers` is quarterfinals-only and says so
+if called otherwise. `advanceToFinalsAndThirdPlace` deletes no submission, writes no elimination,
+and is idempotent so it doubles as the repair: re-running it clears stale `'SF'` elimination marks
+and withdraws the "your season is over" roasts wrongly stored against the SF round. Those roasts
+needed a new endpoint — `DELETE /api/seasons/:year/roasts/:round` — because `sd.roasts` is
+server-authoritative and a full-season save can only ever ADD to it. **The local mirror in
+`clearRoastsForRound` is load-bearing for the same reason**: the server merges an incoming save's
+roasts UNDER its own, so a following save still carrying the deleted text would put all of it back.
+The server independently clears its roast set for `round === 'SF'` rather than trusting the caller.
+
+**The SF post had nothing left to say, so it got a preview.** New pure module `js/roundPreview.js`
+(mirrored, unit-tested): each Finals-week game with both managers' bracket form, the per-round
+split behind it, who carried them there, one career fact apiece from `managerPlayoffHistory`, and an
+"early edge". The edge line is labelled **form, not a forecast**, on purpose — every playoff round
+opens a fresh submission period, so semifinal points are evidence about the manager and not about a
+roster that does not exist yet. Pairings come from `computePlayoffPairs`, the same function the
+results block above it uses, so the preview can never name a matchup the post contradicts; top
+performers come through `managerWeekSubtotal`, not the `sd.rosters` cache, so a mid-round swap is
+credited for exactly its own days. The SF results footer now names the 3rd-place pair too.
+
+**A live gotcha found by actually posting it.** The history line originally rendered as
+`_Alice Adams has never…_`. Slack's italic marker is `_`, `_` is a word character, and
+`shortenManagerNamesInSlack` matches on `\b` — so a full name at the HEAD of an italic run is the
+one mention in a post that never gets shortened, while every other mention of the same manager
+does. Fixed here by labelling the line (`_History:_ …`) so a non-name word comes first. **The
+shortener itself is still wrong for this case and is untouched** — changing name-boundary semantics
+for every post in the league, mid-playoffs, to fix a cosmetic issue is not a trade worth making
+unasked.
+
+Verified against a synthetic 2026 season on a scratch `DB_PATH` with the webhook pointed at a local
+sink: the SF post carries no Hall of Shame even with stale `'SF'` marks still in the data, the QF
+post is unchanged, and in the real browser the SF loser gets a live Finals submission form while the
+QF loser still reads "Season ended in Quarterfinals."
+
+## 2026-08-12 — Branch cleanup, and why `staging` stays
+
+Routine sweep: **zero open PRs** (the newest is #436, merged 2026-08-11) and only four remote
+branches. `claude/scoreboard-playoff-matchups-hx55p8` (#436) and `claude/slack-post-messaging-fgzz42`
+(#435) were both merged and their tips were ancestors of `main`, so they carried nothing; the
+commissioner deleted them. **Agent sessions still get HTTP 403 on ref deletion** — pushes work,
+deletes do not, exactly as the 2026-08-06 audit found. Hand the commands over; don't report the
+deletion as done.
+
+**`staging`'s "838 commits ahead" is a lie told by commit counts.** `git rev-list --left-right`
+reads 28/838 against `main`, which looks like a branch full of unique work. It has none. Those 838
+are history noise: the same changes reached `main` under different SHAs via PR merge commits, so
+they share no identity with staging's copies. The check that settles it is the tree, not the log —
+`git diff $(git merge-base main staging) staging` came back **empty**, meaning staging's tree was
+byte-identical to `main` at `5072849` (2026-08-06). It was simply 28 commits stale. Do that diff
+first next time; the ahead/behind numbers on this branch will never be informative.
+
+The refresh (`git merge origin/main` into `staging`) was conflict-free for the same reason — one
+side had no changes to conflict with — and `git diff origin/main HEAD` was empty before pushing.
+481 tests, lint and Prettier all clean.
+
+**Decision: keep `staging`.** The 2026-08-06 audit floated retiring the branch and its `render.yaml`
+block together, since it has now drifted 240 → 820 → 28 commits behind across three cleanups. The
+commissioner's call is that it earns its keep for QA'ing bigger changes before they hit production,
+so the branch and the `wmmc-staging` service both stay. Treat the drift as a chore to repeat, not a
+smell to fix — and note staging reseeds from `managers_seed.json` on every deploy (no disk, no
+`DB_PATH`), so a QA pass wanting realistic rosters needs `tests/fixtures/staging-seed.json`, which
+the service's Start Command copies to `db.json` on boot.
+
+**The pre-push hook needs two pushes, and this is not obvious.** `.githooks/pre-push` stamps
+`version.json` and commits — but git computes the refs to push _before_ running the hook, so that
+commit is created after the push list is frozen and stays local. The first push reported
+`5f5044b..57eb994` and left `17179ff` behind; a second push sent it. Verify with
+`git ls-remote origin refs/heads/<branch>` rather than trusting the push output, because the second
+push prints a confusing "Everything up-to-date" while still moving the ref. This is why `main`'s
+history shows "chore: stamp version" commits landing alongside the work rather than after it. It
+also leaves `staging` differing from `main` by exactly one line — `version.json`'s date stamp — which
+is expected, since the hook maintains that cache-buster per branch.
+
+One local-only trap: `npm run lint` failed with `Cannot find module '@eslint/js'` on a fresh
+container whose `node_modules` predated the merge. Environment, not code — `npm install` fixed it.
 
 ## 2026-08-11 — The scoreboard showed the bracket twice; the odds to advance moved onto the real one
 

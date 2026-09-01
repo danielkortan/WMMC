@@ -34,13 +34,27 @@ import { parseCSVLine, findColumn } from './csv.js';
 import { computeSeasonAccolades } from './accolades.js';
 import { oddsWindowForDate, bracketOddsWindowForDate, formatOddsPct } from './playoffOdds.js';
 import { orderWithSwapChains } from './rosterOrder.js';
-import { checkSwapLimit } from './swaps.js';
+import { checkSwapLimit, checkSwapEffectiveWindow, swapReasonLabel } from './swaps.js';
+import {
+  addDaysISO,
+  periodBounds,
+  nextViableEffectiveDate,
+  validateForgivenessDate,
+  isSubmissionLate,
+  submissionLateState,
+  lateSubmissionActions,
+} from './lateSubmission.js';
 import {
   periodStartForRound,
   rosterStatusAsOf,
   rosterStatusForManager,
   periodWeekKeys,
   managerWeekWindow,
+  lastRoundPlayed,
+  isManagerActiveInRound,
+  FINALS_GAME_LABELS,
+  finalsGameFor,
+  finalsGameLabel,
 } from './eligibility.js';
 import {
   buildSnapshot,
@@ -95,11 +109,25 @@ Object.assign(window, {
   formatOddsPct,
   orderWithSwapChains,
   checkSwapLimit,
+  checkSwapEffectiveWindow,
+  swapReasonLabel,
+  addDaysISO,
+  periodBounds,
+  nextViableEffectiveDate,
+  validateForgivenessDate,
+  isSubmissionLate,
+  submissionLateState,
+  lateSubmissionActions,
   periodStartForRound,
   rosterStatusAsOf,
   rosterStatusForManager,
   periodWeekKeys,
   managerWeekWindow,
+  lastRoundPlayed,
+  isManagerActiveInRound,
+  FINALS_GAME_LABELS,
+  finalsGameFor,
+  finalsGameLabel,
   buildSnapshot,
   realRosterForRound,
   rosterOverrides,

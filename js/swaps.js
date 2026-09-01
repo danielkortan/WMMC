@@ -55,3 +55,61 @@ export function checkSwapLimit(swaps, managerName, reason, round) {
 
   return null;
 }
+
+// Display labels for the reason menus AND for the Slack swap notification. The STORED value is
+// unchanged and always will be: 'IL Swap' is written on every swap record in db.json going back
+// to the first season, it is what checkSwapLimit above and the server's IL gate both compare
+// against, and relabelling a menu is not a reason to migrate data. This maps the stored value to
+// what a manager reads, nothing more.
+//
+// Mirrored in server.js (guarded by tests/serverMirrors.test.js) since the Slack post renders the
+// same label — the league should never see one name for a swap type in the app and another in
+// Slack. Edit both.
+export const SWAP_REASON_LABELS = {
+  'IL Swap': 'IL/RST Swap',
+};
+
+// The label to show for a stored reason. Unknown reasons pass through unchanged, so a record
+// carrying a reason this map has never heard of still renders as itself.
+export function swapReasonLabel(reason) {
+  return SWAP_REASON_LABELS[reason] || reason || '';
+}
+
+// Round labels for the effective-window message below. Spelled out locally, the same way
+// checkSwapLimit spells out its playoff labels, so the mirrored block stays self-contained
+// (server.js has its own ROUND_LABELS, keyed without the articles this needs).
+const ROUND_WINDOW_LABELS = {
+  PP1: 'Pool Play 1',
+  PP2: 'Pool Play 2',
+  QF: 'the Quarterfinals',
+  SF: 'the Semifinals',
+  Finals: 'the Finals',
+};
+
+// A swap is charged to the round it was submitted in and may only move that round's roster. When
+// the computed add date falls past the round's last day, the swap cannot do either half of its
+// job: drop_date is inclusive, so the outgoing player still scores the whole round, and the
+// incoming player's window never opens inside it. The add date then lands in the NEXT period,
+// where the date-windowed eligibility scan honors it by date and quietly puts the player on a
+// roster that was never submitted — crossing a period boundary the league's rules do not allow.
+//
+// Both failure modes come from the same date, so refuse the swap at submission instead of
+// recording one that cannot do what it says. This is the AUTO path's problem specifically: an
+// explicitly scheduled date is already bounded at submission ("no later than the end of the
+// current round"), but the game-started rule can roll the add to tomorrow with nobody choosing
+// it — and on a round's final day, tomorrow belongs to the next period.
+//
+// `addDate` and `roundEnd` are ISO 'YYYY-MM-DD' (lexicographic compare). Returns null when the
+// swap can still take effect this round, or a user-facing error string when it cannot.
+export function checkSwapEffectiveWindow(addDate, roundEnd, round, playerIn) {
+  if (!addDate || !roundEnd || addDate <= roundEnd) return null;
+  const label = ROUND_WINDOW_LABELS[round] || round;
+  const who = playerIn || 'the incoming player';
+  return (
+    `A game has already started today, so this swap cannot take effect until ${addDate} — ` +
+    `and ${label} ends ${roundEnd}. It would score nothing this round, and ${who} would instead be ` +
+    `added inside the next period, landing on a roster you never submitted. ` +
+    `The swap was not recorded and none of your swaps have been used — pick ${who} in your next ` +
+    `roster submission instead.`
+  );
+}

@@ -120,17 +120,12 @@ function managerShortNameMap(db = null) {
   return map;
 }
 
-// Rewrite full manager names to their short form throughout an outbound Slack payload —
-// strings, arrays and every string field of a block object. Applied at the send boundary so
-// EVERY post inherits it, including the prose ones (swap notifications, elimination roasts,
-// alerts) that assemble their text from templates rather than from a name map.
-//
-// Whole-name, word-bounded matches only, so "Ryan Sullivan" becomes "Ryan S." while "Ryan"
-// on its own is left alone — which also makes the pass idempotent, so a builder that already
-// shortened its own names (buildScoreboardBlocks does, because its commentary needs the map
-// anyway) is not touched twice. The one thing it cannot tell apart is a manager who shares a
-// full name with an MLB player; nobody in this league does, and the failure would be a
-// cosmetic short name on a player row.
+// Mirror of shortenManagerNamesInSlack (+ its NAME_EDGE) in js/utils.js — canonical and
+// unit-tested there, kept byte-identical here because the server can't import the ESM copy
+// (tests/serverMirrors.test.js enforces it). See that file for why the boundary is spelled
+// out instead of using `\b`: `\b` counts underscore as part of a word, and underscore is
+// Slack's italic marker, so `_Ryan Sullivan_` used to match at neither end.
+const NAME_EDGE = '[A-Za-z0-9]';
 function shortenManagerNamesInSlack(value, map) {
   const entries = Object.entries(map || {}).filter(([full, short]) => full !== short);
   if (entries.length === 0) return value;
@@ -145,7 +140,8 @@ function shortenManagerNamesInSlack(value, map) {
         // follows the full name: English collapses the abbreviation period into the sentence
         // period, and "…outscored Ryan S.." is the giveaway that a name got templated in.
         const tail = short.endsWith('.') ? '\\.?' : '';
-        out = out.replace(new RegExp(`\\b${full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b${tail}`, 'g'), short);
+        const escaped = full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(new RegExp(`(?<!${NAME_EDGE})${escaped}(?!${NAME_EDGE})${tail}`, 'g'), short);
       }
       return out;
     }
@@ -1430,6 +1426,23 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // that wiped them would silently split those two apart again.
     if (existingSd.hot_takes) sd.hot_takes = existingSd.hot_takes;
 
+    // Refused-correction flags are the same family, with one extra reason to be careful: the
+    // season close reads them to decide whether it is safe to certify. A stale save that wiped
+    // them would silently re-open the door this guard exists to hold shut. Deleted rather than
+    // merged when the server has none, so a payload carrying an old copy cannot resurrect a
+    // flag a later sweep already cleared.
+    if (existingSd.correction_flags) sd.correction_flags = existingSd.correction_flags;
+    else delete sd.correction_flags;
+
+    // The season-close record is server-authoritative for the same reason: it is written only
+    // by POST /close and cleared only by POST /reopen, and it is what every scheduler reads to
+    // decide whether to run at all. A stale full-season save from a browser that still had the
+    // season open would otherwise switch the 4am sync and the 7am Slack post back on without
+    // anybody asking. Deleted rather than merged when the server has none, so a stale payload
+    // carrying an old copy cannot undo a reopen either.
+    if (existingSd.season_closed) sd.season_closed = existingSd.season_closed;
+    else delete sd.season_closed;
+
     // Elimination roasts are written server-side by /generate-roast while the client's
     // full-season save (fired at "End Pool Play") may still be in flight carrying a copy
     // that predates them — that save landing mid-generation is how a manager's roast
@@ -1532,6 +1545,18 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
 const FREE_SWAP_REASON = 'Free Swap (one per round)';
 const PLAYOFF_LIMITED_REASONS = [FREE_SWAP_REASON, 'Drop Swap', 'Trade Swap'];
 
+// Display labels for the reason menus AND for the Slack swap notification. Mirror of
+// js/swaps.js — see there for why the STORED value stays 'IL Swap'. Edit both.
+const SWAP_REASON_LABELS = {
+  'IL Swap': 'IL/RST Swap',
+};
+
+// The label to show for a stored reason. Unknown reasons pass through unchanged, so a record
+// carrying a reason this map has never heard of still renders as itself.
+function swapReasonLabel(reason) {
+  return SWAP_REASON_LABELS[reason] || reason || '';
+}
+
 function checkSwapLimit(swaps, managerName, reason, round) {
   // Only count approved or pending swaps (not denied/undone) for this manager in this round
   const managerSwaps = (swaps || []).filter(
@@ -1564,6 +1589,45 @@ function checkSwapLimit(swaps, managerName, reason, round) {
   }
 
   return null;
+}
+
+// Round labels for the effective-window message below. Spelled out locally, the same way
+// checkSwapLimit spells out its playoff labels, so the mirrored block stays self-contained
+// (server.js has its own ROUND_LABELS, keyed without the articles this needs).
+const ROUND_WINDOW_LABELS = {
+  PP1: 'Pool Play 1',
+  PP2: 'Pool Play 2',
+  QF: 'the Quarterfinals',
+  SF: 'the Semifinals',
+  Finals: 'the Finals',
+};
+
+// A swap is charged to the round it was submitted in and may only move that round's roster. When
+// the computed add date falls past the round's last day, the swap cannot do either half of its
+// job: drop_date is inclusive, so the outgoing player still scores the whole round, and the
+// incoming player's window never opens inside it. The add date then lands in the NEXT period,
+// where the date-windowed eligibility scan honors it by date and quietly puts the player on a
+// roster that was never submitted — crossing a period boundary the league's rules do not allow.
+//
+// Both failure modes come from the same date, so refuse the swap at submission instead of
+// recording one that cannot do what it says. This is the AUTO path's problem specifically: an
+// explicitly scheduled date is already bounded at submission ("no later than the end of the
+// current round"), but the game-started rule can roll the add to tomorrow with nobody choosing
+// it — and on a round's final day, tomorrow belongs to the next period.
+//
+// `addDate` and `roundEnd` are ISO 'YYYY-MM-DD' (lexicographic compare). Returns null when the
+// swap can still take effect this round, or a user-facing error string when it cannot.
+function checkSwapEffectiveWindow(addDate, roundEnd, round, playerIn) {
+  if (!addDate || !roundEnd || addDate <= roundEnd) return null;
+  const label = ROUND_WINDOW_LABELS[round] || round;
+  const who = playerIn || 'the incoming player';
+  return (
+    `A game has already started today, so this swap cannot take effect until ${addDate} — ` +
+    `and ${label} ends ${roundEnd}. It would score nothing this round, and ${who} would instead be ` +
+    `added inside the next period, landing on a roster you never submitted. ` +
+    `The swap was not recorded and none of your swaps have been used — pick ${who} in your next ` +
+    `roster submission instead.`
+  );
 }
 
 // Server port of the client's getCurrentScheduleRound: which schedule round contains today's ET
@@ -1680,14 +1744,37 @@ function buildSwapSlackText(sd, swap, headline) {
     `${headline} — *${swap.manager || '?'}*${roundWeek ? ` (${roundWeek})` : ''}`,
     `*Out:* ${swap.player_out ? withTeam(swap.player_out) : '—'}${swap.drop_date ? ` — dropped ${swap.drop_date}` : ''}`,
     `*In:* ${swap.player_in ? withTeam(swap.player_in) : '—'}${swap.add_date ? ` — added ${swap.add_date}` : ''}`,
-    `*Reason:* ${swap.reason || '—'}${ilNote}`,
+    `*Reason:* ${swapReasonLabel(swap.reason) || '—'}${ilNote}`,
     `*Effective:* ${swap.effective_date || swap.add_date || '—'} · *Submitted:* ${submittedET}`,
     `🔗 <${WMMC_SITE_URL}/#swap-log|Open the Swap Log to review, edit, or undo>`,
   ].join('\n');
 }
 
-// IL status codes on MLB roster entries: 7-day (concussion), 10-day, 15-day, and 60-day lists.
-const MLB_IL_STATUS_CODES = new Set(['D7', 'D10', 'D15', 'D60']);
+// Roster-entry status codes that qualify a player to be dropped in an IL/RST swap. Verified
+// against the live API on 2026-08-19 with scripts/mlb-roster-status.js --sweep, which is how to
+// re-check this list rather than reasoning about it:
+//
+//   D7 / D10 / D15 / D60  the injured lists, by length (D7 is the concussion list)
+//   ILF                   "Injured - Full Season" — a real IL designation, 240 players league-wide
+//   RA                    "Rehab Assignment" — still on the IL; a rehabbing player has not been
+//                         activated, so his roster entry reads RA rather than a D-code
+//   RST                   "Restricted List" — not an injury, but the same league situation from a
+//                         manager's side: unavailable through no fault of his own
+//
+// Codes NOT in this set that look like they might belong: RM is "Reassigned to Minors" (300
+// players, better than ten times the RL) and DEV is the Development List. Neither is an
+// unavailability the league grants a free swap for.
+const IL_SWAP_ELIGIBLE_STATUS_CODES = new Set(['D7', 'D10', 'D15', 'D60', 'ILF', 'RA', 'RST']);
+
+// The rejection both the submission and the reason-change path return, so the two cannot drift.
+function notEligibleForILSwapError(playerName, status) {
+  return (
+    `${playerName} is not on the official MLB injured list or restricted list` +
+    `${status ? ` (current status: ${status})` : ''}. ` +
+    `An IL/RST swap requires the player you're dropping to be on the IL or the Restricted List — ` +
+    `use your Free, Drop, or Trade swap instead.`
+  );
+}
 
 // Look up a player's official MLB roster status to verify an IL swap, then read the player's
 // current roster entry. Identity comes from the stable MLB person id in sd.mlb_ids (the source
@@ -1731,8 +1818,10 @@ async function fetchPlayerILStatus(sd, season, playerName) {
       return { checked: false, reason: 'no_roster_entry' };
     }
     // Codes are the primary signal; live descriptions read "Injured 60-Day" (not
-    // "60-Day Injured List"), and "Injured" appears only in IL statuses.
-    const onIL = MLB_IL_STATUS_CODES.has(status.code) || /injured/i.test(status.description || '');
+    // "60-Day Injured List"), and "Injured" appears only in IL statuses. The description test is
+    // kept as a catch-all for an injury code MLB adds later, but it is no longer load-bearing:
+    // ILF used to clear the gate through it alone, which is why it is now named in the set.
+    const onIL = IL_SWAP_ELIGIBLE_STATUS_CODES.has(status.code) || /injured/i.test(status.description || '');
     return { checked: true, onIL, status: status.description || status.code };
   } catch (e) {
     console.error(`IL status lookup failed for ${playerName} (id ${mlbId}):`, e.message);
@@ -1815,10 +1904,7 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
       const il = await fetchPlayerILStatus(sd, req.params.year, swap.player_out);
       if (il.checked && !il.onIL) {
         return res.status(400).json({
-          error:
-            `${swap.player_out} is not on the official MLB injured list` +
-            `${il.status ? ` (current status: ${il.status})` : ''}. ` +
-            `An IL swap requires the player you're dropping to be on the IL — use your Free, Drop, or Trade swap instead.`,
+          error: notEligibleForILSwapError(swap.player_out, il.status),
           code: 'not_on_il',
         });
       }
@@ -1873,6 +1959,19 @@ app.post('/api/seasons/:year/swaps', requireAuth, async (req, res) => {
       swap.teams_started = [];
     } else {
       const eff = await computeSwapEffectiveDatesServer(sd, swap.player_out, swap.player_in);
+      // The game-started rule can roll the add to tomorrow — and on a round's final day, tomorrow
+      // belongs to the NEXT period. Such a swap cannot move this round (the outgoing player keeps
+      // it in full, the incoming one never opens a window in it) and its add date leaks the
+      // incoming player into a roster they were never submitted to. Refuse before the swap is
+      // recorded, so no allotment is consumed. The scheduled branch above is already bounded by
+      // its own end-of-round check; this is the auto path, where nobody chose the date.
+      const windowError = checkSwapEffectiveWindow(
+        eff.add_date,
+        scheduleRoundEndDate(sd, round),
+        round,
+        swap.player_in
+      );
+      if (windowError) return res.status(400).json({ error: windowError, code: 'effective_date_past_round' });
       swap.effective_date = eff.effective_date;
       swap.drop_date = eff.drop_date;
       swap.add_date = eff.add_date;
@@ -2117,10 +2216,7 @@ app.put('/api/seasons/:year/swaps/:id', requireAuth, async (req, res) => {
         const il = await fetchPlayerILStatus(sd, req.params.year, swap.player_out);
         if (il.checked && !il.onIL) {
           return res.status(400).json({
-            error:
-              `${swap.player_out} is not on the official MLB injured list` +
-              `${il.status ? ` (current status: ${il.status})` : ''}. ` +
-              `An IL swap requires the player you're dropping to be on the IL — use your Free, Drop, or Trade swap instead.`,
+            error: notEligibleForILSwapError(swap.player_out, il.status),
             code: 'not_on_il',
           });
         }
@@ -2559,6 +2655,254 @@ app.post('/api/seasons/:year/swaps/:id/undo', requireAuth, (req, res) => {
   res.json({ ok: true, swap, _rev: computeSeasonRev(sd) });
 });
 
+// ---- Late roster submissions (mirror of js/lateSubmission.js) ----
+//
+// A manager who misses a period's lock keeps his submission form; the roster just starts on the
+// next day he can't already have seen played. The rules below are the canonical copy from
+// js/lateSubmission.js, which the server can't import (ESM) — CLAUDE.md's "edit both copies"
+// rule applies, and tests/serverMirrors.test.js enforces it. The server-only glue that feeds
+// them (today's real first pitch, the stamping on POST /submissions, the commissioner's
+// forgiveness decision) follows underneath.
+const LATE_FALLBACK_FIRST_PITCH_HOUR_ET = 11;
+
+// The three states a "Beg Commish for Forgiveness" request can be in. A request that is DENIED
+// is not thrown away — the roster still lands, it just lands on the automatic next-viable date
+// instead of the back-date the manager asked for.
+const FORGIVENESS_STATES = ['pending', 'granted', 'denied'];
+
+// ISO date shifted by whole days, done in UTC so a server running in any zone can't slide the
+// calendar day underneath it.
+function addDaysISO(iso, days) {
+  if (!iso) return null;
+  const d = new Date(iso + 'T00:00:00Z');
+  if (Number.isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// First and last calendar day of a period, read off the season's own schedule_dates by round.
+// Returns null when the schedule doesn't cover the round — callers must treat that as "unknown"
+// rather than "unbounded", because an unbounded window is how add/drop scoring gets corrupted.
+function periodBounds(round, schedule, scheduleDates) {
+  if (!round || !Array.isArray(schedule) || !Array.isArray(scheduleDates)) return null;
+  let start = null;
+  let end = null;
+  let firstWeekKey = null;
+  for (let i = 0; i < schedule.length && i < scheduleDates.length; i++) {
+    if (schedule[i].round !== round) continue;
+    const dates = scheduleDates[i];
+    if (!dates) continue;
+    if (start === null && dates.start) {
+      start = dates.start;
+      firstWeekKey = `${schedule[i].round}|${schedule[i].week}`;
+    }
+    if (dates.end) end = dates.end;
+  }
+  return start ? { start, end: end || null, firstWeekKey } : null;
+}
+
+// The date a submission made "now" should take effect. `dayHasStarted` is whether today's MLB
+// slate has already begun (the server answers that from the real schedule; see the fallback
+// helper below for when it can't).
+//
+// Returns null when there is no viable day left — the period has already ended, so nothing a
+// manager submits now can score, and only a commissioner back-date can salvage it.
+function nextViableEffectiveDate({ periodStart, periodEnd = null, todayET, dayHasStarted = false }) {
+  if (!periodStart || !todayET) return null;
+  // The period hasn't started yet: this isn't late at all, and the roster starts with the period.
+  if (todayET < periodStart) return periodStart;
+  const candidate = dayHasStarted ? addDaysISO(todayET, 1) : todayET;
+  if (!candidate) return null;
+  const effective = candidate < periodStart ? periodStart : candidate;
+  if (periodEnd && effective > periodEnd) return null;
+  return effective;
+}
+
+// A commissioner-chosen effective date, held inside the period. Back-dating is the entire
+// privilege being granted here, so any day of the period is allowed — including its first, which
+// makes the late roster score exactly as if it had been in on time. Anything outside the period
+// is rejected rather than silently clamped: a date the commissioner didn't mean is worse than an
+// error he can see.
+function validateForgivenessDate(dateISO, periodStart, periodEnd) {
+  if (!dateISO || !/^\d{4}-\d{2}-\d{2}$/.test(dateISO)) {
+    return { ok: false, error: 'effective_date must be an ISO YYYY-MM-DD date' };
+  }
+  if (!periodStart) return { ok: false, error: 'This period has no start date in the schedule yet' };
+  if (dateISO < periodStart) {
+    return { ok: false, error: `Effective date cannot be before the period starts (${periodStart})` };
+  }
+  if (periodEnd && dateISO > periodEnd) {
+    return { ok: false, error: `Effective date cannot be after the period ends (${periodEnd})` };
+  }
+  return { ok: true, effective_date: dateISO };
+}
+
+// Has today's slate already begun, when the MLB schedule could NOT be consulted? `etHour` is the
+// current hour in America/New_York on a 24-hour clock. See the constant above for why this
+// deliberately reads early.
+function dayHasStartedFallback(etHour, cutoffHour = LATE_FALLBACK_FIRST_PITCH_HOUR_ET) {
+  return Number.isFinite(etHour) && etHour >= cutoffHour;
+}
+
+// Is a submission arriving now past its period's lock? `deadlineMs` is the lock instant (first
+// pitch − 5 minutes); a season with no configured deadline can't be late, because there is no
+// published time to have missed.
+function isSubmissionLate(deadlineMs, nowMs) {
+  return Number.isFinite(deadlineMs) && Number.isFinite(nowMs) && nowMs >= deadlineMs;
+}
+
+// The late/forgiveness facts carried on a stored submission record, normalized so the manager
+// card, the commissioner queue, the status table and the server all read one shape rather than
+// each poking at raw fields. Tolerates a record written before this feature existed (everything
+// reads false/null), which is what makes it safe on an in-flight season.
+function submissionLateState(sub) {
+  const s = sub || {};
+  const forgiveness = FORGIVENESS_STATES.includes(s.forgiveness_status) ? s.forgiveness_status : null;
+  return {
+    late: !!s.late,
+    effectiveDate: s.effective_date || null,
+    forgiveness,
+    forgivenessPending: forgiveness === 'pending',
+    forgivenessGranted: forgiveness === 'granted',
+    reason: s.forgiveness_reason || null,
+    // What the automatic rule offered at submission time. Kept alongside a granted back-date so
+    // the audit trail shows what the forgiveness was actually worth.
+    autoEffectiveDate: s.auto_effective_date || null,
+  };
+}
+
+// What a manager may do with a period whose lock has passed. Split out from the rendering so the
+// rule — rather than the markup — is what the tests pin down.
+//
+//   canSubmit  — take the automatic effective date and get on with it.
+//   canBeg     — ask the commissioner for a back-date instead.
+//
+// A manager whose roster is already approved has nothing to do here. A pending forgiveness
+// request locks both buttons: it is with the commissioner, and letting the manager keep
+// resubmitting underneath a decision he asked for is how two rosters end up half-applied.
+function lateSubmissionActions({
+  isLate = false,
+  hasApproved = false,
+  forgiveness = null,
+  effectiveDate = null,
+  rosterComplete = false,
+} = {}) {
+  if (!isLate || hasApproved) return { canSubmit: false, canBeg: false, reason: null };
+  if (forgiveness === 'pending') {
+    return { canSubmit: false, canBeg: false, reason: 'awaiting_forgiveness' };
+  }
+  return {
+    // With no viable day left, a plain submit would score nothing — only a back-date can help.
+    canSubmit: !!effectiveDate && rosterComplete,
+    canBeg: rosterComplete,
+    reason: effectiveDate ? null : 'period_over',
+  };
+}
+
+// The submission period a schedule round belongs to, and back. Two names for one thing because
+// the buckets are keyed lowercase ('finals') and the schedule by round ('Finals').
+const PERIOD_TO_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+
+// The current hour in America/New_York on a 24-hour clock, for the no-network fallback.
+function currentHourET(nowMs) {
+  const hour = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: 'numeric',
+    hourCycle: 'h23',
+  }).format(new Date(nowMs));
+  const n = Number(hour);
+  return Number.isFinite(n) ? n % 24 : NaN;
+}
+
+// Earliest first pitch on a given date, or null when the slate is empty or unreachable. Thin
+// wrapper over fetchFirstPitchToday that swallows the network failure, because every caller here
+// has a working answer without it and none of them may block a manager's submission.
+async function firstPitchOn(dateISO) {
+  try {
+    return await fetchFirstPitchToday(dateISO);
+  } catch (e) {
+    console.error(`[Late submission] Could not read the ${dateISO} slate: ${e.message}`);
+    return null;
+  }
+}
+
+// The instant a period's rosters lock: five minutes before its first pitch.
+//
+// Prefers the commissioner's explicit sd.period_deadlines[period] — the same field the client's
+// getPeriodDeadline reads, so the two agree whenever it is set (which is the normal case; Season
+// Setup autofills it). With nothing stored, the real first pitch of the period's opening day is
+// fetched rather than guessed at from a time-of-day table, which would be a fourth copy of a
+// season-specific constant.
+//
+// Returns null when neither is available. That is deliberately read downstream as "no published
+// deadline to have missed": with no lock we cannot prove a manager is late, and wrongly flagging
+// an on-time roster would push its start date forward for nothing.
+async function periodLockMs(sd, period) {
+  const explicit = sd && sd.period_deadlines && sd.period_deadlines[period];
+  if (explicit) {
+    const t = Date.parse(explicit);
+    if (Number.isFinite(t)) return t - 5 * 60 * 1000;
+  }
+  const bounds = periodBounds(PERIOD_TO_ROUND[period], SEASON_SCHEDULE, sd && sd.schedule_dates);
+  if (!bounds) return null;
+  const firstPitch = await firstPitchOn(bounds.start);
+  return firstPitch === null ? null : firstPitch - 5 * 60 * 1000;
+}
+
+// Has today's MLB slate already begun? This is the one fact the "next viable day" rule needs
+// that isn't in our own data, so it comes from the real schedule.
+//
+// An EMPTY slate counts as not started: there is no box score to have read, so today is still a
+// viable effective date. An unreachable API degrades to the ET-clock fallback rather than
+// blocking anything — a manager must never be unable to submit because statsapi.mlb.com is down.
+async function mlbDayHasStarted(todayISO, nowMs) {
+  const firstPitch = await firstPitchOn(todayISO);
+  if (firstPitch === null) return dayHasStartedFallback(currentHourET(nowMs));
+  return nowMs >= firstPitch;
+}
+
+// Everything a client needs to render a period's submission window, and everything the POST
+// handler needs to stamp one: the period's bounds, its lock, whether we are past it, and the
+// effective date a submission made right now would carry.
+//
+// This is the AUTHORITY on both questions. The client has its own copy of the deadline rule for
+// instant rendering, but it runs on the manager's clock and its own fallback table; the answer
+// that decides whether a roster is flagged late — and what date it starts on — is this one.
+async function resolveSubmissionWindow(sd, period, nowMs = Date.now()) {
+  const bounds = periodBounds(PERIOD_TO_ROUND[period], SEASON_SCHEDULE, sd && sd.schedule_dates);
+  const lockMs = await periodLockMs(sd, period);
+  const late = isSubmissionLate(lockMs, nowMs);
+  const todayET = new Date(nowMs).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Only pay for the second schedule round-trip when it can change the answer. On time, the
+  // roster starts with the period, exactly as it always has.
+  const dayHasStarted = late ? await mlbDayHasStarted(todayET, nowMs) : false;
+  const effectiveDate = late
+    ? nextViableEffectiveDate({
+        periodStart: bounds && bounds.start,
+        periodEnd: bounds && bounds.end,
+        todayET,
+        dayHasStarted,
+      })
+    : bounds && bounds.start;
+  return {
+    period,
+    round: PERIOD_TO_ROUND[period] || null,
+    period_start: (bounds && bounds.start) || null,
+    period_end: (bounds && bounds.end) || null,
+    first_week_key: (bounds && bounds.firstWeekKey) || null,
+    lock_at: Number.isFinite(lockMs) ? new Date(lockMs).toISOString() : null,
+    is_late: late,
+    day_has_started: dayHasStarted,
+    today_et: todayET,
+    effective_date: effectiveDate || null,
+  };
+}
+
+// submissionLateState and lateSubmissionActions are carried here only to keep this block a
+// verbatim mirror of js/lateSubmission.js (tests/serverMirrors.test.js compares the two as text).
+// They are the client's half of the feature; the server has no caller for them.
+const _lateSubmissionClientHelpers = [submissionLateState, lateSubmissionActions];
+
 // ---- Atomic roster-submission endpoints (PP1 + PP2/playoff periods) ----
 //
 // Roster submissions used to ride the full-season save (POST /api/seasons/:year), whose
@@ -2580,14 +2924,46 @@ function submissionBucket(sd, period) {
   return sd.period_submissions[period];
 }
 
-// POST /api/seasons/:year/submissions — upsert one manager's submission for a period.
-// Body: { period, manager, batters[], pitchers[], status }. The server stamps
-// submitted_at / approved_at so timestamps reflect the real moment, not a client clock.
-app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
+// GET /api/seasons/:year/submission-window/:period — the authoritative state of one period's
+// submission window: when it locks, whether that lock has passed, and what effective date a
+// roster submitted RIGHT NOW would carry.
+//
+// The client has its own copy of the deadline rule for instant rendering, but it runs on the
+// manager's clock and cannot see today's real first pitch. This endpoint is what the submission
+// card asks before it offers a late manager anything, so the date on the button is the date the
+// server will actually stamp.
+app.get('/api/seasons/:year/submission-window/:period', async (req, res) => {
   if (!isValidYear(req.params.year)) {
     return res.status(400).json({ error: 'Invalid year parameter' });
   }
-  const { period, manager, batters, pitchers, status } = req.body || {};
+  const { period } = req.params;
+  if (!SUBMISSION_PERIODS.includes(period)) return res.status(400).json({ error: 'Invalid period' });
+  const sd = (readDB().seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  try {
+    res.json(await resolveSubmissionWindow(sd, period));
+  } catch (e) {
+    console.error(`[Late submission] window resolve failed for ${period}:`, e.message);
+    res.status(500).json({ error: 'Could not resolve the submission window' });
+  }
+});
+
+// POST /api/seasons/:year/submissions — upsert one manager's submission for a period.
+// Body: { period, manager, batters[], pitchers[], status, forgiveness_reason? }. The server
+// stamps submitted_at / approved_at so timestamps reflect the real moment, not a client clock —
+// and, for the same reason, it is the server that decides whether a submission is LATE and what
+// date it takes effect. A client-supplied effective date is never read: that field is the
+// players' add_date, i.e. the core scoring invariant, and a manager must not be able to choose
+// his own start day after seeing a box score.
+//
+// Passing `forgiveness_reason` turns the submission into a plea: it is filed for the commissioner
+// with forgiveness_status 'pending' and NO effective date, because the whole point of the request
+// is that the commissioner picks that date (see the forgiveness endpoint below).
+app.post('/api/seasons/:year/submissions', requireAuth, async (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { period, manager, batters, pitchers, status, forgiveness_reason: forgivenessReason } = req.body || {};
   if (
     !manager ||
     !SUBMISSION_PERIODS.includes(period) ||
@@ -2596,6 +2972,9 @@ app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
     !['draft', 'pending', 'approved'].includes(status)
   ) {
     return res.status(400).json({ error: 'period, manager, batters[], pitchers[] and a valid status are required' });
+  }
+  if (forgivenessReason != null && typeof forgivenessReason !== 'string') {
+    return res.status(400).json({ error: 'forgiveness_reason must be a string' });
   }
   const db = readDB();
   const sd = (db.seasons || {})[req.params.year];
@@ -2613,19 +2992,149 @@ app.post('/api/seasons/:year/submissions', requireAuth, (req, res) => {
     if (status === 'approved') submission.approved_at = now;
     else delete submission.approved_at;
   }
+
+  // ---- Late-submission stamping ----
+  //
+  // Back to draft wipes the whole late/forgiveness story: the manager is editing again, and a
+  // stale effective date left lying around would be applied by the next approval.
+  let window = null;
+  if (status === 'draft') {
+    delete submission.late;
+    delete submission.effective_date;
+    delete submission.auto_effective_date;
+    delete submission.forgiveness_status;
+    delete submission.forgiveness_reason;
+    delete submission.forgiveness_decided_at;
+  } else if (status === 'pending') {
+    // A fresh submission (or resubmission) is re-dated against the clock as it stands now.
+    // The one thing that survives is a GRANTED back-date: the commissioner already ruled on this
+    // roster, and re-deriving it here would quietly revoke the forgiveness he gave.
+    window = await resolveSubmissionWindow(sd, period);
+    submission.late = window.is_late;
+    if (!window.is_late) {
+      delete submission.effective_date;
+      delete submission.auto_effective_date;
+      delete submission.forgiveness_status;
+      delete submission.forgiveness_reason;
+      delete submission.forgiveness_decided_at;
+    } else if (forgivenessReason) {
+      submission.forgiveness_status = 'pending';
+      submission.forgiveness_reason = forgivenessReason.slice(0, 1000);
+      submission.auto_effective_date = window.effective_date || null;
+      // No effective date yet — the commissioner sets it when he rules.
+      delete submission.effective_date;
+      delete submission.forgiveness_decided_at;
+    } else if (submission.forgiveness_status !== 'granted') {
+      submission.auto_effective_date = window.effective_date || null;
+      submission.effective_date = window.effective_date || null;
+      if (submission.forgiveness_status === 'pending') delete submission.forgiveness_status;
+    }
+  }
+
   bucket[manager] = submission;
 
   db.seasons[req.params.year] = sd;
   addAuditEntry(
     db,
     'submission_saved',
-    { year: req.params.year, period, manager, status, batters: batters.length, pitchers: pitchers.length },
+    {
+      year: req.params.year,
+      period,
+      manager,
+      status,
+      batters: batters.length,
+      pitchers: pitchers.length,
+      late: !!submission.late,
+      effective_date: submission.effective_date || null,
+      forgiveness: submission.forgiveness_status || null,
+    },
     req.get('X-User-Email')
   );
   writeDB(db);
+
+  // Tell the commissioner in Slack, but only about the two things he has to act on that the
+  // normal pending queue doesn't already make obvious: a roster that will start mid-period, and
+  // a plea to back-date one. A failed post must never fail the submission.
+  if (status === 'pending' && submission.late) {
+    const label = (ROUND_LABELS[PERIOD_TO_ROUND[period]] || period).toString();
+    const text =
+      submission.forgiveness_status === 'pending'
+        ? `:pray: *${manager}* missed the ${label} roster deadline and is asking for forgiveness.\n` +
+          `> ${submission.forgiveness_reason}\n` +
+          `Approve it in the app and pick the effective date — or deny, and it starts ` +
+          `${submission.auto_effective_date || 'whenever the next viable day is'}.`
+        : `:hourglass_flowing_sand: *${manager}* submitted a LATE ${label} roster. ` +
+          `It takes effect ${submission.effective_date || '— no viable day is left in the period'}.`;
+    postSlack(text).catch((e) => console.error('[Late submission] Slack notice failed:', e.message));
+  }
+
   // Changed a submission bucket (a hashed field) — hand back the new token so a following
   // full-season save doesn't falsely 409.
-  res.json({ ok: true, submission, _rev: computeSeasonRev(sd) });
+  res.json({ ok: true, submission, window, _rev: computeSeasonRev(sd) });
+});
+
+// POST /api/seasons/:year/submissions/:period/:manager/forgiveness — the commissioner's ruling on
+// a "Beg Commish for Forgiveness" request. Body: { decision: 'grant' | 'deny', effective_date? }.
+//
+// GRANT is the back-date: the commissioner names any day inside the period, up to and including
+// its first, and that becomes the roster's add_date at approval. This is the only path in the app
+// by which a roster can start earlier than the automatic next-viable-day rule allows, which is
+// why it is commissioner-only, validated against the period's own bounds, and audited.
+//
+// DENY does not throw the roster away — it drops back to the automatic date, so a manager who
+// asked and was refused is exactly where he'd have been had he just hit Submit.
+app.post('/api/seasons/:year/submissions/:period/:manager/forgiveness', requireCommissioner, async (req, res) => {
+  if (!isValidYear(req.params.year)) {
+    return res.status(400).json({ error: 'Invalid year parameter' });
+  }
+  const { period } = req.params;
+  const manager = decodeURIComponent(req.params.manager);
+  if (!SUBMISSION_PERIODS.includes(period)) return res.status(400).json({ error: 'Invalid period' });
+  const { decision, effective_date: effectiveDate } = req.body || {};
+  if (decision !== 'grant' && decision !== 'deny') {
+    return res.status(400).json({ error: "decision must be 'grant' or 'deny'" });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[req.params.year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const bucket = submissionBucket(sd, period);
+  const submission = bucket[manager];
+  if (!submission) return res.status(404).json({ error: 'No submission on file for that manager and period' });
+
+  const window = await resolveSubmissionWindow(sd, period);
+  if (decision === 'grant') {
+    const check = validateForgivenessDate(effectiveDate, window.period_start, window.period_end);
+    if (!check.ok) return res.status(400).json({ error: check.error });
+    submission.forgiveness_status = 'granted';
+    submission.effective_date = check.effective_date;
+  } else {
+    submission.forgiveness_status = 'denied';
+    // Fall back to whatever the automatic rule offered when he asked; if that was never recorded
+    // (or the period has since run out), re-derive it from the clock as it stands now.
+    submission.effective_date = submission.auto_effective_date || window.effective_date || null;
+  }
+  submission.late = true;
+  submission.forgiveness_decided_at = new Date().toISOString();
+  bucket[manager] = submission;
+
+  db.seasons[req.params.year] = sd;
+  addAuditEntry(
+    db,
+    'submission_forgiveness',
+    { year: req.params.year, period, manager, decision, effective_date: submission.effective_date || null },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+
+  const label = (ROUND_LABELS[PERIOD_TO_ROUND[period]] || period).toString();
+  const text =
+    decision === 'grant'
+      ? `:tada: The commissioner granted *${manager}* forgiveness on his late ${label} roster — it counts from ${submission.effective_date}.`
+      : `:no_entry: The commissioner denied *${manager}* forgiveness on his late ${label} roster — it starts ${submission.effective_date || 'nowhere; the period is over'}.`;
+  postSlack(text).catch((e) => console.error('[Late submission] Slack notice failed:', e.message));
+
+  res.json({ ok: true, submission, window, _rev: computeSeasonRev(sd) });
 });
 
 // PUT /api/seasons/:year/schedule — atomically set the per-week schedule_dates (and the optional
@@ -7248,15 +7757,21 @@ function roundParticipants(sd, round) {
   return names;
 }
 
-// Mirrors of js/eligibility.js ELIMINATION_ROUND_ORDER / isManagerActiveInRound / isManagerInRound
-// — keep the copies identical (same rule as SCORING / detectScoreSwings; the server can't import
-// the ESM module). `sd.eliminated[manager]` is the round a manager went out IN, so 'QF' means they
-// PLAYED the quarterfinals: active iff elimIdx >= roundIdx.
+// Mirrors of js/eligibility.js ELIMINATION_ROUND_ORDER / lastRoundPlayed / isManagerActiveInRound
+// / isManagerInRound — keep the copies identical (same rule as SCORING / detectScoreSwings; the
+// server can't import the ESM module). `sd.eliminated[manager]` is the round a manager went out IN,
+// so 'QF' means they PLAYED the quarterfinals: active iff elimIdx >= roundIdx. The semifinal is the
+// exception the ladder can't express on its own — its two losers play the 3rd-place game over the
+// FINALS weeks — which is what lastRoundPlayed normalizes.
 const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
+function lastRoundPlayed(eliminatedRound) {
+  return eliminatedRound === 'SF' ? 'Finals' : eliminatedRound;
+}
+
 function isManagerActiveInRound(round, eliminatedRound) {
   if (!round || round === 'PP1' || round === 'PP2') return true;
   if (!eliminatedRound) return true;
-  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(eliminatedRound);
+  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(lastRoundPlayed(eliminatedRound));
   const roundIdx = ELIMINATION_ROUND_ORDER.indexOf(round);
   if (elimIdx < 0 || roundIdx < 0) return true;
   return elimIdx >= roundIdx;
@@ -7415,7 +7930,11 @@ function bracketOddsForPost(sd, todayISO, round) {
 // play's odds sat, next to the name they belong to, and high enough in the post that Slack's
 // "View Full Message" fold can never swallow them. Also dropped when `final`: a finished
 // round's outcome is a fact, not a probability.
-function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals = null, advanceOdds = null } = {}) {
+function buildPlayoffMatchupsSlackText(
+  sd,
+  round,
+  { final = false, dailyTotals = null, advanceOdds = null, year = null } = {}
+) {
   const computed = computePlayoffPairs(sd, round);
   if (!computed) return null;
   const { pairs, score, seedRank } = computed;
@@ -7426,7 +7945,19 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
     return s.endsWith('.0') ? s.slice(0, -2) : s;
   };
 
+  // Win/loss marks on a wrap-up post. Every round but the Finals is a plain advance/out, so
+  // a check and a cross say it all. The Finals is the one round where the four managers finish
+  // in four DIFFERENT places, and the medals say which without the reader having to work out
+  // that the 3rd-place game is the other pair: gold/silver decide the Cup, bronze and the
+  // ignominious fourth decide the consolation game. Unicode literals rather than Slack
+  // shortcodes, like the rest of this builder — an unknown shortcode prints as literal text.
+  const marksFor = (label) => {
+    if (round !== 'Finals') return { win: '\u{2705}', loss: '\u{274C}' };
+    return label === 'Championship' ? { win: '\u{1F947}', loss: '\u{1F948}' } : { win: '\u{1F949}', loss: '\u{1F4A9}' };
+  };
+
   const matchupText = (label, r, a, b, leader) => {
+    const marks = marksFor(label);
     const line = (name) => {
       const s = score(r, name);
       const seedTag = seedRank[name] ? `(${seedRank[name]}) ` : '';
@@ -7436,7 +7967,7 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
         ? ` \u{00B7} ${formatOddsPct(o.advance_pct / 100, o.clinched)}${o.clinched ? ' \u{1F512}' : ''}`
         : '';
       const core = `${seedTag}${name} — ${fmt(s.total)}${delta}${oddsTag}`;
-      const mark = final ? (name === leader ? ' \u{2705}' : ' \u{274C}') : '';
+      const mark = final ? ` ${name === leader ? marks.win : marks.loss}` : '';
       return `\u{25B8} ${name === leader ? `*${core}*` : core} _(B: ${fmt(s.batting)} | P: ${fmt(s.pitching)})_${mark}`;
     };
     return `*${label}*\n${line(a)}\n${line(b)}`;
@@ -7444,16 +7975,53 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
 
   let heading;
   let footer = '';
+  // Rendered ABOVE the heading rather than below the matchups — see the Finals branch.
+  let podium = '';
   if (round === 'QF') {
     heading = final ? '\u{1F3C1} *Quarterfinal Results*' : '\u{1F94A} *Quarterfinal Matchups*';
     if (final) footer = `Advancing to the Semifinals: ${pairs.map((p) => `*${p.leader}*`).join(', ')}`;
   } else if (round === 'SF') {
     heading = final ? '\u{1F3C1} *Semifinal Results*' : '\u{1F94A} *Semifinal Matchups*';
-    if (final) footer = `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}`;
+    // Both halves, because the semifinal sends nobody home: the winners play the Championship
+    // and the losers play the 3rd-place game, over the same two Finals weeks. Naming only the
+    // Finals pair is what made this round read as an elimination when it never was one.
+    if (final) {
+      const losers = pairs.map((p) => (p.leader === p.a ? p.b : p.a)).filter(Boolean);
+      footer =
+        `Advancing to the Finals: ${pairs.map((p) => `*${p.leader}*`).join(' vs ')}` +
+        (losers.length === 2
+          ? `\n\u{1F949} 3rd-place game: *${losers[0]}* vs *${losers[1]}* \u{2014} same two weeks.`
+          : '');
+    }
   } else if (round === 'Finals') {
     heading = final ? '\u{1F3C1} *Finals Results*' : '\u{1F94A} *Championship & 3rd Place*';
-    if (final) {
-      footer = `\u{1F3C6} *${pairs[0].leader} wins the Whit Merrifield Memorial Cup!* \u{1F949} ${pairs[1].leader} takes 3rd place.`;
+    // The season's last automatic post, so it says the whole finish outright rather than
+    // leaving the reader to infer three of the four places from two matchup blocks: one line
+    // per podium step, each naming who beat whom and by how much.
+    //
+    // This is the ONE section that goes ABOVE its own heading. The champion is the single
+    // fact the whole post exists to deliver, and Slack folds a long message behind "View
+    // Full Message" from the bottom — so it leads, the rest of the podium sits under it, and
+    // the matchup detail that backs it up follows. Scores go through the same `fmt` the
+    // matchup lines use, so a number can never appear twice in one post wearing two
+    // different faces.
+    if (final && pairs.length === 2) {
+      const [champGame, thirdGame] = pairs;
+      const loserOf = (p) => (p.leader === p.a ? p.b : p.a);
+      const runnerUp = loserOf(champGame);
+      const fourth = loserOf(thirdGame);
+      const result = (p) => {
+        const w = score(p.r, p.leader).total;
+        const l = score(p.r, loserOf(p)).total;
+        return `${fmt(w)}\u{2013}${fmt(l)} (by ${fmt(w - l)})`;
+      };
+      const season = year ? `${year} ` : '';
+      podium =
+        `\u{1F947} *${champGame.leader} is the ${season}Champion!*\n` +
+        `Defeats ${runnerUp} ${result(champGame)} to win the Whit Merrifield Memorial Cup. \u{1F3C6}\n\n` +
+        `\u{1F948} *${runnerUp}* \u{2014} runner-up\n` +
+        `\u{1F949} *${thirdGame.leader}* takes 3rd \u{2014} defeats ${fourth} ${result(thirdGame)}\n` +
+        `\u{1F4A9} *${fourth}* \u{2014} 4th place`;
     }
   }
 
@@ -7466,6 +8034,7 @@ function buildPlayoffMatchupsSlackText(sd, round, { final = false, dailyTotals =
     : '';
 
   return (
+    (podium ? `${podium}\n\n` : '') +
     `${heading}\n\n` +
     pairs.map((p) => matchupText(p.label, p.r, p.a, p.b, p.leader)).join('\n\n') +
     (footer ? `\n\n${footer}` : '') +
@@ -7625,6 +8194,7 @@ function buildScoreboardBlocks(db, year, opts = {}) {
   if (isPlayoffRound) {
     playoffText = buildPlayoffMatchupsSlackText(seasonData, currentRound, {
       final: !!summaryRound,
+      year,
       dailyTotals: roundDailyTotals,
       // Odds to advance, in the round's final week. Server-computed (4am sync / pre-post
       // backstop) and only read here, so the % beside a manager and the score beside it
@@ -9534,6 +10104,209 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
 // the league's history; refusing them is how it gets noticed.
 const CORRECTION_MAX_SWING = Number(process.env.MLB_CORRECTION_MAX_SWING || 15);
 
+// ============================================================
+// Late stat corrections — what a refused swing is made of
+// ============================================================
+// Mirror of js/corrections.js (canonical, unit-tested). server.js cannot import the ESM copy,
+// so the two must stay identical — tests/serverMirrors.test.js enforces it. See that module for
+// why an owner change and a score change are different problems with opposite responses.
+
+const CORRECTION_ROW_LIMIT = 6;
+
+const correctionRound2 = (n) => Math.round(n * 100) / 100;
+
+// A signed score, for prose: 31.1 reads as "+31.1", -7.3 as "-7.3".
+function fmtCorrectionDelta(n) {
+  const v = correctionRound2(n || 0);
+  return `${v > 0 ? '+' : ''}${v}`;
+}
+
+const correctionManagerLabel = (m) => m || '(nobody)';
+const correctionTypeLabel = (t) => (t === 'batting' ? 'bat' : 'pit');
+
+// One row's before/after, classified.
+//
+// `kind` answers "what changed about this row":
+//   'score'   — the numbers moved, the owner did not. A stat difference.
+//   'owner'   — the numbers are identical, the row changed hands. An attribution repair.
+//   'both'    — both moved.
+//   'added' / 'removed' — the row did not exist on one side. A re-sync creating or purging a
+//               row is neither a stat correction nor an attribution fix, and the removal case
+//               is invisible to any diff that only walks the rows that exist afterwards.
+//
+// `impact` is what the row can move on a scoreboard, which is NOT the same as its score delta:
+// an owner-only change moves the row's whole score from one manager to another, so a 31.1-point
+// row that changed hands is a 31.1-point event even though its delta is zero.
+function classifyCorrectionRow(row) {
+  const storedScore = correctionRound2(row.storedScore || 0);
+  const resyncScore = correctionRound2(row.resyncScore || 0);
+  const storedManager = row.storedManager || null;
+  const resyncManager = row.resyncManager || null;
+  const scoreDiff = correctionRound2(resyncScore - storedScore);
+  const ownerChanged = storedManager !== resyncManager;
+
+  let kind = null;
+  if (row.existedBefore === false) kind = 'added';
+  else if (row.existsAfter === false) kind = 'removed';
+  else if (scoreDiff !== 0 && ownerChanged) kind = 'both';
+  else if (scoreDiff !== 0) kind = 'score';
+  else if (ownerChanged) kind = 'owner';
+
+  const impact =
+    kind === 'owner' || kind === 'both'
+      ? Math.max(Math.abs(scoreDiff), Math.abs(resyncScore), Math.abs(storedScore))
+      : Math.abs(kind === 'removed' ? storedScore : scoreDiff);
+
+  return {
+    player: row.player,
+    type: row.type,
+    storedScore,
+    resyncScore,
+    storedManager,
+    resyncManager,
+    scoreDiff,
+    ownerChanged,
+    kind,
+    impact: correctionRound2(impact),
+  };
+}
+
+// Every row that moved, biggest first, plus the week's verdict.
+//
+// The verdict is the sentence a commissioner reads instead of opening a console:
+//   'attribution' — nothing's score changed; only owners did. A roster fix that never reached
+//                   this week. Re-syncing the week is the repair, not a risk.
+//   'stats'       — only scores changed. A genuine data difference; look before writing.
+//   'mixed'       — both, so look at the owner rows first: those are usually the repair.
+//   'none'        — nothing moved at row level (the swing came from somewhere else entirely,
+//                   which is itself worth knowing).
+function summarizeCorrectionRows(rows) {
+  const classified = (rows || [])
+    .map(classifyCorrectionRow)
+    .filter((r) => r.kind)
+    .sort((a, b) => b.impact - a.impact || String(a.player).localeCompare(String(b.player)));
+
+  const scoreMoved = classified.filter((r) => r.kind === 'score' || r.kind === 'both').length;
+  const ownerMoved = classified.filter((r) => r.kind === 'owner' || r.kind === 'both').length;
+  const structural = classified.filter((r) => r.kind === 'added' || r.kind === 'removed').length;
+
+  let verdict = 'none';
+  if (classified.length) {
+    if (scoreMoved && ownerMoved) verdict = 'mixed';
+    else if (ownerMoved) verdict = 'attribution';
+    else if (scoreMoved) verdict = 'stats';
+    // Only rows appearing or vanishing. Neither a stat correction nor an attribution fix, and
+    // worth its own name: a re-sync that would DELETE a stored row is the one shape of this
+    // that silently removes points nobody asked to remove.
+    else verdict = 'structural';
+  }
+
+  return { rows: classified, scoreMoved, ownerMoved, structural, verdict };
+}
+
+// One row as a Slack bullet. The owner case leads with the handover, because that is the whole
+// point of the line; the score case leads with the numbers, for the same reason.
+function correctionRowLine(r) {
+  const where = `\u{2022} *${r.player}* (${correctionTypeLabel(r.type)})`;
+  if (r.kind === 'added') {
+    return `${where} — row did not exist before, now ${r.resyncScore} pts (owner ${correctionManagerLabel(r.resyncManager)})`;
+  }
+  if (r.kind === 'removed') {
+    return `${where} — row would be REMOVED, was ${r.storedScore} pts (owner ${correctionManagerLabel(r.storedManager)})`;
+  }
+  if (r.kind === 'owner') {
+    return (
+      `${where} — owner changed: ${correctionManagerLabel(r.storedManager)} \u{2192} ` +
+      `${correctionManagerLabel(r.resyncManager)}, ${r.resyncScore} pts, score unchanged`
+    );
+  }
+  if (r.kind === 'both') {
+    return (
+      `${where} — owner changed: ${correctionManagerLabel(r.storedManager)} \u{2192} ` +
+      `${correctionManagerLabel(r.resyncManager)}, and score ${r.storedScore} \u{2192} ${r.resyncScore} ` +
+      `(${fmtCorrectionDelta(r.scoreDiff)})`
+    );
+  }
+  return `${where} — score ${r.storedScore} \u{2192} ${r.resyncScore} (${fmtCorrectionDelta(r.scoreDiff)}), owner unchanged`;
+}
+
+// The one line that tells the commissioner what to DO about this week.
+function correctionVerdictLine(summary) {
+  if (summary.verdict === 'attribution') {
+    return (
+      `_Every row that moved changed OWNER, not score._ That is a roster fix (an undone swap, a ` +
+      `corrected date) that never reached this closed week's cached rows — re-syncing the week is ` +
+      `the repair, not a risk. Points are currently credited to the wrong manager, or to nobody.`
+    );
+  }
+  if (summary.verdict === 'stats') {
+    return (
+      `_Every row that moved changed SCORE, with no change of owner._ That is a genuine stat ` +
+      `difference — check for a game counted in the wrong week before writing it.`
+    );
+  }
+  if (summary.verdict === 'structural') {
+    return (
+      `_${summary.structural} row(s) would be ADDED or REMOVED, with no score or owner change on ` +
+      `any existing row._ A re-sync that deletes a stored row takes its points with it — check what ` +
+      `those rows are before writing this.`
+    );
+  }
+  if (summary.verdict === 'mixed') {
+    return (
+      `_${summary.ownerMoved} row(s) changed owner and ${summary.scoreMoved} changed score._ Look at ` +
+      `the owner rows first — those are usually a roster fix that never reached this week, not an anomaly.`
+    );
+  }
+  return `_No stat row moved at all_ — the swing came from outside this week's rows. Worth a look on its own.`;
+}
+
+// The refused-week Slack post.
+//
+// `flagged` is [{ week, maxSwing, diffs: [{ manager, diff }], summary }] — already-derived
+// facts, one entry per refused week. `summary` is what summarizeCorrectionRows returned, and
+// may be absent (a caller that could not capture rows still gets the old, thinner message
+// rather than no message).
+function buildCorrectionRefusalText(flagged, threshold) {
+  const weeks = flagged || [];
+  if (!weeks.length) return '';
+
+  const head =
+    `:warning: *WMMC corrections sweep refused ${weeks.length} week(s).* A re-sync wanted to move a ` +
+    `manager by more than ${threshold} pts, which is too large to be a stat correction. Nothing was written.`;
+
+  const blocks = weeks.map((w) => {
+    const movers = (w.diffs || []).map((d) => `${d.manager} ${fmtCorrectionDelta(d.diff)}`).join(', ');
+    const lines = [`*${w.week}* — ${movers || 'no manager named'}`];
+
+    // A summary that found NO moved rows is not the same as no summary at all, and the
+    // difference matters: the first says "we looked and the swing is not in this week's rows",
+    // which is a finding; the second says "we could not look", which is a thinner message.
+    // Only the row bullets are conditional on there being rows — the verdict always prints.
+    const summary = w.summary;
+    if (summary) {
+      for (const r of summary.rows.slice(0, CORRECTION_ROW_LIMIT)) lines.push(correctionRowLine(r));
+      const hidden = summary.rows.length - CORRECTION_ROW_LIMIT;
+      if (hidden > 0) lines.push(`\u{2022} …and ${hidden} more row(s)`);
+      lines.push(correctionVerdictLine(summary));
+    }
+    return lines.join('\n');
+  });
+
+  return [head, ...blocks].join('\n\n');
+}
+
+// The same facts, compressed to one line per week for a console log.
+function correctionRefusalLogLine(flagged) {
+  return (flagged || [])
+    .map((w) => {
+      const movers = (w.diffs || []).map((d) => `${d.manager} ${fmtCorrectionDelta(d.diff)}`).join(', ');
+      const verdict = w.summary ? ` [${w.summary.verdict}]` : '';
+      return `${w.week}${verdict}: ${movers}`;
+    })
+    .join(' | ');
+}
+
 // Per-manager total differences between two score snapshots, largest first.
 function totalsDelta(before, after) {
   const out = [];
@@ -9543,6 +10316,52 @@ function totalsDelta(before, after) {
     if (Math.abs(a - b) >= 0.01) out.push({ manager, before: r2s(b), after: r2s(a), diff: r2s(a - b) });
   }
   return out.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff));
+}
+
+// One week's weekly rows as { score, manager } keyed by type + player — the raw material the
+// correction classifier needs. Both halves matter: the score answers "did the stats change",
+// the manager answers "did this row change hands", and a swing made entirely of the second kind
+// is a roster repair the sweep should not be treating as a data anomaly.
+function correctionRowSnapshot(sd, schedWeek) {
+  const snap = new Map();
+  const take = (rows, playerKey, type) => {
+    for (const r of rows || []) {
+      if (r.round !== schedWeek.round || r.week !== schedWeek.week) continue;
+      snap.set(`${type}\0${r[playerKey]}`, {
+        player: r[playerKey],
+        type,
+        score: r.weekly_score || 0,
+        manager: r.manager || null,
+      });
+    }
+  };
+  take(sd.weekly_batting, 'batter', 'batting');
+  take(sd.weekly_pitching, 'pitcher', 'pitching');
+  return snap;
+}
+
+// Before/after for every row of one week, including the rows that exist on only one side.
+// Walking the UNION rather than the post-sync rows is deliberate: a re-sync that would DELETE a
+// row is invisible to any diff built from what survives, and a deletion is exactly the kind of
+// thing worth refusing over.
+function diffCorrectionRows(before, after) {
+  const out = [];
+  for (const key of new Set([...before.keys(), ...after.keys()])) {
+    const b = before.get(key);
+    const a = after.get(key);
+    const ref = b || a;
+    out.push({
+      player: ref.player,
+      type: ref.type,
+      storedScore: b ? b.score : 0,
+      resyncScore: a ? a.score : 0,
+      storedManager: b ? b.manager : null,
+      resyncManager: a ? a.manager : null,
+      existedBefore: !!b,
+      existsAfter: !!a,
+    });
+  }
+  return out;
 }
 
 // Move one week's stat rows from a synced clone into the live season. Surgical on purpose: only
@@ -9679,6 +10498,7 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
       // twice.
       clone = JSON.parse(JSON.stringify(target));
       const before = captureScoreSnapshot(clone, todayISO).totals;
+      const beforeRows = correctionRowSnapshot(clone, schedWeek);
       await performMLBSync(clone, schedWeek, dates, { trigger: 'auto', note: 'corrections-sweep' });
       const diffs = totalsDelta(before, captureScoreSnapshot(clone, todayISO).totals);
 
@@ -9688,7 +10508,13 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
       }
       const maxSwing = Math.max(...diffs.map((d) => Math.abs(d.diff)));
       if (maxSwing > threshold) {
-        results.push({ week: label, status: 'flagged', max_swing: maxSwing, diffs });
+        // Refused. Say what the swing is MADE of, not just how big it is — a week whose rows all
+        // changed owner and none changed score is a roster fix waiting to land, and reading that
+        // off the message is the difference between a minute and an afternoon.
+        const summary = summarizeCorrectionRows(
+          diffCorrectionRows(beforeRows, correctionRowSnapshot(clone, schedWeek))
+        );
+        results.push({ week: label, status: 'flagged', max_swing: maxSwing, diffs, summary });
         continue;
       }
       adoptWeekRows(target, clone, schedWeek);
@@ -9704,6 +10530,79 @@ async function sweepStatCorrections(sd, { todayISO, threshold = CORRECTION_MAX_S
     outcomeChanges = adopted ? diffRoundOutcomes(outcomesBefore, captureRoundOutcomes(db, target)) : [];
   }
   return { results, outcomeChanges };
+}
+
+// Remember which weeks the sweep refused, so the refusal outlives the Slack message.
+//
+// The sweep used to be stateless, which meant a refused week had no existence anywhere except a
+// post in a channel: it re-alerted every Wednesday, said the same thing, and nothing downstream
+// could know it was outstanding. That is how a season got certified on top of one. `sd`
+// carries the flags now — set when a week is refused, CLEARED the moment a later sweep finds
+// that week clean or adopts it, so a repaired week stops flagging itself with no human step.
+//
+// A week that errored is left exactly as it was: an MLB fetch that fell over is not evidence
+// that a previously refused week is fine now.
+function recordCorrectionFlags(sd, results, todayISO) {
+  const flags = sd.correction_flags && typeof sd.correction_flags === 'object' ? sd.correction_flags : {};
+  for (const r of results || []) {
+    if (r.status === 'flagged') {
+      flags[r.week] = {
+        first_seen: (flags[r.week] && flags[r.week].first_seen) || todayISO,
+        last_seen: todayISO,
+        max_swing: r.max_swing,
+        verdict: (r.summary && r.summary.verdict) || null,
+        diffs: r.diffs || [],
+        rows: (r.summary && r.summary.rows) || [],
+      };
+    } else if (r.status === 'clean' || r.status === 'applied') {
+      delete flags[r.week];
+    }
+  }
+  if (Object.keys(flags).length) sd.correction_flags = flags;
+  else delete sd.correction_flags;
+  return flags;
+}
+
+// Is there an unresolved refusal standing in the way of certifying this season?
+//
+// Written after one was allowed to matter. A week with a refused correction is, by definition, a
+// week whose stored scores the sweep believes are wrong by more than the ceiling — and a
+// completed week's scores are what the bracket, the placements, the roasts, the recap and the
+// permanent history are all computed from. Closing on top of one certifies a number the server
+// already flagged as suspect. The 2026 season closed with SF Week 2 outstanding: a 31.1-point
+// attribution repair sat refused across the semifinal that decided the Championship pairing.
+//
+// It blocks rather than warns, and takes `force` to proceed, because "close the season" is a
+// once-a-year irreversible-feeling action and the commissioner should have to say yes on
+// purpose. Returns null when there is nothing in the way.
+function correctionCloseBlock(sd, force) {
+  const flags = outstandingCorrectionFlags(sd);
+  if (!flags.length || force) return null;
+  const lines = flags.map(
+    (f) =>
+      `${f.week} (${f.managers || 'no manager named'}${f.verdict ? `, looks like a ${f.verdict} problem` : ''}, ` +
+      `first refused ${f.first_seen || 'unknown'})`
+  );
+  return {
+    error:
+      `Cannot close the season — ${flags.length} completed week(s) have a stat correction the sweep REFUSED and ` +
+      `nobody resolved: ${lines.join('; ')}. Those weeks' scores feed the bracket, the placements and the permanent ` +
+      `record. Resolve them first (re-sync the week to accept the correction, or fix the underlying data), or ` +
+      `re-run with force to close anyway.`,
+    correction_flags: flags,
+    force_required: true,
+  };
+}
+
+// The outstanding refusals, as lines a human can read in an error message or a confirm dialog.
+function outstandingCorrectionFlags(sd) {
+  return Object.entries((sd && sd.correction_flags) || {}).map(([week, f]) => ({
+    week,
+    max_swing: f.max_swing,
+    verdict: f.verdict,
+    first_seen: f.first_seen,
+    managers: (f.diffs || []).map((d) => `${d.manager} ${fmtCorrectionDelta(d.diff)}`).join(', '),
+  }));
 }
 
 // The Slack post for a correction that overturned something. Kept as its own builder, like the
@@ -9741,13 +10640,18 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
     const applied = results.filter((r) => r.status === 'applied' || r.status === 'would_apply');
     const flagged = results.filter((r) => r.status === 'flagged');
 
-    if (!dryRun && applied.length) {
-      addAuditEntry(db, 'mlb_corrections_applied', {
-        year,
-        threshold,
-        weeks: applied.map((r) => r.week),
-        outcome_changes: outcomeChanges,
-      });
+    if (!dryRun) {
+      // Flags are recorded even when nothing was adopted: a run that refuses every week still
+      // changed what we know, and a run that finds a previously refused week clean must clear it.
+      recordCorrectionFlags(sd, results, todayET);
+      if (applied.length) {
+        addAuditEntry(db, 'mlb_corrections_applied', {
+          year,
+          threshold,
+          weeks: applied.map((r) => r.week),
+          outcome_changes: outcomeChanges,
+        });
+      }
       db.seasons[year] = sd;
       writeDB(db);
     }
@@ -9758,6 +10662,10 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
       applied: applied.length,
       flagged: flagged.length,
       outcome_changes: outcomeChanges,
+      // Exactly what the Wednesday sweep would post for these refusals — so the message can be
+      // read here, on demand, instead of by waiting a week for a cron.
+      refusal_message: buildCorrectionRefusalText(flagged, threshold) || null,
+      outstanding_flags: outstandingCorrectionFlags(sd),
       results,
     });
   } catch (e) {
@@ -13102,6 +14010,26 @@ app.get('/api/mlb/live', async (req, res) => {
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
 
+  // A closed season answers before touching the MLB Stats API at all. This is the endpoint the
+  // Live tab polls every two minutes per open browser, and every one of those polls can fan out
+  // into a week of schedule and boxscore fetches — so "no more polling the API" has to be
+  // enforced here, not only in the 4am job. `season_closed` tells the client to stop its own
+  // poll loop immediately rather than wind down through the grace window (shouldKeepPolling,
+  // app.js), which otherwise keeps a tab left open asking for another half hour.
+  if (sd.season_closed && sd.season_closed.at) {
+    return res.json({
+      season: year,
+      active_week: null,
+      season_closed: true,
+      reason: 'season_closed',
+      today: null,
+      fetched_at: new Date().toISOString(),
+      games: [],
+      managers: [],
+      players: [],
+    });
+  }
+
   // The live day, not the ET calendar date — see resolveLiveDay. A slate that started last
   // night keeps this view through the following morning, so `today` here means "the game day
   // being shown" and every date comparison below (active week, roster asOf, today_score,
@@ -16316,6 +17244,927 @@ app.post('/api/seasons/:year/generate-roast', requireCommissioner, async (req, r
   }
 });
 
+// DELETE /api/seasons/:year/roasts/:round — remove every stored roast for a round (commissioner
+// only). sd.roasts is server-authoritative — a full-season save can only ever ADD to it (see the
+// save guard) — so a roast written in error cannot be withdrawn from the client without this.
+//
+// It exists because of one specific error: before the 3rd-place-game fix, "Advance winners" roasted
+// the two semifinal losers as ELIMINATED, and that roast renders on their roster page as a "your
+// season is over" banner while they are still playing the 3rd-place game. The Semifinals advance
+// action calls this to clear that. Returns the managers whose roasts were removed.
+app.delete('/api/seasons/:year/roasts/:round', requireCommissioner, (req, res) => {
+  const { year, round } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  if (!['PP', 'QF', 'SF', 'Finals'].includes(round)) {
+    return res.status(400).json({ error: "round must be one of 'PP', 'QF', 'SF', 'Finals'" });
+  }
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const removed = [];
+  for (const [manager, r] of Object.entries(sd.roasts || {})) {
+    if (r && r.round === round) {
+      delete sd.roasts[manager];
+      removed.push(manager);
+    }
+  }
+
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'roasts_cleared', { year, round, managers: removed }, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ok: true, round, removed, _rev: computeSeasonRev(sd) });
+});
+
+// ============================================================
+// Next-round preview — mirror of js/roundPreview.js
+// ============================================================
+// Canonical copy + unit tests live in js/roundPreview.js; server.js cannot import the ESM
+// module, so the two must stay byte-identical (tests/serverMirrors.test.js enforces it).
+// Pure formatting only — the fact-gathering that feeds it (buildNextRoundPreview, below)
+// is server-only glue, because it reads season data.
+function fmtPreviewScore(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  const s = v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+
+// "(1) Alice" when the seed is known, "Alice" when it isn't.
+function previewSeeded(team) {
+  return team.seed ? `(${team.seed}) ${team.name}` : team.name;
+}
+
+// "QF 610.2 · SF 594.3" — the per-round splits behind the playoff total, so a manager who
+// peaked early reads differently from one who is getting hotter.
+function previewSplitLine(team) {
+  const parts = (team.roundPoints || [])
+    .filter((r) => r && r.round)
+    .map((r) => `${r.round} ${fmtPreviewScore(r.points)}`);
+  return parts.length ? ` (${parts.join(' \u{00B7} ')})` : '';
+}
+
+// The two or three players who actually carried this manager through the bracket. Named with
+// their points because "his best hitter" is worth nothing without the number attached.
+function previewTopLine(team) {
+  const top = (team.top || []).filter((p) => p && p.name).slice(0, 3);
+  if (!top.length) return '';
+  return ` \u{00B7} carried by ${top.map((p) => `${p.name} ${fmtPreviewScore(p.points)}`).join(', ')}`;
+}
+
+// 1 -> '1st', 2 -> '2nd', 3 -> '3rd', 11 -> '11th'.
+function previewOrdinal(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '';
+  const rem100 = v % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${v}th`;
+  return `${v}${['th', 'st', 'nd', 'rd'][v % 10] || 'th'}`;
+}
+
+const previewPlural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// One manager's career, in the single most interesting sentence available about it — chosen
+// by how much it raises the stakes of the game being previewed, most loaded first. Never
+// invents a fact: a manager with no finished season on record is simply described as such.
+//
+// `history` is a js/history.js managerPlayoffHistory result. `label` is the matchup label, so
+// a 3rd-place-game preview doesn't tell somebody he is chasing a Cup he has already lost.
+function previewHistoryFact(name, history, label = 'Championship') {
+  if (!history || !history.seasonsPlayed) {
+    return `${name} has no finished WMMC season on record — everything from here is a first.`;
+  }
+  const seasons = previewPlural(history.seasonsPlayed, 'season');
+
+  if (history.titleCount > 0) {
+    return history.titleCount === 1
+      ? `${name} won it in ${history.lastTitle}.`
+      : `${name} has ${previewPlural(history.titleCount, 'Cup')}, most recently ${history.lastTitle}.`;
+  }
+  if (history.neverMadeFinals && label === 'Championship') {
+    return `${name} has never reached a Final in ${seasons} — this is the first.`;
+  }
+  if (history.finalsAppearances > 0) {
+    return `${name} has ${previewPlural(history.finalsAppearances, 'Final')} and no Cup${
+      history.lastYearInFinals ? `, the last in ${history.lastYearInFinals}` : ''
+    }.`;
+  }
+  if (history.sfExitCount > 0) {
+    return `${name} has lost ${previewPlural(history.sfExitCount, 'semifinal')}${
+      history.lastYearInSemis ? `, the last in ${history.lastYearInSemis}` : ''
+    }, and never got past one.`;
+  }
+  if (history.neverPastQF) {
+    return `${name} had never won a playoff game before this year, across ${seasons}.`;
+  }
+  const best = history.seasons.reduce((lo, s) => (lo === null || s.place < lo.place ? s : lo), null);
+  return best
+    ? `${name}'s best finish is ${previewOrdinal(best.place)}, in ${best.year}.`
+    : `${name} is ${seasons} into his WMMC career.`;
+}
+
+// Who the form likes, and by how much — stated as form and labelled as form. Returns '' when
+// neither manager has any bracket scoring to compare, because a pick from nothing is a guess
+// wearing a number.
+function previewEdge(a, b) {
+  const pa = Number(a.playoffPoints) || 0;
+  const pb = Number(b.playoffPoints) || 0;
+  if (pa <= 0 && pb <= 0) return '';
+  const gap = Math.round(Math.abs(pa - pb) * 10) / 10;
+  if (gap < 1) {
+    return `Dead level across the bracket — ${fmtPreviewScore(pa)} apiece. Fresh rosters decide this one entirely.`;
+  }
+  const leader = pa > pb ? a : b;
+  // The gap against the bigger of the two totals, so "62 points" reads as the rounding error
+  // or the chasm it actually is instead of as a bare number.
+  const share = gap / Math.max(pa, pb);
+  const strength =
+    share >= 0.1
+      ? 'and it has not been close'
+      : share >= 0.03
+        ? 'a real gap, but a survivable one'
+        : 'which is close enough to nothing';
+  return `Form likes ${leader.name} — ${fmtPreviewScore(gap)} more points across the bracket, ${strength}. Both rosters reset for these weeks, so treat it as form, not a forecast.`;
+}
+
+// One upcoming matchup, as a Slack mrkdwn section.
+//
+//   matchup — { label, emoji?, teams: [team, team] }, each team
+//             { name, seed?, playoffPoints, roundPoints: [{ round, points }], top: [{ name, points }],
+//               history: managerPlayoffHistory result | null }
+//
+// Returns '' unless both sides are known — a half-built preview is worse than none.
+function buildMatchupPreview(matchup) {
+  const teams = ((matchup && matchup.teams) || []).filter((t) => t && t.name);
+  if (teams.length !== 2) return '';
+  const [a, b] = teams;
+  const emoji = matchup.emoji || '\u{1F3C6}';
+  const lines = [`${emoji} *${matchup.label}* — ${previewSeeded(a)} vs ${previewSeeded(b)}`];
+  for (const t of teams) {
+    lines.push(
+      `> *${t.name}* — ${fmtPreviewScore(t.playoffPoints)} pts in the bracket${previewSplitLine(t)}${previewTopLine(t)}`
+    );
+  }
+  // Both trailing lines are labelled rather than wrapped whole in italics, and that is load
+  // bearing: Slack's italic marker is `_`, `_` is a word character, and the shortening pass that
+  // rewrites full manager names at the send boundary matches on `\b` — so a line that OPENS with
+  // `_Alice Adams …` is the one place a manager's full name survives into a post while every
+  // other mention of him is short. Keep a non-name word first.
+  const facts = teams.map((t) => previewHistoryFact(t.name, t.history, matchup.label)).filter(Boolean);
+  if (facts.length) lines.push(`> _History:_ ${facts.join(' ')}`);
+  const edge = previewEdge(a, b);
+  if (edge) lines.push(`> _Early edge:_ ${edge}`);
+  return lines.join('\n');
+}
+
+// The whole preview section for a round-end post: a heading plus one block per upcoming
+// matchup. Returns '' when nothing is previewable, so a caller can append it unconditionally.
+function buildRoundPreviewBlock({ heading = null, matchups = [] } = {}) {
+  const blocks = (matchups || []).map(buildMatchupPreview).filter(Boolean);
+  if (!blocks.length) return '';
+  const head = heading || '\u{1F52E} *Up next*';
+  return [head, ...blocks].join('\n\n');
+}
+
+// ============================================================
+// Season recap — mirror of js/seasonRecap.js
+// ============================================================
+// Canonical copy + unit tests live in js/seasonRecap.js; server.js cannot import the ESM
+// module, so the two must stay byte-identical (tests/serverMirrors.test.js enforces it).
+// Pure formatting only — the fact-gathering that feeds it (collectSeasonRecapFacts, below)
+// is server-only glue, because that half has to read the season and honour roster windows.
+const TROPHY = '\u{1F3C6}'; // trophy
+const SILVER = '\u{1F948}'; // 2nd place medal
+const BRONZE = '\u{1F949}'; // 3rd place medal
+const BASEBALL = '\u{26BE}'; // baseball
+const CHART = '\u{1F4CA}'; // bar chart
+const CLIPBOARD = '\u{1F4CB}'; // clipboard
+const LINK = '\u{1F517}'; // link
+const MICROPHONE = '\u{1F3A4}'; // microphone
+
+// A score as every other Slack post formats one: one decimal, thousands separators, and no
+// trailing `.0` — so the same number never appears twice in a post wearing two faces.
+function fmtRecapScore(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  const s = v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+
+// 1 -> '1st', 2 -> '2nd', 3 -> '3rd', 11 -> '11th'.
+function recapOrdinal(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '';
+  const rem100 = v % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${v}th`;
+  return `${v}${['th', 'st', 'nd', 'rd'][v % 10] || 'th'}`;
+}
+
+// A stable index into a bank, derived from the text handed in. The recap is generated at most
+// once a season but MAY be re-run (the commissioner's "Re-run Season Close" button), and a
+// re-run that silently reshuffles which fallback line was used reads as a different season
+// rather than the same one posted twice.
+function recapSeed(key) {
+  let seed = 0;
+  for (const c of String(key || '')) seed = (seed * 31 + c.charCodeAt(0)) >>> 0;
+  return seed;
+}
+
+// "1,204.5-1,180.2 (by 24.3)" — the result line under a podium name, always from THAT
+// manager's side. Written from the winner's side for everyone it produced a line reading
+// "lost the Championship 1,204.5-1,180.2", which says the loser scored the winning total.
+// Returns '' when the game isn't resolvable, so the name still renders on its own.
+function gameLine(game, forManager) {
+  if (!game || !game.winner || !game.loser) return '';
+  const lost = forManager === game.loser;
+  const mine = lost ? game.loserScore : game.winnerScore;
+  const theirs = lost ? game.winnerScore : game.loserScore;
+  return `${fmtRecapScore(mine)}\u{2013}${fmtRecapScore(theirs)} (by ${fmtRecapScore(game.margin)})`;
+}
+
+// The podium: the four managers who played the Finals weeks, with the two games that sorted
+// them. Champion and runner-up came out of the Championship, 3rd and 4th out of the 3rd-place
+// game — both played over the SAME two weeks, which is why all four are here and not two.
+function buildPodiumBlock(facts) {
+  const f = facts || {};
+  if (!f.champion) return '';
+  const lines = [`${TROPHY} *The ${f.year} Whit Merrifield Memorial Cup goes to ${f.champion}.*`];
+
+  const champWon = gameLine(f.championship, f.champion);
+  lines.push(`${TROPHY} *1st \u{2014} ${f.champion}*${champWon ? ` \u{2014} won the Championship ${champWon}` : ''}`);
+  if (f.runnerUp) {
+    const champLost = gameLine(f.championship, f.runnerUp);
+    lines.push(
+      `${SILVER} *2nd \u{2014} ${f.runnerUp}*${champLost ? ` \u{2014} lost the Championship ${champLost}` : ''}`
+    );
+  }
+  if (f.third) {
+    const thirdWon = gameLine(f.thirdPlaceGame, f.third);
+    lines.push(`${BRONZE} *3rd \u{2014} ${f.third}*${thirdWon ? ` \u{2014} won the 3rd-place game ${thirdWon}` : ''}`);
+  }
+  if (f.fourth) {
+    const thirdLost = gameLine(f.thirdPlaceGame, f.fourth);
+    lines.push(`*4th \u{2014} ${f.fourth}*${thirdLost ? ` \u{2014} lost the 3rd-place game ${thirdLost}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
+// Every manager, in final order, with where they went out and what they scored getting there.
+//
+// `standings` is already ordered and already carries its `place` — the ordering rule (podium
+// from the bracket, then quarterfinal losers by playoff points, then everyone else by pool
+// play) is a fact about the season, so it is settled by the caller and not re-litigated here.
+function buildFinalStandingsBlock(standings) {
+  const rows = (standings || []).filter((s) => s && s.manager);
+  if (!rows.length) return '';
+  const lines = rows.map((s) => {
+    const exit = s.exit ? ` \u{2014} ${s.exit}` : '';
+    const pts = Number.isFinite(Number(s.seasonPoints)) ? ` \u{00B7} ${fmtRecapScore(s.seasonPoints)} pts` : '';
+    return `${recapOrdinal(s.place)}. *${s.manager}*${exit}${pts}`;
+  });
+  return [`${CLIPBOARD} *Final standings*`, ...lines].join('\n');
+}
+
+// The season's outliers. Every entry is optional: a season missing daily rows, or one where
+// nobody ever swapped, just gets a shorter block. Returns '' when nothing survived, so the
+// caller can append it unconditionally.
+function buildSuperlativesBlock(superlatives) {
+  const s = superlatives || {};
+  const lines = [];
+  if (s.seasonPoints && s.seasonPoints.manager) {
+    lines.push(
+      `\u{2022} *Most points all season:* ${s.seasonPoints.manager} \u{2014} ${fmtRecapScore(s.seasonPoints.points)}`
+    );
+  }
+  if (s.poolPlayLeader && s.poolPlayLeader.manager) {
+    lines.push(
+      `\u{2022} *Pool play winner:* ${s.poolPlayLeader.manager} \u{2014} ${fmtRecapScore(s.poolPlayLeader.points)}`
+    );
+  }
+  if (s.bestWeek && s.bestWeek.manager) {
+    lines.push(
+      `\u{2022} *Best single week:* ${s.bestWeek.manager} \u{2014} ${fmtRecapScore(s.bestWeek.points)} in ${s.bestWeek.label}`
+    );
+  }
+  if (s.topBatter && s.topBatter.name) {
+    lines.push(
+      `\u{2022} *Top bat:* ${s.topBatter.name} \u{2014} ${fmtRecapScore(s.topBatter.points)} for ${s.topBatter.manager}`
+    );
+  }
+  if (s.topPitcher && s.topPitcher.name) {
+    lines.push(
+      `\u{2022} *Top arm:* ${s.topPitcher.name} \u{2014} ${fmtRecapScore(s.topPitcher.points)} for ${s.topPitcher.manager}`
+    );
+  }
+  if (s.biggestBlowout && s.biggestBlowout.winner) {
+    lines.push(
+      `\u{2022} *Biggest beating:* ${s.biggestBlowout.winner} over ${s.biggestBlowout.loser} by ${fmtRecapScore(s.biggestBlowout.margin)} (${s.biggestBlowout.label})`
+    );
+  }
+  if (s.closestGame && s.closestGame.winner) {
+    lines.push(
+      `\u{2022} *Closest game:* ${s.closestGame.winner} over ${s.closestGame.loser} by ${fmtRecapScore(s.closestGame.margin)} (${s.closestGame.label})`
+    );
+  }
+  if (s.mostSwaps && s.mostSwaps.manager) {
+    lines.push(
+      `\u{2022} *Busiest waiver wire:* ${s.mostSwaps.manager} \u{2014} ${s.mostSwaps.count} approved swap${s.mostSwaps.count === 1 ? '' : 's'}`
+    );
+  }
+  if (!lines.length) return '';
+  return [`${CHART} *Season superlatives*`, ...lines].join('\n');
+}
+
+// "two Cups" / "one Cup" — the small pluraliser the history line needs.
+function recapPlural(n, word) {
+  const v = Number(n) || 0;
+  return `${v} ${word}${v === 1 ? '' : 's'}`;
+}
+
+// One line of career context for a podium finisher, read off the finished-season record.
+//
+// `history` is managerPlayoffHistory's result, and the caller passes `throughYear: <this
+// season>` — so everything here is what was true BEFORE today, which is what makes it worth
+// saying. The tenses are past on purpose: this season is the thing the line gives context to,
+// never a season the line is counting.
+function recapHistoryFact(name, history, place) {
+  if (!history || !history.seasonsPlayed) {
+    return `${name} had no finished WMMC season on record before this one.`;
+  }
+  const seasons = recapPlural(history.seasonsPlayed, 'season');
+  const finalsLost = Math.max(0, (history.finalsAppearances || 0) - (history.titleCount || 0));
+
+  if (place === 1) {
+    if (!history.titleCount) {
+      return finalsLost > 0
+        ? `${name} had lost ${recapPlural(finalsLost, 'Final')} across ${seasons} and never won one. That is over.`
+        : `${name} had gone ${seasons} without a Cup.`;
+    }
+    return `${name} had already won ${recapPlural(history.titleCount, 'Cup')}, the last in ${history.lastTitle}.`;
+  }
+  if (place === 2) {
+    if (history.titleCount) {
+      return `${name} has ${recapPlural(history.titleCount, 'Cup')} at home, the last in ${history.lastTitle}, and did not add one.`;
+    }
+    return finalsLost > 0
+      ? `${name} had already lost ${recapPlural(finalsLost, 'Final')} before this one.`
+      : `${name} had never reached a Final in ${seasons}. Reached one. Lost it.`;
+  }
+  if (history.titleCount) {
+    return `${name} won it in ${history.lastTitle}, which is a long way from here.`;
+  }
+  if (history.neverMadeFinals) {
+    return `${name} has still never reached a Final, ${seasons} in.`;
+  }
+  const best = (history.seasons || []).reduce((lo, s) => (lo === null || s.place < lo.place ? s : lo), null);
+  return best
+    ? `${name}'s best finish before this year was ${recapOrdinal(best.place)}, in ${best.year}.`
+    : `${name} is ${seasons} into a WMMC career.`;
+}
+
+// One career line per podium finisher, already written by the caller from the historical
+// results table. Labelled rather than wrapped whole in italics for the same reason the round
+// preview labels its history line: it keeps a non-name word first.
+function buildHistoryBlock(historyLines) {
+  const lines = (historyLines || []).filter((l) => typeof l === 'string' && l.trim());
+  if (!lines.length) return '';
+  return [`${BASEBALL} *For the record*`, ...lines.map((l) => `> _History:_ ${l.trim()}`)].join('\n');
+}
+
+// The written wrap, when the model is unavailable. Four banks, one per voice ROAST_VOICE asks
+// for, so an API failure changes WHO wrote the season's last post rather than how the league
+// sounds. Keep that property when adding lines. Every line is built from supplied facts only —
+// this bank can no more invent a number than the model is allowed to.
+function fallbackSeasonRecap(facts) {
+  const f = facts || {};
+  const champ = f.champion || 'somebody';
+  const runnerUp = f.runnerUp || 'the other guy';
+  const fourth = f.fourth;
+  const margin = f.championship ? fmtRecapScore(f.championship.margin) : null;
+  const top = f.superlatives && f.superlatives.seasonPoints;
+
+  const banks = [
+    // The anchor's swagger.
+    () =>
+      `And that's the season. ${champ} takes the Cup${margin ? ` by ${margin} points` : ''} \u{2014} sixteen weeks of box scores, one name on the thing. ` +
+      `${runnerUp} got all the way to the last weekend and found out that the last weekend is the hard one.` +
+      (top && top.manager && top.manager !== champ
+        ? ` ${top.manager} scored more points than anybody all year and is watching this like the rest of you.`
+        : ''),
+    // Deadpan.
+    () =>
+      `${champ} won the ${f.year} Whit Merrifield Memorial Cup${margin ? `, by ${margin} points` : ''}. That is the whole story. ` +
+      `${runnerUp} finished second, which is the best of the losers, which is still the losers.` +
+      (fourth ? ` ${fourth} finished fourth in a four-man weekend. Somebody had to.` : ''),
+    // Escalation.
+    () =>
+      `${champ} won it. ${champ} won it${margin ? ` by ${margin}` : ''}. ${champ} won it, and now every single one of you has to hear about it until next May. ` +
+      `${runnerUp} played the whole season to lose one game, and lost that one.`,
+    // The guy at the bar.
+    () =>
+      `So ${champ} is the champion, which nobody in this league is going to handle well, least of all ${champ}. ` +
+      `${runnerUp} was right there${margin ? ` \u{2014} ${margin} points right there` : ''} and gets to think about it all winter, which honestly sounds worse than not making it.` +
+      (top && top.manager && top.manager !== champ
+        ? ` And ${top.manager} led the whole league in points and won nothing, which is the most fantasy baseball thing that happened all year.`
+        : ''),
+  ];
+
+  return banks[recapSeed(`${f.year}|${champ}|recap`) % banks.length]();
+}
+
+// The whole post. `wrap` is the written season-in-review (Claude's, or fallbackSeasonRecap's);
+// everything else is receipts, deliberately BELOW it, so the numbers the wrap leans on are
+// visible even when the model got flowery about them.
+//
+// Returns '' when there is no podium, because a season recap that cannot name a champion is
+// not a recap — the caller should fail loudly rather than post a shell.
+function buildSeasonRecapText(facts, wrap) {
+  const f = facts || {};
+  const podium = buildPodiumBlock(f);
+  if (!podium) return '';
+  const blocks = [
+    podium,
+    wrap && String(wrap).trim() ? `${MICROPHONE} *The ${f.year} season, in review*\n\n${String(wrap).trim()}` : '',
+    buildFinalStandingsBlock(f.standings),
+    buildSuperlativesBlock(f.superlatives),
+    buildHistoryBlock(f.historyLines),
+    `${LINK} Full season: <http://wmmc.live|wmmc.live>. Same time next year.`,
+  ];
+  return blocks.filter(Boolean).join('\n\n');
+}
+
+// ============================================================
+// Season recap — server-only glue
+// ============================================================
+// The fact-gathering half of the season recap. It lives here, not in js/seasonRecap.js, for
+// the same reason buildNextRoundPreview does: this is the half that reads season data, and
+// reading season data means honouring the roster windows. Every point total below comes
+// through managerWeekSubtotal (directly, or via computeRoundScores/computePlayoffPairs, which
+// are built on it) rather than off the sd.rosters cache — so a player swapped in mid-round is
+// credited for exactly the days he was rostered, and the recap can never disagree with the
+// scoreboard about a number. See the CORE SCORING INVARIANT in CLAUDE.md.
+
+function recapRound2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+// Every manager the season is actually about — the commissioner page is the canonical list
+// (CORE SCORING INVARIANT), filtered exactly the way the pool-play standings filter it, so the
+// recap's field and the standings' field are the same field.
+function recapManagerNames(db) {
+  return (db.managers || []).filter((m) => m.active !== false && m.pool).map((m) => m.name);
+}
+
+// Who finished where, 1st through last.
+//
+// The podium comes from computePlayoffPairs — the SAME function the Slack results block and
+// the Playoff Bracket card are built from — so the recap can never crown someone the bracket
+// disagrees with. Below the podium the order is a fact about how the season is played, not a
+// judgement: the four quarterfinal losers rank 5th-8th by the points they scored in the round
+// that knocked them out, and everyone who missed the bracket ranks below all of them by their
+// pool-play total, which is the thing that decided they missed it.
+//
+// Returns null when the bracket isn't derivable (no confirmed seeding, or the Finals haven't
+// been played) — the caller must fail loudly rather than post a recap with a guessed champion.
+function finalPlacements(db, sd) {
+  const computed = computePlayoffPairs(sd, 'Finals');
+  if (!computed) return null;
+
+  const champPair = computed.pairs.find((p) => p.label === 'Championship');
+  const thirdPair = computed.pairs.find((p) => p.label === '3rd Place');
+  if (!champPair || !champPair.a || !champPair.b || !champPair.leader) return null;
+
+  const champion = champPair.leader;
+  const runnerUp = champion === champPair.a ? champPair.b : champPair.a;
+  const third = thirdPair && thirdPair.leader ? thirdPair.leader : null;
+  const fourth = third ? (third === thirdPair.a ? thirdPair.b : thirdPair.a) : null;
+
+  const game = (winner, loser) => {
+    if (!winner || !loser) return null;
+    const w = recapRound2(computed.score('Finals', winner).total);
+    const l = recapRound2(computed.score('Finals', loser).total);
+    return { winner, loser, winnerScore: w, loserScore: l, margin: recapRound2(Math.abs(w - l)) };
+  };
+
+  // Has the Finals round actually been scored?
+  //
+  // computePlayoffPairs resolves a 0-0 matchup on the better seed, which is correct as a
+  // tie-break and catastrophic as an answer to "who won" before the last week's stats are
+  // uploaded: it will happily crown the higher seed of a game nobody has played. Every caller
+  // that WRITES (finalize, close) refuses on this; the read-only endpoint reports it so the
+  // commissioner can see why.
+  const finalsScored =
+    [champion, runnerUp, third, fourth]
+      .filter(Boolean)
+      .reduce((sum, m) => sum + (computed.score('Finals', m).total || 0), 0) > 0;
+
+  const seasonTotals = {};
+  for (const row of computeRoundScores(sd.weekly_batting || [], sd.weekly_pitching || [], null, sd)) {
+    seasonTotals[row.manager] = recapRound2(row.total);
+  }
+
+  const qfField = roundParticipants(sd, 'QF');
+  const sfField = roundParticipants(sd, 'SF');
+  const qfLosers = qfField
+    .filter((m) => !sfField.includes(m))
+    .sort((a, b) => computed.score('QF', b).total - computed.score('QF', a).total || a.localeCompare(b));
+
+  const poolTotals = {};
+  for (const row of computeRoundScores(sd.weekly_batting || [], sd.weekly_pitching || [], ['PP1', 'PP2'], sd)) {
+    poolTotals[row.manager] = recapRound2(row.total);
+  }
+  const missed = recapManagerNames(db)
+    .filter((m) => !qfField.includes(m))
+    .sort((a, b) => (poolTotals[b] || 0) - (poolTotals[a] || 0) || a.localeCompare(b));
+
+  const ordered = [
+    { manager: champion, exit: 'Champion' },
+    { manager: runnerUp, exit: 'Lost the Championship' },
+    third ? { manager: third, exit: 'Won the 3rd-place game' } : null,
+    fourth ? { manager: fourth, exit: 'Lost the 3rd-place game' } : null,
+    ...qfLosers.map((m) => ({ manager: m, exit: 'Out in the Quarterfinals' })),
+    ...missed.map((m) => ({ manager: m, exit: 'Missed the playoffs' })),
+  ].filter(Boolean);
+
+  return {
+    champion,
+    runnerUp,
+    third,
+    fourth,
+    finalsScored,
+    championship: game(champion, runnerUp),
+    thirdPlaceGame: game(third, fourth),
+    standings: ordered.map((row, i) => ({
+      place: i + 1,
+      manager: row.manager,
+      exit: row.exit,
+      seed: computed.seedRank[row.manager] || null,
+      seasonPoints: seasonTotals[row.manager] || 0,
+      poolPoints: poolTotals[row.manager] || 0,
+    })),
+  };
+}
+
+// The season's outliers. Every entry is independently optional — a season with no daily rows,
+// or one where nobody ever swapped, simply produces fewer of them, and js/seasonRecap.js drops
+// what is missing. Nothing here is allowed to be a guess: an entry we cannot derive is null,
+// never a plausible-looking zero.
+function seasonSuperlatives(db, sd, placements) {
+  const batting = sd.weekly_batting || [];
+  const pitching = sd.weekly_pitching || [];
+  const managers = recapManagerNames(db);
+
+  const best = (rows, value) => rows.reduce((top, r) => (top === null || value(r) > value(top) ? r : top), null);
+
+  const seasonRows = computeRoundScores(batting, pitching, null, sd).filter((r) => managers.includes(r.manager));
+  const poolRows = computeRoundScores(batting, pitching, ['PP1', 'PP2'], sd).filter((r) =>
+    managers.includes(r.manager)
+  );
+
+  // One pass over every week x manager, collecting the week totals and the per-player detail
+  // at the same time. The detail is keyed by player AND manager: a player can be rostered by
+  // two different managers across a season, and "Top bat: X — 890.5 for nobody in particular"
+  // is not a fact worth posting.
+  const weekBests = [];
+  const playerTotals = { batters: {}, pitchers: {} };
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    for (const manager of managers) {
+      let weekTotal = 0;
+      for (const [rows, playerKey, listKey, bucket] of [
+        [batting, 'batter', 'batters', 'batters'],
+        [pitching, 'pitcher', 'pitchers', 'pitchers'],
+      ]) {
+        const detail = [];
+        weekTotal += managerWeekSubtotal(sd, manager, schedWeek, idx, rows, playerKey, listKey, detail);
+        for (const d of detail) {
+          const key = `${d.player}|${manager}`;
+          if (!playerTotals[bucket][key]) playerTotals[bucket][key] = { name: d.player, manager, points: 0 };
+          playerTotals[bucket][key].points += d.score;
+        }
+      }
+      if (weekTotal > 0) {
+        weekBests.push({ manager, label: `${schedWeek.round} ${schedWeek.week}`, points: recapRound2(weekTotal) });
+      }
+    }
+  });
+
+  const topPlayer = (bucket) => {
+    const top = best(Object.values(playerTotals[bucket]), (p) => p.points);
+    return top && top.points > 0 ? { name: top.name, manager: top.manager, points: recapRound2(top.points) } : null;
+  };
+
+  // Every playoff game of the season, from the same pairings the Slack results blocks are
+  // built from, so a margin quoted here is a margin the league has already seen posted.
+  const games = [];
+  for (const round of ['QF', 'SF', 'Finals']) {
+    const computed = computePlayoffPairs(sd, round);
+    if (!computed) continue;
+    for (const p of computed.pairs) {
+      if (!p.a || !p.b || !p.leader) continue;
+      const loser = p.leader === p.a ? p.b : p.a;
+      const w = recapRound2(computed.score(p.r, p.leader).total);
+      const l = recapRound2(computed.score(p.r, loser).total);
+      if (w <= 0 && l <= 0) continue;
+      games.push({
+        label: round === 'Finals' ? p.label : round,
+        winner: p.leader,
+        loser,
+        margin: recapRound2(Math.abs(w - l)),
+      });
+    }
+  }
+
+  const swapCounts = {};
+  for (const s of sd.swaps || []) {
+    if (s && s.status === 'approved' && s.manager) swapCounts[s.manager] = (swapCounts[s.manager] || 0) + 1;
+  }
+  const swapTop = best(
+    Object.entries(swapCounts).map(([manager, count]) => ({ manager, count })),
+    (s) => s.count
+  );
+
+  const topSeason = best(seasonRows, (r) => r.total);
+  const topPool = best(poolRows, (r) => r.total);
+  const topWeek = best(weekBests, (w) => w.points);
+  const blowout = best(games, (g) => g.margin);
+  const closest = games.length ? games.reduce((lo, g) => (g.margin < lo.margin ? g : lo), games[0]) : null;
+
+  return {
+    seasonPoints: topSeason ? { manager: topSeason.manager, points: recapRound2(topSeason.total) } : null,
+    poolPlayLeader: topPool ? { manager: topPool.manager, points: recapRound2(topPool.total) } : null,
+    bestWeek: topWeek || null,
+    topBatter: topPlayer('batters'),
+    topPitcher: topPlayer('pitchers'),
+    // A blowout and a nail-biter that are the same game is one fact, not two — report the
+    // margin once rather than twice under opposite headings.
+    biggestBlowout: blowout,
+    closestGame: closest && blowout && closest !== blowout ? closest : null,
+    mostSwaps: swapTop && swapTop.count > 0 ? swapTop : null,
+    // Not rendered — carried so the written wrap can lean on the champion's own season total
+    // without the model having to infer it from the standings.
+    championSeasonPoints: placements
+      ? (seasonRows.find((r) => r.manager === placements.champion) || {}).total || null
+      : null,
+  };
+}
+
+// Everything js/seasonRecap.js needs, derived once. Returns null when the bracket can't name a
+// champion — the callers turn that into a loud error rather than a shell post.
+function collectSeasonRecapFacts(db, sd, year) {
+  const placements = finalPlacements(db, sd);
+  if (!placements) return null;
+
+  const historyLines = [placements.champion, placements.runnerUp, placements.third, placements.fourth]
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((name, i) =>
+      recapHistoryFact(name, managerPlayoffHistory(name, WMMC_HISTORICAL_RESULTS, { throughYear: year }), i + 1)
+    );
+
+  return {
+    year: String(year),
+    ...placements,
+    superlatives: seasonSuperlatives(db, sd, placements),
+    historyLines,
+  };
+}
+
+// The written season-in-review. Runs on the same model the daily Hot Takes use, and for the
+// same reason: it sits directly above a table of real final standings and quotes its numbers,
+// so getting a total subtly wrong there is worse than any joke is good. Every failure path
+// returns fallbackSeasonRecap, which is written in the same four voices — so an API outage
+// changes WHO wrote the season's last post, never whether one goes out.
+async function generateSeasonRecapWithClaude(facts) {
+  if (!ANTHROPIC_API_KEY) {
+    console.log('[Season recap] Using the static bank: ANTHROPIC_API_KEY is not set.');
+    return { text: fallbackSeasonRecap(facts), source: 'bank:no_api_key', reason: 'ANTHROPIC_API_KEY is not set' };
+  }
+
+  const s = facts.superlatives || {};
+  const factLines = [
+    `Champion: ${facts.champion}`,
+    facts.championship
+      ? `Championship game: ${facts.championship.winner} ${fmtRecapScore(facts.championship.winnerScore)} beat ${facts.championship.loser} ${fmtRecapScore(facts.championship.loserScore)}, by ${fmtRecapScore(facts.championship.margin)}`
+      : null,
+    facts.thirdPlaceGame
+      ? `3rd-place game: ${facts.thirdPlaceGame.winner} ${fmtRecapScore(facts.thirdPlaceGame.winnerScore)} beat ${facts.thirdPlaceGame.loser} ${fmtRecapScore(facts.thirdPlaceGame.loserScore)}, by ${fmtRecapScore(facts.thirdPlaceGame.margin)}`
+      : null,
+    `Final order: ${(facts.standings || []).map((r) => `${recapOrdinal(r.place)} ${r.manager} (${r.exit})`).join('; ')}`,
+    s.seasonPoints
+      ? `Most points all season: ${s.seasonPoints.manager}, ${fmtRecapScore(s.seasonPoints.points)}`
+      : null,
+    s.championSeasonPoints ? `The champion's own season total: ${fmtRecapScore(s.championSeasonPoints)}` : null,
+    s.poolPlayLeader
+      ? `Pool play winner: ${s.poolPlayLeader.manager}, ${fmtRecapScore(s.poolPlayLeader.points)}`
+      : null,
+    s.bestWeek
+      ? `Best single week: ${s.bestWeek.manager}, ${fmtRecapScore(s.bestWeek.points)} in ${s.bestWeek.label}`
+      : null,
+    s.topBatter
+      ? `Top bat: ${s.topBatter.name}, ${fmtRecapScore(s.topBatter.points)} for ${s.topBatter.manager}`
+      : null,
+    s.topPitcher
+      ? `Top arm: ${s.topPitcher.name}, ${fmtRecapScore(s.topPitcher.points)} for ${s.topPitcher.manager}`
+      : null,
+    s.biggestBlowout
+      ? `Biggest beating: ${s.biggestBlowout.winner} over ${s.biggestBlowout.loser} by ${fmtRecapScore(s.biggestBlowout.margin)} (${s.biggestBlowout.label})`
+      : null,
+    s.mostSwaps ? `Most approved swaps: ${s.mostSwaps.manager}, ${s.mostSwaps.count}` : null,
+    ...(facts.historyLines || []).map((l) => `Career note: ${l}`),
+  ].filter(Boolean);
+
+  const prompt = `You are the trash-talking announcer for the Whit Merrifield Memorial Cup fantasy baseball league. The ${facts.year} season is OVER. Write the season-in-review: the last thing the league reads until next May.
+
+Write 5-8 sentences of prose. Crown ${facts.champion} properly, then work down — the manager who lost the Championship, the one who led the league in points and won nothing if that happened, whoever's season the numbers make funny. Naming three or four managers is right; naming all of them is a list, not a joke.
+
+HARD RULES:
+- Use ONLY the facts below. Do not invent a player, a team, a score, a margin or a placing.
+- Every number you write must appear verbatim in the facts below. If you are not quoting one of these figures, do not write a figure at all.
+- No headings, no bullet points, no labels, no preamble. Prose only — the post already carries the standings and the receipts underneath what you write.
+
+Season facts:
+${factLines.join('\n')}
+
+${ROAST_VOICE}
+
+Write the season-in-review now.`;
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: PLAYOFF_COMMENTARY_MODEL,
+        // Generous on purpose: a thinking block spends the same budget, and a reply cut off
+        // mid-thinking reads as an empty response. See the js/anthropic.js gotcha in CLAUDE.md.
+        max_tokens: 2000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(ROAST_API_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error(
+        `[Season recap] Anthropic HTTP ${resp.status} (model ${PLAYOFF_COMMENTARY_MODEL}):`,
+        body.slice(0, 500)
+      );
+      console.log(`[Season recap] Using the static bank: HTTP ${resp.status}.`);
+      return {
+        text: fallbackSeasonRecap(facts),
+        source: `bank:http_${resp.status}`,
+        reason: `Anthropic HTTP ${resp.status}: ${body.slice(0, 200) || '(no body)'}`,
+      };
+    }
+    const data = await resp.json();
+    const text = anthropicReplyText(data);
+    if (!text) {
+      // describeAnthropicReply is the whole reason this branch is debuggable: block types,
+      // stop_reason and token usage are what tell a refusal apart from a max_tokens cut-off
+      // mid-thinking, and without them "the API returned nothing" is true of both.
+      const shape = describeAnthropicReply(data);
+      console.error(`[Season recap] Empty reply — ${shape}`);
+      console.log('[Season recap] Using the static bank: the model returned no text.');
+      return { text: fallbackSeasonRecap(facts), source: 'bank:empty_reply', reason: `empty reply — ${shape}` };
+    }
+    // Same guard the Hot Takes use: a decimal the fact sheet never contained is a number the
+    // model made up, and a made-up number sitting above the real standings is worse than a
+    // less funny paragraph. Whole numbers are left alone — those are years, counts and places.
+    const supplied = new Set((factLines.join('\n').match(/\d[\d,]*\.\d+/g) || []).map((n) => n.replace(/,/g, '')));
+    const invented = (text.match(/\d[\d,]*\.\d+/g) || [])
+      .map((n) => n.replace(/,/g, ''))
+      .filter((n) => !supplied.has(n));
+    if (invented.length) {
+      console.error(`[Season recap] Reply quoted figures not in the fact sheet: ${invented.join(', ')}`);
+      console.log('[Season recap] Using the static bank: the reply quoted an unsupplied figure.');
+      return {
+        text: fallbackSeasonRecap(facts),
+        source: 'bank:invented_figure',
+        reason: `reply quoted figures not in the fact sheet: ${invented.join(', ')}`,
+      };
+    }
+    console.log(`[Season recap] Written by ${PLAYOFF_COMMENTARY_MODEL}.`);
+    return { text: text.trim(), source: PLAYOFF_COMMENTARY_MODEL };
+  } catch (e) {
+    console.error('[Season recap] Anthropic call failed:', e.name, e.message);
+    console.log(`[Season recap] Using the static bank: ${e.message}.`);
+    return { text: fallbackSeasonRecap(facts), source: 'bank:error', reason: `${e.name}: ${e.message}` };
+  }
+}
+
+// Build and post the season recap to the SCOREBOARD channel — the same webhook the daily
+// scores and the round-end roasts go to, never the swap-notification channel.
+//
+// Returns { posted, source, text }. Throws only when the recap could not be BUILT (no
+// derivable champion); a Slack failure is reported, not thrown, because by the time this runs
+// the season is already closed and the roasts are already out.
+async function postSeasonRecapSlack(db, year) {
+  const sd = (db.seasons || {})[year];
+  const facts = collectSeasonRecapFacts(db, sd, year);
+  if (!facts) {
+    throw new Error(
+      'Season recap could not be built — the Finals bracket is not derivable (check that pool play was finalized and the Finals scores are uploaded).'
+    );
+  }
+  const wrap = await generateSeasonRecapWithClaude(facts);
+  const text = buildSeasonRecapText(facts, wrap.text);
+  if (!text) throw new Error('Season recap came out empty — no champion could be named.');
+
+  // `error` and `fallbackReason` are different questions and are kept apart on purpose:
+  // `error` means the post did not go out, `fallbackReason` means it went out in the static
+  // bank's voice instead of the model's, and says why. Collapsing them is how a season recap
+  // recorded `source: 'bank:error'` next to `error: null` — the one field that could have named
+  // the cause, empty, because a fallback is not a post failure and nothing else carried it.
+  const fallbackReason = wrap.reason || null;
+  try {
+    await postScoreboardChannelSlack(text);
+    return { posted: true, source: wrap.source, fallbackReason, text, facts };
+  } catch (e) {
+    console.error('[Season recap] Slack post failed:', e.message);
+    return { posted: false, source: wrap.source, fallbackReason, text, facts, error: e.message };
+  }
+}
+
+// The rounds a manager has already played, in order, at the point `round` has just finished.
+// Pool play is deliberately excluded: the preview is about bracket form, and a 10-week pool
+// total would swamp two playoff rounds and turn "form" back into "seeding".
+const BRACKET_ROUNDS_BEFORE = { QF: ['QF'], SF: ['QF', 'SF'] };
+
+// The players who actually carried a manager through the bracket so far, best first.
+//
+// Scored through managerWeekSubtotal — the same date-windowed pass the scoreboard totals come
+// from — rather than off the sd.rosters cache, so a player who was swapped in mid-round is
+// credited for exactly the days he was rostered, and one swapped out is not credited past his
+// drop date. (sd.rosters is a derived cache and is not swap-honored; see CLAUDE.md.)
+function topBracketPerformers(sd, manager, rounds, limit = 3) {
+  const totals = {};
+  const sources = [
+    [sd.weekly_batting || [], 'batter', 'batters'],
+    [sd.weekly_pitching || [], 'pitcher', 'pitchers'],
+  ];
+  const roundSet = new Set(rounds);
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (!roundSet.has(schedWeek.round)) return;
+    for (const [rows, playerKey, listKey] of sources) {
+      const detail = [];
+      managerWeekSubtotal(sd, manager, schedWeek, idx, rows, playerKey, listKey, detail);
+      for (const d of detail) totals[d.player] = (totals[d.player] || 0) + d.score;
+    }
+  });
+  return Object.entries(totals)
+    .map(([name, points]) => ({ name, points: Math.round(points * 100) / 100 }))
+    .filter((p) => p.points > 0)
+    .sort((a, b) => b.points - a.points || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+// The forward-looking block on a round-end post: every game of the NEXT round, with each
+// manager's bracket form, who carried him there, and one career fact apiece.
+//
+// Only the Semifinals transition is wired up, and for a reason: it is the only round-end post
+// with nothing else to say. Pool Play announces a playoff field, the Quarterfinals stack four
+// eliminations — but nobody is eliminated in the semifinals (the two losers play the 3rd-place
+// game over the Finals weeks), so without this the SF post would be a results block and a
+// deadline. Both Finals-week games get previewed: the Championship and the 3rd-place game.
+//
+// The pairings come from computePlayoffPairs — the SAME function the results block above it is
+// built from — so a preview can never name a matchup the post itself contradicts. Returns ''
+// when the bracket isn't derivable yet, so the caller can append unconditionally.
+function buildNextRoundPreview(sd, round, year) {
+  if (round !== 'SF') return '';
+  const computed = computePlayoffPairs(sd, 'Finals');
+  if (!computed) return '';
+
+  const played = BRACKET_ROUNDS_BEFORE.SF;
+  const emojiFor = { Championship: '\u{1F3C6}', '3rd Place': '\u{1F949}' };
+
+  const teamFacts = (name) => {
+    const roundPoints = played.map((r) => ({ round: r, points: computed.score(r, name).total }));
+    return {
+      name,
+      seed: computed.seedRank[name] || null,
+      playoffPoints: Math.round(roundPoints.reduce((s, r) => s + r.points, 0) * 100) / 100,
+      roundPoints,
+      top: topBracketPerformers(sd, name, played),
+      history: managerPlayoffHistory(name, WMMC_HISTORICAL_RESULTS, { throughYear: year }),
+    };
+  };
+
+  return buildRoundPreviewBlock({
+    heading: '\u{1F52E} *Up next — both Finals-week games*',
+    matchups: computed.pairs
+      .filter((p) => p.a && p.b)
+      .map((p) => ({
+        label: p.label,
+        emoji: emojiFor[p.label] || '\u{1F3C6}',
+        teams: [teamFacts(p.a), teamFacts(p.b)],
+      })),
+  });
+}
+
 const NEXT_ROUND_BY_ROUND = {
   PP: { round: 'QF', label: 'The Quarterfinals', period: 'qf' },
   QF: { round: 'SF', label: 'The Semifinals', period: 'sf' },
@@ -16457,6 +18306,11 @@ function buildSubmissionWindowBlock(sd, todayISO) {
 // before the post — the first live post silently dropped a manager because it trusted the
 // stored roasts alone. `regenerate: true` re-rolls every roast for the round (the repost
 // button uses this).
+//
+// A round-end post does NOT require a roast. The Semifinals eliminate nobody — their two
+// losers go to the 3rd-place game, played out over the Finals weeks — so the SF post is
+// results plus the Finals/3rd-place preview and no Hall of Shame at all. Only a post with
+// nothing to say (no results, no roasts, no preview) 404s.
 app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
@@ -16475,8 +18329,8 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
 
   // Finals-only: the top-3 podium finishers (champion, runner-up, 3rd place) get a
   // distinct roast + banner from a plain elimination — passed explicitly by the client
-  // (crownChampionAndRoastFinals) since there's no way to self-heal "this manager is the
-  // runner-up" from stored state the way a plain elimination can be. Built before toRoast
+  // (runSeasonClose, which reads it off GET /final-placements) since there's no way to
+  // self-heal "this manager is the runner-up" from stored state the way a plain elimination can be. Built before toRoast
   // below so the runner-up (who IS in sd.eliminated, same as 4th place) can be excluded
   // from the Hall of Shame set — they get exactly one roast, not two.
   const podiumList = Array.isArray(podium)
@@ -16491,8 +18345,18 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     if (r && r.round === round && r.text && (r.outcome || 'eliminated') === 'eliminated') toRoast.add(m);
   }
   for (const m of podiumManagers) toRoast.delete(m);
-  if (toRoast.size === 0 && podiumList.length === 0) {
-    return res.status(404).json({ error: `No eliminated managers or stored roasts for round ${round}` });
+  // The semifinal eliminates nobody: both losers play the 3rd-place game over the Finals weeks.
+  // Enforced here rather than trusted from the caller, because seasons finalized BEFORE that fix
+  // still carry sd.eliminated / sd.roasts entries stamped 'SF' — and a Hall of Shame built from
+  // them would tell two managers their season is over while they are still playing.
+  if (round === 'SF') toRoast.clear();
+
+  // Built up front so the "is there a post to make at all?" check below can see it: a
+  // Semifinals post carries no roasts by design, and previewing the two Finals-week games is
+  // the entire reason it goes out.
+  const previewBlock = buildNextRoundPreview(sd, round, year);
+  if (toRoast.size === 0 && podiumList.length === 0 && !previewBlock) {
+    return res.status(404).json({ error: `Nothing to post for round ${round} — no eliminations, roasts or preview` });
   }
 
   // Generate what's missing (or everything, on regenerate) BEFORE composing the post.
@@ -16619,7 +18483,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   const podiumEntries = podiumList
     .filter((w) => podiumRoastByManager[w.manager])
     .map((w) => [w.manager, { text: podiumRoastByManager[w.manager], outcome: w.outcome }]);
-  if (entries.length === 0 && podiumEntries.length === 0) {
+  // Every roast we meant to write failed. Only a 500 when roasts were the point of the post —
+  // a preview-only round (SF) never had any to lose.
+  if (entries.length === 0 && podiumEntries.length === 0 && toRoast.size > 0) {
     return res.status(500).json({ error: 'Roast generation failed for every eliminated manager' });
   }
 
@@ -16652,7 +18518,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     // daily scoreboard posts, so Slack can never disagree with itself about who won. Until
     // now a QF or SF round-end post opened straight into the roasts and never once said who
     // had actually advanced.
-    const results = buildPlayoffMatchupsSlackText(sd, round, { final: true });
+    const results = buildPlayoffMatchupsSlackText(sd, round, { final: true, year });
     if (results) summary = `${results}\n\n`;
   }
 
@@ -16703,7 +18569,9 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
   // Only the hard deadline rides the round-end post now; the full submission walkthrough
   // moved to the Friday scoreboard post (buildSubmissionWindowBlock), where it is actionable.
   const reminder = buildDeadlineReminderLine(sd, round);
-  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, reminder].filter(Boolean).join('\n\n');
+  // Preview last, above the deadline: the post reads backwards through the round just played
+  // and then forwards into the games the deadline is for.
+  const messageBody = [summary.trimEnd(), mainBlock, podiumBlock, previewBlock, reminder].filter(Boolean).join('\n\n');
 
   try {
     await postScoreboardChannelSlack(messageBody);
@@ -16718,6 +18586,7 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
         round,
         managers: entries.length,
         podium: podiumEntries.length,
+        preview: !!previewBlock,
         regenerated: Object.keys(freshTexts).length,
       },
       req.get('X-User-Email')
@@ -16733,6 +18602,254 @@ app.post('/api/seasons/:year/roasts/slack', requireCommissioner, async (req, res
     console.error('[Slack] Combined roast post failed:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ============================================================
+// Ending the season
+// ============================================================
+// Closing a season is three things, and it used to be one: finalize the Finals round, roast
+// the four managers who played the Finals weeks, post a season recap, and turn every recurring
+// background job off. "End Finals" only ever did the first, and the rest sat behind a second
+// button nobody was told to press — which is exactly how a season ended with no roasts on the
+// roster pages and no last word in the channel.
+//
+// It is split across two endpoints (plus the roast endpoints already in this file) because the
+// middle step is a long chain of Anthropic calls the browser drives one at a time:
+//
+//   1. POST /finalize-season  — the state write. Idempotent, no Slack, no shutdown.
+//   2. (client) POST /generate-roast x4, then POST /roasts/slack for the combined post.
+//   3. POST /close            — the recap post, and the stand-down.
+//
+// Every one of them is re-runnable, which is the whole point of the commissioner's "Re-run
+// Season Close" button: a failed Slack post, a batch of roasts that all came from the static
+// bank, or a recap written before a late stat correction can all be fixed by doing it again.
+
+// GET /api/seasons/:year/final-placements — who finished where, derived from the bracket.
+//
+// Read-only, and the one place the answer is computed: the client asks rather than running its
+// own bracket math, so the podium the roasts are generated for, the podium the recap crowns and
+// the podium the Playoff Bracket card draws can never be three different answers.
+app.get('/api/seasons/:year/final-placements', requireAuth, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const placements = finalPlacements(db, sd);
+  if (!placements) {
+    return res.status(409).json({
+      error:
+        'Final placements are not derivable yet — pool play must be finalized (confirmed seeding) and the Finals scores uploaded.',
+    });
+  }
+  res.json(placements);
+});
+
+// POST /api/seasons/:year/finalize-season — the bracket bookkeeping for the end of the season
+// (commissioner only). Marks the Finals round finalized, records the runner-up and the
+// 4th-place manager as eliminated in 'Finals', and returns the placements so the caller can
+// generate the right roast for each of the four.
+//
+// Deliberately writes NOTHING for the champion and the 3rd-place winner: they did not go out.
+// And deliberately deletes no submission — there is no next round to prune one from, which is
+// why this is not dumpPlayoffLosers.
+//
+// Idempotent: safe to run again on an already-finalized season, which is what makes the
+// re-run button possible.
+app.post('/api/seasons/:year/finalize-season', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const placements = finalPlacements(db, sd);
+  if (!placements) {
+    return res.status(409).json({
+      error:
+        'Cannot finalize — the Finals bracket is not derivable. Check that pool play was finalized and the Finals scores are uploaded.',
+    });
+  }
+
+  if (!placements.finalsScored) {
+    return res.status(409).json({
+      error:
+        'The Finals round has no scores yet. Upload the Finals weeks before finalizing — without them the bracket resolves every game on seed and would crown the wrong manager.',
+    });
+  }
+
+  // Nothing gets certified on top of a correction the sweep refused and nobody resolved.
+  const blocked = correctionCloseBlock(sd, !!(req.body && req.body.force));
+  if (blocked) return res.status(409).json(blocked);
+
+  if (!Array.isArray(sd.finalized_rounds)) sd.finalized_rounds = [];
+  if (!sd.finalized_rounds.includes('Finals')) sd.finalized_rounds.push('Finals');
+  if (!Array.isArray(sd.losers_dumped)) sd.losers_dumped = [];
+  if (!sd.losers_dumped.includes('Finals')) sd.losers_dumped.push('Finals');
+  if (!sd.eliminated) sd.eliminated = {};
+  for (const m of [placements.runnerUp, placements.fourth].filter(Boolean)) sd.eliminated[m] = 'Finals';
+
+  db.seasons[year] = sd;
+  addAuditEntry(
+    db,
+    'season_finalized',
+    {
+      year,
+      champion: placements.champion,
+      runner_up: placements.runnerUp,
+      third: placements.third,
+      fourth: placements.fourth,
+    },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+
+  res.json({ ok: true, placements, _rev: computeSeasonRev(sd) });
+});
+
+// POST /api/seasons/:year/close — post the season recap and stand every scheduler down
+// (commissioner only). Body: { skipRecap?: true } to close without posting (a re-run where the
+// recap already went out and only the shutdown needs re-asserting).
+//
+// The close record is written BEFORE the recap is posted, on purpose. Standing the schedulers
+// down is the part that must not depend on Slack being reachable: a webhook outage should cost
+// the league its recap, not leave the 4am sync running all winter. A failed post is reported
+// back and the re-run button posts it again.
+app.post('/api/seasons/:year/close', requireCommissioner, async (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const placements = finalPlacements(db, sd);
+  if (!placements) {
+    return res.status(409).json({
+      error:
+        'Cannot close the season — the Finals bracket is not derivable. Check that pool play was finalized and the Finals scores are uploaded.',
+    });
+  }
+
+  if (!placements.finalsScored) {
+    return res.status(409).json({
+      error:
+        'The Finals round has no scores yet. Upload the Finals weeks before closing the season — without them the bracket resolves every game on seed and would crown the wrong manager.',
+    });
+  }
+
+  // Same gate as finalize-season. Checked again here because /close is reachable on its own —
+  // the "Re-run Season Close" button calls it without re-finalizing.
+  const correctionBlock = correctionCloseBlock(sd, !!(req.body && req.body.force));
+  if (correctionBlock) return res.status(409).json(correctionBlock);
+
+  const closedAt = new Date().toISOString();
+  sd.season_closed = {
+    at: (sd.season_closed && sd.season_closed.at) || closedAt,
+    last_run_at: closedAt,
+    by: req.get('X-User-Email') || null,
+    champion: placements.champion,
+    runner_up: placements.runnerUp,
+    third: placements.third,
+    fourth: placements.fourth,
+    recap: (sd.season_closed && sd.season_closed.recap) || null,
+  };
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'season_closed', { year, champion: placements.champion }, req.get('X-User-Email'));
+  writeDB(db);
+
+  // Only the ACTIVE season's flag governs the schedulers — closing an old season out of order
+  // must not silence the one currently being played.
+  const isActiveSeason = activeSeason(readDB()) === String(year);
+  if (isActiveSeason) standDownSchedulers();
+
+  if (req.body && req.body.skipRecap) {
+    const fresh = readDB();
+    return res.json({
+      ok: true,
+      placements,
+      schedulers: isActiveSeason ? 'stood_down' : 'unchanged',
+      recap: null,
+      _rev: computeSeasonRev((fresh.seasons || {})[year]),
+    });
+  }
+
+  let recap = null;
+  let recapError = null;
+  try {
+    recap = await postSeasonRecapSlack(readDB(), year);
+  } catch (e) {
+    console.error('[Season recap] Build failed:', e.message);
+    recapError = e.message;
+  }
+
+  // Fresh read: postSeasonRecapSlack awaited an Anthropic call and a webhook, and other
+  // requests may have written in the meantime — the same reason the roast post audits against
+  // a fresh read rather than its own opening snapshot.
+  const after = readDB();
+  const afterSd = (after.seasons || {})[year];
+  if (afterSd && afterSd.season_closed) {
+    afterSd.season_closed.recap = recap
+      ? {
+          posted: !!recap.posted,
+          source: recap.source,
+          at: new Date().toISOString(),
+          error: recap.error || null,
+          fallback_reason: recap.fallbackReason || null,
+        }
+      : { posted: false, source: null, at: new Date().toISOString(), error: recapError, fallback_reason: null };
+    writeDB(after);
+  }
+
+  res.json({
+    ok: true,
+    placements,
+    schedulers: isActiveSeason ? 'stood_down' : 'unchanged',
+    recap: recap
+      ? {
+          posted: recap.posted,
+          source: recap.source,
+          error: recap.error || null,
+          fallback_reason: recap.fallbackReason || null,
+        }
+      : null,
+    recap_error: recapError,
+    _rev: computeSeasonRev(afterSd),
+  });
+});
+
+// POST /api/seasons/:year/reopen — undo the close (commissioner only). Clears the close record
+// and re-arms every scheduler, so the 4am sync, the 7am post, the Sunday auto-advance and live
+// scoring all come back.
+//
+// It exists because closing is a judgement call made at 11pm on the last Sunday of the season,
+// and the two things most likely to be wrong about it are "a stat correction is still coming"
+// and "I clicked it a week early". Neither should need a database edit to fix. Nothing about
+// the roasts, the recap or the standings is touched — reopening turns the machinery back on,
+// it does not un-crown anybody.
+app.post('/api/seasons/:year/reopen', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+  if (!sd.season_closed) return res.status(409).json({ error: 'Season is not closed' });
+
+  delete sd.season_closed;
+  db.seasons[year] = sd;
+  addAuditEntry(db, 'season_reopened', { year }, req.get('X-User-Email'));
+  writeDB(db);
+
+  // Re-arm unconditionally: armSchedulers re-reads the flag itself, so this is a no-op for any
+  // scheduler the (still-closed) active season should not have.
+  armSchedulers();
+  console.log(`[Season close] Season ${year} reopened — schedulers re-armed.`);
+
+  res.json({ ok: true, year, _rev: computeSeasonRev(sd) });
 });
 
 // ============================================================
@@ -16808,6 +18925,52 @@ function isWithinSyncWindow(sd) {
   const syncEndISO = syncEnd.toISOString().split('T')[0];
 
   return todayISO >= syncStartISO && todayISO <= syncEndISO;
+}
+
+// ============================================================
+// Season close — the scheduler stand-down
+// ============================================================
+// Closing a season turns every recurring background job off. Not "quietly no-ops for the rest
+// of the year" — off: no 4am stats sync, no 7am scoreboard, no Sunday auto-advance, no Google
+// Sheets pull, no live-scoring warm loop, and therefore no Slack posts and no MLB API traffic.
+// The date-based gates (isWithinSyncWindow, scoreboardAutoPostPlan) already stop most of this
+// on their own a day or two after the Finals end, but they are a schedule talking, not the
+// commissioner, and "most of this" is not what was asked for.
+//
+// It is deliberately BOTH a flag and a timer teardown. The flag alone would leave the timers
+// armed and firing into a no-op every morning; tearing the timers down alone would last until
+// the next deploy, because an in-memory setTimeout does not survive a restart and boot re-arms
+// everything. The flag is what boot reads.
+//
+// Scoped to the ACTIVE season, which is what makes it self-clearing: point `active_season` at
+// next year and the schedulers come back on their own, with no flag to remember to unset.
+function seasonSchedulingHalted(db) {
+  const database = db || readDB();
+  const sd = (database.seasons || {})[activeSeason(database)];
+  return !!(sd && sd.season_closed && sd.season_closed.at);
+}
+
+// Cancel every armed scheduler timer. Idempotent, and safe to call when nothing is armed.
+function standDownSchedulers() {
+  for (const timer of [syncTimer, weeklyAutoAdvanceTimer, scoreboardTimer, mlbApiSyncTimer, welcomeTimer]) {
+    if (timer) clearTimeout(timer);
+  }
+  syncTimer = null;
+  weeklyAutoAdvanceTimer = null;
+  scoreboardTimer = null;
+  mlbApiSyncTimer = null;
+  welcomeTimer = null;
+  console.log('[Season close] All recurring schedulers stood down — no syncs, no Slack posts, no MLB polling.');
+}
+
+// Arm (or re-arm) every recurring scheduler. Each schedule* function checks the halt flag
+// itself and returns without arming when the season is closed, so this is also the correct
+// thing to call at boot: one call, and the closed/open decision is made in one place.
+function armSchedulers() {
+  scheduleGSheetsSync();
+  scheduleMLBApiSync();
+  scheduleScoreboardPost();
+  scheduleWeeklyAutoAdvance();
 }
 
 // ============================================================
@@ -17002,8 +19165,20 @@ let weeklyAutoAdvanceTimer = null;
 
 function scheduleWeeklyAutoAdvance() {
   if (weeklyAutoAdvanceTimer) clearTimeout(weeklyAutoAdvanceTimer);
+  weeklyAutoAdvanceTimer = null;
+  if (seasonSchedulingHalted()) {
+    console.log('[Auto-Advance] Season closed — scheduler not armed.');
+    return;
+  }
 
   async function runAndReschedule() {
+    // Re-checked on every firing, not just at arm time: the season can be closed between two
+    // Sundays, and a timer already in flight is not cancelled by the flag alone.
+    if (seasonSchedulingHalted()) {
+      weeklyAutoAdvanceTimer = null;
+      console.log('[Auto-Advance] Season closed — standing down.');
+      return;
+    }
     try {
       const db = readDB();
       const season = activeSeason(db);
@@ -17051,8 +19226,13 @@ function scheduleWeeklyAutoAdvance() {
 
 function scheduleGSheetsSync() {
   if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = null;
 
   const db = readDB();
+  if (seasonSchedulingHalted(db)) {
+    console.log('[GSheets] Season closed — scheduler not armed.');
+    return;
+  }
   const config = db.google_sheets_config || {};
 
   if (!config.enabled || !config.spreadsheet_id || !config.api_key) {
@@ -17064,6 +19244,11 @@ function scheduleGSheetsSync() {
 
   function runAndReschedule() {
     const now = new Date();
+    if (seasonSchedulingHalted()) {
+      syncTimer = null;
+      console.log('[GSheets] Season closed — standing down.');
+      return;
+    }
     console.log(`[GSheets] Running scheduled sync at ${now.toISOString()}`);
 
     const db2 = readDB();
@@ -17493,6 +19678,7 @@ async function fireSeasonWelcomePost(season, todayET) {
 // posts immediately — a welcome post at the wrong hour beats no welcome post at all.
 async function scheduleSeasonWelcomePost(reason) {
   const db = readDB();
+  if (seasonSchedulingHalted(db)) return;
   const season = activeSeason(db);
   const sd = (db.seasons || {})[season];
   if (!hasScoreboardData(sd)) return;
@@ -17527,6 +19713,12 @@ let scoreboardTimer = null;
 
 function scheduleScoreboardPost() {
   if (scoreboardTimer) clearTimeout(scoreboardTimer);
+  scoreboardTimer = null;
+
+  if (seasonSchedulingHalted()) {
+    console.log('[Scoreboard] Season closed — auto-post not armed.');
+    return;
+  }
 
   if (!SLACK_SCOREBOARD_WEBHOOK_URL) {
     console.log(
@@ -17540,6 +19732,13 @@ function scheduleScoreboardPost() {
   function runAndReschedule() {
     const now = new Date();
     const todayET = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+    // Re-checked on every firing, not just at arm time — see scheduleWeeklyAutoAdvance.
+    if (seasonSchedulingHalted()) {
+      scoreboardTimer = null;
+      console.log('[Scoreboard] Season closed — standing down.');
+      return;
+    }
 
     // Idempotency guard: claim today's post in db.json (shared across processes/restarts)
     // BEFORE sending to Slack. Render's zero-downtime deploys can briefly run an old and a
@@ -17716,9 +19915,22 @@ function recordSyncStatus(status) {
 
 function scheduleMLBApiSync() {
   if (mlbApiSyncTimer) clearTimeout(mlbApiSyncTimer);
+  mlbApiSyncTimer = null;
+  if (seasonSchedulingHalted()) {
+    console.log('[MLB-API] Season closed — auto-sync not armed.');
+    return;
+  }
 
   async function runAndReschedule() {
     const now = new Date();
+    // Re-checked on every firing, not just at arm time — see scheduleWeeklyAutoAdvance. This
+    // is the one that matters most: it is the only scheduled job that talks to the MLB Stats
+    // API at all, and the pool refresh above the sync window runs every day of the year.
+    if (seasonSchedulingHalted()) {
+      mlbApiSyncTimer = null;
+      console.log('[MLB-API] Season closed — standing down.');
+      return;
+    }
     try {
       const db = readDB();
       const season = activeSeason(db);
@@ -17816,20 +20028,17 @@ function scheduleMLBApiSync() {
                   )
                 ).catch(() => {});
               }
+              // Record the refusals (and clear any week that has since been repaired) before the
+              // post, so the flags survive whether or not Slack takes the message.
+              recordCorrectionFlags(sd, sweep, todayET);
               if (flagged.length) {
-                // Too big to be a stat correction. A human should look before this is written.
-                const detail = flagged
-                  .map(
-                    (r) =>
-                      `${r.week}: ${r.diffs.map((d) => `${d.manager} ${d.diff > 0 ? '+' : ''}${d.diff}`).join(', ')}`
-                  )
-                  .join(' | ');
-                console.warn(`[MLB-API] Corrections sweep REFUSED ${flagged.length} week(s): ${detail}`);
-                await postSlack(
-                  `:warning: WMMC corrections sweep refused ${flagged.length} week(s) — a re-sync wanted to move ` +
-                    `a manager by more than ${CORRECTION_MAX_SWING} pts, which is too large to be a stat correction. ` +
-                    `Nothing was written. ${detail}`
-                ).catch(() => {});
+                // Too big to be a stat correction. A human should look before this is written —
+                // and the message now says which KIND of problem each week has, because an
+                // attribution repair and a bad stat feed want opposite responses.
+                console.warn(
+                  `[MLB-API] Corrections sweep REFUSED ${flagged.length} week(s): ${correctionRefusalLogLine(flagged)}`
+                );
+                await postSlack(buildCorrectionRefusalText(flagged, CORRECTION_MAX_SWING)).catch(() => {});
               }
             } catch (e) {
               console.error('[MLB-API] Corrections sweep failed:', e.message);
@@ -18239,17 +20448,19 @@ async function main() {
       console.error('[Integrity] audit error (continuing):', e.message);
     }
 
-    // Start the Google Sheets sync scheduler (no-op while config.enabled=false,
-    // but stays available so the commissioner can re-enable as a fallback).
-    scheduleGSheetsSync();
-    // Start the MLB Stats API daily sync (4am Eastern) — the new source of truth.
-    scheduleMLBApiSync();
-    // Start the daily scoreboard post scheduler (7am)
-    scheduleScoreboardPost();
-    // Auto-advance active rosters to the next week every Sunday at 6am Eastern,
-    // for mid-period week changes only. Period (round) boundaries — PP1→PP2,
-    // PP2→QF, QF→SF, SF→Finals — are skipped; those use roster submissions.
-    scheduleWeeklyAutoAdvance();
+    // Arm every recurring scheduler: the Google Sheets sync (no-op while config.enabled=false,
+    // but stays available so the commissioner can re-enable it as a fallback), the MLB Stats
+    // API daily sync at 4am Eastern (the source of truth), the 7am scoreboard post, and the
+    // Sunday 6am roster auto-advance — mid-period week changes only, since period boundaries
+    // (PP1→PP2, PP2→QF, QF→SF, SF→Finals) come from roster submissions instead.
+    //
+    // Each one checks the season-closed flag itself and declines to arm, which is why this is
+    // one call: a closed season must come back up closed, or the first deploy after the Finals
+    // would silently restart every job the commissioner just turned off.
+    armSchedulers();
+    if (seasonSchedulingHalted()) {
+      console.log('[Season close] Active season is closed — no schedulers armed this boot.');
+    }
   });
 }
 

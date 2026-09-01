@@ -9,8 +9,12 @@ import {
   rosterStatusForManager,
   managerWeekWindow,
   mergeWeekWindows,
+  lastRoundPlayed,
   isManagerActiveInRound,
   isManagerInRound,
+  finalsGameFor,
+  finalsGameLabel,
+  FINALS_GAME_LABELS,
 } from '../js/eligibility.js';
 
 // A compact schedule spanning a period boundary (PP1 → PP2), with a gap, to exercise the rules.
@@ -385,6 +389,20 @@ describe('mergeWeekWindows', () => {
   });
 });
 
+describe('lastRoundPlayed', () => {
+  it('maps a semifinal loss forward to the Finals weeks (the 3rd-place game)', () => {
+    assert.equal(lastRoundPlayed('SF'), 'Finals');
+  });
+
+  it('leaves every other round alone', () => {
+    assert.equal(lastRoundPlayed('PP'), 'PP');
+    assert.equal(lastRoundPlayed('QF'), 'QF');
+    assert.equal(lastRoundPlayed('Finals'), 'Finals');
+    assert.equal(lastRoundPlayed(null), null);
+    assert.equal(lastRoundPlayed(undefined), undefined);
+  });
+});
+
 describe('isManagerActiveInRound', () => {
   it('never restricts pool play — every manager plays PP1 and PP2', () => {
     assert.equal(isManagerActiveInRound('PP1', 'PP'), true);
@@ -402,8 +420,14 @@ describe('isManagerActiveInRound', () => {
     assert.equal(isManagerActiveInRound('QF', 'QF'), true); // lost the QF — but played it
     assert.equal(isManagerActiveInRound('SF', 'QF'), false);
     assert.equal(isManagerActiveInRound('SF', 'SF'), true);
-    assert.equal(isManagerActiveInRound('Finals', 'SF'), false);
     assert.equal(isManagerActiveInRound('Finals', 'Finals'), true); // runner-up / 4th place
+  });
+
+  it('losing the SEMIFINAL is not an elimination — the 3rd-place game runs in the Finals weeks', () => {
+    assert.equal(isManagerActiveInRound('Finals', 'SF'), true);
+    // ...and it is only the semifinal that works this way.
+    assert.equal(isManagerActiveInRound('Finals', 'QF'), false);
+    assert.equal(isManagerActiveInRound('Finals', 'PP'), false);
   });
 
   it('a manager who was never eliminated is active everywhere', () => {
@@ -454,5 +478,44 @@ describe('isManagerInRound', () => {
     // every manager because the bracket array happened to carry placeholders.
     assert.equal(isManagerInRound('Cam', 'QF', { participants: [null, '', undefined], eliminated }), true);
     assert.equal(isManagerInRound('Austin', 'QF', { participants: [null, ''], eliminated }), false);
+  });
+});
+
+describe('finalsGameFor / finalsGameLabel', () => {
+  // Semifinals: Ryan beat Cam, Austin beat Dan. Two play the Championship, two the 3rd-place game.
+  const semifinalists = ['Ryan', 'Cam', 'Austin', 'Dan'];
+  const finalists = ['Ryan', 'Austin'];
+  const field = { finalists, semifinalists };
+
+  it('names the Championship for the semifinal winners', () => {
+    assert.equal(finalsGameFor('Ryan', field), 'finals');
+    assert.equal(finalsGameFor('Austin', field), 'finals');
+    assert.equal(finalsGameLabel('Ryan', field), 'Finals');
+  });
+
+  it('names the 3rd-place game for the semifinal losers', () => {
+    assert.equal(finalsGameFor('Cam', field), 'third');
+    assert.equal(finalsGameFor('Dan', field), 'third');
+    assert.equal(finalsGameLabel('Cam', field), '3rd Place Game');
+  });
+
+  it('names both games while the semifinals are unfinalized', () => {
+    // The whole point: with no finalists known, a semifinalist must not be told he is in the
+    // Championship. Both games, or nothing.
+    assert.equal(finalsGameFor('Cam', { finalists: null, semifinalists }), null);
+    assert.equal(finalsGameLabel('Cam', { finalists: null, semifinalists }), 'Finals / 3rd Place');
+    assert.equal(finalsGameLabel('Cam', {}), FINALS_GAME_LABELS.unknown);
+    assert.equal(finalsGameLabel('Cam'), FINALS_GAME_LABELS.unknown);
+  });
+
+  it('says nothing about a manager who is in neither game', () => {
+    assert.equal(finalsGameFor('Nobody', field), null);
+    assert.equal(finalsGameLabel('Nobody', field), FINALS_GAME_LABELS.unknown);
+    assert.equal(finalsGameFor('', field), null);
+  });
+
+  it('ignores blank/non-string entries in either list', () => {
+    assert.equal(finalsGameFor('Cam', { finalists: [null, ''], semifinalists }), null);
+    assert.equal(finalsGameFor('Cam', { finalists, semifinalists: [null, undefined, 'Cam'] }), 'third');
   });
 });

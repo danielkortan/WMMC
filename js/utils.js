@@ -91,6 +91,58 @@ export function shortManagerNames(names) {
   return out;
 }
 
+// Rewrite full manager names to their short form throughout an outbound Slack payload —
+// strings, arrays and every string field of a block object. Applied at the send boundary so
+// EVERY post inherits it, including the prose ones (swap notifications, elimination roasts,
+// alerts) that assemble their text from templates rather than from a name map.
+//
+// Whole-name matches only, so "Ryan Sullivan" becomes "Ryan S." while "Ryan" on its own is
+// left alone — which also makes the pass idempotent, so a builder that already shortened its
+// own names (buildScoreboardBlocks does, because its commentary needs the map anyway) is not
+// touched twice. The one thing it cannot tell apart is a manager who shares a full name with
+// an MLB player; nobody in this league does, and the failure would be a cosmetic short name
+// on a player row.
+//
+// The boundary is spelled out rather than using `\b`, and that is the whole point of this
+// function having its own tests. `\b` counts UNDERSCORE as part of a word, and underscore is
+// Slack's italic marker — so `_Ryan Sullivan_` matched at neither end, and a name at the head
+// of an italic run was the one mention in a post that stayed long while every other mention of
+// the same manager went short. Letters and digits delimit a name here; punctuation, markup and
+// whitespace do not.
+//
+// Must stay identical to shortenManagerNamesInSlack in server.js — the only caller — which
+// cannot import this ESM copy (see CLAUDE.md gotchas).
+const NAME_EDGE = '[A-Za-z0-9]';
+export function shortenManagerNamesInSlack(value, map) {
+  const entries = Object.entries(map || {}).filter(([full, short]) => full !== short);
+  if (entries.length === 0) return value;
+  // Longest first, so a name that contains another ("Ryan Sullivan Jr.") can't be half-matched.
+  entries.sort((a, b) => b[0].length - a[0].length);
+
+  const rewrite = (v) => {
+    if (typeof v === 'string') {
+      let out = v;
+      for (const [full, short] of entries) {
+        // When the short form is an initial ("Ryan S."), swallow a period that immediately
+        // follows the full name: English collapses the abbreviation period into the sentence
+        // period, and "…outscored Ryan S.." is the giveaway that a name got templated in.
+        const tail = short.endsWith('.') ? '\\.?' : '';
+        const escaped = full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        out = out.replace(new RegExp(`(?<!${NAME_EDGE})${escaped}(?!${NAME_EDGE})${tail}`, 'g'), short);
+      }
+      return out;
+    }
+    if (Array.isArray(v)) return v.map(rewrite);
+    if (v && typeof v === 'object') {
+      const out = {};
+      for (const [k, val] of Object.entries(v)) out[k] = rewrite(val);
+      return out;
+    }
+    return v;
+  };
+  return rewrite(value);
+}
+
 // Accent/punctuation/suffix-insensitive form of a player name, for matching
 // names across data sources that spell them differently ("Ronald Acuna Jr."
 // vs MLB's "Ronald Acuña Jr."). Must stay identical to normalizeName in

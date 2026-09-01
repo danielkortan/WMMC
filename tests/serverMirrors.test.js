@@ -45,6 +45,23 @@ function extractFunction(source, name) {
   throw new Error(`unbalanced braces in ${name}`);
 }
 
+// One top-level `const NAME = { ... };` declaration, located by brace matching for the same
+// reason extractFunction exists: the comment above it legitimately differs between the files.
+function extractConstObject(source, name) {
+  const at = source.search(new RegExp(`^(?:export )?const ${name}\\b`, 'm'));
+  assert.notEqual(at, -1, `no top-level const ${name}`);
+  const open = source.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(at, i + 1).replace(/^export /, '');
+    }
+  }
+  throw new Error(`unbalanced braces in ${name}`);
+}
+
 describe('server.js mirrors of js/ modules', () => {
   it('carries js/history.js verbatim', () => {
     const canonical = canonicalTail(read('js/history.js'), 'export const WMMC_HISTORICAL_RESULTS');
@@ -73,6 +90,38 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries js/lateSubmission.js verbatim', () => {
+    const canonical = canonicalTail(read('js/lateSubmission.js'), 'export const LATE_FALLBACK_FIRST_PITCH_HOUR_ET');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/lateSubmission.js — the late-submission effective-date rules must be identical in both'
+    );
+  });
+
+  it('carries the swap effective-window rule from js/swaps.js verbatim', () => {
+    const canonical = canonicalTail(read('js/swaps.js'), 'const ROUND_WINDOW_LABELS');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/swaps.js — checkSwapEffectiveWindow and its labels must be identical in both'
+    );
+  });
+
+  // The Slack swap notification renders this label too, so the league can never see one name for
+  // a swap type in the app and another in Slack.
+  it('carries the swap reason labels from js/swaps.js verbatim', () => {
+    const canonical = read('js/swaps.js');
+    assert.equal(
+      extractConstObject(SERVER, 'SWAP_REASON_LABELS'),
+      extractConstObject(canonical, 'SWAP_REASON_LABELS'),
+      'server.js has drifted from js/swaps.js — SWAP_REASON_LABELS must be identical in both'
+    );
+    assert.equal(
+      extractFunction(SERVER, 'swapReasonLabel'),
+      extractFunction(canonical, 'swapReasonLabel'),
+      'server.js has drifted from js/swaps.js — swapReasonLabel must be identical in both'
+    );
+  });
+
   it('carries shortManagerNames from js/utils.js verbatim', () => {
     assert.equal(
       extractFunction(SERVER, 'shortManagerNames'),
@@ -80,9 +129,64 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries shortenManagerNamesInSlack from js/utils.js verbatim', () => {
+    assert.equal(
+      extractFunction(SERVER, 'shortenManagerNamesInSlack'),
+      extractFunction(read('js/utils.js'), 'shortenManagerNamesInSlack')
+    );
+  });
+
+  it('carries the NAME_EDGE the shortener is built on', () => {
+    const line = "const NAME_EDGE = '[A-Za-z0-9]';";
+    assert.ok(SERVER.includes(line), 'server.js is missing NAME_EDGE');
+    assert.ok(read('js/utils.js').includes(line), 'js/utils.js is missing NAME_EDGE');
+  });
+
   it('carries normalizeName from js/utils.js verbatim (the pre-existing pair)', () => {
     assert.equal(extractFunction(SERVER, 'normalizeName'), extractFunction(read('js/utils.js'), 'normalizeName'));
   });
+
+  // The refused-correction message. Its whole value is that a human can tell an attribution
+  // repair from a stat anomaly at a glance, so a server copy that has drifted into saying
+  // something the tested copy does not say is worse than no message at all.
+  it('carries js/corrections.js verbatim', () => {
+    const canonical = canonicalTail(read('js/corrections.js'), 'export const CORRECTION_ROW_LIMIT');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/corrections.js — the correction classifier and its Slack text must be identical in both'
+    );
+  });
+
+  it('carries js/roundPreview.js verbatim', () => {
+    const canonical = canonicalTail(read('js/roundPreview.js'), 'export function fmtPreviewScore');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/roundPreview.js — the round-preview formatters must be identical in both'
+    );
+  });
+
+  // The season's last Slack post. It goes out exactly once a year, so a drift here is one
+  // nobody gets a second chance to notice before the league reads it.
+  it('carries js/seasonRecap.js verbatim', () => {
+    const canonical = canonicalTail(read('js/seasonRecap.js'), 'const TROPHY =');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/seasonRecap.js — the season-recap formatters must be identical in both'
+    );
+  });
+
+  // The elimination ladder. lastRoundPlayed is the one that encodes "the semifinal knocks
+  // nobody out of the schedule", so a drift here would put the 3rd-place game's two managers
+  // back where this pair was added to get them out of: unable to submit a Finals roster.
+  for (const name of ['lastRoundPlayed', 'isManagerActiveInRound', 'isManagerInRound']) {
+    it(`carries ${name} from js/eligibility.js verbatim`, () => {
+      assert.equal(
+        extractFunction(SERVER, name),
+        extractFunction(read('js/eligibility.js'), name),
+        `server.js has drifted from js/eligibility.js in ${name} — the elimination ladder must be identical in both`
+      );
+    });
+  }
 
   // The odds engine is the oldest untested mirror pair in the repo. These are the functions
   // whose two copies are byte-identical — the rest of the engine (computeTeamQualityFactors,

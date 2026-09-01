@@ -501,6 +501,56 @@ function isManagerQualifiedForPeriod(managerName, period, sd) {
   return false;
 }
 
+// The schedule round a period's submission is for. The Finals period covers BOTH Finals-week
+// games — the Championship and the 3rd-place game — which is why all four semifinalists submit
+// for it (see isManagerEliminatedForPeriod).
+const PERIOD_SUBMISSION_ROUND = { pp1: 'PP1', pp2: 'PP2', qf: 'QF', sf: 'SF', finals: 'Finals' };
+
+// Is this manager's season already over before `period` starts? The rule itself is the shared
+// one in js/eligibility.js (mirrored in server.js), reached here on `window` — so the submission
+// card, the submission-warning banner and the server all read the same ladder rather than three
+// copies of a hardcoded round list. In particular: a manager who lost the SEMIFINAL is NOT
+// finished — they play the 3rd-place game over the Finals weeks, and need a Finals roster.
+function isManagerEliminatedForPeriod(sd, managerName, period) {
+  const elim = sd && sd.eliminated && sd.eliminated[managerName];
+  if (!elim) return false;
+  const round = PERIOD_SUBMISSION_ROUND[period];
+  return !!round && !isManagerActiveInRound(round, elim);
+}
+
+// The Finals period's two-game field: the Championship pair (SF winners) and, with the four
+// semifinalists, the 3rd-place pair. Both are null until the semifinals are finalized. Derived
+// once per caller because each read runs the bracket.
+function finalsGameField(sd) {
+  if (!sd) return { finalists: null, semifinalists: null };
+  return { finalists: getFinalsParticipants(sd), semifinalists: getSFParticipants(sd) };
+}
+
+// What to call a submission period ON ONE MANAGER'S CARD. Every period but the Finals is the
+// same game for everybody. The Finals period is two — the Championship and the 3rd-place game,
+// played over the same two weeks by all four semifinalists — so a manager who lost his semifinal
+// was being told to submit a "Finals" roster for a game he isn't in. Name his actual game; the
+// rule is js/eligibility.js's finalsGameLabel, which falls back to naming both when the
+// semifinals aren't finalized yet. Pass `field` when rendering several managers in one pass.
+function submissionPeriodLabel(sd, period, managerName, field = null) {
+  const base = PERIOD_LABELS[period] || period;
+  if (period !== 'finals') return base;
+  return finalsGameLabel(managerName, field || finalsGameField(sd));
+}
+
+// What to call it on a surface that spans MANAGERS (a commissioner's approval queue, the
+// submission status table) — there, the period really is both games.
+function periodLabelForAll(period) {
+  return period === 'finals' ? FINALS_GAME_LABELS.unknown : PERIOD_LABELS[period] || period;
+}
+
+// The label for one of `manager`'s periods, read straight off the selected season — for the
+// confirm/alert strings, which have a manager and a period and nothing else in hand.
+function periodLabelForManager(period, manager) {
+  const seasons = getSeasons();
+  return submissionPeriodLabel(seasons[SELECTED_SEASON], period, manager);
+}
+
 // ---- Period Submission Data Helpers ----
 
 function getPeriodSub(sd, period, manager) {
@@ -1246,7 +1296,104 @@ function mirrorSubmissionLocally(period, manager, submission) {
   setSeasonsLocal(seasons);
 }
 
-async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
+// ---- Late-submission window (server-authoritative) ----
+//
+// Whether a period's roster deadline has passed — and, if it has, which day a roster submitted
+// now would start on — is decided by the SERVER (GET /submission-window/:period). It has to be:
+// the answer depends on today's real first pitch, which only the server can look up, and on a
+// clock a manager cannot set. app.js's own getPeriodDeadline stays for instant rendering and for
+// the plain open/closed question; this cache is what the late-mode UI actually offers buttons on.
+//
+// Keyed by period. A period with nothing cached renders its normal (non-late) form, so a failed
+// or in-flight fetch degrades to today's behavior rather than to a wrong effective date.
+const SUBMISSION_WINDOWS = {};
+const SUBMISSION_WINDOWS_AT = {};
+const SUBMISSION_WINDOWS_INFLIGHT = {};
+// How long a cached answer is trusted. The only thing that moves inside a period is "has today's
+// first pitch happened", so a minute is plenty — and it keeps a roster page that re-renders on
+// every click from re-asking the MLB schedule each time.
+const SUBMISSION_WINDOW_TTL_MS = 60 * 1000;
+
+// Record a window the server handed back alongside a write, so the next render reads the same
+// answer the stamp was made from instead of a stale one.
+function cacheSubmissionWindow(period, win) {
+  if (!win) return;
+  SUBMISSION_WINDOWS[period] = win;
+  SUBMISSION_WINDOWS_AT[period] = Date.now();
+}
+
+// Fetch a period's window, honoring the TTL cache. Deduplicated per period, because several
+// callers ask for the same one in the same tick.
+async function loadSubmissionWindow(period, { force = false } = {}) {
+  const fresh = SUBMISSION_WINDOWS_AT[period] && Date.now() - SUBMISSION_WINDOWS_AT[period] < SUBMISSION_WINDOW_TTL_MS;
+  if (!force && fresh) return SUBMISSION_WINDOWS[period];
+  if (SUBMISSION_WINDOWS_INFLIGHT[period]) return SUBMISSION_WINDOWS_INFLIGHT[period];
+  const req = (async () => {
+    try {
+      const resp = await fetch(`/api/seasons/${SELECTED_SEASON}/submission-window/${period}`);
+      if (!resp.ok) return null;
+      const win = await resp.json();
+      cacheSubmissionWindow(period, win);
+      return win;
+    } catch (_) {
+      return null;
+    } finally {
+      delete SUBMISSION_WINDOWS_INFLIGHT[period];
+    }
+  })();
+  SUBMISSION_WINDOWS_INFLIGHT[period] = req;
+  return req;
+}
+
+// Ask the server about every period whose card is on screen, then re-render ONCE if any answer
+// moved. Called after the roster page paints, so the first paint never waits on the network and a
+// season whose server predates this endpoint simply keeps rendering the way it always did.
+async function refreshSubmissionWindows(periods, rerender) {
+  const snapshot = () => periods.map((p) => JSON.stringify(SUBMISSION_WINDOWS[p] || null)).join('|');
+  const before = snapshot();
+  await Promise.all(periods.map((p) => loadSubmissionWindow(p)));
+  if (snapshot() !== before && typeof rerender === 'function') rerender();
+}
+
+// Is this period past its lock, per the server? Unknown (nothing cached) reads as NOT late — see
+// the cache comment above.
+function periodIsLate(period) {
+  const win = SUBMISSION_WINDOWS[period];
+  return !!(win && win.is_late);
+}
+
+// The date a roster submitted right now would take effect, per the server. Null when the period
+// has no viable day left (or we haven't asked yet).
+function periodEffectiveDate(period) {
+  const win = SUBMISSION_WINDOWS[period];
+  return (win && win.effective_date) || null;
+}
+
+// Is this period still running — i.e. is there any of it left to play? Late mode only makes sense
+// while there is: once a period has ENDED, a manager who never submitted for it has nothing left
+// to gain, and leaving the form up would put a permanent "you missed Pool Play 1" card on the
+// roster page for the rest of the season. A late submission or plea already on file keeps the
+// card alive past that, so a request in flight can still be seen through.
+function periodStillRunning(period, sub) {
+  const win = SUBMISSION_WINDOWS[period];
+  if (!win) return false;
+  if (submissionLateState(sub).late) return true;
+  return !win.period_end || (!!win.today_et && win.today_et <= win.period_end);
+}
+
+// 'YYYY-MM-DD' rendered as a human date, pinned to noon UTC so the printed calendar day can't
+// shift with the reader's timezone.
+function fmtEffectiveDate(iso) {
+  if (!iso) return '';
+  return new Date(iso + 'T12:00:00Z').toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+async function persistSubmission(period, manager, sub, { quiet = false, forgivenessReason = null } = {}) {
   try {
     const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/submissions`, {
       method: 'POST',
@@ -1256,14 +1403,20 @@ async function persistSubmission(period, manager, sub, { quiet = false } = {}) {
         batters: sub.batters || [],
         pitchers: sub.pitchers || [],
         status: sub.status || 'draft',
+        // Present only on a "Beg Commish for Forgiveness" submission. Its presence is what turns
+        // the submission into a plea; the effective date it earns is the commissioner's to set.
+        ...(forgivenessReason ? { forgiveness_reason: forgivenessReason } : {}),
       }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.error || `Server error (${resp.status})`);
     }
-    const { submission, _rev } = await resp.json();
+    const { submission, window: subWindow, _rev } = await resp.json();
     mirrorSubmissionLocally(period, manager, submission);
+    // The POST resolved the window server-side anyway; keep it so the card re-renders against
+    // the same answer the stamp was made from instead of a stale one.
+    cacheSubmissionWindow(period, subWindow);
     adoptRev(_rev);
     return submission;
   } catch (e) {
@@ -2075,6 +2228,10 @@ function init() {
       DATA = null;
       showActiveSeason(seasonData);
     }
+    // After the branch, so it runs for both and clears itself on a season that isn't closed —
+    // switching from a closed season to a live one must not leave last year's champion card
+    // sitting above this year's scoreboard.
+    renderSeasonChampionAnnouncement(seasonData);
   } catch (e) {
     console.error('Error rendering season:', e);
   }
@@ -2323,7 +2480,11 @@ function renderDailyContent(d) {
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No schedule week found for ${d.date}.`;
+    if (statusEl) {
+      statusEl.textContent = d.season_closed
+        ? 'The season is over — live scoring is off.'
+        : `No schedule week found for ${d.date}.`;
+    }
     if (managersEl) managersEl.innerHTML = '';
     return;
   }
@@ -2499,6 +2660,11 @@ function renderDailyContent(d) {
 }
 
 function shouldKeepPolling(data) {
+  // A closed season stops the loop dead rather than winding down through the grace window.
+  // The grace exists so a tab stays live between the last out of one game and the first pitch
+  // of the next; there is no next one, and the server is answering this endpoint without
+  // touching the MLB API at all now.
+  if (data?.season_closed) return false;
   const hasLive = (data?.summary?.games_live ?? 0) > 0;
   const withinGrace = Date.now() - _liveLastSawLiveGame < LIVE_GRACE_MS;
   return hasLive || withinGrace;
@@ -2561,7 +2727,11 @@ function renderLiveContent(d) {
 
   if (!d.active_week) {
     if (titleEl) titleEl.textContent = 'Live';
-    if (statusEl) statusEl.textContent = `No active schedule week for ${d.today}.`;
+    if (statusEl) {
+      statusEl.textContent = d.season_closed
+        ? 'The season is over — live scoring is off.'
+        : `No active schedule week for ${d.today}.`;
+    }
     if (managersEl) managersEl.innerHTML = '';
     if (gamesEl) gamesEl.innerHTML = '';
     return;
@@ -3034,59 +3204,83 @@ function renderScoreboard() {
   renderScoreboardContent();
 }
 
+// The most recent champion crowned BEFORE `year`, from every record we have.
+//
+// Two sources, and the winner is whichever is LATER, not whichever is checked first: the
+// hand-maintained `WMMC_HISTORICAL_RESULTS` table lags by design (adding a finished season to
+// it is a deliberate two-file edit), so the season the app itself just closed is routinely
+// newer than anything in the table. Checking the table first — which is what this used to do —
+// would hand next season's banner the champion from two years ago.
+//
+// Returns { champion, year } or null.
+function previousChampionBefore(year) {
+  const target = parseInt(year, 10);
+  const candidates = [];
+
+  for (const r of WMMC_HISTORICAL_RESULTS) {
+    const y = parseInt(r.year, 10);
+    if (y < target && r.champion) candidates.push({ champion: r.champion, year: r.year });
+  }
+
+  const seasons = getSeasons() || {};
+  for (const [yr, priorSd] of Object.entries(seasons)) {
+    if (parseInt(yr, 10) >= target || !priorSd) continue;
+    // A season this app closed itself: season_closed.champion is written by POST /close from
+    // the server's own bracket math, so it is the same answer the recap crowned.
+    if (priorSd.season_closed && priorSd.season_closed.champion) {
+      candidates.push({ champion: priorSd.season_closed.champion, year: yr });
+      continue;
+    }
+    const legacyWinner =
+      priorSd.status === 'completed' &&
+      priorSd.data &&
+      priorSd.data.bracket &&
+      priorSd.data.bracket.finals &&
+      priorSd.data.bracket.finals.winner;
+    if (legacyWinner) {
+      candidates.push({ champion: legacyWinner, year: yr });
+      continue;
+    }
+    if (priorSd.champion) candidates.push({ champion: priorSd.champion, year: yr });
+  }
+
+  if (!candidates.length) return null;
+  return candidates.reduce((best, c) => (parseInt(c.year, 10) > parseInt(best.year, 10) ? c : best));
+}
+
 function renderChampionBanner() {
   const banner = document.getElementById('champion-banner');
   banner.className = 'champion-banner';
 
-  const seasonComplete = DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner;
+  const sd = (getSeasons() || {})[SELECTED_SEASON];
+  const closed = sd && sd.season_closed && sd.season_closed.at ? sd.season_closed : null;
+  const seasonComplete = !!(DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner) || !!closed;
 
-  // Determine the reigning champion (champion of the most recent completed season)
-  let reigningChampion = null;
-  let reigningYear = null;
-  if (seasonComplete) {
-    reigningChampion = DATA.bracket.finals.winner;
-    reigningYear = SELECTED_SEASON;
-  } else {
-    // Look back through historical results for the most recent champion before this season
-    const hist = [...WMMC_HISTORICAL_RESULTS].reverse().find((r) => parseInt(r.year) < parseInt(SELECTED_SEASON));
-    if (hist) {
-      reigningChampion = hist.champion;
-      reigningYear = hist.year;
-    }
-    // Also check localStorage seasons for prior champions (active seasons that were finalized)
-    if (!reigningChampion) {
-      const seasons = getSeasons();
-      const years = Object.keys(seasons)
-        .map(Number)
-        .sort((a, b) => b - a);
-      for (const yr of years) {
-        if (String(yr) === String(SELECTED_SEASON)) continue;
-        const priorSd = seasons[yr];
-        if (!priorSd) continue;
-        if (
-          priorSd.status === 'completed' &&
-          priorSd.data &&
-          priorSd.data.bracket &&
-          priorSd.data.bracket.finals &&
-          priorSd.data.bracket.finals.winner
-        ) {
-          reigningChampion = priorSd.data.bracket.finals.winner;
-          reigningYear = yr;
-          break;
-        }
-        if (priorSd.champion) {
-          reigningChampion = priorSd.champion;
-          reigningYear = yr;
-          break;
-        }
-      }
-    }
-  }
+  // The champion crowned BY the season being viewed, if it has one. A historical season carries
+  // it on its stored bracket; an active season that has been closed carries it on
+  // season_closed, which the server wrote from computePlayoffPairs.
+  const crowned =
+    DATA && DATA.bracket && DATA.bracket.finals && DATA.bracket.finals.winner
+      ? DATA.bracket.finals.winner
+      : closed
+        ? closed.champion
+        : null;
+
+  // Whoever held it going in. When this season crowned somebody, that name is the OUTGOING
+  // champion and gets struck through above the new one — the banner should read as the title
+  // changing hands, not quietly swap one name for another overnight.
+  //
+  // Scoped to seasons this app closed itself. The archived 2018-2025 seasons predate the
+  // feature and their banner has read the same way for years; rendering "New Champion" with a
+  // line through somebody on a 2019 archive page is a worse answer than leaving it alone.
+  const previous = previousChampionBefore(SELECTED_SEASON);
+  const reigningChampion = crowned || (previous && previous.champion) || null;
+  const reigningYear = crowned ? SELECTED_SEASON : previous && previous.year;
+  const outgoing = closed && crowned && previous && previous.champion !== crowned ? previous : null;
 
   // Determine footer for in-progress or preseason
   let footerHtml = '';
   if (!seasonComplete) {
-    const sd = (getSeasons() || {})[SELECTED_SEASON];
     const period = sd ? getCurrentScoringPeriod(sd) : null;
     const between = sd ? getBetweenPeriodsInfo(sd) : null;
 
@@ -3145,19 +3339,86 @@ function renderChampionBanner() {
     }
   }
 
+  // When this season crowned someone, the outgoing holder's name sits above the new one with a
+  // line through it. It is the one place in the app where the title visibly changes hands, and
+  // it costs a row of small text; showing only the new name loses the whole point of the moment.
+  const outgoingHtml = outgoing
+    ? `<div class="banner-champ-outgoing" title="${esc(outgoing.year)} champion"><s>${esc(outgoing.champion)}</s></div>`
+    : '';
   const rightHtml = reigningChampion
-    ? `<div class="banner-right" style="display:flex;align-items:center;gap:0.75rem;">
+    ? `<div class="banner-right${outgoing ? ' banner-right-handover' : ''}" style="display:flex;align-items:center;gap:0.75rem;">
         <div style="font-size:2.5rem;line-height:1;">&#127942;</div>
         <div>
-          <div class="banner-champ-label">Reigning Champion</div>
-          <div class="banner-champ-name">${reigningChampion}</div>
-          <div class="banner-champ-year">${reigningYear} WMMC Champion</div>
+          <div class="banner-champ-label">${outgoing ? 'New Champion' : 'Reigning Champion'}</div>
+          ${outgoingHtml}
+          <div class="banner-champ-name">${esc(reigningChampion)}</div>
+          <div class="banner-champ-year">${esc(String(reigningYear))} WMMC Champion</div>
         </div>
        </div>`
     : '';
 
   // Apply custom background if configured
   applyBannerBackground(banner, rightHtml, footerHtml);
+}
+
+// The end-of-season announcement card: the champion, big, above everything else on the
+// dashboard. Rendered only once the commissioner has closed the season — `sd.season_closed`
+// is written by POST /close from the server's own bracket math, the same answer the Slack
+// recap crowned, so this card cannot name a different champion than the post did.
+//
+// The four names come off that record; the scores are re-derived here through the same
+// roundBreakdown the Playoff Bracket card uses, so the numbers on this card and the numbers
+// on the bracket a few hundred pixels below it are the same numbers.
+function renderSeasonChampionAnnouncement(seasonData) {
+  const el = document.getElementById('season-champion-announcement');
+  if (!el) return;
+
+  const closed =
+    seasonData && seasonData.season_closed && seasonData.season_closed.at ? seasonData.season_closed : null;
+  if (!closed || !closed.champion) {
+    el.innerHTML = '';
+    return;
+  }
+
+  const rosterLookup = buildRosterLookup(seasonData);
+  const weekKeyToStart = buildWeekKeyToStart();
+  const finalsTotal = (name) =>
+    name ? roundBreakdown(seasonData, name, 'Finals', rosterLookup, weekKeyToStart).total : null;
+
+  const champTotal = finalsTotal(closed.champion);
+  const runnerUpTotal = finalsTotal(closed.runner_up);
+  const resultLine =
+    closed.runner_up && champTotal != null && runnerUpTotal != null
+      ? `def. ${esc(closed.runner_up)} ${fmt(champTotal)}&ndash;${fmt(runnerUpTotal)}`
+      : '';
+
+  const podium = [
+    { place: '2nd', medal: '&#129352;', manager: closed.runner_up },
+    { place: '3rd', medal: '&#129353;', manager: closed.third },
+    { place: '4th', medal: '', manager: closed.fourth },
+  ].filter((p) => p.manager);
+
+  const podiumHtml = podium.length
+    ? `<div class="champ-podium">${podium
+        .map((p) => {
+          const total = finalsTotal(p.manager);
+          return `<div class="champ-podium-item">
+            <span class="champ-podium-place">${p.medal ? `${p.medal} ` : ''}${p.place}</span>
+            <span class="champ-podium-name">${esc(p.manager)}</span>
+            ${total != null ? `<span class="champ-podium-score">${fmt(total)}</span>` : ''}
+          </div>`;
+        })
+        .join('')}</div>`
+    : '';
+
+  el.innerHTML = `<div class="card champ-announcement">
+    <div class="champ-announcement-trophy">&#127942;</div>
+    <div class="champ-announcement-label">${esc(String(SELECTED_SEASON))} Whit Merrifield Memorial Cup</div>
+    <div class="champ-announcement-name">${esc(closed.champion)}</div>
+    ${resultLine ? `<div class="champ-announcement-result">${resultLine}</div>` : ''}
+    ${podiumHtml}
+    <div class="champ-announcement-foot">Season complete &mdash; final results below.</div>
+  </div>`;
 }
 
 // Build base banner HTML and apply the custom background (or default gradient)
@@ -5306,13 +5567,29 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     ? `<p class="bracket-odds-legend">&#128302; % = odds to win this matchup, from ${bracketOdds.sims.toLocaleString('en-US')} simulated finishes (games left, projected starts, opponent, park) &middot; &#128274; = decided</p>`
     : '';
 
+  // Once the season is closed, the bracket opens on the games that decided it: the earlier
+  // rounds collapse to a clickable header. Nothing is removed — the whole season is one click
+  // away — but a finished bracket's job is to show who won, not to make you scan past eight
+  // settled quarterfinal scores to find out.
+  const seasonClosed = !!(seasonData.season_closed && seasonData.season_closed.at);
+  const roundOpen = (id) => !seasonClosed || id === 'finals';
+  const roundColumn = (id, label, inner) => {
+    const open = roundOpen(id);
+    return `<div class="bracket-round${open ? '' : ' bracket-round-collapsed'}" id="bracket-round-${id}">
+      <div class="bracket-round-label" onclick="toggleBracketRound('${id}')">
+        <span>${label}</span><span class="bracket-round-arrow">&#9662;</span>
+      </div>
+      <div class="bracket-round-body" id="bracket-round-body-${id}" style="display:${open ? 'block' : 'none'}">${inner}</div>
+    </div>`;
+  };
+
   let html = `<div class="card bracket-card ${ppFinalized ? 'bracket-featured' : ''}">
     <h2>Playoffs${tentativeLabel}</h2>
     ${oddsLegend}
     <div class="active-bracket">`;
 
   // QF column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Quarterfinals</div>';
+  let qfInner = '';
   const qfWinners = [];
   qfMatchups.forEach((m) => {
     const s1Bd = getRoundBreakdown(m.s1.name, 'QF');
@@ -5320,16 +5597,16 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const qfDone = finalized.includes('QF');
     const winner = qfDone ? roundMatchupWinner(m.s1.name, s1Bd.total, m.s2.name, s2Bd.total, seedRank) : null;
     qfWinners.push(winner);
-    html += `<div class="bracket-matchup">
+    qfInner += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       ${bracketTeamHtml(m.s1.name, `<span class="bracket-seed">${m.s1.seed}</span>`, s1Bd, winner === m.s1.name ? 'bracket-winner' : '', 'QF', m.s2.name)}
       ${bracketTeamHtml(m.s2.name, `<span class="bracket-seed">${m.s2.seed}</span>`, s2Bd, winner === m.s2.name ? 'bracket-winner' : '', 'QF', m.s1.name)}
     </div>`;
   });
-  html += '</div>';
+  html += roundColumn('qf', 'Quarterfinals', qfInner);
 
   // SF column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Semifinals</div>';
+  let sfInner = '';
   const sfMatchups = [
     { label: 'SF1', t1: qfWinners[0] || 'TBD', t2: qfWinners[1] || 'TBD' },
     { label: 'SF2', t1: qfWinners[2] || 'TBD', t2: qfWinners[3] || 'TBD' },
@@ -5347,16 +5624,16 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
     const loser = winner ? (winner === m.t1 ? m.t2 : m.t1) : null;
     sfWinners.push(winner);
     sfLosers.push(loser);
-    html += `<div class="bracket-matchup">
+    sfInner += `<div class="bracket-matchup">
       <div class="bracket-matchup-label">${m.label}</div>
       ${bracketTeamHtml(m.t1, '', s1Bd, winner === m.t1 ? 'bracket-winner' : '', 'SF', m.t2)}
       ${bracketTeamHtml(m.t2, '', s2Bd, winner === m.t2 ? 'bracket-winner' : '', 'SF', m.t1)}
     </div>`;
   });
-  html += '</div>';
+  html += roundColumn('sf', 'Semifinals', sfInner);
 
   // Finals column
-  html += '<div class="bracket-round"><div class="bracket-round-label">Finals</div>';
+  let finalsInner = '';
   const f1 = sfWinners[0] || 'TBD';
   const f2 = sfWinners[1] || 'TBD';
   const f1Bd = f1 !== 'TBD' ? getRoundBreakdown(f1, 'Finals') : { bat: 0, pit: 0, total: 0 };
@@ -5365,7 +5642,7 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const champion =
     finalsDone && f1 !== 'TBD' && f2 !== 'TBD' ? roundMatchupWinner(f1, f1Bd.total, f2, f2Bd.total, seedRank) : null;
 
-  html += `<div class="bracket-matchup">
+  finalsInner += `<div class="bracket-matchup">
     <div class="bracket-matchup-label">Championship</div>
     ${bracketTeamHtml(f1, '', f1Bd, champion === f1 ? 'bracket-winner bracket-champion' : '', 'Finals', f2)}
     ${bracketTeamHtml(f2, '', f2Bd, champion === f2 ? 'bracket-winner bracket-champion' : '', 'Finals', f1)}
@@ -5378,15 +5655,28 @@ function buildActivePlayoffBracket(seasonData, ppFinalized) {
   const t2Bd = t2 !== 'TBD' ? getRoundBreakdown(t2, 'Finals') : { bat: 0, pit: 0, total: 0 };
   const thirdPlace = finalsDone && t1 !== 'TBD' && t2 !== 'TBD' ? (t1Bd.total >= t2Bd.total ? t1 : t2) : null;
 
-  html += `<div class="bracket-matchup" style="margin-top:1rem;">
+  finalsInner += `<div class="bracket-matchup" style="margin-top:1rem;">
     <div class="bracket-matchup-label">3rd Place</div>
     ${bracketTeamHtml(t1, '', t1Bd, thirdPlace === t1 ? 'bracket-winner' : '', 'Finals', t2)}
     ${bracketTeamHtml(t2, '', t2Bd, thirdPlace === t2 ? 'bracket-winner' : '', 'Finals', t1)}
   </div>`;
 
-  html += '</div></div></div>';
+  html += roundColumn('finals', 'Finals', finalsInner);
+
+  html += '</div></div>';
   return html;
 }
+
+// Expand/collapse one column of the Playoff Bracket card. Every round starts open; a closed
+// season starts with the Quarterfinals and Semifinals shut (see roundColumn).
+window.toggleBracketRound = function (roundId) {
+  const col = document.getElementById('bracket-round-' + roundId);
+  const body = document.getElementById('bracket-round-body-' + roundId);
+  if (!col || !body) return;
+  const isCollapsed = col.classList.contains('bracket-round-collapsed');
+  col.classList.toggle('bracket-round-collapsed', !isCollapsed);
+  body.style.display = isCollapsed ? 'block' : 'none';
+};
 
 function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   const batting = seasonData.weekly_batting || [];
@@ -5598,7 +5888,12 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   // showActiveSeason post-render fixup enforces the same state after bracket render.
   const rounds = new Set([...batting.map((b) => b.round), ...pitching.map((p) => p.round)]);
   const hasPlayoffData = rounds.has('QF') || rounds.has('SF') || rounds.has('Finals');
-  const ppCollapsed = hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
+  // A closed season opens nothing on this card: the Playoff Bracket above already leads with
+  // the Finals, and `currentSectionId` goes null once the schedule runs out, which would
+  // otherwise fall through to "no current period, so open Pool Play 1" and put a ten-week-old
+  // table at the top of the page on the day the season ended.
+  const seasonClosed = !!(seasonData.season_closed && seasonData.season_closed.at);
+  const ppCollapsed = seasonClosed || hasPlayoffData || (seasonData.finalized_rounds || []).includes('PP');
 
   // Pool-play leaders, precomputed so both the leader cards (inside the body) and the
   // collapsed-state summary (below) can use them.
@@ -5751,7 +6046,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
   }
 
   // Pool Play 1
-  const pp1Open = !currentSectionId || currentSectionId === 'pp1';
+  const pp1Open = !seasonClosed && (!currentSectionId || currentSectionId === 'pp1');
   html += `
     <div class="sb-section${pp1Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp1">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp1')">
@@ -5764,7 +6059,7 @@ function renderActiveScoreboardTabs(seasonData, managerScores, managers) {
     </div>`;
 
   // Pool Play 2
-  const pp2Open = currentSectionId === 'pp2';
+  const pp2Open = !seasonClosed && currentSectionId === 'pp2';
   html += `
     <div class="sb-section${pp2Open ? '' : ' sb-section-collapsed'}" id="sb-section-pp2">
       <div class="sb-section-header" onclick="toggleScoreboardSection('pp2')">
@@ -8192,6 +8487,12 @@ function renderRosterData(managerName, isCommissioner) {
   html += `</div>`;
 
   container.innerHTML = html;
+  // Late-submission state is the server's to decide (SUBMISSION_WINDOWS). Ask AFTER painting, so
+  // the page never waits on the network, and re-render only if an answer actually moved — which
+  // is what turns a closed period back into a late-mode form.
+  if (isActive) {
+    refreshSubmissionWindows(['pp1', 'pp2', 'qf', 'sf', 'finals'], () => renderRosterData(managerName, isCommissioner));
+  }
   // The Swaps tab's "All Swaps" list is the shared swap log scoped to this manager — it renders
   // into its container after the innerHTML above, and keeps its own expand/filter state.
   renderSwapLog(ROSTER_SWAP_LOG_ID, false, managerName);
@@ -9549,7 +9850,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           <label for="swap-reason">Transaction Reason</label>
           <select id="swap-reason" class="form-select">
             <option value="">Select reason...</option>
-            ${SWAP_REASONS.map((r) => `<option value="${r}">${r}</option>`).join('')}
+            ${SWAP_REASONS.map((r) => `<option value="${r}">${swapReasonLabel(r)}</option>`).join('')}
           </select>
         </div>
         <div class="swap-form-field">
@@ -9695,6 +9996,11 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     const poolPitCount = (seasonData.pitchers_pool || []).length;
     const poolReady = poolBatCount > 0 && poolPitCount > 0;
 
+    // Same late mode as the playoff periods: PP1 closes at its own first pitch, and a manager who
+    // misses opening day still drafts — his roster just starts on the next day he can't already
+    // have watched. See buildLateSubmissionBanner.
+    const pp1Late = !isApproved && poolReady && periodIsLate('pp1') && periodStillRunning('pp1', submission);
+
     html += `<div class="card initial-submission-section" id="period-submission-card-pp1" style="margin-top:1rem;">
       <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem;">
         <span class="swap-badge" style="background:var(--primary);color:#fff;font-size:0.8rem;">Pool Play 1</span>
@@ -9737,7 +10043,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
           <p class="text-muted" style="margin-top:0.5rem;margin-bottom:0;font-size:0.82rem;">${deadlineNote}</p>
         </div>`;
       }
-    } else if (poolReady && !isPeriodTimeOpen(seasonData, 'pp1')) {
+    } else if (poolReady && !isPeriodTimeOpen(seasonData, 'pp1') && !pp1Late) {
       // Window not yet open, or already closed (PP1 has begun) — no editable form, no submit.
       // Mirrors the playoff-period cards so stray PP1 submissions can't land mid-season.
       const pp1OpenDate = getPeriodOpenDate(seasonData, 'pp1');
@@ -9755,7 +10061,9 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
         html += `<p class="text-muted" style="font-size:0.85rem;">Submission window has closed.</p>`;
       }
     } else if (poolReady) {
-      // Editable submission form (only when pool is available and the window is open)
+      // Editable submission form (only when pool is available and the window is open — or when it
+      // has closed and this manager is submitting late)
+      if (pp1Late) html += buildLateSubmissionBanner('pp1', 'Pool Play 1', submission);
       if (isPending) {
         html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>`;
       }
@@ -9807,7 +10115,16 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
       }
 
       // Submit button
-      if (!isPending) {
+      if (pp1Late) {
+        html += buildLateSubmissionControls(
+          'pp1',
+          'Pool Play 1',
+          managerName,
+          submittedBatters,
+          submittedPitchers,
+          submission
+        );
+      } else if (!isPending) {
         const allSelected = submittedBatters.length === 4 && submittedPitchers.length === 3;
         const missingBatters = 4 - submittedBatters.length;
         const missingPitchers = 3 - submittedPitchers.length;
@@ -9849,6 +10166,7 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
               <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(sub.pitchers || []).join(', ') || 'None'}</div>
             </div>
             <div id="initial-edit-${m.name.replace(/\s+/g, '-')}" style="display:none;"></div>
+            ${buildForgivenessControls('pp1', m.name, sub)}
             <div class="swap-pending-actions">
               <button class="btn btn-sm btn-success" onclick="approveInitialSubmission('${safeName}')">Approve</button>
               <button class="btn btn-sm btn-secondary" onclick="editInitialSubmission('${safeName}')">Edit</button>
@@ -9863,13 +10181,16 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
     html += `</div>`; // .initial-submission-section
 
     // ---- PP2 / Playoff Period Submission Cards ----
+    // The card is titled for the manager it is being rendered for, which only matters in the
+    // Finals period: two of its four submitters are playing the 3rd-place game, not the Finals.
     const periodOrder = [
-      { period: 'pp2', label: 'Pool Play 2', qualCheck: true },
-      { period: 'qf', label: 'Quarterfinals', qualCheck: true },
-      { period: 'sf', label: 'Semifinals', qualCheck: true },
-      { period: 'finals', label: 'Finals', qualCheck: true },
+      { period: 'pp2', qualCheck: true },
+      { period: 'qf', qualCheck: true },
+      { period: 'sf', qualCheck: true },
+      { period: 'finals', qualCheck: true },
     ];
-    for (const { period, label } of periodOrder) {
+    for (const { period } of periodOrder) {
+      const label = submissionPeriodLabel(seasonData, period, managerName);
       const openDate = getPeriodOpenDate(seasonData, period);
       const deadline = getPeriodDeadline(seasonData, period);
       const qualified = isManagerQualifiedForPeriod(managerName, period, seasonData);
@@ -9887,6 +10208,149 @@ function buildPlayerSwapsSection(managerName, isCommissioner, seasonData) {
 
   html += '</div>'; // .player-swaps-section
   return html;
+}
+
+// ---- Late submission UI ----
+//
+// A manager who misses a period's lock keeps his form. What changes is the date his roster
+// starts on, and that has to be said plainly on the card before he picks anyone — the difference
+// between a roster that counts from Monday and one that counts from Wednesday is most of the
+// round. Two paths from here:
+//
+//   Submit  — take the automatic next-viable date and get on with it. Still goes to the
+//             commissioner for the same approval every roster gets.
+//   Beg     — ask the commissioner to back-date it instead. The roster is filed with NO effective
+//             date; the commissioner names one when he rules.
+//
+// Both render only when the SERVER says the period is late (see SUBMISSION_WINDOWS).
+
+// The explanation box. Shown at the top of a late period's form, in whatever state the manager
+// has already left it.
+function buildLateSubmissionBanner(period, periodLabel, sub) {
+  const state = submissionLateState(sub);
+  const win = SUBMISSION_WINDOWS[period] || {};
+  const auto = periodEffectiveDate(period);
+  const lockStr = win.lock_at
+    ? new Date(win.lock_at).toLocaleString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+    : null;
+
+  if (state.forgivenessPending) {
+    return `<div style="padding:0.75rem;background:#e7f1ff;border-radius:6px;border:1px solid #6ea8fe;margin-bottom:0.75rem;">
+      <p style="font-size:0.9rem;margin:0 0 0.35rem;color:#084298;font-weight:600;">Your plea is with the commissioner</p>
+      <p style="font-size:0.82rem;margin:0;color:#084298;">He decides which day your ${esc(periodLabel)} roster starts on. If he says no, it still counts &mdash; from ${esc(fmtEffectiveDate(state.autoEffectiveDate) || 'the next viable day')}.</p>
+      ${state.reason ? `<p style="font-size:0.8rem;margin:0.5rem 0 0;color:#084298;font-style:italic;">&ldquo;${esc(state.reason)}&rdquo;</p>` : ''}
+    </div>`;
+  }
+
+  const verdict =
+    state.forgiveness === 'granted' && state.effectiveDate
+      ? `The commissioner back-dated it to <strong>${esc(fmtEffectiveDate(state.effectiveDate))}</strong>.`
+      : state.forgiveness === 'denied'
+        ? `The commissioner denied the back-date, so it counts from <strong>${esc(fmtEffectiveDate(state.effectiveDate) || 'the next viable day')}</strong>.`
+        : auto
+          ? `Anything you submit now counts from <strong>${esc(fmtEffectiveDate(auto))}</strong> &mdash; you cannot pick up points from a day that has already been played.`
+          : `The ${esc(periodLabel)} period is over, so there is no day left for a new roster to start on. Only the commissioner can still back-date one.`;
+
+  return `<div style="padding:0.75rem;background:#fff3cd;border-radius:6px;border:1px solid #ffc107;margin-bottom:0.75rem;">
+    <p style="font-size:0.9rem;margin:0 0 0.35rem;color:#856404;font-weight:600;">You missed the ${esc(periodLabel)} roster deadline${lockStr ? ` (${esc(lockStr)})` : ''}</p>
+    <p style="font-size:0.82rem;margin:0;color:#856404;">${verdict}</p>
+  </div>`;
+}
+
+// The Submit / Beg controls that replace the ordinary "Submit for Approval" button on a late
+// period. `sub` may be undefined — a manager who never started a roster is the common case here.
+function buildLateSubmissionControls(period, periodLabel, managerName, batters, pitchers, sub) {
+  const safeMgr = jsStr(managerName);
+  const state = submissionLateState(sub);
+  const status = (sub && sub.status) || 'draft';
+  const auto = periodEffectiveDate(period);
+
+  if (status === 'pending') {
+    const line = state.forgivenessPending
+      ? 'Waiting on the commissioner to rule on your plea and set the date.'
+      : `Waiting on commissioner approval. It counts from <strong>${esc(fmtEffectiveDate(state.effectiveDate) || 'the next viable day')}</strong>.`;
+    return `<div style="margin-top:1rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+      <p class="text-muted" style="font-size:0.82rem;margin:0;">${line}</p>
+    </div>`;
+  }
+
+  const rosterComplete = (batters || []).length === 4 && (pitchers || []).length === 3;
+  const actions = lateSubmissionActions({
+    isLate: true,
+    hasApproved: status === 'approved',
+    forgiveness: state.forgiveness,
+    effectiveDate: auto,
+    rosterComplete,
+  });
+
+  const missing = [];
+  if ((batters || []).length < 4) missing.push(`${4 - batters.length} batter${batters.length < 3 ? 's' : ''}`);
+  if ((pitchers || []).length < 3) missing.push(`${3 - pitchers.length} pitcher${pitchers.length < 2 ? 's' : ''}`);
+
+  const dead = ' disabled style="opacity:0.45;cursor:not-allowed;"';
+  const submitLabel = auto ? `Submit &mdash; starts ${esc(fmtEffectiveDate(auto))}` : 'Submit';
+  const pleaId = `late-plea-${period}`;
+
+  let html = `<div style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:0.5rem;">
+    <button class="btn btn-primary"${actions.canSubmit ? '' : dead} onclick="${actions.canSubmit ? `submitLateRoster('${period}','${safeMgr}')` : ''}">${submitLabel}</button>
+    <button class="btn btn-secondary"${actions.canBeg ? '' : dead} onclick="${actions.canBeg ? `toggleForgivenessForm('${period}')` : ''}">Beg Commish for Forgiveness</button>
+  </div>`;
+
+  if (!rosterComplete) {
+    html += `<p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">Still need: ${missing.join(' and ')}.</p>`;
+  } else if (!actions.canSubmit && actions.reason === 'period_over') {
+    html += `<p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">No day is left in ${esc(periodLabel)} for a roster to start on &mdash; begging is your only option.</p>`;
+  } else {
+    html += `<p class="text-muted" style="margin-top:0.5rem;font-size:0.82rem;">Submitting takes the automatic date. Begging sends it to the commissioner instead, and he chooses which day it counts from.</p>`;
+  }
+
+  html += `<div id="${pleaId}" style="display:none;margin-top:0.75rem;padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
+    <label for="${pleaId}-text" style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.35rem;">Why should the commissioner back-date your roster?</label>
+    <textarea id="${pleaId}-text" class="form-input" rows="3" style="width:100%;" placeholder="Make your case. The commissioner sees this, and so does Slack."></textarea>
+    <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
+      <button class="btn btn-sm btn-primary" onclick="sendForgivenessRequest('${period}','${safeMgr}')">Send to Commissioner</button>
+      <button class="btn btn-sm btn-secondary" onclick="toggleForgivenessForm('${period}')">Cancel</button>
+    </div>
+  </div>`;
+
+  return html;
+}
+
+// The commissioner's half: the extra context and controls attached to a late manager's row in the
+// pending queue. A plain late submission just needs its start date shown before Approve is
+// pressed; a plea needs a date picker, because granting it IS choosing the date.
+function buildForgivenessControls(period, managerName, sub) {
+  const state = submissionLateState(sub);
+  if (!state.late) return '';
+  const safeName = jsStr(managerName);
+  const win = SUBMISSION_WINDOWS[period] || {};
+  const inputId = `forgive-date-${period}-${managerName.replace(/[^A-Za-z0-9]/g, '-')}`;
+
+  if (!state.forgivenessPending) {
+    const granted = state.forgivenessGranted ? ' (back-dated by you)' : '';
+    return `<div style="padding:0.4rem 0.5rem;margin:0.35rem 0;background:#fff3cd;border-radius:4px;border:1px solid #ffc107;font-size:0.8rem;color:#856404;">
+      <strong>Late submission.</strong> Approving starts this roster on ${esc(fmtEffectiveDate(state.effectiveDate) || 'the next viable day')}${granted}.
+    </div>`;
+  }
+
+  const defaultDate = win.period_start || state.autoEffectiveDate || '';
+  return `<div style="padding:0.5rem;margin:0.35rem 0;background:#e7f1ff;border-radius:4px;border:1px solid #6ea8fe;">
+    <div style="font-size:0.8rem;color:#084298;font-weight:600;margin-bottom:0.25rem;">Asking for forgiveness</div>
+    ${state.reason ? `<div style="font-size:0.8rem;color:#084298;font-style:italic;margin-bottom:0.4rem;">&ldquo;${esc(state.reason)}&rdquo;</div>` : ''}
+    <div style="font-size:0.78rem;color:#084298;margin-bottom:0.4rem;">Without forgiveness this roster starts ${esc(fmtEffectiveDate(state.autoEffectiveDate) || 'on the next viable day')}. Granting lets you set any day inside the period &mdash; including its first.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;">
+      <input type="date" id="${inputId}" class="form-input" style="max-width:11rem;" value="${esc(defaultDate)}"${win.period_start ? ` min="${esc(win.period_start)}"` : ''}${win.period_end ? ` max="${esc(win.period_end)}"` : ''}>
+      <button class="btn btn-sm btn-success" onclick="decideForgiveness('${period}','${safeName}','grant','${inputId}')">Grant Back-Date</button>
+      <button class="btn btn-sm btn-danger" onclick="decideForgiveness('${period}','${safeName}','deny','${inputId}')">Deny</button>
+    </div>
+  </div>`;
 }
 
 // Build a submission card for a given period (pp2, qf, sf, finals)
@@ -9927,10 +10391,19 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     <p class="text-muted" style="margin-bottom:0.75rem;">Submit your roster for ${periodLabel}: 4 batters and 3 pitchers</p>`;
 
   const eliminatedInRound = seasonData && seasonData.eliminated && seasonData.eliminated[managerName];
-  const periodIsEliminated =
-    eliminatedInRound &&
-    ((period === 'sf' && ['PP', 'QF'].includes(eliminatedInRound)) ||
-      (period === 'finals' && ['PP', 'QF', 'SF'].includes(eliminatedInRound)));
+  const periodIsEliminated = isManagerEliminatedForPeriod(seasonData, managerName, period);
+
+  // Late mode: the SERVER says this period's lock has passed and this manager still has no
+  // approved roster for it. The form stays up — what changes is the date it starts on and the
+  // buttons underneath it. Gated on the server's answer rather than the local deadline so a
+  // manager's clock (or a missing period_deadlines entry) can never move his start date.
+  const lateMode =
+    !isApproved &&
+    poolReady &&
+    qualified &&
+    !periodIsEliminated &&
+    periodIsLate(period) &&
+    periodStillRunning(period, sub);
 
   if (!qualified && !isApproved) {
     html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
@@ -9966,7 +10439,7 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     }
   } else if (!poolReady) {
     html += `<p class="text-muted" style="font-size:0.85rem;">Waiting for commissioner to upload player pool. If you expect it to be ready, <a href="#" onclick="location.reload();return false;">refresh the page</a>.</p>`;
-  } else if (!isOpen) {
+  } else if (!isOpen && !lateMode) {
     if (openDate && Date.now() < openDate.getTime()) {
       const openStr = openDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
       html += `<div style="padding:0.75rem;background:var(--bg);border-radius:6px;border:1px solid var(--border);">
@@ -9979,11 +10452,12 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     }
   } else {
     // Editable form
+    if (lateMode) html += buildLateSubmissionBanner(period, periodLabel, sub);
     if (isPending) {
       html += `<div class="swap-badge swap-badge-pending" style="margin-bottom:0.75rem;">Pending Commissioner Approval</div>
       <p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">You can still modify your roster until the commissioner approves it.</p>`;
     }
-    if (deadline) {
+    if (deadline && !lateMode) {
       html += `<p class="text-muted" style="font-size:0.82rem;margin-bottom:0.75rem;">Submission deadline: <strong>${fmtDeadline(deadline)}</strong></p>`;
     }
 
@@ -10030,7 +10504,9 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
       </div>`;
     }
 
-    if (!isPending) {
+    if (lateMode) {
+      html += buildLateSubmissionControls(period, periodLabel, managerName, batters, pitchers, sub);
+    } else if (!isPending) {
       const allSelected = batters.length === 4 && pitchers.length === 3;
       const missing = [];
       if (batters.length < 4) missing.push(`${4 - batters.length} batter${batters.length < 3 ? 's' : ''}`);
@@ -10043,7 +10519,12 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
     }
   }
 
-  // Commissioner approval section for this period
+  // Commissioner approval section for this period.
+  //
+  // The queue spans managers, so its heading uses the period's neutral name (in the Finals
+  // period, both games) rather than the card owner's — but each row is one manager, and in the
+  // Finals period which of the two games he submitted for is the thing being approved, so it
+  // rides next to his name.
   if (isCommissioner) {
     const allManagers = getManagers().filter((m) => m.active !== false);
     const pendingPeriod = allManagers.filter((m) => {
@@ -10051,16 +10532,23 @@ function buildPeriodSubmissionCard(period, periodLabel, managerName, isCommissio
       return s && s.status === 'pending';
     });
     if (pendingPeriod.length > 0) {
-      html += `<div class="swap-pending-card" style="margin-top:1rem;"><h4>Pending ${periodLabel} Approvals</h4>`;
+      const field = period === 'finals' ? finalsGameField(seasonData) : null;
+      html += `<div class="swap-pending-card" style="margin-top:1rem;"><h4>Pending ${periodLabelForAll(period)} Approvals</h4>`;
       pendingPeriod.forEach((m) => {
         const s = getPeriodSub(seasonData, period, m.name);
         const safeName = jsStr(m.name);
+        const gameLabel = field ? submissionPeriodLabel(seasonData, period, m.name, field) : '';
+        const gameTag =
+          gameLabel && gameLabel !== FINALS_GAME_LABELS.unknown
+            ? `<span class="text-muted" style="font-size:0.78rem;">${esc(gameLabel)}</span>`
+            : '';
         html += `<div class="swap-pending-item">
-          <div class="swap-pending-header"><strong>${esc(m.name)}</strong><span class="swap-badge swap-badge-pending">Pending</span></div>
+          <div class="swap-pending-header"><span style="display:flex;align-items:baseline;gap:0.4rem;"><strong>${esc(m.name)}</strong>${gameTag}</span><span class="swap-badge swap-badge-pending">Pending</span></div>
           <div style="padding:0.5rem 0;">
             <div style="font-size:0.82rem;"><strong>Batters:</strong> ${(s.batters || []).join(', ') || 'None'}</div>
             <div style="font-size:0.82rem;"><strong>Pitchers:</strong> ${(s.pitchers || []).join(', ') || 'None'}</div>
           </div>
+          ${buildForgivenessControls(period, m.name, s)}
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
             <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
@@ -10303,6 +10791,20 @@ window.submitSwapRequest = async function (managerName, ev) {
       eff = await computeSwapEffectiveDates(sd, playerOut, playerIn);
     }
     const { effective_date, drop_date, add_date, teams_started } = eff;
+
+    // Same guard the server enforces (js/swaps.js): on a round's final day the game-started rule
+    // rolls the add into the next period, where the swap can only do harm — it scores nothing this
+    // round and adds the incoming player to a roster that was never submitted. Fast feedback here;
+    // the server refuses authoritatively. Only the auto path can hit this — a scheduled date is
+    // already bounded by the end-of-round check above.
+    if (!requestedEff) {
+      const windowError = checkSwapEffectiveWindow(add_date, scheduleRoundEnd(sd, round), round, playerIn);
+      if (windowError) {
+        errEl.textContent = windowError;
+        errEl.style.display = 'block';
+        return;
+      }
+    }
 
     const swap = {
       email: LOGGED_IN_EMAIL,
@@ -10597,7 +11099,7 @@ window.editSwapInline = function (swapId) {
       <div class="swap-form-field">
         <label>Reason</label>
         <select id="edit-reason-${swapId}" class="form-select">
-          ${SWAP_REASONS.map((r) => `<option value="${r}" ${r === swap.reason ? 'selected' : ''}>${r}</option>`).join('')}
+          ${SWAP_REASONS.map((r) => `<option value="${r}" ${r === swap.reason ? 'selected' : ''}>${swapReasonLabel(r)}</option>`).join('')}
         </select>
       </div>
       <div class="swap-form-field">
@@ -10675,18 +11177,26 @@ function renderSubmissionStatusTable() {
 
   // Managers to show for a period: Pool Play = all active managers; playoff rounds = only the
   // managers who advanced to that round (null until the prior round is finalized).
+  //
+  // The Finals period is the exception: ALL FOUR semifinalists submit for it — two for the
+  // Championship, two for the 3rd-place game played over the same two weeks — so listing only
+  // the two finalists hid half the rosters the commissioner has to chase and approve.
   const participantsFor = (period) => {
     if (period === 'pp1' || period === 'pp2') return activeManagers;
     if (period === 'qf') return getQFQualifiers(sd);
-    if (period === 'sf') return getSFParticipants(sd);
-    if (period === 'finals') return getFinalsParticipants(sd);
+    if (period === 'sf' || period === 'finals') return getSFParticipants(sd);
     return null;
   };
+
+  // Which of the two Finals-week games each of those four is in, once the semifinals are
+  // finalized. Derived once — every read of it runs the bracket.
+  const finalsField = finalsGameField(sd);
 
   const pendingNote = {
     qf: 'Advancing managers appear here once Pool Play is finalized.',
     sf: 'Semifinalists appear here once the Quarterfinals are finalized.',
-    finals: 'Finalists appear here once the Semifinals are finalized.',
+    finals:
+      'All four semifinalists appear here once the Quarterfinals are finalized — two play the Finals, two the 3rd-place game.',
   };
 
   const muted = (txt) => `<p class="text-muted" style="font-size:0.85rem;margin:0.5rem 0;">${txt}</p>`;
@@ -10707,17 +11217,35 @@ function renderSubmissionStatusTable() {
         else if (isPending) pending++;
         else notSub++;
 
+        // Late state rides the two cells that already exist rather than adding a column: a
+        // missing roster on a locked period says so, and a submitted-late one shows the day it
+        // actually starts counting from, which is the number the commissioner is approving.
+        const late = submissionLateState(sub);
+        const lateOpen = !isSubmitted && periodIsLate(period);
         const notCell = !isSubmitted
-          ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted</td>`
+          ? `<td style="background:rgba(220,53,69,0.18);color:#dc3545;font-weight:600;text-align:center;white-space:nowrap;">Not Submitted${lateOpen ? '<div style="font-weight:500;font-size:0.72rem;">deadline passed</div>' : ''}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
+        const lateNote = late.late
+          ? `<div style="font-weight:500;font-size:0.72rem;">${
+              late.forgivenessPending
+                ? 'late &middot; begging'
+                : `late &middot; from ${esc(late.effectiveDate || 'TBD')}`
+            }</div>`
+          : '';
         const subCell = isSubmitted
-          ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}</td>`
+          ? `<td style="background:rgba(255,193,7,0.18);color:#9a7000;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.submitted_at) || '&#8212;'}${lateNote}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
         const appCell = isApproved
           ? `<td style="background:rgba(40,167,69,0.18);color:#1a7a35;font-weight:600;text-align:center;white-space:nowrap;font-size:0.82rem;">${fmtDt(sub.approved_at) || '&#8212;'}</td>`
           : `<td style="text-align:center;color:var(--text-muted);">&#8212;</td>`;
 
-        return `<tr><td style="font-weight:500;">${esc(name)}</td>${notCell}${subCell}${appCell}</tr>`;
+        // In the Finals period the row says which of the two games this roster is for.
+        const game = period === 'finals' ? submissionPeriodLabel(sd, period, name, finalsField) : '';
+        const gameNote =
+          game && game !== FINALS_GAME_LABELS.unknown
+            ? `<div class="text-muted" style="font-weight:400;font-size:0.72rem;">${esc(game)}</div>`
+            : '';
+        return `<tr><td style="font-weight:500;">${esc(name)}${gameNote}</td>${notCell}${subCell}${appCell}</tr>`;
       })
       .join('');
     const table =
@@ -10760,7 +11288,7 @@ function renderSubmissionStatusTable() {
     const openAttr = period === defaultOpen ? ' open' : '';
     html +=
       `<details class="sub-status-period"${openAttr}>` +
-      `<summary><span class="sub-status-label">${PERIOD_LABELS[period]}</span>` +
+      `<summary><span class="sub-status-label">${periodLabelForAll(period)}</span>` +
       `<span class="sub-status-meta">${meta}</span></summary>${body}</details>`;
   });
 
@@ -10932,11 +11460,11 @@ function swapDetailHtml(s, sd, containerId, editable) {
   if (editable) {
     const reason = s.reason || '';
     const opts = COMMISSIONER_SWAP_REASONS.map(
-      (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(r)}</option>`
+      (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(swapReasonLabel(r))}</option>`
     ).join('');
     reasonVal = `<select class="swap-detail-reason" onclick="event.stopPropagation()" onchange="saveSwapLogReason('${containerId}','${s.id}', this.value)">${opts}</select>`;
   } else {
-    reasonVal = esc(s.reason || '—');
+    reasonVal = s.reason ? esc(swapReasonLabel(s.reason)) : '—';
   }
 
   let items = '';
@@ -10998,7 +11526,7 @@ function managerSwapActionsHtml(s, sd, containerId) {
   const minDate = tomorrowET(); // strictly forward, same rule the submission path enforces
   const maxDate = scheduleRoundEnd(sd, s.round || (getCurrentScheduleRound(sd) || {}).round);
   const reasonOpts = SWAP_REASONS.map(
-    (r) => `<option value="${esc(r)}"${r === s.reason ? ' selected' : ''}>${esc(r)}</option>`
+    (r) => `<option value="${esc(r)}"${r === s.reason ? ' selected' : ''}>${esc(swapReasonLabel(r))}</option>`
   ).join('');
 
   return `<div class="swap-detail-actions">
@@ -11109,11 +11637,11 @@ function renderSwapLog(containerId = 'swap-log-list', editable = isLoggedInCommi
     let reasonCell;
     if (editable) {
       const opts = COMMISSIONER_SWAP_REASONS.map(
-        (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(r)}</option>`
+        (r) => `<option value="${esc(r)}"${r === reason ? ' selected' : ''}>${esc(swapReasonLabel(r))}</option>`
       ).join('');
       reasonCell = `<select onclick="event.stopPropagation()" onchange="saveSwapLogReason('${containerId}','${s.id}', this.value)" style="font-size:0.82rem;color:var(--text-muted);border:1px solid transparent;background:transparent;cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.borderColor='var(--border)'" onmouseout="this.style.borderColor='transparent'">${opts}</select>`;
     } else {
-      reasonCell = esc(reason);
+      reasonCell = esc(swapReasonLabel(reason));
     }
     html += `<tr class="swap-log-row${isOpen ? ' swap-log-row-open' : ''}" onclick="toggleSwapDetail('${containerId}','${s.id}')">
       <td class="swap-log-caret">${isOpen ? '▾' : '▸'}</td>
@@ -11626,6 +12154,7 @@ function renderPendingSwapRequests() {
             <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map((p) => displayPlayer(p, sd)).join(', ') || 'None'}</span>
           </div>
           <div id="comm-initial-edit-${idSafe}" style="display:none;"></div>
+          ${buildForgivenessControls(period, m.name, sub)}
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="${approveFn}('${safeName}')">Approve</button>
             <button class="btn btn-sm btn-secondary" onclick="${editFn}('${safeName}')">Edit</button>
@@ -11645,6 +12174,7 @@ function renderPendingSwapRequests() {
             <span><strong>Batters:</strong> ${(sub.batters || []).map((b) => displayPlayer(b, sd)).join(', ') || 'None'}</span>
             <span><strong>Pitchers:</strong> ${(sub.pitchers || []).map((p) => displayPlayer(p, sd)).join(', ') || 'None'}</span>
           </div>
+          ${buildForgivenessControls(period, m.name, sub)}
           <div class="swap-pending-actions">
             <button class="btn btn-sm btn-success" onclick="approvePeriodSubmission('${period}','${safeName}')">Approve</button>
             <button class="btn btn-sm btn-danger" onclick="denyPeriodSubmission('${period}','${safeName}')">Deny</button>
@@ -11705,6 +12235,10 @@ function renderPendingSwapRequests() {
   }
 
   container.innerHTML = html;
+  // The late-submission rows in this queue (buildForgivenessControls) need the server's window —
+  // its period bounds are the min/max on the commissioner's back-date picker. Fetched after the
+  // paint, re-rendering only if an answer moved.
+  refreshSubmissionWindows(['pp1', 'pp2', 'qf', 'sf', 'finals'], renderPendingSwapRequests);
 }
 
 // Navigate to a manager's roster page from commissioner pending swaps
@@ -12915,9 +13449,13 @@ window.approveInitialSubmission = async function (manager) {
     return;
   }
 
+  // A late roster with no effective date cannot be approved — see submissionAddDate.
+  if (blockLateApprovalWithoutDate(sub, manager, 'Pool Play 1')) return;
+
   sub.status = 'approved';
   // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
-  if (!(await persistSubmission('pp1', manager, sub))) return;
+  const saved = await persistSubmission('pp1', manager, sub);
+  if (!saved) return;
 
   // Add all players to Week 1 roster
   const firstWeek = SEASON_SCHEDULE[0];
@@ -12926,8 +13464,10 @@ window.approveInitialSubmission = async function (manager) {
   if (!sd.rosters[manager]) sd.rosters[manager] = {};
   if (!sd.rosters[manager][weekKey]) sd.rosters[manager][weekKey] = { batters: [], pitchers: [] };
 
-  // Use the PP1 Week 1 start date as each player's add_date
-  const pp1StartDate = sd.schedule_dates && sd.schedule_dates[0] ? sd.schedule_dates[0].start : null;
+  // Each player's add_date: normally PP1's own first day, but a roster submitted after opening
+  // day starts on the effective date the server stamped instead (submissionAddDate).
+  const weekOneStart = sd.schedule_dates && sd.schedule_dates[0] ? sd.schedule_dates[0].start : null;
+  const pp1StartDate = submissionAddDate(saved, weekOneStart);
   if (pp1StartDate) {
     if (!sd.roster_dates) sd.roster_dates = {};
     if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
@@ -12938,7 +13478,7 @@ window.approveInitialSubmission = async function (manager) {
   // legitimately advanced so repairCarryForwardRosters doesn't purge the approved roster as a
   // speculative future write.
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  if (pp1StartDate && pp1StartDate > todayET) {
+  if (weekOneStart && weekOneStart > todayET) {
     if (!Array.isArray(sd.advanced_weeks)) sd.advanced_weeks = [];
     if (!sd.advanced_weeks.includes(0)) sd.advanced_weeks.push(0);
   }
@@ -13170,6 +13710,152 @@ window.submitPeriodRoster = async function (period, manager) {
   renderRosterData(manager, isComm);
 };
 
+// ---- Late-submission actions ----
+
+// Submit a roster after its period's lock, taking the automatic next-viable effective date. The
+// date is re-read from the server first: the manager may have had this page open since before
+// first pitch, and the button label he is about to press must be the date he actually gets.
+window.submitLateRoster = async function (period, manager) {
+  const label = periodLabelForManager(period, manager);
+  const win = await loadSubmissionWindow(period, { force: true });
+  if (!win || !win.is_late) {
+    // The window re-opened under us (a commissioner moved the schedule, or the clock was wrong).
+    // Fall through to the ordinary path rather than filing a late roster that isn't one.
+    return window.submitPeriodRoster(period, manager);
+  }
+  if (!win.effective_date) {
+    alert(
+      `${label} is over — there is no day left for a new roster to start on.\n\n` +
+        'Use "Beg Commish for Forgiveness" instead; only the commissioner can back-date it now.'
+    );
+    const isComm = isLoggedInCommissioner();
+    renderRosterData(manager, isComm);
+    return;
+  }
+  if (
+    !confirm(
+      `You missed the ${label} deadline, so this roster counts from ${fmtEffectiveDate(win.effective_date)} ` +
+        `— not from the start of the period.\n\nSubmit it for approval?`
+    )
+  ) {
+    return;
+  }
+  await window.submitPeriodRoster(period, manager);
+};
+
+// Show/hide the plea box under a late period's Beg button.
+window.toggleForgivenessForm = function (period) {
+  const box = document.getElementById(`late-plea-${period}`);
+  if (!box) return;
+  const showing = box.style.display !== 'none';
+  box.style.display = showing ? 'none' : 'block';
+  if (!showing) {
+    const ta = document.getElementById(`late-plea-${period}-text`);
+    if (ta) ta.focus();
+  }
+};
+
+// File the roster as a plea instead of a submission: it goes to the commissioner with NO
+// effective date, and he chooses which day it counts from.
+window.sendForgivenessRequest = async function (period, manager) {
+  const label = periodLabelForManager(period, manager);
+  const ta = document.getElementById(`late-plea-${period}-text`);
+  const reason = ((ta && ta.value) || '').trim();
+  if (!reason) {
+    alert('Tell the commissioner why. A blank plea is just a late submission.');
+    if (ta) ta.focus();
+    return;
+  }
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  const sub = getPeriodSub(sd, period, manager);
+  if (!sub) return;
+  if ((sub.batters || []).length !== 4 || (sub.pitchers || []).length !== 3) {
+    alert('You must select exactly 4 batters and 3 pitchers before begging for forgiveness.');
+    return;
+  }
+  if (!confirm(`Send your ${label} roster to the commissioner and ask him to back-date it?`)) return;
+
+  sub.status = 'pending';
+  if (!(await persistSubmission(period, manager, sub, { forgivenessReason: reason }))) return;
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = isLoggedInCommissioner();
+  renderRosterData(manager, isComm);
+};
+
+// The commissioner's ruling. Granting takes the date out of the picker — the server validates it
+// against the period's own bounds, because this is the one path that can start a roster earlier
+// than the automatic rule allows. Denying needs no date: the roster drops to the automatic one.
+window.decideForgiveness = async function (period, manager, decision, inputId) {
+  const label = periodLabelForManager(period, manager);
+  const input = document.getElementById(inputId);
+  const effectiveDate = input ? input.value : '';
+  if (decision === 'grant') {
+    if (!effectiveDate) {
+      alert('Pick the date this roster should start counting from.');
+      return;
+    }
+    if (
+      !confirm(
+        `Back-date ${manager}'s ${label} roster to ${fmtEffectiveDate(effectiveDate)}?\n\n` +
+          'Every player on it will be added as of that date and will score from then on.'
+      )
+    ) {
+      return;
+    }
+  } else if (!confirm(`Deny ${manager}'s request? His roster still counts, from the automatic date.`)) {
+    return;
+  }
+
+  try {
+    const resp = await apiFetch(
+      `/api/seasons/${SELECTED_SEASON}/submissions/${period}/${encodeURIComponent(manager)}/forgiveness`,
+      { method: 'POST', body: JSON.stringify({ decision, effective_date: effectiveDate || undefined }) }
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || `Server error (${resp.status})`);
+    }
+    const { submission, window: subWindow, _rev } = await resp.json();
+    mirrorSubmissionLocally(period, manager, submission);
+    cacheSubmissionWindow(period, subWindow);
+    adoptRev(_rev);
+  } catch (e) {
+    alert(`Could not record that decision — ${e.message}. Please try again.`);
+    return;
+  }
+  renderPendingSwapRequests();
+  renderSubmissionStatusTable();
+  const isComm = isLoggedInCommissioner();
+  renderRosterData(manager, isComm);
+};
+
+// The add_date every player on an approved submission gets. Normally the period's first day; for
+// a LATE roster, the effective date the server stamped (or the commissioner back-dated to).
+//
+// Returns null when a late roster has no effective date at all — a plea nobody has ruled on, or a
+// period that ran out. Approving that would silently back-date the roster to the period start,
+// which is the exact thing the whole feature exists to prevent, so callers refuse instead.
+function submissionAddDate(sub, periodStartDate) {
+  const state = submissionLateState(sub);
+  if (!state.late) return periodStartDate;
+  return state.effectiveDate || null;
+}
+
+// Shared guard for both approval paths. Returns true when approval must not proceed.
+function blockLateApprovalWithoutDate(sub, manager, periodLabel) {
+  const state = submissionLateState(sub);
+  if (!state.late || state.effectiveDate) return false;
+  alert(
+    `${manager}'s ${periodLabel} roster was submitted late and has no effective date yet.\n\n` +
+      (state.forgivenessPending
+        ? 'Rule on the forgiveness request first — granting it is how the date gets set.'
+        : 'The period has no viable day left. Grant forgiveness with a date to approve this roster.')
+  );
+  return true;
+}
+
 window.approvePeriodSubmission = async function (period, manager) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
@@ -13197,9 +13883,13 @@ window.approvePeriodSubmission = async function (period, manager) {
     return;
   }
 
+  // A late roster with no effective date cannot be approved — see submissionAddDate.
+  if (blockLateApprovalWithoutDate(sub, manager, periodLabelForManager(period, manager))) return;
+
   sub.status = 'approved';
   // Persist the approval atomically first; only touch the Week 1 roster if it stuck.
-  if (!(await persistSubmission(period, manager, sub))) return;
+  const saved = await persistSubmission(period, manager, sub);
+  if (!saved) return;
 
   // Set the first week of the corresponding round to EXACTLY the submission.
   const firstEntry = roundKey ? SEASON_SCHEDULE.find((s) => s.round === roundKey && s.week === 'Week 1') : null;
@@ -13223,11 +13913,18 @@ window.approvePeriodSubmission = async function (period, manager) {
     // a resurrected holdover left an approved manager with a 5th batter). In-period swaps happen
     // after approval and are re-applied by repairCarryForwardRosters from the swap records.
     sd.rosters[manager][weekKey] = { batters: [...(sub.batters || [])], pitchers: [...(sub.pitchers || [])] };
-    if (weekStart) {
+    // The add_date is the scoring invariant's own unit, so a LATE roster needs no special case
+    // anywhere downstream — it simply carries a later add_date and scores a shorter window. The
+    // week key stays the period's first week either way: managerWeekSubtotal and
+    // rebuildRosterArraysFromDates both pool a manager's dates across the period's weeks and
+    // filter by each week's end, so an add_date landing in Week 2 scores in Week 2 and nowhere
+    // earlier.
+    const addDate = submissionAddDate(saved, weekStart);
+    if (addDate) {
       if (!sd.roster_dates) sd.roster_dates = {};
       if (!sd.roster_dates[manager]) sd.roster_dates[manager] = {};
       const dates = {};
-      for (const p of [...(sub.batters || []), ...(sub.pitchers || [])]) dates[p] = { add_date: weekStart };
+      for (const p of [...(sub.batters || []), ...(sub.pitchers || [])]) dates[p] = { add_date: addDate };
       sd.roster_dates[manager][weekKey] = dates;
     }
   }
@@ -13240,7 +13937,7 @@ window.approvePeriodSubmission = async function (period, manager) {
 };
 
 window.denyPeriodSubmission = async function (period, manager) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   if (!confirm(`Deny ${label} submission for ${manager}? Their selection will be reset to draft.`)) return;
   const draft = { batters: [], pitchers: [], status: 'draft' };
   if (!(await persistSubmission(period, manager, draft))) return;
@@ -13254,7 +13951,7 @@ window.denyPeriodSubmission = async function (period, manager) {
 // which leaves an empty 'draft' record behind — this deletes the entry entirely. The manager's
 // actual roster (sd.rosters) is untouched; only the submission artifact is removed.
 window.deletePeriodSubmission = async function (period, manager) {
-  const label = PERIOD_LABELS[period] || period;
+  const label = periodLabelForManager(period, manager);
   if (
     !confirm(
       `Delete ${manager}'s ${label} submission record entirely?\n\n` +
@@ -13282,7 +13979,7 @@ window.editApprovedPeriodSubmission = async function (period, manager) {
     return;
   }
 
-  const label = PERIOD_LABELS[period] || period;
+  const label = submissionPeriodLabel(sd, period, manager);
   if (
     !confirm(
       `Editing your ${label} submission will un-approve your current roster and require commissioner re-approval.\n\n` +
@@ -14773,41 +15470,68 @@ function renderWeeklyUploadSections() {
         html += roastRepairToolsHtml('QF');
       }
     } else if (i === 13) {
-      // Week 14 (SF Week 2) - End Semifinals
+      // Week 14 (SF Week 2) - End Semifinals.
+      //
+      // Unlike the Quarterfinals, this transition dumps NOBODY. The semifinal knocks nobody
+      // out of the schedule: its two winners play the Championship and its two losers play
+      // the 3rd-place game, and both of those games are contested over the SAME Finals weeks.
+      // All four semifinalists therefore submit a Finals roster, and there is no Hall of
+      // Shame until the season actually ends. See advanceToFinalsAndThirdPlace.
       const sfFinalized = finalized.includes('SF');
-      const sfDumped = (sd.losers_dumped || []).includes('SF');
+      const sfAdvanced = (sd.losers_dumped || []).includes('SF');
       html += `<div style="margin-top:0.75rem;">
         <button class="btn btn-sm ${sfFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('SF')" ${sfFinalized ? 'disabled style="opacity:0.5;"' : ''}>
           ${sfFinalized ? 'Semifinals Ended' : 'End Semifinals'}
         </button>
-        ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to finals.</span>'}
+        ${sfFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Semifinals finalized.</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize semifinals and advance winners to the Finals and losers to the 3rd-place game.</span>'}
       </div>`;
-      if (sfFinalized && !sfDumped) {
+      if (sfFinalized) {
         html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-danger" onclick="dumpPlayoffLosers('SF')">Advance Finals Teams &amp; Dump SF Loser Rosters</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Removes SF losers from Finals submissions, marks them eliminated, generates roasts, and posts the Hall of Shame to Slack.</span>
+          <button class="btn btn-sm btn-accent" onclick="advanceToFinalsAndThirdPlace()">${sfAdvanced ? 'Repost' : 'Post'} Semifinal Results &amp; Finals/3rd-Place Preview</button>
+          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Posts the semifinal results and a preview of both Finals-week games to Slack. Nobody is eliminated here &mdash; all four semifinalists keep their Finals submission (two for the Championship, two for the 3rd-place game). Safe to run again.</span>
         </div>`;
-      } else if (sfDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">SF loser rosters dumped. Roasts generated and posted to Slack.</span></div>`;
-        html += roastRepairToolsHtml('SF');
+        if (sfAdvanced) {
+          html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Semifinal results and previews posted to Slack.</span></div>`;
+        }
       }
     } else if (i === 15) {
-      // Week 16 (Finals Week 2) - End Finals
-      const finalsFinalized = finalized.includes('Finals');
-      const finalsDumped = (sd.losers_dumped || []).includes('Finals');
-      html += `<div style="margin-top:0.75rem;">
-        <button class="btn btn-sm ${finalsFinalized ? 'btn-secondary' : 'btn-accent'}" onclick="finalizeRound('Finals')" ${finalsFinalized ? 'disabled style="opacity:0.5;"' : ''}>
-          ${finalsFinalized ? 'Season Complete' : 'End Finals'}
-        </button>
-        ${finalsFinalized ? '<span class="success-text" style="font-size:0.78rem;"> Season finalized!</span>' : '<span class="text-muted" style="font-size:0.78rem;"> Finalize finals and complete the season.</span>'}
+      // Week 16 (Finals Week 2) — End Finals & Close Season.
+      //
+      // ONE button, deliberately. This used to be two: "End Finals" wrote a flag, and every
+      // visible thing a season ending is supposed to produce — the four roasts, the Hall of
+      // Shame post — sat behind a second button that only appeared afterwards. A season ended
+      // with neither, because nobody knew to press it. The whole close is one action now, and
+      // it is re-runnable, which is what the second button underneath is for.
+      const closed = sd.season_closed && sd.season_closed.at;
+      if (!closed) {
+        const finalsFinalized = finalized.includes('Finals');
+        html += `<div style="margin-top:0.75rem;">
+        <button class="btn btn-sm btn-accent" onclick="endFinalsAndCloseSeason()">End Finals &amp; Close Season</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">
+          Crowns the champion, roasts all four Finals-week managers, posts the Hall of Shame and the season recap to Slack, and turns off every scheduled job &mdash; no more daily syncs, Slack posts or MLB polling.
+        </span>
       </div>`;
-      if (finalsFinalized && !finalsDumped) {
-        html += `<div style="margin-top:0.5rem;">
-          <button class="btn btn-sm btn-danger" onclick="crownChampionAndRoastFinals()">Crown Champion &amp; Roast Runner-up/4th</button>
-          <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Marks the runner-up and 4th-place manager eliminated, generates their roasts, and posts the season-ending Hall of Shame to Slack.</span>
-        </div>`;
-      } else if (finalsDumped) {
-        html += `<div style="margin-top:0.5rem;"><span class="success-text" style="font-size:0.78rem;">Champion crowned. Runner-up/4th roasted.</span></div>`;
+        if (finalsFinalized) {
+          html += `<div style="margin-top:0.5rem;"><span class="text-muted" style="font-size:0.78rem;">The Finals round is already marked finalized, but the season has not been closed &mdash; run this to finish it.</span></div>`;
+        }
+      } else {
+        const closedOn = fmtServerTimestamp(sd.season_closed.at);
+        const recap = sd.season_closed.recap || {};
+        const recapNote = recap.posted
+          ? `Season recap posted${recap.source ? ` (written by ${esc(String(recap.source))})` : ''}.`
+          : `Season recap did NOT post${recap.error ? `: ${esc(String(recap.error))}` : ''}. Re-run to try again.`;
+        html += `<div style="margin-top:0.75rem;">
+        <span class="success-text" style="font-size:0.78rem;">Season closed ${esc(closedOn)}. Champion: ${esc(sd.season_closed.champion || '?')}. All scheduled jobs are off.</span>
+        <div class="${recap.posted ? 'text-muted' : 'error-text'}" style="font-size:0.78rem;margin-top:0.25rem;">${recapNote}</div>
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-secondary" onclick="rerunSeasonClose()">Re-run Season Close</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Re-rolls all four Finals roasts, reposts the Hall of Shame <em>and</em> the season recap, and re-asserts the shutdown. Safe to run again.</span>
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button class="btn btn-sm btn-danger" onclick="reopenSeason()">Reopen Season</button>
+        <span class="text-muted" style="font-size:0.78rem;margin-left:0.5rem;">Turns the scheduled jobs back on (daily sync, 7am Slack post, auto-advance, live scoring). Nothing about the roasts, the recap or the standings changes.</span>
+      </div>`;
         html += roastRepairToolsHtml('Finals');
       }
     }
@@ -15153,25 +15877,26 @@ window.finalizeRound = async function (roundKey) {
 };
 
 // Remove losing managers' next-round submissions, mark them eliminated, trigger roasts.
-// round = 'QF' (dumps QF losers from SF) or 'SF' (dumps SF losers from Finals).
+//
+// QUARTERFINALS ONLY. The semifinal looks like the same transition and is not: its losers play
+// the 3rd-place game over the Finals weeks, so nothing of theirs may be dumped and nobody is
+// marked eliminated. That transition is advanceToFinalsAndThirdPlace, below.
 window.dumpPlayoffLosers = async function (round) {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  const nextPeriod = round === 'QF' ? 'sf' : round === 'SF' ? 'finals' : null;
-  if (!nextPeriod) return;
-
-  let losers;
-  if (round === 'QF') {
-    const qfQualifiers = getQFQualifiers(sd) || [];
-    const sfParticipants = getSFParticipants(sd) || [];
-    losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
-  } else {
-    const sfParticipants = getSFParticipants(sd) || [];
-    const finalsParticipants = getFinalsParticipants(sd) || [];
-    losers = sfParticipants.filter((m) => !finalsParticipants.includes(m));
+  if (round !== 'QF') {
+    alert(
+      'Only the quarterfinals eliminate anyone. Use "Post Semifinal Results & Finals/3rd-Place Preview" for the semifinals — all four semifinalists play on.'
+    );
+    return;
   }
+  const nextPeriod = 'sf';
+
+  const qfQualifiers = getQFQualifiers(sd) || [];
+  const sfParticipants = getSFParticipants(sd) || [];
+  const losers = qfQualifiers.filter((m) => !sfParticipants.includes(m));
 
   if (losers.length === 0) {
     alert('No losers identified — make sure the round is finalized and scores are uploaded.');
@@ -15216,82 +15941,302 @@ window.dumpPlayoffLosers = async function (round) {
   init();
 };
 
-// Determine the Finals-round results (champion, runner-up, 3rd, 4th) from the confirmed
-// bracket, mark the runner-up and 4th-place manager as eliminated (tournament-bracket
-// bookkeeping — the runner-up genuinely did lose the Championship), generate roasts for
-// ALL FOUR participants, and post the combined "season is over" Slack message. Only 4th
-// place gets the plain elimination banner — the top 3 finishers (champion, runner-up, 3rd)
-// are next year's pool-selection captains, so they get the podium treatment (silver/gold/
-// bronze banner + captain reminder) instead of "Hall of Shame", even though the runner-up
-// and 4th place lost the same round. There's no next round to prune submissions from, so
-// this is a separate action rather than folded into finalizeRound('Finals', ...).
-window.crownChampionAndRoastFinals = async function () {
+// The Semifinals → Finals transition. The counterpart to dumpPlayoffLosers, and deliberately
+// NOT a dump: losing a semifinal eliminates nobody.
+//
+// Both Finals-week games are played over the SAME two weeks — the Championship between the SF
+// winners and the 3rd-place game between the SF losers — so all four semifinalists need a
+// Finals-period roster, and all four keep submitting. Nothing here deletes a submission and
+// nothing here writes sd.eliminated; the season's only remaining elimination happens at
+// "Crown Champion", where 4th place is settled by the 3rd-place game.
+//
+// It is also the repair for seasons transitioned before this was understood, which is why it is
+// re-runnable and idempotent: it clears any stale sd.eliminated[...] = 'SF' markers (they blocked
+// the two 3rd-place managers out of the Finals submission form) and any 'your season is over'
+// roast wrongly stored against the SF round (server-authoritative, so it takes an endpoint).
+window.advanceToFinalsAndThirdPlace = async function () {
   const seasons = getSeasons();
   const sd = seasons[SELECTED_SEASON];
   if (!sd) return;
 
-  const matchups = playoffRoundMatchups(sd, 'Finals');
-  if (!matchups) {
-    alert('Finals participants not determined yet — make sure QF and SF are finalized.');
+  const sfParticipants = getSFParticipants(sd) || [];
+  const finalsParticipants = getFinalsParticipants(sd) || [];
+  if (sfParticipants.length < 4 || finalsParticipants.length < 2) {
+    alert('Finals participants not determined yet — make sure the semifinals are finalized and scores are uploaded.');
     return;
   }
+  const thirdPlacePair = sfParticipants.filter((m) => !finalsParticipants.includes(m));
 
-  const rosterLookup = buildRosterLookup(sd);
-  const weekKeyToStart = buildWeekKeyToStart();
-  const seedRank = seedRankLookup(sd);
-  const winnerOf = (a, b) =>
-    roundMatchupWinner(
-      a,
-      roundBreakdown(sd, a, 'Finals', rosterLookup, weekKeyToStart).total,
-      b,
-      roundBreakdown(sd, b, 'Finals', rosterLookup, weekKeyToStart).total,
-      seedRank
-    );
+  // Withdraw any SF-round roast first: those were written as eliminations, and they render on
+  // the manager's roster page as a "season over" banner while he is still playing.
+  const clearedRoasts = await clearRoastsForRound('SF');
+  if (clearedRoasts === null) return; // already alerted
 
-  const [champA, champB] = matchups[0].teams.map((t) => t.name);
-  const [thirdA, thirdB] = matchups[1].teams.map((t) => t.name);
-  const champion = winnerOf(champA, champB);
-  const runnerUp = champion === champA ? champB : champA;
-  const third = winnerOf(thirdA, thirdB);
-  const fourth = third === thirdA ? thirdB : thirdA;
-
-  // Top-3 podium finishers — captains for next year's pool selection — get the podium
-  // roast/banner treatment. Only 4th place is a plain elimination.
-  const podiumRoles = [];
-  if (champion) podiumRoles.push({ manager: champion, outcome: 'champion' });
-  if (runnerUp) podiumRoles.push({ manager: runnerUp, outcome: 'runner_up' });
-  if (third) podiumRoles.push({ manager: third, outcome: 'third' });
-
-  const losers = [fourth].filter(Boolean);
-  if (losers.length === 0 && podiumRoles.length === 0) {
-    alert('Could not determine Finals results — make sure scores are uploaded.');
-    return;
+  // Re-read after the roast delete adopted a new _rev, so this save isn't rejected as stale.
+  const fresh = getSeasons();
+  const freshSd = fresh[SELECTED_SEASON];
+  if (!freshSd) return;
+  const unblocked = [];
+  for (const [m, r] of Object.entries(freshSd.eliminated || {})) {
+    if (r === 'SF') {
+      delete freshSd.eliminated[m];
+      unblocked.push(m);
+    }
   }
+  freshSd.losers_dumped = freshSd.losers_dumped || [];
+  if (!freshSd.losers_dumped.includes('SF')) freshSd.losers_dumped.push('SF');
 
-  if (!sd.eliminated) sd.eliminated = {};
-  // Bracket bookkeeping: the runner-up and 4th place both genuinely lost the Championship/
-  // 3rd-place game this round, regardless of which roast banner they get.
-  [runnerUp, fourth].filter(Boolean).forEach((m) => {
-    sd.eliminated[m] = 'Finals';
-  });
-  sd.losers_dumped = sd.losers_dumped || [];
-  sd.losers_dumped.push('Finals');
-  saveSeason(SELECTED_SEASON, sd);
+  if (!(await saveSeason(SELECTED_SEASON, freshSd))) return; // saveSeason already alerted/reloaded
 
-  for (const m of losers) {
-    await generateRoastForManager(m, 'Finals');
-  }
-  for (const w of podiumRoles) {
-    await generateRoastForManager(w.manager, 'Finals', w.outcome);
-  }
-  const posted = await postCombinedRoastsToSlack('Finals', null, losers, false, podiumRoles);
+  // No roasts to pass: the server builds this post as results + the Finals/3rd-place preview.
+  const posted = await postCombinedRoastsToSlack('SF', null, []);
   alert(
-    `Champion: ${champion}. Runner-up: ${runnerUp}. 3rd place: ${third}. 4th place: ${fourth}.` +
+    `Finals: ${finalsParticipants.join(' vs ')}. 3rd-place game: ${thirdPlacePair.join(' vs ')}. ` +
+      `All four submit a Finals roster.` +
+      (unblocked.length ? ` Cleared stale elimination marks for ${unblocked.join(', ')}.` : '') +
       (posted ? ' Posted to Slack.' : ' Slack post failed — check the browser console.')
   );
   renderWeeklyUploadSections();
   init();
 };
+
+// Delete every stored roast for a round. sd.roasts is server-authoritative (a full-season save
+// can only ADD to it), so this is the only way to withdraw one. Returns the removed managers, or
+// null on failure after alerting.
+//
+// The local mirror is NOT optional here: the server merges an incoming save's roasts UNDER its
+// own (`{...incoming, ...stored}`), so a following full-season save still carrying the deleted
+// roasts would put every one of them straight back.
+async function clearRoastsForRound(round) {
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/roasts/${round}`, { method: 'DELETE' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(`Could not clear ${round} roasts: ${data.error || resp.status}`);
+      return null;
+    }
+    const removed = data.removed || [];
+    const seasons = getSeasons();
+    const sd = seasons[SELECTED_SEASON];
+    if (sd && sd.roasts) {
+      for (const m of removed) delete sd.roasts[m];
+      setSeasonsLocal(seasons);
+    }
+    adoptRev(data._rev);
+    return removed;
+  } catch (e) {
+    console.error('clearRoastsForRound failed:', e);
+    alert(`Could not clear ${round} roasts: ${e.message}`);
+    return null;
+  }
+}
+
+// End the season, in one action.
+//
+// Everything a season ending is supposed to produce, in the order the league sees it:
+//
+//   1. Finalize the Finals round server-side, which also records the runner-up and the
+//      4th-place manager as eliminated and hands back the authoritative placements.
+//   2. A roast for each of the four managers who played the Finals weeks. Only 4th place gets
+//      the plain elimination banner — the champion, the runner-up and the 3rd-place winner are
+//      next year's pool-selection captains, so they get the podium treatment instead, even
+//      though the runner-up lost the same round 4th place did.
+//   3. The combined "the season is over" Hall of Shame post.
+//   4. The season recap — final standings, superlatives, career notes, a written wrap — and
+//      the shutdown: every scheduled job off, no more syncs, Slack posts or MLB polling.
+//
+// The placements come from the SERVER (`/final-placements`), not from bracket math run here,
+// so the podium the roasts are written for and the podium the recap crowns are the same
+// answer computed once. Sequential throughout: each generate-roast is a read-modify-write of
+// db.json, so concurrent calls would clobber each other's stored roast.
+//
+// `regenerate` re-rolls every stored roast instead of keeping what is there — the difference
+// between the first run and the Re-run button.
+async function runSeasonClose({ regenerate = false } = {}) {
+  const setBusy = (msg) => {
+    const el = document.getElementById('weekly-upload-sections');
+    if (el) el.style.opacity = '0.6';
+    console.log(`[Season close] ${msg}`);
+  };
+  const clearBusy = () => {
+    const el = document.getElementById('weekly-upload-sections');
+    if (el) el.style.opacity = '';
+  };
+
+  // A refused stat correction on a completed week blocks the close server-side. It is a real
+  // stop — those weeks feed the bracket and the permanent record — but it is the commissioner's
+  // call, not ours, so the block is offered as a decision rather than a dead end.
+  let force = false;
+  const finalize = () =>
+    apiFetch(`/api/seasons/${SELECTED_SEASON}/finalize-season`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
+
+  try {
+    setBusy('Finalizing the Finals round…');
+    let finResp = await finalize();
+    let finData = await finResp.json().catch(() => ({}));
+    if (!finResp.ok && finData.force_required) {
+      const detail = (finData.correction_flags || [])
+        .map((f) => `  • ${f.week} — ${f.managers || 'no manager named'}${f.verdict ? ` (${f.verdict})` : ''}`)
+        .join('\n');
+      const proceed = confirm(
+        `${finData.error}\n\nOutstanding:\n${detail}\n\n` +
+          'OK = close the season anyway (the placements and the permanent record will be built on ' +
+          'these scores).\nCancel = stop, and resolve the week first.'
+      );
+      if (!proceed) return false;
+      force = true;
+      finResp = await finalize();
+      finData = await finResp.json().catch(() => ({}));
+    }
+    if (!finResp.ok) {
+      alert(`Could not close the season: ${finData.error || finResp.status}`);
+      return false;
+    }
+    adoptRev(finData._rev);
+    const p = finData.placements || {};
+    if (!p.champion) {
+      alert('Could not determine a champion — make sure the Finals scores are uploaded.');
+      return false;
+    }
+
+    // Re-sync so the eliminations the server just wrote are in the local cache before any
+    // save fired by a re-render can echo a copy that predates them.
+    await resyncSeasonsFromServer();
+
+    const podiumRoles = [
+      { manager: p.champion, outcome: 'champion' },
+      p.runnerUp ? { manager: p.runnerUp, outcome: 'runner_up' } : null,
+      p.third ? { manager: p.third, outcome: 'third' } : null,
+    ].filter(Boolean);
+    const losers = [p.fourth].filter(Boolean);
+
+    setBusy('Writing the roasts…');
+    for (const m of losers) await generateRoastForManager(m, 'Finals');
+    for (const w of podiumRoles) await generateRoastForManager(w.manager, 'Finals', w.outcome);
+
+    setBusy('Posting the Hall of Shame…');
+    const roastsPosted = await postCombinedRoastsToSlack('Finals', null, losers, regenerate, podiumRoles);
+
+    setBusy('Posting the season recap and standing the schedulers down…');
+    // Carries the same force decision — /close re-checks the correction flags independently.
+    const closeResp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
+    const closeData = await closeResp.json().catch(() => ({}));
+    if (!closeResp.ok) {
+      alert(
+        `Roasts are done, but closing the season failed: ${closeData.error || closeResp.status}\n\n` +
+          'The scheduled jobs may still be running. Use "Re-run Season Close" once the problem is fixed.'
+      );
+      return false;
+    }
+    adoptRev(closeData._rev);
+    await resyncSeasonsFromServer();
+
+    const recap = closeData.recap || {};
+    alert(
+      `Season closed.\n\nChampion: ${p.champion}\nRunner-up: ${p.runnerUp}\n3rd place: ${p.third}\n4th place: ${p.fourth}\n\n` +
+        `Roasts: ${roastsPosted ? 'posted to Slack' : 'POST FAILED — check the browser console'}\n` +
+        `Season recap: ${recap.posted ? `posted (written by ${recap.source})${recap.fallback_reason ? ` — fell back to the static bank: ${recap.fallback_reason}` : ''}` : `NOT POSTED${recap.error || closeData.recap_error ? ` — ${recap.error || closeData.recap_error}` : ''}`}\n` +
+        `Scheduled jobs: ${closeData.schedulers === 'stood_down' ? 'all off' : 'unchanged (this is not the active season)'}`
+    );
+    return true;
+  } catch (e) {
+    console.error('Season close failed:', e);
+    alert(`Season close failed: ${e.message}`);
+    return false;
+  } finally {
+    clearBusy();
+    renderWeeklyUploadSections();
+    init();
+  }
+}
+
+window.endFinalsAndCloseSeason = async function () {
+  const seasons = getSeasons();
+  const sd = seasons[SELECTED_SEASON];
+  if (!sd) return;
+  if (
+    !confirm(
+      'End the Finals and close the season?\n\nThis crowns the champion, roasts all four Finals-week managers, ' +
+        'posts the Hall of Shame and the season recap to Slack, and turns OFF every scheduled job — the daily ' +
+        'stat sync, the 7am Slack post, the Sunday auto-advance and live scoring.\n\nIt can be undone with "Reopen Season".'
+    )
+  ) {
+    return;
+  }
+  await runSeasonClose();
+};
+
+// Re-run the whole close. Every step of it is idempotent, so this is the one repair action for
+// the lot: a Slack post that failed, a batch of roasts that all came from the static bank, a
+// recap written before a late stat correction, or a shutdown that needs re-asserting after the
+// season was reopened and closed again.
+window.rerunSeasonClose = async function () {
+  if (
+    !confirm(
+      'Re-run the season close?\n\nThis RE-ROLLS all four Finals roasts and posts a NEW Hall of Shame message and a ' +
+        'NEW season recap to the scoreboard channel. It cannot edit the messages already there.'
+    )
+  ) {
+    return;
+  }
+  await runSeasonClose({ regenerate: true });
+};
+
+// Turn the scheduled jobs back on. Deliberately touches nothing else: the roasts, the recap and
+// the standings stay exactly as they are. Reopening is for "a stat correction is still coming"
+// or "I clicked that a week early", not for un-crowning anybody.
+window.reopenSeason = async function () {
+  if (
+    !confirm(
+      'Reopen the season?\n\nThe daily stat sync, the 7am Slack post, the Sunday auto-advance and live scoring all ' +
+        'start running again. The roasts, the recap and the final standings are left alone.'
+    )
+  ) {
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/seasons/${SELECTED_SEASON}/reopen`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(`Could not reopen the season: ${data.error || resp.status}`);
+      return;
+    }
+    adoptRev(data._rev);
+    await resyncSeasonsFromServer();
+    alert('Season reopened. All scheduled jobs are running again.');
+  } catch (e) {
+    console.error('Season reopen failed:', e);
+    alert(`Could not reopen the season: ${e.message}`);
+  } finally {
+    renderWeeklyUploadSections();
+    init();
+  }
+};
+
+// Pull the server's seasons back into the local cache. Every commissioner action that writes
+// through an atomic endpoint needs this: the server's copy is authoritative for roasts,
+// submissions and the season-close record, and a following full-season save built on a stale
+// local copy is how those get rolled back.
+async function resyncSeasonsFromServer() {
+  try {
+    const fresh = await fetch('/api/seasons');
+    if (!fresh.ok) return false;
+    const serverSeasons = await fresh.json();
+    if (serverSeasons && Object.keys(serverSeasons).length > 0) {
+      setSeasonsLocal(serverSeasons);
+      return true;
+    }
+  } catch (e) {
+    console.error('Season re-sync failed:', e);
+  }
+  return false;
+}
 
 // Call the server to generate and store a roast. `outcome` defaults to the standard
 // "you're eliminated" roast; pass 'champion', 'runner_up', or 'third' for the Finals-round
@@ -15303,13 +16248,7 @@ async function generateRoastForManager(manager, round, outcome) {
       body: JSON.stringify({ manager, round, outcome: outcome || 'eliminated' }),
     });
     // Re-sync seasons from server so roasts appear immediately
-    const fresh = await fetch('/api/seasons');
-    if (fresh.ok) {
-      const serverSeasons = await fresh.json();
-      if (serverSeasons && Object.keys(serverSeasons).length > 0) {
-        setSeasonsLocal(serverSeasons);
-      }
-    }
+    await resyncSeasonsFromServer();
   } catch (e) {
     console.error('Roast generation failed for', manager, e);
   }
@@ -15403,15 +16342,7 @@ window.repostRoundRoasts = async function (round) {
   const ok = await postCombinedRoastsToSlack(round, qualifiers, losers, true, podium.length ? podium : undefined);
 
   // Re-sync so the regenerated roasts show on roster pages immediately.
-  try {
-    const fresh = await fetch('/api/seasons');
-    if (fresh.ok) {
-      const serverSeasons = await fresh.json();
-      if (serverSeasons && Object.keys(serverSeasons).length > 0) setSeasonsLocal(serverSeasons);
-    }
-  } catch (e) {
-    console.error('Season re-sync after roast repost failed:', e);
-  }
+  await resyncSeasonsFromServer();
   alert(ok ? 'Roasts regenerated and reposted to Slack.' : 'Slack repost failed — check the browser console.');
   renderWeeklyUploadSections();
 };
@@ -15441,11 +16372,13 @@ function updateSubmissionWarningBanner() {
 
   // SF/Finals "qualification" is open to everyone (see isManagerQualifiedForPeriod) —
   // an eliminated manager is filtered here instead, mirroring the submission card's
-  // "Season ended" state so the banner never nags a knocked-out manager.
-  const elim = sd.eliminated && sd.eliminated[me.name];
-  const isEliminatedFor = (period) =>
-    !!elim &&
-    ((period === 'sf' && ['PP', 'QF'].includes(elim)) || (period === 'finals' && ['PP', 'QF', 'SF'].includes(elim)));
+  // "Season ended" state so the banner never nags a knocked-out manager. A semifinal
+  // loser is NOT knocked out (3rd-place game), so this still nags them for a Finals roster.
+  const isEliminatedFor = (period) => isManagerEliminatedForPeriod(sd, me.name, period);
+
+  // Whether a period is LATE is the server's call (SUBMISSION_WINDOWS). Ask in the background and
+  // re-run this banner if an answer moved; the TTL cache keeps it from re-asking on every render.
+  refreshSubmissionWindows(['pp1', 'pp2', 'qf', 'sf', 'finals'], updateSubmissionWarningBanner);
 
   // During a between-periods break (e.g. the All-Star break) the upcoming round's
   // window may not have opened yet — windows open the Friday before the round — but
@@ -15458,7 +16391,11 @@ function updateSubmissionWarningBanner() {
   const warnings = [];
   for (const period of ['pp1', 'pp2', 'qf', 'sf', 'finals']) {
     let opensAt = null;
-    if (!isPeriodWindowConfirmedOpen(sd, period)) {
+    // A period whose lock has passed used to fall out of this loop entirely — the banner went
+    // quiet on exactly the manager who most needed it. It now warns louder instead: he can still
+    // submit, and every day he waits is a day his roster doesn't score.
+    const late = periodIsLate(period) && periodStillRunning(period, getPeriodSub(sd, period, me.name));
+    if (!late && !isPeriodWindowConfirmedOpen(sd, period)) {
       if (period !== upcomingPeriod) continue;
       const deadline = getPeriodDeadline(sd, period);
       if (deadline && Date.now() >= deadline.getTime()) continue;
@@ -15469,7 +16406,9 @@ function updateSubmissionWarningBanner() {
     if (isEliminatedFor(period)) continue;
     const sub = getPeriodSub(sd, period, me.name);
     if (!sub || (sub.status !== 'pending' && sub.status !== 'approved')) {
-      warnings.push({ period, label: PERIOD_LABELS[period] || period, opensAt });
+      // Named for THIS manager: a semifinal loser is warned about his 3rd-place-game roster,
+      // not about a Finals roster he has no game for.
+      warnings.push({ period, label: submissionPeriodLabel(sd, period, me.name), opensAt, late });
     }
   }
 
@@ -15483,6 +16422,16 @@ function updateSubmissionWarningBanner() {
       // The period lives inside the <strong>: the desktop banner lays the item out
       // with inline-flex, so a bare trailing "." would become its own flex item
       // with a stray gap before it.
+      if (w.late) {
+        const eff = periodEffectiveDate(w.period);
+        const effNote = eff
+          ? ` You can still submit &mdash; it would count from <strong>${fmtEffectiveDate(eff)}.</strong>`
+          : ' Only the commissioner can still back-date it.';
+        return (
+          `<span class="sub-warn-item">⏰ You missed the <strong>${w.label}</strong> roster deadline.${effNote}` +
+          ` <a href="#" onclick="goToSubmission('${w.period}');return false;">Submit late &rarr;</a></span>`
+        );
+      }
       const opensNote = w.opensAt
         ? ` Submissions open <strong>${w.opensAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}.</strong>`
         : '';

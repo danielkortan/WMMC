@@ -197,6 +197,21 @@ export function isGameDateEligible(
 // PP1/PP2.
 export const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
 
+// The LAST schedule round a manager still plays, given the round they lost in.
+//
+// For every round but one this is that round itself. The SEMIFINAL is the exception, and it is
+// the whole reason this helper exists: losing a semifinal knocks nobody out of the schedule.
+// The two SF losers play the 3rd-place game, and the 3rd-place game is contested over the
+// FINALS weeks (see SEASON_SCHEDULE: 'Finals / 3rd Place - Week 1' and 'Week 2'). So all four
+// semifinalists are active in the Finals round — two in the Championship, two in the 3rd-place
+// game — and all four submit a Finals-period roster.
+//
+// Applied on READ rather than by rewriting stored values, so the seasons written before this fix
+// (where "Advance winners" did stamp sd.eliminated[loser] = 'SF') behave correctly too.
+export function lastRoundPlayed(eliminatedRound) {
+  return eliminatedRound === 'SF' ? 'Finals' : eliminatedRound;
+}
+
 // Is a manager eliminated in `eliminatedRound` still competing in schedule round `round`?
 // A manager eliminated IN a round still PLAYED that round — 'QF' is out of SF and Finals, not QF.
 // `eliminatedRound` is null/undefined for a manager who was never eliminated. An unrecognized
@@ -204,7 +219,7 @@ export const ELIMINATION_ROUND_ORDER = ['PP', 'QF', 'SF', 'Finals'];
 export function isManagerActiveInRound(round, eliminatedRound) {
   if (!round || round === 'PP1' || round === 'PP2') return true;
   if (!eliminatedRound) return true;
-  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(eliminatedRound);
+  const elimIdx = ELIMINATION_ROUND_ORDER.indexOf(lastRoundPlayed(eliminatedRound));
   const roundIdx = ELIMINATION_ROUND_ORDER.indexOf(round);
   if (elimIdx < 0 || roundIdx < 0) return true;
   return elimIdx >= roundIdx;
@@ -223,4 +238,36 @@ export function isManagerInRound(manager, round, { participants = null, eliminat
   const field = (participants || []).filter((n) => typeof n === 'string' && n);
   if (field.length) return field.includes(manager);
   return isManagerActiveInRound(round, (eliminated || {})[manager]);
+}
+
+// ---- Which Finals-week game a manager is actually playing ----
+//
+// The Finals period is TWO games run over the SAME two weeks: the Championship between the
+// semifinal winners, and the 3rd-place game between the semifinal losers. All four semifinalists
+// submit a roster for it (see lastRoundPlayed), which is why every submission surface calls that
+// period "Finals" — and why two of those four managers are told, on every card and every banner,
+// to submit for a game they are not in.
+//
+// Given the round's field, name the game the manager is in. When the semifinal isn't finalized
+// yet the field isn't known, and the honest answer is both games at once — never a guess, because
+// guessing here tells a manager he's in the Championship.
+export const FINALS_GAME_LABELS = {
+  finals: 'Finals',
+  third: '3rd Place Game',
+  unknown: 'Finals / 3rd Place',
+};
+
+// 'finals' | 'third' | null (unknown). `finalists` are the SF winners, `semifinalists` all four.
+export function finalsGameFor(manager, { finalists = null, semifinalists = null } = {}) {
+  if (!manager) return null;
+  const fin = (finalists || []).filter((n) => typeof n === 'string' && n);
+  if (fin.includes(manager)) return 'finals';
+  const sf = (semifinalists || []).filter((n) => typeof n === 'string' && n);
+  if (fin.length && sf.includes(manager)) return 'third';
+  return null;
+}
+
+// The label to print for that manager's Finals-period submission.
+export function finalsGameLabel(manager, field = {}) {
+  return FINALS_GAME_LABELS[finalsGameFor(manager, field) || 'unknown'];
 }

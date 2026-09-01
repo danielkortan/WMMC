@@ -47,7 +47,7 @@ Express backend in `server.js` handles all API routes, the scoring engine, MLB S
 - `app.js` — Frontend monolith (being incrementally modularized — do not duplicate logic already moved to `js/`)
 - `index.html` — Single-page app shell
 - `styles.css` — Core styles (monolithic); `mobile.css` — mobile/responsive overrides (both loaded by `index.html`)
-- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `history.js` (the finished-season record + per-manager career facts — mirrored in `server.js`), `playoffCommentary.js` (the daily playoff post's "Hot Takes" — pure, mirrored in `server.js`, no frontend caller yet), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
+- `js/` — Extracted frontend modules: `scoring.js` (scoring + `SCORING`/`SEASON_SCHEDULE` + weekly-team enrichment), `playoffOdds.js` (Monte-Carlo playoff-odds engine), `hypothetical.js` (the What If sandbox engine — client-only, never writes), `seeding.js` (pool-play seeding rule, shared by the real bracket and the What If playoff picture), `bracket.js` (playoff pairings + tie-breaks, used by the What If bracket), `history.js` (the finished-season record + per-manager career facts — mirrored in `server.js`), `playoffCommentary.js` (the daily playoff post's "Hot Takes" — pure, mirrored in `server.js`, no frontend caller yet), `lateSubmission.js` (when a roster submitted after its period's lock takes effect — pure, mirrored in `server.js`), `roundPreview.js` (the round-end post's next-round preview — pure, mirrored in `server.js`, server-only caller), `seasonRecap.js` (the end-of-season Slack recap — pure, mirrored in `server.js`, server-only caller), `csv.js`, `utils.js`, `index.js` (bridges exports onto `window` for `app.js`), `mobile.js` (side-effect mobile UI behaviors — not unit-tested)
 - `tests/` — Unit tests for pure `js/` modules only
 - `db.json` — Runtime database (gitignored); written by server on every mutation
 - `managers_seed.json` — Committed manager identities (no passwords); seeds `db.json` on fresh deploy
@@ -114,16 +114,111 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 - **Appearance rate is why a projection is not "his team's remaining games".** A per-game scoring rate is a rate per APPEARANCE, so multiplying it by team games projects a starting pitcher to take every turn. `expectedAppearanceRate` corrects it from the player's own observed appearances, shrunk toward a positional prior. The denominator matters more than it looks: it must be measured over the SAME span as the numerator, which rules out the team's MLB season game count (MLB starts in late March, the WMMC season in May — a full-season denominator over a WMMC-season numerator files every everyday bat as a part-timer). `teamGamesInSpan` therefore derives games-per-day from the REMAINING schedule and applies it to the days we have stats for that player. `projectManager` carries the appearance risk into the variance via the law of total variance, not just the scaled-down mean — for a pitcher who may get two starts or three, that is most of the uncertainty.
 
-- `checkSwapLimit` (+ `FREE_SWAP_REASON`/`PLAYOFF_LIMITED_REASONS`) exists in **both** `js/swaps.js` (canonical, unit-tested; the swap form's pre-check) and `server.js` (the enforcing copy at swap submission). Same rule as `detectScoreSwings`: the two copies must stay identical — edit both. Relatedly, the client's `getCurrentScheduleRound` (app.js) and the server's `currentScheduleRound` implement the same round-detection rule (between weeks → the upcoming round) and must stay in step.
+- `checkSwapLimit` (+ `FREE_SWAP_REASON`/`PLAYOFF_LIMITED_REASONS`) exists in **both** `js/swaps.js` (canonical, unit-tested; the swap form's pre-check) and `server.js` (the enforcing copy at swap submission). Same rule as `detectScoreSwings`: the two copies must stay identical — edit both. **`SWAP_REASON_LABELS`/`swapReasonLabel` in the same file are a mirrored pair too** (guarded by `tests/serverMirrors.test.js`), because the Slack swap notification renders the same label as the menus — the league must never see one name for a swap type in the app and another in Slack. They map the STORED reason to what a manager reads (`'IL Swap'` → `'IL/RST Swap'`); the stored string never changes, since every historical swap in `db.json` carries it and `checkSwapLimit`, the server's IL gate and the audit log all key off it. Relabel there, never rename the value — and apply the label only at display sites, never where a reason is compared or persisted. Relatedly, the client's `getCurrentScheduleRound` (app.js) and the server's `currentScheduleRound` implement the same round-detection rule (between weeks → the upcoming round) and must stay in step.
+
+- **A LATE roster submission is not a special case in the scoring engine — it is just a later
+  `add_date`.** `js/lateSubmission.js` (canonical, unit-tested) ↔ `server.js`, on the same
+  must-stay-identical footing as the pairs above and guarded by `tests/serverMirrors.test.js`. The
+  rule: submit before the day's first pitch → effective TODAY; after it → TOMORROW; never before
+  the period starts, never past its end (null = no viable day left). That date becomes every
+  player's `add_date` when the commissioner approves, so `managerWeekSubtotal` and
+  `rebuildRosterArraysFromDates` clip the window with the machinery they already have. **The
+  SERVER decides both "is this late" and "which date"** (`resolveSubmissionWindow`, exposed as
+  `GET /api/seasons/:year/submission-window/:period`, and stamped onto the record by
+  `POST /submissions`): it needs today's real first pitch from the MLB Stats API and a clock the
+  manager cannot set, and the date is the scoring invariant's own unit — a manager choosing it
+  after reading a box score is the whole thing this prevents. app.js keeps `getPeriodDeadline`
+  for instant rendering and the plain open/closed question, but late mode renders off
+  `SUBMISSION_WINDOWS`, the server's answer. **"Beg Commish for Forgiveness"** files the roster
+  with `forgiveness_status: 'pending'` and NO effective date; `POST .../forgiveness` is the only
+  path that can start a roster earlier than the automatic rule, which is why it is
+  commissioner-only and validated against the period's own bounds. Approving a late submission
+  that has no effective date is blocked client-side (`blockLateApprovalWithoutDate`) — without
+  that guard it would silently fall back to the period start, i.e. a free back-date.
 
 - `SCORING` and `SEASON_SCHEDULE` appear in both `server.js` and `js/scoring.js`. This is intentional — the server needs them for score recomputation and Slack posts; the client needs them for live scoring. They must stay identical. (`app.js` consumes the `js/scoring.js` copy via `window`, so it is no longer a third source of truth.) The one permitted difference: the `js/scoring.js` entries carry a `label` for the UI and the `server.js` ones do not — `round` and `week` must match exactly.
 - `ROUND_LABELS` is a fourth `server.js` ↔ `js/scoring.js` duplicate, on the same must-stay-identical footing as the three above. (Not to be confused with `app.js`'s `ROUND_LABELS_FOR_ROAST`, which is keyed by bracket stage, where Pool Play is one thing.)
 
-- **`tests/serverMirrors.test.js` mechanizes the "edit both copies" rule** for the pairs it covers — it reads `server.js` as text and fails if a mirrored block has drifted from its `js/` original. It runs no server code. When you intentionally change a mirrored helper, change it in `js/` too and the test goes green again. It currently guards `normalizeName`, `shortManagerNames`, `js/history.js`, `js/playoffCommentary.js` and ten functions of the odds engine; extending it to the remaining older pairs (`SCORING`, `detectScoreSwings`) would be a straight win. It has already earned its keep — adding the odds-engine pairs immediately caught a comment that had gone missing from the `server.js` copy of `makeNormalSampler`.
+- **`tests/serverMirrors.test.js` mechanizes the "edit both copies" rule** for the pairs it covers — it reads `server.js` as text and fails if a mirrored block has drifted from its `js/` original. It runs no server code. When you intentionally change a mirrored helper, change it in `js/` too and the test goes green again. It currently guards `normalizeName`, `shortManagerNames`, `shortenManagerNamesInSlack`, `js/history.js`, `js/playoffCommentary.js`, `js/roundPreview.js`, `js/seasonRecap.js`, the elimination ladder (`lastRoundPlayed`/`isManagerActiveInRound`/`isManagerInRound` from `js/eligibility.js`) and ten functions of the odds engine; extending it to the remaining older pairs (`SCORING`, `detectScoreSwings`) would be a straight win. It has already earned its keep — adding the odds-engine pairs immediately caught a comment that had gone missing from the `server.js` copy of `makeNormalSampler`.
 
 - `js/history.js` (canonical, unit-tested) ↔ `server.js` — `WMMC_HISTORICAL_RESULTS` plus `managerPlayoffHistory`/`exitStageForPlace`/`canonicalManagerName`. Same must-stay-identical rule. **Adding a finished season is now a two-file edit**: the table in `js/history.js` (which `app.js` reads off `window` for the Hall of Fame — it no longer holds its own copy) and the mirror in `server.js` (which the daily playoff Slack commentary reads). `HISTORICAL_NAME_ALIASES` maps a manager's old spelling to their current `db.managers` name (`Dan Kortan` → `Daniel Kortan`); the Hall of Fame does **not** apply it yet, so its all-time records still split that career in two — a real bug, just not this file's.
 
 - `js/anthropic.js` (canonical, unit-tested) ↔ `server.js` — `anthropicReplyText` / `describeAnthropicReply`. **Never read `data.content[0].text`.** A model that emits a `thinking` block puts it at index 0, so `content[0].text` is `undefined`, the call looks empty, and the caller silently ships its static fallback on an HTTP 200 with tokens billed. That is exactly what happened to the daily Hot Takes, the elimination roasts and the season-opening roast — for months, and it is what the 2026-08-03 entry misread as a missing `ANTHROPIC_API_KEY`. Walk the `content` array and join every text block; `anthropicReplyText` does. When it comes back empty, log `describeAnthropicReply(data)` — the block types, `stop_reason` and token usage are what tell a refusal apart from a `max_tokens` cut-off mid-thinking. Keep `max_tokens` generous for the same reason: thinking spends the same budget.
+
+- **Only three rounds eliminate anyone: Pool Play, the Quarterfinals and the Finals.** The
+  SEMIFINALS do not. Its two winners play the Championship, its two losers play the 3rd-place
+  game, and both games run over the SAME two Finals weeks — so all four semifinalists submit a
+  Finals-period roster and all four keep scoring. `lastRoundPlayed` (`js/eligibility.js` ↔
+  `server.js`) is where that lives: it maps a stored `sd.eliminated[m] === 'SF'` forward to
+  'Finals' on READ, so seasons transitioned before this was understood behave correctly without
+  a data migration. Nothing should ever write `sd.eliminated[m] = 'SF'` again — the SF transition
+  is `advanceToFinalsAndThirdPlace` (app.js), which deletes no submission, marks nobody
+  eliminated, and clears stale 'SF' markers and roasts when re-run. The server enforces it
+  independently: the round-end post clears its roast set for `round === 'SF'` rather than
+  trusting the caller. **"The Finals period" and "the Finals" are not the same set** — the period
+  is two games, and any surface that names it for ONE manager must name his game, via
+  `finalsGameFor`/`finalsGameLabel` (`js/eligibility.js`, unit-tested) and app.js's
+  `submissionPeriodLabel`; surfaces spanning managers use `periodLabelForAll` ("Finals / 3rd
+  Place"), and anything listing the period's participants wants all four semifinalists, not
+  `getFinalsParticipants`.
+
+- `js/roundPreview.js` (canonical, unit-tested) ↔ `server.js` — the round-end post's forward-
+  looking section (`buildRoundPreviewBlock` and friends). Same must-stay-identical rule, guarded
+  by `tests/serverMirrors.test.js`. Pure: it is handed already-derived facts and only shapes
+  them, so it can't disagree with the scoreboard. The server-only glue that feeds it
+  (`buildNextRoundPreview`, `topBracketPerformers`) lives in `server.js`, takes its pairings from
+  `computePlayoffPairs` — the same function the results block above it uses — and scores top
+  performers through `managerWeekSubtotal` rather than the `sd.rosters` cache. Its two trailing lines are
+  labelled (`_History:_ …`) rather than wrapped whole in italics, which is now a style choice
+  rather than a workaround — the `\b`-vs-underscore bug that made it necessary was fixed in
+  `shortenManagerNamesInSlack` itself.
+
+- **Ending the season is ONE action, and it turns everything off.** "End Finals & Close
+  Season" (`endFinalsAndCloseSeason` → `runSeasonClose`, app.js) drives the whole thing:
+  `POST /finalize-season` (idempotent state write — `eliminated` for the runner-up and 4th
+  ONLY, since the champion and the 3rd-place winner did not go out), four `generate-roast`
+  calls, the existing combined `roasts/slack` post, then `POST /close` for the season recap
+  and the scheduler stand-down. It used to be two buttons and the second one produced all the
+  visible output, which is how a season ended with no roasts and no last word in the channel.
+  **The podium comes from the SERVER** — `finalPlacements` reads `computePlayoffPairs(sd,
+'Finals')`, the same function the Slack results block and the bracket card use, exposed as
+  `GET /final-placements` — so the podium the roasts are written for and the podium the recap
+  crowns are one answer. `finalsScored` is load-bearing: `computePlayoffPairs` resolves a 0-0
+  matchup on the better seed, so before the last week's stats are uploaded it will crown the
+  higher seed of a game nobody has played; `/finalize-season` and `/close` both 409 on it.
+  `js/seasonRecap.js` (canonical, unit-tested) ↔ `server.js` is the recap text itself, on the
+  same must-stay-identical footing as `js/roundPreview.js` and guarded by
+  `tests/serverMirrors.test.js`; the fact-gathering that feeds it (`finalPlacements`,
+  `seasonSuperlatives`, `collectSeasonRecapFacts`, `generateSeasonRecapWithClaude`,
+  `postSeasonRecapSlack`) is server-only glue. Its emoji are **literal Unicode, not
+  shortcodes**, because a recap posts once a year and there is no second chance to notice an
+  unknown one printing as `:text:`. The scoreboard reads the same flag rather than being told:
+  `renderSeasonChampionAnnouncement` draws the champion card into
+  `#season-champion-announcement` (declared BEFORE both `#scoreboard-content` and
+  `#scoreboard-bracket` on purpose — `orderScoreboardBracket` swaps those two around each
+  other, so a card rendered into either can end up second), the bracket card collapses its
+  Quarterfinals and Semifinals columns (`toggleBracketRound`) leaving the Finals — Championship
+  AND 3rd Place — open, and Pool Play stays shut. The banner strikes the outgoing champion
+  through above the new one, and only for a season this app closed: applied to every crowned
+  season it puts "New Champion" and a line through a name on the 2019 archive page.
+  `previousChampionBefore` takes the LATEST candidate across `WMMC_HISTORICAL_RESULTS` and the
+  stored seasons rather than checking the table first — that table is a deliberate two-file
+  hand edit and is routinely a year behind the season the app just closed.
+
+- **`sd.season_closed` is the off switch, and it is both a flag and a timer teardown.** It
+  gates the 4am MLB sync (the only job that talks to the MLB Stats API), the 7am scoreboard
+  post, the Sunday auto-advance, the Google Sheets sync, the season-welcome post, and
+  `/api/mlb/live` — that last one at the ENDPOINT, because it is what the Live tab polls every
+  two minutes per open browser, not something the cron controls. The flag alone would leave
+  timers firing into a no-op; the teardown alone would last until the next deploy, because an
+  in-memory `setTimeout` does not survive a restart and boot re-arms everything. So boot calls
+  `armSchedulers()` and each `schedule*()` declines to arm itself when the flag is set. Scoped
+  to the **active** season, which is what makes it self-clearing: point `active_season` at next
+  year and the schedulers come back with nothing to remember to unset. Server-authoritative in
+  the full-season save — preserved when the server has one, **deleted** when it does not — so a
+  stale browser tab cannot switch the 4am sync back on, and a stale save cannot undo a reopen.
+  `POST /reopen` (the "Reopen Season" button) clears it and re-arms; it touches nothing about
+  the roasts, the recap or the standings.
 
 - `js/playoffCommentary.js` (canonical, unit-tested) ↔ `server.js` — the "Hot Takes" line banks and the lead-change/blowout/history rules on the daily playoff post, plus `commentaryFactSheet` / `commentaryMentionsUnknownScore` / `tidyCommentaryLine`, which are the pure half of the Anthropic path. Pure throughout: it is handed already-derived facts, so it can never disagree with the scoreboard about a score. Same must-stay-identical rule.
 
@@ -131,7 +226,9 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 
 - **Hot Takes has two paths and the order matters.** `buildScoreboardBlocks` is synchronous (the `/wmmc` slash command owes Slack a reply in 3 seconds), so it always renders the deterministic bank and tags the block `block_id: wmmc_hot_takes`. `postScoreboardSlack` — the only async caller — then swaps that block's text for `generatePlayoffCommentary`'s Anthropic-written version. Every failure (no key, network, bad status, unreadable body, empty reply, or a reply quoting a decimal the fact sheet never contained) returns the bank text, so the swap becomes a no-op and the post is never harmed. Never make `buildScoreboardBlocks` async to "simplify" this — the slash command is what the sync path exists for. The bridge between them is `sd.hot_takes`, a server-computed derived cache keyed on `day|round` (same family as `sd.playoff_odds`, and preserved on a full-season save the same way): `ensureFreshHotTakes` generates at most once per day and stores it, and `buildScoreboardBlocks` prefers a matching cache over the bank — which is how `/wmmc` shows the written takes at all. When the takes come out in the bank's voice, `GET /api/admin/anthropic-check` (commissioner only) answers why in one call instead of waiting for a post — it makes a one-token request with the service's own key and reports unset / wrong / rejected / unreachable / working, without ever returning the key. Every fallback also names its reason in the logs (`[Hot Takes] Using the static bank: …`) and records it on `sd.hot_takes.source`. `POST /api/slack/scoreboard` takes `refreshTakes: true` to force a re-roll and `channel: "notifications"` to rehearse a post into the notifications channel; the latter is the ONLY supported override of the scoreboard webhook, and it is explicit for a reason (an implicit fallback into the swaps channel is a bug this repo has already had). The commentary runs on `PLAYOFF_COMMENTARY_MODEL` (Sonnet 5), deliberately not the Haiku the elimination roasts use: these takes sit directly under a real scoreboard and quote its numbers.
 
-- `shortManagerNames` is a `js/utils.js` ↔ `server.js` pair, like `normalizeName`. Slack posts get short names at the **send boundary** (`shortenManagerNamesInSlack` inside `postSlack` / `postScoreboardSlack` / `postScoreboardChannelSlack`, plus the `/wmmc` slash-command reply, which answers Slack directly and would otherwise be missed), so prose posts — swap notifications, elimination roasts, alerts — inherit it without every builder having to know. The pass is whole-name and word-bounded, therefore idempotent; a short name ending in an initial swallows a following period so nothing prints `Ryan S..`. Its one blind spot is a manager who shares a full name with an MLB player — nobody in this league does, and the damage would be a cosmetic short name on a player row.
+- `shortManagerNames` **and `shortenManagerNamesInSlack`** are `js/utils.js` ↔ `server.js` pairs, like `normalizeName` (both mechanized in `tests/serverMirrors.test.js`). Slack posts get short names at the **send boundary** (`shortenManagerNamesInSlack` inside `postSlack` / `postScoreboardSlack` / `postScoreboardChannelSlack`, plus the `/wmmc` slash-command reply, which answers Slack directly and would otherwise be missed), so prose posts — swap notifications, elimination roasts, alerts — inherit it without every builder having to know. The pass is whole-name, therefore idempotent; a short name ending in an initial swallows a following period so nothing prints `Ryan S..`. **Its boundary is spelled out (`NAME_EDGE = '[A-Za-z0-9]'`), not `\b`, and that is deliberate**: `\b` counts underscore as a word character, underscore is Slack's italic marker, and so `_Ryan Sullivan_` matched at neither end — a name at the head of an italic run was the one mention in a post that stayed long while every other mention of the same manager went short. If you ever reach for `\b` here again, `tests/utils.test.js` will fail. Its one remaining blind spot is a manager who shares a full name with an MLB player — nobody in this league does, and the damage would be a cosmetic short name on a player row.
+
+- **The IL-swap gate reads MLB roster status CODES, and the code list is not guessable.** `IL_SWAP_ELIGIBLE_STATUS_CODES` (`server.js`) is `D7`/`D10`/`D15`/`D60`/`ILF`/`RA`/`RST`. Verified against the live API, and re-verifiable with `node scripts/mlb-roster-status.js --sweep`, which prints every status code in use league-wide with the gate's verdict for each — use it rather than reasoning about what a code probably means. Two traps it exists to prevent: **`RM` is "Reassigned to Minors"** (300 players), not the Restricted List, which is **`RST`** (28); and `ILF` ("Injured - Full Season", 240 players) used to clear the gate only through the `/injured/i` description fallback, never through the code set — that regex is still there as a catch-all for codes MLB adds later, but nothing should depend on it again. `RA` ("Rehab Assignment") counts because a rehabbing player has not been activated off the IL.
 
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.

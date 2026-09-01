@@ -11,6 +11,7 @@ import {
   normalizeName,
   parseServerTimestamp,
   shortManagerNames,
+  shortenManagerNamesInSlack,
 } from '../js/utils.js';
 
 describe('esc', () => {
@@ -231,5 +232,69 @@ describe('fmtDateISO', () => {
   it('zero-pads single-digit month and day', () => {
     const d = new Date(2026, 0, 3);
     assert.equal(fmtDateISO(d), '2026-01-03');
+  });
+});
+
+describe('shortenManagerNamesInSlack', () => {
+  const map = { 'Ryan Sullivan': 'Ryan S.', 'Ryan Courville': 'Ryan C.', 'Cam McCallum': 'Cam' };
+
+  it('rewrites whole names anywhere in a string', () => {
+    assert.equal(shortenManagerNamesInSlack('Cam McCallum beat Ryan Sullivan', map), 'Cam beat Ryan S.');
+  });
+
+  it('leaves a bare first name alone, which is what makes the pass idempotent', () => {
+    assert.equal(shortenManagerNamesInSlack('Cam beat Ryan S.', map), 'Cam beat Ryan S.');
+    const once = shortenManagerNamesInSlack('Cam McCallum beat Ryan Sullivan', map);
+    assert.equal(shortenManagerNamesInSlack(once, map), once);
+  });
+
+  // The regression this function was pulled out of server.js for. `\b` treats `_` as a word
+  // character, and `_` is Slack's italic marker, so an italicised name matched at neither end
+  // and stayed long while every other mention of the same manager went short.
+  it("shortens a name wrapped in Slack's italic markers", () => {
+    assert.equal(shortenManagerNamesInSlack('_Ryan Sullivan had a week._', map), '_Ryan S. had a week._');
+    assert.equal(shortenManagerNamesInSlack('_Cam McCallum_', map), '_Cam_');
+  });
+
+  it('shortens names against every other bit of Slack markup too', () => {
+    assert.equal(shortenManagerNamesInSlack('*Cam McCallum*', map), '*Cam*');
+    assert.equal(shortenManagerNamesInSlack('> Cam McCallum: 12 pts', map), '> Cam: 12 pts');
+    assert.equal(shortenManagerNamesInSlack('(Ryan Sullivan)', map), '(Ryan S.)');
+    assert.equal(shortenManagerNamesInSlack('~Cam McCallum~', map), '~Cam~');
+  });
+
+  it('still refuses to match a name glued to letters or digits', () => {
+    assert.equal(shortenManagerNamesInSlack('XCam McCallumX', map), 'XCam McCallumX');
+    assert.equal(shortenManagerNamesInSlack('9Cam McCallum9', map), '9Cam McCallum9');
+  });
+
+  it('swallows a sentence period after an initialled short form', () => {
+    assert.equal(shortenManagerNamesInSlack('It was Ryan Sullivan.', map), 'It was Ryan S.');
+    // ...and only for the short forms that end in one.
+    assert.equal(shortenManagerNamesInSlack('It was Cam McCallum.', map), 'It was Cam.');
+  });
+
+  it('walks arrays and every string field of a block object', () => {
+    const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: '_Cam McCallum_ leads' }, n: 3 }];
+    assert.deepEqual(shortenManagerNamesInSlack(blocks, map), [
+      { type: 'section', text: { type: 'mrkdwn', text: '_Cam_ leads' }, n: 3 },
+    ]);
+  });
+
+  it('passes non-strings and an empty map straight through', () => {
+    assert.equal(shortenManagerNamesInSlack('Cam McCallum', {}), 'Cam McCallum');
+    assert.equal(shortenManagerNamesInSlack('Cam McCallum', null), 'Cam McCallum');
+    assert.equal(shortenManagerNamesInSlack(42, map), 42);
+    assert.equal(shortenManagerNamesInSlack(null, map), null);
+  });
+
+  it('never half-matches a name that contains another', () => {
+    const nested = { 'Ryan Sullivan': 'Ryan S.', 'Ryan Sullivan Jr.': 'Ryan J.' };
+    assert.equal(shortenManagerNamesInSlack('_Ryan Sullivan Jr._', nested), '_Ryan J._');
+  });
+
+  it('escapes regex metacharacters in a name', () => {
+    assert.equal(shortenManagerNamesInSlack('_A.B (C)_', { 'A.B (C)': 'AB' }), '_AB_');
+    assert.equal(shortenManagerNamesInSlack('_AXB (C)_', { 'A.B (C)': 'AB' }), '_AXB (C)_');
   });
 });

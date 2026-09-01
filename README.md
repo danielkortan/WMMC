@@ -7,6 +7,7 @@ A full-stack fantasy baseball league management application with multi-season su
 - **Multi-Season Management** — Create, manage, and archive multiple seasons
 - **Configurable Scoring** — Per-stat batting and pitching point rubrics (currently hardcoded; see [Scoring Rubric](#scoring-rubric))
 - **Roster Management** — Per-week rosters with a manager-initiated swap workflow that auto-applies on submission: the server enforces per-round swap limits (pool play: one Free Swap per PP round, unlimited IL/Drop/Trade; playoffs: one Free/Drop/Trade swap per round, unlimited IL), verifies IL swaps against the player's official MLB injured-list status, and computes effective dates from the live schedule (a player whose game has started swaps effective tomorrow). Swaps the integrity guard flags fall back to commissioner review; the commissioner can undo any applied swap
+- **Late Roster Submissions** — A manager who misses a period's roster deadline keeps his submission form; what moves is the date the roster starts on. Submitting before the day's first pitch takes effect today, submitting after it takes effect tomorrow — never earlier than the period starts, and never on a day whose box scores are already in. Alongside **Submit**, a **Beg Commish for Forgiveness** button files the roster as a plea instead: the commissioner reads the manager's case and picks the effective date himself, up to and including the period's first day (a full back-date). Denying a plea doesn't discard the roster — it drops to the automatic date. The effective date becomes each player's `add_date` at approval, so scoring needs no special case: a late roster simply scores a shorter window
 - **MLB Stats API Sync** — Source of truth for stats: automatic 4am-Eastern daily delta + Wednesday full-week correction, with manual backfill/rebuild/diagnostic tools in the commissioner panel
 - **Google Sheets Sync** — Dormant server-side fallback (no UI); re-enable via API only if the MLB feed is unavailable — see [RUNBOOK.md](RUNBOOK.md)
 - **Playoff Bracket** — Pool play seeding feeds quarterfinals, semifinals, finals, and a 3rd-place game
@@ -119,6 +120,8 @@ A season is 16 scoring weeks plus a midseason break.
 
 The schedule is hardcoded in `js/scoring.js` (`SEASON_SCHEDULE`, consumed by `app.js` via `window`) and `server.js` (`SEASON_SCHEDULE`).
 
+**Only Pool Play, the Quarterfinals and the Finals eliminate anyone.** The Semifinals do not: the two winners play the Championship and the two losers play the 3rd-place game, and both games are contested over the same two Finals weeks. All four semifinalists therefore submit a Finals-period roster, and the season's last eliminations (runner-up and 4th place) are settled at "Crown Champion". The rule lives in `lastRoundPlayed` / `isManagerActiveInRound` (`js/eligibility.js`, mirrored in `server.js`).
+
 ## API Reference
 
 All endpoints return JSON. Endpoints that read state are unauthenticated; endpoints that mutate state perform their own per-request password/role checks.
@@ -142,6 +145,18 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 | `DELETE` | `/api/seasons/:year/week-data`              | Wipe a single week's uploaded stats for a season.                                                                            |
 | `POST`   | `/api/seasons/:year/recompute-scores`       | Recompute weekly scores from scratch.                                                                                        |
 | `POST`   | `/api/seasons/:year/playoff-odds/recompute` | Recompute & store odds now — pool-play odds during PP2 Weeks 4–5, head-to-head bracket odds in a playoff round's final week. |
+
+### Roster Submissions
+
+| Method   | Endpoint                                                      | Description                                                                                                                                                         |
+| -------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/seasons/:year/submission-window/:period`                | Authoritative state of one period's window: bounds, lock time, whether it has passed, and the effective date a roster submitted right now would carry.              |
+| `POST`   | `/api/seasons/:year/submissions`                              | Upsert one manager's submission for a period. The server stamps the timestamps, the `late` flag and the effective date; `forgiveness_reason` files it as a plea.    |
+| `POST`   | `/api/seasons/:year/submissions/:period/:manager/forgiveness` | Commissioner ruling on a plea — `{ decision: 'grant' \| 'deny', effective_date? }`. Granting back-dates the roster to any day inside the period. Commissioner only. |
+| `DELETE` | `/api/seasons/:year/submissions/:period/:manager`             | Remove one submission record entirely.                                                                                                                              |
+| `DELETE` | `/api/seasons/:year/submissions`                              | Clear every submission for a season. Commissioner only.                                                                                                             |
+
+**Why the server owns the effective date.** It is the players' `add_date` — the core scoring invariant's own unit — so a manager must not be able to choose it after seeing a box score. Deciding it needs today's real first pitch (fetched from the MLB Stats API) and a clock the manager cannot set, so the client renders what this endpoint says rather than computing its own. If the schedule can't be reached the server falls back to an 11:00 AM ET cutoff, which errs toward pushing the roster to the next day.
 
 ### Player Dates & Daily Stats
 
@@ -181,12 +196,13 @@ All endpoints return JSON. Endpoints that read state are unauthenticated; endpoi
 
 ### Slack
 
-| Method | Endpoint                          | Description                                                                                                                                                                                                                                                       |
-| ------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`  | `/api/admin/anthropic-check`      | Commissioner only. Asks the Anthropic API a one-token question with this service's key and reports exactly what came back — unset, wrong, rejected, unreachable, or working. Never returns the key itself. Optional `?model=` to test a different model id.       |
-| `POST` | `/api/slack/scoreboard`           | Manually trigger the scoreboard Slack post. Optional body: `year`; `channel: "notifications"` to rehearse it into the notifications channel instead of the league one; `refreshTakes: true` to regenerate the day's Hot Takes instead of reusing the cached ones. |
-| `POST` | `/api/slack/command`              | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                      |
-| `POST` | `/api/seasons/:year/roasts/slack` | Post the playoff field, a roast for every manager eliminated in a round, and next-round submission instructions as one combined message to the scoreboard channel; generates any missing roast first. Body: `{ round, qualifiers?, eliminated?, regenerate? }`.   |
+| Method   | Endpoint                           | Description                                                                                                                                                                                                                                                                                                                |
+| -------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/admin/anthropic-check`       | Commissioner only. Asks the Anthropic API a one-token question with this service's key and reports exactly what came back — unset, wrong, rejected, unreachable, or working. Never returns the key itself. Optional `?model=` to test a different model id.                                                                |
+| `POST`   | `/api/slack/scoreboard`            | Manually trigger the scoreboard Slack post. Optional body: `year`; `channel: "notifications"` to rehearse it into the notifications channel instead of the league one; `refreshTakes: true` to regenerate the day's Hot Takes instead of reusing the cached ones.                                                          |
+| `POST`   | `/api/slack/command`               | Slash-command webhook (verified via `SLACK_SIGNING_SECRET`).                                                                                                                                                                                                                                                               |
+| `POST`   | `/api/seasons/:year/roasts/slack`  | Post a round-end message to the scoreboard channel: the results, a roast for every manager eliminated in the round (generating any that are missing), and — after the Semifinals, which eliminate nobody — a preview of the Championship and the 3rd-place game. Body: `{ round, qualifiers?, eliminated?, regenerate? }`. |
+| `DELETE` | `/api/seasons/:year/roasts/:round` | Commissioner only. Withdraw every stored roast for a round. `sd.roasts` is server-authoritative (a full-season save can only add to it), so this is the only way to un-say one.                                                                                                                                            |
 
 ### Misc
 
@@ -255,6 +271,7 @@ WMMC/
 │                          #   bracket.js — playoff pairings and tie-breaks (What If bracket)
 │                          #   anthropic.js — Messages API reply shape (never index content[0])
 │                          #   history.js — finished-season record + per-manager career facts
+│                          #   lateSubmission.js — when a roster submitted after its lock takes effect
 │                          #   playoffCommentary.js — daily playoff post "Hot Takes" (server-only caller)
 │                          #   index.js — bridges module exports onto window for app.js
 │                          #   mobile.js — side-effect mobile UI behaviors (not unit-tested)
