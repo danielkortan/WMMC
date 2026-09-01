@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-01 | The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`           | [MEMORY](#2026-09-01-the-staging-refresh-is-a-recurring-chore-and-two-open-prs-had-been-overtaken-by-main)                        |
 | 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
 | 2026-08-31 | A refused correction was an attribution repair, and the season closed on top of it                | [MEMORY](#2026-08-31-a-refused-correction-was-an-attribution-repair-and-the-season-closed-on-top-of-it)                           |
 | 2026-08-19 | The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror         | [MEMORY](#2026-08-19-the-slack-swap-post-said-il-swap-while-the-app-said-ilrst-the-label-became-a-mirror)                         |
@@ -106,6 +107,51 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-01 — The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`
+
+Second sweep in three weeks. It mostly confirms the 2026-08-12 entry rather than adding to it.
+
+**Everything was in prod; nothing was stuck.** `main` at `dbf6aa3` (#450) was green — 640 tests,
+Prettier clean — and every PR from #437 to #450 was merged and deployed. `staging` was 43 commits
+behind, last refreshed 2026-08-12 at `main@5a5aebc`. As predicted, the ahead/behind counts
+(875/43) were noise; the tree check settled it in one command — `git diff --stat 5a5aebc
+origin/staging` returned only `version.json`, so staging held nothing unique and the refresh was a
+pure catch-up. **Do the tree diff first. The commit counts on this branch have now been misleading
+three sweeps running.**
+
+New detail worth recording: **all 143 tags live on staging's lineage, not `main`'s** (through
+`v9.9`, 2026-05-21, when tagging stopped). If staging is ever hard-reset instead of merged, those
+old commits stay reachable through the tags, so no history is lost either way.
+
+**Thirteen PRs reached production without a staging rehearsal.** #437–#450 all went straight to
+prod, including the whole one-button season close (#448/#449/#450) and the late-submission window
+(#445). That is the cost of the refresh being a manual chore: staging only earns its keep if it is
+refreshed _before_ the risky change, not weeks after. Refresh it at the start of a big piece of
+work, not at cleanup time.
+
+**Both open PRs were stale in different ways, and neither was a merge conflict.**
+
+- **#440** (3rd-place managers missing from the Finals submission status) was _already fixed_ —
+  #446 landed the same change on 2026-08-19. `main` already returns `getSFParticipants(sd)` for the
+  `finals` period and tags each of the four with his game via `finalsGameField`. Redundant; closed.
+- **#441** (mark semifinal losers eliminated) was _contradicted_. `main` deliberately went the
+  other way: `app.js` clears stale `'SF'` markers, `server.js` sets fourth place to `'Finals'` at
+  close, and `CLAUDE.md` records that nothing should ever write `sd.eliminated[m] = 'SF'` again.
+  Its secondary fix targeted `crownChampionAndRoastFinals`, which #448 deleted outright. Closed as
+  a settled product decision, not a rebase job. **The one salvageable idea:** the 3rd-place game
+  buys a Pot 1 draft slot, not a medal — that per-matchup `stakes` line never landed in
+  `js/roundPreview.js` and depends on none of the `eliminated` change.
+
+The triage lesson: a PR left open across a fast-moving month is more likely to be **superseded or
+reversed** than merely conflicted. Check what `main` did to the same lines before planning a rebase.
+
+**Three repeats from 2026-08-12, all confirmed again:** ref deletion still 403s for agent sessions
+(pushes work, deletes do not — the 12 branches were handed to the commissioner as a command); the
+pre-push hook still needs two pushes, and the second prints a misleading "Everything up-to-date"
+while still moving the ref, so verify with `git ls-remote origin refs/heads/<branch>`; and
+`npm run lint` still fails with `Cannot find module '@eslint/js'` on a fresh container until
+`npm install` has run — environment, not code.
 
 ## 2026-08-31 — "End Finals" produced neither roasts nor a recap, and left every scheduler running
 
