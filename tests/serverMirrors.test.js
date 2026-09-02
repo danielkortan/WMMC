@@ -175,6 +175,15 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries js/rollupDrift.js verbatim', () => {
+    const canonical = canonicalTail(read('js/rollupDrift.js'), 'export const ROLLUP_DRIFT_NAG_DAYS');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/rollupDrift.js — the drift-flag recording, the alert cadence and the ' +
+        'season-close gate must be identical in both'
+    );
+  });
+
   // The elimination ladder. lastRoundPlayed is the one that encodes "the semifinal knocks
   // nobody out of the schedule", so a drift here would put the 3rd-place game's two managers
   // back where this pair was added to get them out of: unable to submit a Finals roster.
