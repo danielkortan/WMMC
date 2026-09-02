@@ -6262,6 +6262,96 @@ function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
 }
 
 // ============================================================
+// Stat retention — what the sync is allowed to store
+// ============================================================
+
+// GET /api/seasons/:year/stat-retention
+//
+// What the keep-set currently holds, and what turning it on would have cost. `would_drop` is
+// measured against the rows already stored, so the answer is this season's own numbers rather than
+// an estimate: it is the count of stored rows whose player is not in the keep-set.
+app.get('/api/seasons/:year/stat-retention', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  const sd = (readDB().seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const names = seasonRetentionNames(sd);
+  const held = (sd.held_players || []).slice();
+  let kept = 0;
+  let dropped = 0;
+  const tally = (rows, key) => {
+    for (const r of rows || []) {
+      if (names.has(retentionKey(r[key]))) kept++;
+      else dropped++;
+    }
+  };
+  tally(sd.daily_batting, 'batter');
+  tally(sd.daily_pitching, 'pitcher');
+  tally(sd.weekly_batting, 'batter');
+  tally(sd.weekly_pitching, 'pitcher');
+
+  res.json({
+    year,
+    mode: statRetentionMode(sd),
+    floor: RETENTION_MIN_KEEP,
+    keep_set: names.size,
+    held_players: held,
+    stored_rows: kept + dropped,
+    rows_for_rostered_players: kept,
+    rows_that_would_not_be_written: dropped,
+    pct_unrostered: kept + dropped ? Math.round((dropped / (kept + dropped)) * 1000) / 10 : 0,
+  });
+});
+
+// POST /api/seasons/:year/stat-retention   { mode?: 'all'|'rostered', hold?: string[] }
+//
+// Turning this on is FORWARD-LOOKING: it changes what the next sync writes and touches not one
+// stored row, which is why it needs no totals vet. Turning it off is always safe — the rows it
+// declined are re-fetchable from the MLB Stats API by re-syncing the week.
+//
+// `hold` is the escape hatch, for a player who must be tracked before anybody can roster him.
+app.post('/api/seasons/:year/stat-retention', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const body = req.body || {};
+  if (body.mode !== undefined && !STAT_RETENTION_MODES.includes(body.mode)) {
+    return res.status(400).json({ error: `mode must be one of: ${STAT_RETENTION_MODES.join(', ')}` });
+  }
+  if (body.hold !== undefined && !Array.isArray(body.hold)) {
+    return res.status(400).json({ error: 'hold must be an array of player names' });
+  }
+
+  const before = statRetentionMode(sd);
+  if (body.mode !== undefined) sd.stat_retention = body.mode;
+  const held = body.hold ? retainPlayers(sd, body.hold) : [];
+
+  const filter = buildRetentionFilter(sd);
+  addAuditEntry(
+    db,
+    'stat_retention',
+    { year, from: before, to: statRetentionMode(sd), held, keep_set: filter.size },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+
+  res.json({
+    year,
+    mode: statRetentionMode(sd),
+    was: before,
+    keep_set: filter.size,
+    active: filter.active,
+    reason: filter.reason,
+    held_players_added: held,
+  });
+});
+
+// ============================================================
 // Weekly-row attribution repair
 // ============================================================
 // The pure half lives in js/attribution.js and is mirrored VERBATIM below;
@@ -9575,9 +9665,16 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
 
   if (!sd.daily_batting) sd.daily_batting = [];
 
+  // Same keep-set as the MLB paths. The sheet is the break-glass fallback, so it is filtered too —
+  // a season that stores only rostered players must not quietly re-inflate when the fallback runs.
+  // Skipping is per PLAYER and total, so the daily cumulative→delta chain a kept player depends on
+  // is never broken by a gap in the middle of it.
+  const retention = buildRetentionFilter(sd);
+
   rows.forEach((row) => {
     const batter = findCol(row, ['batter', 'player', 'name']);
     if (!batter) return;
+    if (!retainsPlayer(retention, batter)) return;
 
     // Update player→team map from sheet's Team column (handles new players + mid-season trades)
     const team = findCol(row, ['team', 'Team']);
@@ -9723,9 +9820,12 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
 
   if (!sd.daily_pitching) sd.daily_pitching = [];
 
+  const retention = buildRetentionFilter(sd);
+
   rows.forEach((row) => {
     const pitcher = findCol(row, ['pitcher', 'player', 'name']);
     if (!pitcher) return;
+    if (!retainsPlayer(retention, pitcher)) return;
 
     // Update player→team map from sheet's Team column (handles new players + mid-season trades)
     const team = findCol(row, ['team', 'Team']);
@@ -11667,6 +11767,175 @@ app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
   }
 });
 
+// ============================================================
+// Stat retention — mirrored from js/statRetention.js
+// ============================================================
+// Verbatim copy of js/statRetention.js (minus its `export` keywords), because server.js cannot
+// import an ES module and the sync paths below are the only runtime callers. Guarded by
+// tests/serverMirrors.test.js: edit js/statRetention.js and copy it here, never one alone.
+//
+// Read that file's header for why this exists. The short version: 85% of the rows this sync writes
+// are for players nobody in the league ever rostered, and readDB() parses all of them on every
+// request.
+
+const STAT_RETENTION_MODES = ['all', 'rostered'];
+
+// What a season does when the mode has never been set. 'all' is today's behaviour to the byte, so
+// adding this module changes nothing until a commissioner turns it on for a season.
+const DEFAULT_STAT_RETENTION = 'all';
+
+// A season whose keep-set is smaller than this is almost certainly half-loaded rather than
+// genuinely tiny — a fresh season before the draft, a partial restore — and filtering against it
+// would silently throw away a week of real stats. performMLBSync falls back to 'all' below it.
+const RETENTION_MIN_KEEP = 40;
+
+function statRetentionMode(sd) {
+  const mode = sd && sd.stat_retention;
+  return STAT_RETENTION_MODES.includes(mode) ? mode : DEFAULT_STAT_RETENTION;
+}
+
+// Match key for a player name. Looser than the row and roster names themselves on purpose: an
+// accent, a suffix or a stray period must never be the reason a rostered player's stats are
+// dropped. (js/utils.js normalizeName is the same idea; this module stays self-contained so its
+// server mirror can be a verbatim copy.)
+function retentionKey(name) {
+  return String(name == null ? '' : name)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Every player any manager has held, asked for, or been offered this season.
+//
+// Five sources, unioned, and each one is here because it can be the ONLY record of a player at some
+// point in his life on this league:
+//
+//   rosters          — the per-week arrays. A derived cache, but additive, so it never forgets.
+//   roster_dates     — the authority for who was rostered when. The one that must never be missed.
+//   swaps            — BOTH sides, and pending as well as approved. The player coming in has no
+//                      roster entry until approval, and approval can back-date him.
+//   submissions      — initial and per-period, including a roster still awaiting approval.
+//   held_players     — an explicit escape hatch (see retainPlayers below) for anything the four
+//                      derivations cannot see.
+//
+// Returns a Set of retentionKey()s.
+function seasonRetentionNames(sd) {
+  const names = new Set();
+  const add = (n) => {
+    const key = retentionKey(n);
+    if (key) names.add(key);
+  };
+
+  for (const weekRosters of Object.values((sd && sd.rosters) || {})) {
+    for (const roster of Object.values(weekRosters || {})) {
+      ((roster || {}).batters || []).forEach(add);
+      ((roster || {}).pitchers || []).forEach(add);
+    }
+  }
+
+  for (const weeks of Object.values((sd && sd.roster_dates) || {})) {
+    for (const players of Object.values(weeks || {})) {
+      Object.keys(players || {}).forEach(add);
+    }
+  }
+
+  for (const swap of (sd && sd.swaps) || []) {
+    add((swap || {}).player_in);
+    add((swap || {}).player_out);
+  }
+
+  const fromSubmission = (s) => {
+    ((s || {}).batters || []).forEach(add);
+    ((s || {}).pitchers || []).forEach(add);
+  };
+  for (const s of Object.values((sd && sd.initial_submissions) || {})) fromSubmission(s);
+  for (const period of Object.values((sd && sd.period_submissions) || {})) {
+    for (const s of Object.values(period || {})) fromSubmission(s);
+  }
+
+  ((sd && sd.held_players) || []).forEach(add);
+
+  return names;
+}
+
+// The decision object the sync paths carry for one run. Built once per sync rather than per row,
+// because seasonRetentionNames walks the whole season.
+//
+// `active` is the only field a caller needs to branch on: it is false whenever the mode is 'all',
+// and false when the keep-set is too small to trust, so a caller that forgets the mode check still
+// writes everything rather than nothing.
+function buildRetentionFilter(sd) {
+  const mode = statRetentionMode(sd);
+  if (mode !== 'rostered') return { mode, active: false, names: null, size: 0, reason: 'mode is all' };
+  const names = seasonRetentionNames(sd);
+  if (names.size < RETENTION_MIN_KEEP) {
+    return {
+      mode,
+      active: false,
+      names,
+      size: names.size,
+      reason: `keep-set is ${names.size} players, below the ${RETENTION_MIN_KEEP} floor — storing everything`,
+    };
+  }
+  return { mode, active: true, names, size: names.size, reason: null };
+}
+
+// Does a row for this player get written? An inactive filter keeps everything, which is what makes
+// this safe to call unconditionally at every write site.
+function retainsPlayer(filter, name) {
+  if (!filter || !filter.active || !filter.names) return true;
+  return filter.names.has(retentionKey(name));
+}
+
+// The escape hatch. Names added here survive every filter for the rest of the season, whatever
+// happens to the rosters — for the case where a player must be tracked before anyone can roster him
+// (a commissioner watching a call-up) or where a derivation has been found wanting after the fact.
+function retainPlayers(sd, names) {
+  if (!sd) return [];
+  const existing = new Set((sd.held_players || []).map(retentionKey));
+  const added = [];
+  for (const n of names || []) {
+    const key = retentionKey(n);
+    if (!key || existing.has(key)) continue;
+    existing.add(key);
+    added.push(String(n));
+  }
+  if (added.length) sd.held_players = [...(sd.held_players || []), ...added];
+  return added;
+}
+
+// How much a run actually skipped, for the sync's response and its log line. Reported rather than
+// silent: a retention filter that has quietly stopped keeping anyone would otherwise look exactly
+// like a quiet day in the majors.
+function retentionSummary(filter, counts) {
+  const c = counts || {};
+  return {
+    mode: (filter && filter.mode) || DEFAULT_STAT_RETENTION,
+    active: !!(filter && filter.active),
+    keep_set: (filter && filter.size) || 0,
+    reason: (filter && filter.reason) || null,
+    skipped_batting: c.batting || 0,
+    skipped_pitching: c.pitching || 0,
+  };
+}
+
+// One line per sync saying what the keep-set did. A retention filter that has quietly stopped
+// keeping anybody looks exactly like a quiet day in the majors, so it says the size of the set and
+// how many rows it declined every time it runs — and says why when it stood itself down.
+function logRetention(report, label) {
+  if (!report || report.mode !== 'rostered') return;
+  if (!report.active) {
+    console.log(`[Retention] ${label}: storing everything — ${report.reason}`);
+    return;
+  }
+  const skipped = report.skipped_batting + report.skipped_pitching;
+  console.log(`[Retention] ${label}: kept ${report.keep_set} players, declined ${skipped} unrostered row(s)`);
+}
+
 // Core MLB-API sync logic, shared by the manual /api/mlb/sync endpoint and
 // the daily 4am Eastern auto-sync scheduler. Mutates `sd` in place but does
 // not write the db — the caller decides how to persist and audit.
@@ -11698,9 +11967,21 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     pitImported = 0,
     pitSkipped = 0;
 
+  // Whose rows are worth storing. Built ONCE per run — seasonRetentionNames walks the whole season,
+  // and this loop runs per player per game. Inactive unless the season opted in, so on a season
+  // that has not, retainsPlayer is a constant true and this is the behaviour it has always had.
+  const retention = buildRetentionFilter(sd);
+  const retentionSkipped = { batting: 0, pitching: 0 };
+
   // Store one daily record per player per game, then recompute weekly totals.
   for (const { gameId, date, batting, pitching } of gameRecords) {
     for (const [name, gameStats] of Object.entries(batting)) {
+      // Nobody in this league has ever held him, asked for him, or been offered him. His row is
+      // 85% of this file and is re-fetchable from the MLB Stats API the day that stops being true.
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.batting++;
+        continue;
+      }
       const manager =
         findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
         findManagerForPlayer(sd, name, 'batting');
@@ -11757,6 +12038,10 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     }
 
     for (const [name, gameStats] of Object.entries(pitching)) {
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.pitching++;
+        continue;
+      }
       const manager =
         findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
         findManagerForPlayer(sd, name, 'pitching');
@@ -11823,9 +12108,13 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     games: gameRecords.length,
     batting_imported: batImported,
     pitching_imported: pitImported,
+    ...(retention.active ? { retention_skipped: retentionSkipped.batting + retentionSkipped.pitching } : {}),
     ...(opts.note ? { note: opts.note } : {}),
   });
   pruneSyncHistory(sd);
+
+  const retentionReport = retentionSummary(retention, retentionSkipped);
+  logRetention(retentionReport, `${round} ${week}`);
 
   return {
     games_fetched: gameRecords.length,
@@ -11833,6 +12122,7 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     batting_skipped: batSkipped,
     pitching_imported: pitImported,
     pitching_skipped: pitSkipped,
+    retention: retentionReport,
   };
 }
 
@@ -11866,8 +12156,17 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
   let batImported = 0,
     pitImported = 0;
 
+  // Same keep-set as performMLBSync, built once. This is the 4am path — the one that writes most of
+  // the season — so it is the one the storage number actually turns on.
+  const retention = buildRetentionFilter(sd);
+  const retentionSkipped = { batting: 0, pitching: 0 };
+
   for (const { gameId, date, batting, pitching } of gameRecords) {
     for (const [name, gameStats] of Object.entries(batting)) {
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.batting++;
+        continue;
+      }
       const locked = sd.daily_batting.find(
         (r) =>
           r.game_id === gameId &&
@@ -11912,6 +12211,10 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
       batImported++;
     }
     for (const [name, gameStats] of Object.entries(pitching)) {
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.pitching++;
+        continue;
+      }
       const locked = sd.daily_pitching.find(
         (r) =>
           r.game_id === gameId &&
@@ -11967,9 +12270,13 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
     games: gameRecords.length,
     batting_imported: batImported,
     pitching_imported: pitImported,
+    ...(retention.active ? { retention_skipped: retentionSkipped.batting + retentionSkipped.pitching } : {}),
     note: `daily-delta:${dateISO}`,
   });
   pruneSyncHistory(sd);
+
+  const retentionReport = retentionSummary(retention, retentionSkipped);
+  logRetention(retentionReport, `${round} ${week} ${dateISO}`);
 
   return {
     games_fetched: gameRecords.length,
@@ -11977,6 +12284,7 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
     pitching_imported: pitImported,
     round,
     week,
+    retention: retentionReport,
   };
 }
 
