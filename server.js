@@ -329,10 +329,18 @@ function requireCommissioner(req, res, next) {
 // Static file serving
 // ============================================================
 
-// Serve index.html through a dedicated route so we can inject the dynamic
-// version stamp and set aggressive no-cache headers that cannot be overridden.
+// Serve index.html through a dedicated route so we can set aggressive no-cache headers that
+// cannot be overridden. The shell itself is never cached, so it always names the current assets.
+//
+// It used to rewrite the assets' `?v=` stamps here at request time with `/\?v=\d+/g`. That
+// matched when the committed placeholders were plain numbers; .githooks/pre-push has since moved
+// to 8-character git content hashes, and the regex requires a DIGIT right after the `=`. So
+// `app.js?v=b9eb2308` and `mobile.css?v=c44aa827` were never rewritten at all, while
+// `styles.css?v=54461f12` had its leading digits eaten and went out as `?v=<timestamp>f12`. The
+// hook's hashes are the better mechanism anyway — they change when the file's content changes,
+// rather than on every restart — so the rewrite is gone rather than repaired.
 app.get(['/', '/index.html'], (req, res) => {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8').replace(/\?v=\d+/g, '?v=' + ASSET_VERSION);
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
@@ -731,14 +739,41 @@ function formatPool(pool) {
   return /^pool\b/i.test(s) ? s : `Pool ${s}`;
 }
 
-function writeManagersSeed(managers) {
+// Mirror the league's manager identities into the git-committed seed file, so a fresh deploy (or a
+// db.json that never arrived) still knows who is in the league.
+//
+// It refuses to DROP anyone unless the caller says so. managers_seed.json is the last line of
+// disaster recovery, it lives in the repository, and every writer here hands it the whole
+// `db.managers` array — so any code path running against a partial or test database would
+// otherwise replace the real roster with that database's. That is not hypothetical: booting the
+// server against a one-manager fixture rewrote the committed file down to that one manager, via
+// the googleEmail backfill in main(), and the change was staged into a commit before anyone
+// noticed. Removing a manager for real goes through POST /api/managers, which is a deliberate,
+// commissioner-only, audited full replace and passes allowShrink.
+function writeManagersSeed(managers, { allowShrink = false } = {}) {
   try {
+    const incoming = Array.isArray(managers) ? managers : [];
+    if (!allowShrink) {
+      const emails = new Set(incoming.map((m) => (m.email || '').toLowerCase()).filter(Boolean));
+      const existing = readManagersSeed();
+      const dropped = existing.map((m) => (m.email || '').toLowerCase()).filter((e) => e && !emails.has(e));
+      if (dropped.length) {
+        console.error(
+          `[Managers seed] REFUSED a write that would drop ${dropped.length} manager(s) from ` +
+            `managers_seed.json (${dropped.join(', ')}). The file was left alone. If this is a ` +
+            `deliberate removal, do it through the commissioner panel (POST /api/managers).`
+        );
+        return false;
+      }
+    }
     // Strip credentials (password + Google auth token) — they belong in db.json
     // only, never in the git-committed seed file.
-    const seedRecords = managers.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
+    const seedRecords = incoming.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
     fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
+    return true;
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
+    return false;
   }
 }
 
@@ -1433,6 +1468,12 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // flag a later sweep already cleared.
     if (existingSd.correction_flags) sd.correction_flags = existingSd.correction_flags;
     else delete sd.correction_flags;
+
+    // Scoring-drift flags, written only by the twice-daily audit and read by the season close, are
+    // the same family for the same reasons — including that `first_seen` is what makes a standing
+    // problem's age real. A client save carrying no copy must not reset the clock on one.
+    if (existingSd.rollup_drift) sd.rollup_drift = existingSd.rollup_drift;
+    else delete sd.rollup_drift;
 
     // The season-close record is server-authoritative for the same reason: it is written only
     // by POST /close and cleared only by POST /reopen, and it is what every scheduler reads to
@@ -3327,8 +3368,10 @@ app.post('/api/managers', requireCommissioner, (req, res) => {
   });
   addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
   writeDB(db);
-  // Keep the committed seed file in sync so managers survive the next redeploy
-  writeManagersSeed(db.managers);
+  // Keep the committed seed file in sync so managers survive the next redeploy. This is the one
+  // caller allowed to remove someone: it is commissioner-only, audited, and a full replace is
+  // exactly what the panel's Save button means.
+  writeManagersSeed(db.managers, { allowShrink: true });
   res.json({ ok: true });
 });
 
@@ -6477,7 +6520,7 @@ function auditWeeklyRollupDrift(sd, { tolerance = 0.5 } = {}) {
   return findings;
 }
 
-function buildRollupDriftSlackText(findings, year) {
+function buildRollupDriftSlackText(findings, year, oldestDays = 0) {
   const lines = findings.slice(0, 8).map((f) => {
     const who = f.players
       .slice(0, 4)
@@ -6494,25 +6537,150 @@ function buildRollupDriftSlackText(findings, year) {
     `:mag: *Scoring drift detected (${year})* — the certified totals disagree with the stats they are ` +
     `derived from. The posted scoreboard is using the certified numbers, so they are wrong until this ` +
     `is resolved.\n${lines.join('\n')}${more}\n` +
+    (oldestDays >= ROLLUP_DRIFT_NAG_DAYS
+      ? `:rotating_light: *This has been outstanding for ${oldestDays} day${oldestDays === 1 ? '' : 's'}.* ` +
+        `It will keep coming back every ${ROLLUP_DRIFT_NAG_DAYS} days until it is resolved, and the season ` +
+        `cannot be closed while it stands.\n`
+      : '') +
     `_Rebuild Totals recompiles the rollups from the stored daily rows — Sync Now only touches the ` +
     `current week, so it cannot fix a finished one. If it persists, check the named player's ` +
     `add/drop dates against that week's start and end._`
   );
 }
 
-// One alert per distinct finding-set per process — the 4am compile and the 7am post both run this,
-// and an unresolved drift would otherwise re-post every morning.
-let lastRollupDriftSignature = null;
+// The pure half of the drift machinery — how a finding is recorded, when the alert repeats, and
+// whether it may be certified over — lives in js/rollupDrift.js and is mirrored VERBATIM below.
+// tests/serverMirrors.test.js fails if the two copies drift. Edit both.
 
-async function alertOnRollupDrift(sd, year, trigger) {
+const ROLLUP_DRIFT_NAG_DAYS = 3;
+
+// Whole days between two ISO 'YYYY-MM-DD' dates (b - a). Both are date-only, so parsing them as
+// UTC midnight avoids the off-by-one a local-time parse gives across a DST boundary.
+function daysBetweenISO(a, b) {
+  if (!a || !b) return 0;
+  const ms = Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.round(ms / 86400000) : 0;
+}
+
+// Record the current findings on the season, keyed `manager|week`, in the shape
+// recordCorrectionFlags uses for refused corrections — and for the same reason. A drift that
+// exists only as a Slack post cannot be asked about later, cannot be shown in the app, and cannot
+// be checked at season close.
+//
+// The map is REPLACED each run rather than merged, so a drift that has been fixed clears itself
+// the next time the audit runs clean — the same self-healing property the correction flags have.
+// `first_seen` and `last_alerted` are carried across from the previous run, so the age of a
+// standing problem is real and is not reset by a deploy or a restart.
+function recordRollupDriftFlags(sd, findings, todayISO) {
+  const prev = sd && sd.rollup_drift && typeof sd.rollup_drift === 'object' ? sd.rollup_drift : {};
+  const next = {};
+  for (const f of findings || []) {
+    const key = `${f.manager}|${f.week}`;
+    const before = prev[key] || {};
+    next[key] = {
+      manager: f.manager,
+      week: f.week,
+      certified: f.certified,
+      from_daily: f.from_daily,
+      delta: f.delta,
+      players: (f.players || []).slice(0, 6),
+      first_seen: before.first_seen || todayISO,
+      last_seen: todayISO,
+      last_alerted: before.last_alerted || null,
+      alerted_delta: Object.prototype.hasOwnProperty.call(before, 'alerted_delta') ? before.alerted_delta : null,
+    };
+  }
+  if (Object.keys(next).length) sd.rollup_drift = next;
+  else delete sd.rollup_drift;
+  return next;
+}
+
+// Which stored flags to post about right now. Three ways to qualify: never posted, the number
+// moved since it was last posted, or it has been quiet for `nagDays` and is still there. Anything
+// already posted today is excluded, which is what keeps the 4am and 7am runs — and any manual
+// re-run in between — from double-posting the same finding.
+function rollupDriftDueForAlert(flags, todayISO, nagDays = ROLLUP_DRIFT_NAG_DAYS) {
+  return Object.values(flags || {}).filter((f) => {
+    if (!f.last_alerted) return true;
+    if (f.last_alerted === todayISO) return false;
+    if (f.alerted_delta !== f.delta) return true;
+    return daysBetweenISO(f.last_alerted, todayISO) >= nagDays;
+  });
+}
+
+// The outstanding drift, as lines a human can read. Mirrors outstandingCorrectionFlags.
+function outstandingRollupDrift(sd) {
+  return Object.values((sd && sd.rollup_drift) || {}).map((f) => ({
+    manager: f.manager,
+    week: f.week,
+    delta: f.delta,
+    certified: f.certified,
+    from_daily: f.from_daily,
+    first_seen: f.first_seen,
+    last_seen: f.last_seen,
+  }));
+}
+
+// Is a scoring disagreement standing in the way of certifying this season?
+//
+// The same gate, and the same argument, as correctionCloseBlock: a drifted week is one whose
+// CERTIFIED scores the server itself says disagree with the stats underneath them, and a completed
+// week's scores are what the bracket, the placements, the roasts, the recap and the permanent
+// record are all computed from. The 2026 season closed on top of exactly this — 31.1 points
+// credited to nobody across the semifinal that decided the Championship pairing.
+//
+// Blocks rather than warns, and takes `force`, because closing the season is a once-a-year
+// irreversible-feeling action and the commissioner should have to say yes on purpose. Returns null
+// when there is nothing in the way.
+function rollupDriftCloseBlock(sd, force) {
+  const drift = outstandingRollupDrift(sd);
+  if (!drift.length || force) return null;
+  const lines = drift.map(
+    (d) =>
+      `${d.manager} ${d.week} (certified ${d.certified} vs ${d.from_daily} from the daily rows, ` +
+      `off by ${Math.abs(d.delta)}, first seen ${d.first_seen || 'unknown'})`
+  );
+  return {
+    error:
+      `Cannot close the season — ${drift.length} manager-week(s) have certified totals that disagree with the ` +
+      `stats they are derived from: ${lines.join('; ')}. Those weeks feed the bracket, the placements and the ` +
+      `permanent record. Resolve them first (Rebuild Totals recompiles the rollups from the stored daily rows; ` +
+      `if it persists, check the named player's add/drop dates against that week), or re-run with force to ` +
+      `close anyway.`,
+    rollup_drift: drift,
+    force_required: true,
+  };
+}
+
+// Audit the season, persist what was found, and post about anything due. Takes a YEAR rather than
+// an `sd` and does its own read-modify-write: it now records state, and a caller that handed in a
+// detached season object would have that state thrown away.
+async function alertOnRollupDrift(year, trigger) {
   try {
+    const db = readDB();
+    const sd = (db.seasons || {})[year];
+    if (!sd) return [];
     const findings = auditWeeklyRollupDrift(sd);
+    const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const before = JSON.stringify(sd.rollup_drift || null);
+
+    const flags = recordRollupDriftFlags(sd, findings, todayISO);
+    const due = rollupDriftDueForAlert(flags, todayISO);
+    for (const f of due) {
+      f.last_alerted = todayISO;
+      f.alerted_delta = f.delta;
+    }
+    if (JSON.stringify(sd.rollup_drift || null) !== before) {
+      db.seasons[year] = sd;
+      writeDB(db);
+    }
+
     if (findings.length === 0) return [];
     const signature = findings.map((f) => `${f.manager}|${f.week}|${f.delta}`).join(';');
     console.error(`[Rollup audit] (${trigger}) ${findings.length} manager-week(s) drifted: ${signature}`);
-    if (signature !== lastRollupDriftSignature) {
-      lastRollupDriftSignature = signature;
-      await postSlack(buildRollupDriftSlackText(findings, year)).catch(() => {});
+    if (due.length) {
+      const oldest = due.reduce((n, f) => Math.max(n, daysBetweenISO(f.first_seen, todayISO)), 0);
+      await postSlack(buildRollupDriftSlackText(due, year, oldest)).catch(() => {});
     }
     return findings;
   } catch (e) {
@@ -12103,7 +12271,15 @@ app.get('/api/diag/rollup-audit', requireCommissioner, (req, res) => {
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
   const tolerance = Number.isFinite(parseFloat(req.query.tolerance)) ? parseFloat(req.query.tolerance) : 0.5;
   const findings = auditWeeklyRollupDrift(sd, { tolerance });
-  res.json({ year, tolerance, clean: findings.length === 0, findings });
+  res.json({
+    year,
+    tolerance,
+    clean: findings.length === 0,
+    findings,
+    // What the twice-daily audit has on record, with each finding's age — the question the old
+    // Slack-only alert could not answer after the fact.
+    outstanding: outstandingRollupDrift(sd),
+  });
 });
 
 app.get('/api/diag/manager', requireCommissioner, (req, res) => {
@@ -18935,6 +19111,10 @@ app.post('/api/seasons/:year/finalize-season', requireCommissioner, (req, res) =
   const blocked = correctionCloseBlock(sd, !!(req.body && req.body.force));
   if (blocked) return res.status(409).json(blocked);
 
+  // …nor on top of a week whose certified total disagrees with the stats it came from.
+  const drifted = rollupDriftCloseBlock(sd, !!(req.body && req.body.force));
+  if (drifted) return res.status(409).json(drifted);
+
   if (!Array.isArray(sd.finalized_rounds)) sd.finalized_rounds = [];
   if (!sd.finalized_rounds.includes('Finals')) sd.finalized_rounds.push('Finals');
   if (!Array.isArray(sd.losers_dumped)) sd.losers_dumped = [];
@@ -18995,6 +19175,9 @@ app.post('/api/seasons/:year/close', requireCommissioner, async (req, res) => {
   // the "Re-run Season Close" button calls it without re-finalizing.
   const correctionBlock = correctionCloseBlock(sd, !!(req.body && req.body.force));
   if (correctionBlock) return res.status(409).json(correctionBlock);
+
+  const driftBlock = rollupDriftCloseBlock(sd, !!(req.body && req.body.force));
+  if (driftBlock) return res.status(409).json(driftBlock);
 
   const closedAt = new Date().toISOString();
   sd.season_closed = {
@@ -20054,7 +20237,7 @@ function scheduleScoreboardPost() {
           // Vet the numbers about to be posted against the stats they come from. The post goes out
           // either way (a silent wrong scoreboard is worse than a flagged one) — but the
           // commissioner gets told, instead of finding out hours later from a manager.
-          .then(() => alertOnRollupDrift((readDB().seasons || {})[season], season, '7am-scoreboard'))
+          .then(() => alertOnRollupDrift(season, '7am-scoreboard'))
           .then(() => postScoreboardSlack(readDB(), season, plan))
           .then(() =>
             console.log(
@@ -20370,7 +20553,7 @@ function scheduleMLBApiSync() {
         // holds rejected scores, and the numbers that matter are the ones actually on disk — the
         // ones the 7am post will use.
         if (statsCompiled) {
-          await alertOnRollupDrift((readDB().seasons || {})[season], season, 'auto-4am');
+          await alertOnRollupDrift(season, 'auto-4am');
         }
 
         // Refresh the playoff odds after the stats settle (no-op outside PP2
@@ -20559,7 +20742,10 @@ async function main() {
       });
       if (changed) {
         writeDB(dbGE);
-        writeManagersSeed(dbGE.managers);
+        // Deliberately does NOT touch managers_seed.json. This runs on every boot against
+        // whatever database is present — including a fixture or a partial restore — and the seed
+        // file is a git-tracked disaster-recovery artifact. The backfill is idempotent, so a
+        // reseeded db just gets it again on the next boot.
         console.log('Backfilled googleEmail for managers missing it');
       }
     } catch (e) {
