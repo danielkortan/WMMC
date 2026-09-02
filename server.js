@@ -329,10 +329,18 @@ function requireCommissioner(req, res, next) {
 // Static file serving
 // ============================================================
 
-// Serve index.html through a dedicated route so we can inject the dynamic
-// version stamp and set aggressive no-cache headers that cannot be overridden.
+// Serve index.html through a dedicated route so we can set aggressive no-cache headers that
+// cannot be overridden. The shell itself is never cached, so it always names the current assets.
+//
+// It used to rewrite the assets' `?v=` stamps here at request time with `/\?v=\d+/g`. That
+// matched when the committed placeholders were plain numbers; .githooks/pre-push has since moved
+// to 8-character git content hashes, and the regex requires a DIGIT right after the `=`. So
+// `app.js?v=b9eb2308` and `mobile.css?v=c44aa827` were never rewritten at all, while
+// `styles.css?v=54461f12` had its leading digits eaten and went out as `?v=<timestamp>f12`. The
+// hook's hashes are the better mechanism anyway — they change when the file's content changes,
+// rather than on every restart — so the rewrite is gone rather than repaired.
 app.get(['/', '/index.html'], (req, res) => {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8').replace(/\?v=\d+/g, '?v=' + ASSET_VERSION);
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
@@ -731,14 +739,41 @@ function formatPool(pool) {
   return /^pool\b/i.test(s) ? s : `Pool ${s}`;
 }
 
-function writeManagersSeed(managers) {
+// Mirror the league's manager identities into the git-committed seed file, so a fresh deploy (or a
+// db.json that never arrived) still knows who is in the league.
+//
+// It refuses to DROP anyone unless the caller says so. managers_seed.json is the last line of
+// disaster recovery, it lives in the repository, and every writer here hands it the whole
+// `db.managers` array — so any code path running against a partial or test database would
+// otherwise replace the real roster with that database's. That is not hypothetical: booting the
+// server against a one-manager fixture rewrote the committed file down to that one manager, via
+// the googleEmail backfill in main(), and the change was staged into a commit before anyone
+// noticed. Removing a manager for real goes through POST /api/managers, which is a deliberate,
+// commissioner-only, audited full replace and passes allowShrink.
+function writeManagersSeed(managers, { allowShrink = false } = {}) {
   try {
+    const incoming = Array.isArray(managers) ? managers : [];
+    if (!allowShrink) {
+      const emails = new Set(incoming.map((m) => (m.email || '').toLowerCase()).filter(Boolean));
+      const existing = readManagersSeed();
+      const dropped = existing.map((m) => (m.email || '').toLowerCase()).filter((e) => e && !emails.has(e));
+      if (dropped.length) {
+        console.error(
+          `[Managers seed] REFUSED a write that would drop ${dropped.length} manager(s) from ` +
+            `managers_seed.json (${dropped.join(', ')}). The file was left alone. If this is a ` +
+            `deliberate removal, do it through the commissioner panel (POST /api/managers).`
+        );
+        return false;
+      }
+    }
     // Strip credentials (password + Google auth token) — they belong in db.json
     // only, never in the git-committed seed file.
-    const seedRecords = managers.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
+    const seedRecords = incoming.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
     fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
+    return true;
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
+    return false;
   }
 }
 
@@ -3333,8 +3368,10 @@ app.post('/api/managers', requireCommissioner, (req, res) => {
   });
   addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
   writeDB(db);
-  // Keep the committed seed file in sync so managers survive the next redeploy
-  writeManagersSeed(db.managers);
+  // Keep the committed seed file in sync so managers survive the next redeploy. This is the one
+  // caller allowed to remove someone: it is commissioner-only, audited, and a full replace is
+  // exactly what the panel's Save button means.
+  writeManagersSeed(db.managers, { allowShrink: true });
   res.json({ ok: true });
 });
 
@@ -20455,7 +20492,10 @@ async function main() {
       });
       if (changed) {
         writeDB(dbGE);
-        writeManagersSeed(dbGE.managers);
+        // Deliberately does NOT touch managers_seed.json. This runs on every boot against
+        // whatever database is present — including a fixture or a partial restore — and the seed
+        // file is a git-tracked disaster-recovery artifact. The backfill is idempotent, so a
+        // reseeded db just gets it again on the next boot.
         console.log('Backfilled googleEmail for managers missing it');
       }
     } catch (e) {
