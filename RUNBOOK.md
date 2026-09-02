@@ -336,15 +336,17 @@ Every applied change is logged server-side as `[Reattribute] …` and recorded i
 3. If weekly totals look stale after a roster correction, **Rebuild Totals** re-derives them
    from stored daily data without re-fetching from MLB.
 
-## Eligibility shadow — is the second derivation safe to retire?
+## Eligibility shadow — is the live derivation still right?
 
-The app has TWO answers to "who was rostered this week". `managerWeekSubtotal` builds an `eligible`
-SET by unioning five heuristics; `weekRosterWindows` builds a per-player WINDOW from `roster_dates`
-alone. **43 of the 98 entries in `MEMORY.md` are the two disagreeing** — whichever one a surface
-happened to call is what that surface showed.
+There is now ONE answer to "who was rostered this week": `weekRosterWindows`, which `server.js` and
+`app.js` both consume. What it replaced was an `eligible` SET built by unioning five heuristics,
+which each file had its own slightly different copy of — **43 of the 98 entries in `MEMORY.md` are
+those disagreeing.**
 
-The plan (`SEASON_ONE_REVIEW.md` R1) is to make the subtotal a thin consumer of the windows. That
-is a scoring change, so it ships on evidence, not on an argument. This endpoint is the evidence:
+**The old union is still in `server.js` as `managerWeekSubtotalLegacy`, and it is not dead code.** It
+is the permanent control this endpoint measures the live path against. Run it after any change that
+touches rosters, swaps, dates or scoring — it is the cheapest before/after totals vet in the repo,
+and it works on any season.
 
 ```bash
 curl -s https://wmmc.live/api/seasons/2026/eligibility-shadow \
@@ -366,11 +368,12 @@ What to look at, in order:
   only when TWO OR MORE managers claim the player that week. So wherever the server's eligibility set
   claims a player it then clips to zero, the client has nothing to read but the full weekly score.
   **A non-zero entry here is a live discrepancy, not a plan.**
-- **`totals_delta`** — every manager whose total would MOVE if the switch were flipped. **Empty is
-  the goal.** Anything here must be understood before R1 proceeds.
+- **`totals_delta`** — every manager whose total differs between the live path and the control.
+  **Empty is the goal**, and it was empty on 2026 when the switch was made.
 - **`disagreements`** — manager-weeks where the two differ at all, including where they agree on
   points but not on who was claimed. A non-zero count with an empty `totals_delta` is the common and
-  benign case: the legacy set claims a player it then scores at zero.
+  benign case: the control's looser set claims a player it then scores at zero. On 2026 there are
+  twelve, one per manager.
 - **`only_legacy`** on each entry — players the old path claims and the windows do not. The
   dangerous direction, and the one to read by eye.
 - **`only_windows`** — usually a player the additive roster-array cache forgot.
@@ -385,10 +388,9 @@ plus `delta` and `client_delta` against the legacy figure.
 `?limit=N` bounds the `detail` array (default 50, max 500); `detail_truncated` says how many were
 left out.
 
-**R1's switch cannot be flipped on the server alone.** `managerWeekSubtotal` exists a THIRD time, in
-`app.js`, and it is what renders the scoreboard the league reads. Flipping one side would guarantee
-a window where the app and the server disagree. That is why the client column exists: it has to be
-zero, or already understood, before either side moves.
+**The switch moved both sides at once**, because `managerWeekSubtotal` exists in `app.js` too and it
+is what renders the scoreboard the league reads. Moving one alone would guarantee a window where the
+app and the server disagree. The client column is how that stays checkable.
 
 Run it against the **frozen 2026 season**: the right answer there is already known, because it is
 what the league played all year.

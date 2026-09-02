@@ -5,18 +5,19 @@
 // add_date → drop_date window, scoped to the period. This module is that sentence as code, and it
 // is the answer everything else should be reading.
 //
-// It exists because the app currently has TWO derivations of it. managerWeekSubtotal (server.js)
-// builds an `eligible` SET by unioning five heuristics — the roster array filtered by a
-// "was he dropped earlier" scan, a period-scoped carry-forward, this week's own date bucket, and
-// the approved swaps whose week_key matches — and then decides per stat row which manager may claim
-// it. managerWeekRosterWindows builds a per-player WINDOW from roster_dates alone, with the roster
-// array as an explicit fallback only for a player who has no date events at all.
+// It exists because the app used to answer it several ways. managerWeekSubtotal built an `eligible`
+// SET by unioning five heuristics — the roster array filtered by a "was he dropped earlier" scan, a
+// period-scoped carry-forward, this week's own date bucket, and the approved swaps whose week_key
+// matched — and then decided per stat row which manager may claim it. server.js and app.js each had
+// their own slightly different copy of that union, and managerWeekRosterWindows answered the same
+// question a third way, from roster_dates alone.
 //
-// Forty-three of the ninety-eight entries in MEMORY.md are the same structural bug: the two
-// disagree, and whichever one a given surface happened to call is what that surface showed. The
-// windows form is the one that matches the invariant, so the plan (SEASON_ONE_REVIEW.md R1) is to
-// make the subtotal a thin consumer of it. This module is the first half of that: the derivation,
-// extracted, pure, and unit-tested against the season's real incidents.
+// Forty-three of the ninety-eight entries in MEMORY.md are the same structural bug: they disagreed,
+// and whichever one a given surface happened to call is what that surface showed. This form is the
+// one that matches the invariant, so it is now the ONLY one — server.js and app.js are both thin
+// consumers of it (SEASON_ONE_REVIEW.md R1). The old union survives as managerWeekSubtotalLegacy in
+// server.js, not as a scoring path but as the permanent control that
+// GET /api/seasons/:year/eligibility-shadow measures the live path against, on any season, forever.
 //
 // PURE — it takes already-derived facts (the week's bounds, the period start, one manager's date
 // buckets, one week's roster array) rather than a season object, so it can be tested without one

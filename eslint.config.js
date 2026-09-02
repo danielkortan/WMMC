@@ -41,6 +41,7 @@ const projectGlobals = {
   bracketOddsWindowForDate: 'readonly',
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
+  weekRosterWindows: 'readonly',
   checkSwapLimit: 'readonly',
   swapReasonLabel: 'readonly',
   checkSwapEffectiveWindow: 'readonly',
