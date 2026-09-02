@@ -184,6 +184,17 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  // The write-side keep-set. A server copy that has drifted into a NARROWER keep-set than the
+  // tested one drops stat rows for players somebody actually rostered, which is the one direction
+  // this filter must never fail in.
+  it('carries js/statRetention.js verbatim', () => {
+    const canonical = canonicalTail(read('js/statRetention.js'), 'export const STAT_RETENTION_MODES');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/statRetention.js — the stat-row keep-set must be identical in both'
+    );
+  });
+
   it('carries js/attribution.js verbatim', () => {
     const canonical = canonicalTail(read('js/attribution.js'), 'export function chooseOwner');
     assert.ok(
