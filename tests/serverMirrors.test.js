@@ -205,6 +205,17 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  // The derivation the core scoring invariant describes. If the server copy drifts, the scoreboard
+  // and the drift audit stop agreeing about who was rostered — which is the bug class 43 of the 98
+  // MEMORY entries are made of.
+  it('carries js/rosterWindows.js verbatim', () => {
+    const canonical = canonicalTail(read('js/rosterWindows.js'), 'export function weekRosterWindows');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/rosterWindows.js — the roster-window derivation must be identical in both'
+    );
+  });
+
   it('carries js/attribution.js verbatim', () => {
     const canonical = canonicalTail(read('js/attribution.js'), 'export function chooseOwner');
     assert.ok(
