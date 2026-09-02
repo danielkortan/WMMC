@@ -195,6 +195,16 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  // The backup's contents. A server copy that has drifted into a NARROWER key list silently stops
+  // backing something up, and the way you find out is the day you need it.
+  it('carries js/backupSet.js verbatim', () => {
+    const canonical = canonicalTail(read('js/backupSet.js'), 'export const BACKUP_FORMAT');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/backupSet.js — the irreplaceable-field lists and the diff must be identical in both'
+    );
+  });
+
   it('carries js/attribution.js verbatim', () => {
     const canonical = canonicalTail(read('js/attribution.js'), 'export function chooseOwner');
     assert.ok(

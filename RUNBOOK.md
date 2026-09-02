@@ -409,6 +409,83 @@ he then survives every filter for the rest of the season:
 -d '{"hold":["Roman Anthony"]}'
 ```
 
+## The local backup trail — dated copies of what cannot be re-fetched
+
+Render takes a disk snapshot every 24 hours and keeps seven days. That covers total corruption. It
+does **not** cover the shape of failure this app actually produces:
+
+- **Seven days of memory.** The 8/31 misattribution went unnoticed for twelve.
+- **All-or-nothing.** Rolling back to recover one manager's swap log throws away every stat sync and
+  every other manager's swaps since. In-season you would never actually press it.
+- **Opaque.** You cannot see what a snapshot holds without restoring it.
+
+The trail is the answer to those three. `<db dir>/backups/wmmc-YYYY-MM-DD.json`, one per day at
+**11pm Eastern**, a year of them, ~90 MB in total. It holds only what exists nowhere else:
+`roster_dates`, `rosters`, the swaps, the submissions, the roasts, the hand-set `schedule_dates`,
+the `mlb_ids` map, the audit log, and manager identities. **Passwords are stripped**, following
+`managers_seed.json`'s rule — a commissioner re-issues one in a minute, and a dated trail of copies
+would multiply the exposure of a plaintext credential.
+
+Every copy also carries **`certified_totals`** — each season's per-manager totals from
+`captureScoreSnapshot`, the same function every before/after vet in this repo uses. That is what
+makes a restored file checkable rather than merely present.
+
+Everything omitted is regenerable, and the payload says so in its own `omitted` block: the stat
+rows re-fetch from the MLB Stats API, the pools re-bootstrap, the weekly rollups rebuild from the
+dailies, the odds and hot takes recompute.
+
+### List what you have
+
+```bash
+curl -s https://wmmc.live/api/admin/backups \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+Each entry reports the things a person actually asks about — how many swaps, how many roster
+events, how many managers have a certified total — not just a byte count.
+
+### Answer "when did this change?"
+
+This is the reason the trail exists, and the one thing no whole-disk snapshot can do at any
+retention:
+
+```bash
+curl -s https://wmmc.live/api/admin/backups/2026-08-19/diff/today \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+`to` can be another date or the literal `today` (compares against the live database, writing
+nothing). It reports, per season: swaps added, removed, or changed status; roster windows added,
+removed, or moved; and every manager whose certified total moved. Bisect with it — halve the
+interval until the diff names one day.
+
+### Read one day in full, and repair surgically
+
+```bash
+curl -s https://wmmc.live/api/admin/backups/2026-08-19 \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq '.seasons["2026"].swaps'
+```
+
+Then put back the one thing that moved, through the normal endpoints. **That is the point:** you
+repair the swap log without rolling the machine back and losing every sync since.
+
+### Take one now
+
+```bash
+curl -s -X POST https://wmmc.live/api/admin/backups \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+Idempotent — the day's file is overwritten — so run it before any change worth being able to undo.
+
+**This does not replace the Upstash mirror or Render's snapshots**, and it is not a whole-database
+restore: a copy holds no stat rows, so recovering from one means re-syncing the season from the MLB
+Stats API afterwards. It is the surgical half, and the half that remembers longer than a week.
+
 ## Season storage report — how big is db.json, and what would an archive save?
 
 Answers "what is the database actually made of" and prices the offseason archive tiers. See

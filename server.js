@@ -503,6 +503,339 @@ async function loadTimestampedBackup(dateKey) {
   }
 }
 
+// ============================================================
+// Backing up by replaceability — mirrored from js/backupSet.js
+// ============================================================
+// Verbatim copy of js/backupSet.js (minus its `export` keywords), because server.js cannot import
+// an ES module and the local backup writer below is the only runtime caller. Guarded by
+// tests/serverMirrors.test.js: edit js/backupSet.js and copy it here, never one alone.
+//
+// Read that file's header for the argument. The short version: Render's disk snapshot covers total
+// corruption for seven days; it cannot answer "when did this week's attribution change", and this
+// app's defects take longer than a week to notice.
+
+const BACKUP_FORMAT = 'wmmc-irreplaceable-v1';
+
+// Default retention for the dated local copies. A year of them is ~90 MB against a 1 GB disk.
+const BACKUP_KEEP_DAYS = 365;
+
+// Season fields that exist nowhere but this database.
+//
+// schedule_dates is on this list for a reason that is not size: its silent wipe is the incident
+// that motivated the boot-time integrity audit in the first place, and it is hand-set, so nothing
+// regenerates it.
+const IRREPLACEABLE_SEASON_KEYS = [
+  'status',
+  'schedule_dates',
+  'roster_dates',
+  'rosters',
+  'swaps',
+  'initial_submissions',
+  'period_submissions',
+  'submission_windows',
+  'eliminated',
+  'roasts',
+  'season_closed',
+  'mlb_ids',
+  'held_players',
+  'stat_retention',
+  'correction_flags',
+  'rollup_drift',
+];
+
+// Top-level fields likewise. audit_log is here because it is the only record of who did what —
+// a stat row can be re-fetched, a decision cannot.
+const IRREPLACEABLE_ROOT_KEYS = ['active_season', 'banner_config', 'audit_log', 'last_saved_at'];
+
+// Everything deliberately left out, with the reason. Carried in the payload so a person reading a
+// restored file three months from now does not have to guess whether something went missing.
+const REPLACEABLE_NOTE = {
+  daily_batting: 're-fetch from the MLB Stats API',
+  daily_pitching: 're-fetch from the MLB Stats API',
+  weekly_batting: 'rebuilt from the daily rows',
+  weekly_pitching: 'rebuilt from the daily rows',
+  batters_pool: 're-bootstraps from the MLB catalog',
+  pitchers_pool: 're-bootstraps from the MLB catalog',
+  batters_team: 'rewritten by the next sync',
+  pitchers_team: 'rewritten by the next sync',
+  playoff_odds: 'recomputed nightly',
+  bracket_odds: 'recomputed nightly',
+  hot_takes: 'regenerated daily',
+  score_snapshots: 'the guard trail — the certified totals below are the part worth keeping',
+  upload_log: 'a log of syncs that can be run again',
+  passwords: 'stripped on purpose — a commissioner re-issues one',
+};
+
+// Manager identities without credentials.
+function backupManagers(managers) {
+  return (managers || []).map((m) => {
+    const { password: _password, ...rest } = m || {};
+    return rest;
+  });
+}
+
+function pick(source, keys) {
+  const out = {};
+  for (const k of keys) if (source && source[k] !== undefined) out[k] = source[k];
+  return out;
+}
+
+// The payload. `certifiedTotals` maps a year to that season's per-manager totals — the caller
+// computes them (captureScoreSnapshot is server-only glue), and they are what makes this backup
+// SELF-VERIFYING: a restore can be checked against what the season actually was, rather than
+// against a hope. Without them a restored file is a set of roster dates nobody can confirm.
+function buildIrreplaceableBackup(db, { certifiedTotals = {}, createdAt = null } = {}) {
+  const seasons = {};
+  for (const [year, sd] of Object.entries((db && db.seasons) || {})) {
+    if (!sd || typeof sd !== 'object') continue;
+    seasons[year] = pick(sd, IRREPLACEABLE_SEASON_KEYS);
+    if (certifiedTotals[year]) seasons[year].certified_totals = certifiedTotals[year];
+  }
+  return {
+    format: BACKUP_FORMAT,
+    created_at: createdAt || new Date().toISOString(),
+    omitted: REPLACEABLE_NOTE,
+    ...pick(db || {}, IRREPLACEABLE_ROOT_KEYS),
+    managers: backupManagers((db || {}).managers),
+    seasons,
+  };
+}
+
+// One-glance contents, for the restore-point picker and for the list endpoint. Deliberately counts
+// the things a human would ask about — how many swaps, how many roster events — rather than bytes.
+function describeBackup(payload) {
+  const seasons = {};
+  for (const [year, sd] of Object.entries((payload && payload.seasons) || {})) {
+    let rosterEvents = 0;
+    for (const weeks of Object.values((sd || {}).roster_dates || {})) {
+      for (const players of Object.values(weeks || {})) rosterEvents += Object.keys(players || {}).length;
+    }
+    seasons[year] = {
+      status: (sd || {}).status || null,
+      schedule_dates: Array.isArray((sd || {}).schedule_dates) ? sd.schedule_dates.length : 0,
+      managers_with_dates: Object.keys((sd || {}).roster_dates || {}).length,
+      roster_events: rosterEvents,
+      swaps: Array.isArray((sd || {}).swaps) ? sd.swaps.length : 0,
+      roasts: Object.keys((sd || {}).roasts || {}).length,
+      season_closed: !!(sd || {}).season_closed,
+      certified_managers: Object.keys((sd || {}).certified_totals || {}).length,
+    };
+  }
+  return {
+    format: (payload && payload.format) || null,
+    created_at: (payload && payload.created_at) || null,
+    managers: ((payload && payload.managers) || []).length,
+    seasons,
+  };
+}
+
+// A stable identity for one swap, so two backups can be compared without depending on array order.
+function swapId(s, i) {
+  if (!s || typeof s !== 'object') return `#${i}`;
+  return [s.manager || '', s.player_out || '', s.player_in || '', s.week_key || '', s.submitted_at || ''].join('|');
+}
+
+// What changed between two dated backups.
+//
+// This is the whole argument for keeping them. A whole-disk snapshot can restore last Tuesday; it
+// cannot tell you that this week's attribution changed on Tuesday, which is the question twelve days
+// of silence actually raised. Reports per season: swaps added, removed or changed status; roster
+// events added or removed; and every manager whose certified total moved.
+function diffBackups(before, after) {
+  const years = new Set([
+    ...Object.keys((before && before.seasons) || {}),
+    ...Object.keys((after && after.seasons) || {}),
+  ]);
+  const seasons = {};
+  let changed = false;
+
+  for (const year of [...years].sort()) {
+    const a = ((before && before.seasons) || {})[year] || {};
+    const b = ((after && after.seasons) || {})[year] || {};
+
+    const aSwaps = new Map((a.swaps || []).map((s, i) => [swapId(s, i), s]));
+    const bSwaps = new Map((b.swaps || []).map((s, i) => [swapId(s, i), s]));
+    const swapsAdded = [...bSwaps.keys()].filter((k) => !aSwaps.has(k)).map((k) => bSwaps.get(k));
+    const swapsRemoved = [...aSwaps.keys()].filter((k) => !bSwaps.has(k)).map((k) => aSwaps.get(k));
+    const swapsChanged = [];
+    for (const [k, swap] of bSwaps) {
+      const prior = aSwaps.get(k);
+      if (prior && prior.status !== swap.status) {
+        swapsChanged.push({ swap, from: prior.status || null, to: swap.status || null });
+      }
+    }
+
+    const flatten = (sd) => {
+      const out = new Map();
+      for (const [mgr, weeks] of Object.entries((sd || {}).roster_dates || {})) {
+        for (const [wk, players] of Object.entries(weeks || {})) {
+          for (const [player, d] of Object.entries(players || {})) {
+            out.set(`${mgr}|${wk}|${player}`, `${(d || {}).add_date || ''}→${(d || {}).drop_date || ''}`);
+          }
+        }
+      }
+      return out;
+    };
+    const aEvents = flatten(a);
+    const bEvents = flatten(b);
+    const rosterAdded = [...bEvents.keys()].filter((k) => !aEvents.has(k));
+    const rosterRemoved = [...aEvents.keys()].filter((k) => !bEvents.has(k));
+    const rosterMoved = [...bEvents.keys()]
+      .filter((k) => aEvents.has(k) && aEvents.get(k) !== bEvents.get(k))
+      .map((k) => ({ key: k, from: aEvents.get(k), to: bEvents.get(k) }));
+
+    const totalsMoved = {};
+    const aT = a.certified_totals || {};
+    const bT = b.certified_totals || {};
+    for (const mgr of new Set([...Object.keys(aT), ...Object.keys(bT)])) {
+      const d = ((bT[mgr] || {}).total || 0) - ((aT[mgr] || {}).total || 0);
+      if (Math.abs(d) > 0.01) totalsMoved[mgr] = Math.round(d * 10) / 10;
+    }
+
+    const any =
+      swapsAdded.length ||
+      swapsRemoved.length ||
+      swapsChanged.length ||
+      rosterAdded.length ||
+      rosterRemoved.length ||
+      rosterMoved.length ||
+      Object.keys(totalsMoved).length;
+    if (!any) continue;
+    changed = true;
+    seasons[year] = {
+      swaps_added: swapsAdded,
+      swaps_removed: swapsRemoved,
+      swaps_changed: swapsChanged,
+      roster_events_added: rosterAdded,
+      roster_events_removed: rosterRemoved,
+      roster_events_moved: rosterMoved,
+      certified_totals_moved: totalsMoved,
+    };
+  }
+
+  return { changed, seasons };
+}
+
+// Which dated files to delete. Keeps everything within `keepDays` of today, and — because a file
+// this small is not worth a cliff — never deletes the newest one even if it has aged out.
+function expiredBackupDates(dates, todayISO, keepDays = BACKUP_KEEP_DAYS) {
+  const sorted = [...new Set(dates || [])].filter(Boolean).sort();
+  if (sorted.length <= 1) return [];
+  const cutoff = new Date(`${todayISO}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - keepDays);
+  const cutoffISO = cutoff.toISOString().slice(0, 10);
+  const newest = sorted[sorted.length - 1];
+  return sorted.filter((d) => d < cutoffISO && d !== newest);
+}
+
+// ============================================================
+// The local backup trail
+// ============================================================
+// Dated copies of the irreplaceable half of the database, next to db.json on the persistent disk.
+// One per day, a year of them, ~90 MB in total — five current db.json files.
+//
+// This is NOT a replacement for Render's disk snapshot, and it is not trying to be: a snapshot can
+// restore the whole machine and this cannot. It answers the question a snapshot cannot, which is the
+// one this app actually produces — WHEN did a roster window change, and what did the standings look
+// like before it did. Seven days of whole-disk rollback never answered that, and the 8/31
+// misattribution took twelve days to notice.
+
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(DB_FILE), 'backups');
+const BACKUP_FILE_RE = /^wmmc-(\d{4}-\d{2}-\d{2})\.json$/;
+
+function backupPathFor(dateISO) {
+  return path.join(BACKUP_DIR, `wmmc-${dateISO}.json`);
+}
+
+// Dates of the copies on disk, oldest first. Returns [] when the directory does not exist yet,
+// because "no backups" and "no directory" are the same answer to every caller.
+function listBackupDates() {
+  try {
+    return fs
+      .readdirSync(BACKUP_DIR)
+      .map((f) => (BACKUP_FILE_RE.exec(f) || [])[1])
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function readBackup(dateISO) {
+  try {
+    return JSON.parse(fs.readFileSync(backupPathFor(dateISO), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// The certified totals that make a restored file checkable rather than merely present. Computed
+// per season through captureScoreSnapshot — the same function every other before/after vet in this
+// file uses, so the number in a backup is the number the scoreboard would have shown.
+function certifiedTotalsForBackup(db) {
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const out = {};
+  for (const [year, sd] of Object.entries((db && db.seasons) || {})) {
+    if (!sd || typeof sd !== 'object') continue;
+    try {
+      out[year] = captureScoreSnapshot(sd, todayET).totals;
+    } catch (e) {
+      console.error(`[Backup] Could not certify ${year}:`, e.message);
+    }
+  }
+  return out;
+}
+
+// Write today's copy and prune what has aged out. Same-day writes overwrite, so a busy day leaves
+// one file holding that day's final state rather than hundreds of intermediate ones.
+//
+// Never throws: a backup that fails must not take a request down with it. It logs and reports.
+function writeLocalBackup(db, opts = {}) {
+  const dateISO = opts.dateISO || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const payload = buildIrreplaceableBackup(db, { certifiedTotals: certifiedTotalsForBackup(db) });
+    const json = JSON.stringify(payload);
+    const file = backupPathFor(dateISO);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, json);
+    fs.renameSync(tmp, file);
+
+    const expired = expiredBackupDates(listBackupDates(), dateISO, BACKUP_KEEP_DAYS);
+    for (const d of expired) {
+      try {
+        fs.unlinkSync(backupPathFor(d));
+      } catch (e) {
+        console.error('[Backup] Could not prune', d, e.message);
+      }
+    }
+    // Byte length, not string length — the two differ wherever a name carries an accent, and a
+    // listing that disagrees with `ls` about the same file is a small thing that wastes real time.
+    const bytes = Buffer.byteLength(json);
+    console.log(`[Backup] Wrote ${file} (${(bytes / 1024).toFixed(1)} KB), pruned ${expired.length}`);
+    return { ok: true, date: dateISO, bytes, pruned: expired, summary: describeBackup(payload) };
+  } catch (e) {
+    console.error('[Backup] Failed:', e.message);
+    return { ok: false, date: dateISO, error: e.message };
+  }
+}
+
+// Once a day is the whole point — the trail is one copy per day, and a copy taken every hour would
+// bury the day a roster window moved in twenty-three that look the same. Armed at boot, and armed
+// regardless of season_closed: the offseason is exactly when a quiet corruption goes unnoticed.
+let backupTimer = null;
+function scheduleLocalBackup() {
+  if (backupTimer) clearTimeout(backupTimer);
+  const next = getNextEasternHour(23);
+  const delay = Math.max(60_000, next.getTime() - Date.now());
+  backupTimer = setTimeout(() => {
+    writeLocalBackup(readDB());
+    scheduleLocalBackup();
+  }, delay);
+  if (backupTimer.unref) backupTimer.unref();
+  console.log(`[Backup] Daily copy scheduled for ${next.toISOString()} (11pm Eastern)`);
+}
+
 // One-glance integrity summary of a DB snapshot for the restore-point picker: when it was last
 // saved, how many managers it carries, and per active-or-not season the status + schedule_dates
 // length (the field whose silent wipe motivated this tooling) + roster-attribution manager count.
@@ -851,6 +1184,79 @@ function addAuditEntry(db, action, details, email) {
     db.audit_log = db.audit_log.slice(0, MAX_AUDIT_ENTRIES);
   }
 }
+
+// ============================================================
+// The local backup trail — endpoints
+// ============================================================
+
+// GET /api/admin/backups — every dated copy on disk, newest first, each with its contents.
+//
+// summarizeBackup was written to answer "what is in this snapshot without restoring it" and has
+// been inert since; describeBackup is the same idea for this trail, and here it is actually wired
+// to something a commissioner can call.
+app.get('/api/admin/backups', requireCommissioner, (req, res) => {
+  const dates = listBackupDates().reverse();
+  const backups = dates.map((date) => {
+    let bytes;
+    try {
+      bytes = fs.statSync(backupPathFor(date)).size;
+    } catch {
+      bytes = 0;
+    }
+    const payload = readBackup(date);
+    return { date, bytes, ...(payload ? describeBackup(payload) : { unreadable: true }) };
+  });
+  res.json({
+    dir: BACKUP_DIR,
+    keep_days: BACKUP_KEEP_DAYS,
+    count: backups.length,
+    total_bytes: backups.reduce((n, b) => n + b.bytes, 0),
+    backups,
+  });
+});
+
+// GET /api/admin/backups/:date — one copy in full. This is the surgical restore the whole-disk
+// snapshot cannot do: read the swap log as it stood that day and put back the one thing that moved,
+// instead of rolling the machine back and losing every sync since.
+app.get('/api/admin/backups/:date', requireCommissioner, (req, res) => {
+  const { date } = req.params;
+  if (!DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const payload = readBackup(date);
+  if (!payload) return res.status(404).json({ error: `No backup for ${date}`, available: listBackupDates() });
+  res.json(payload);
+});
+
+// GET /api/admin/backups/:from/diff/:to — what changed between two days.
+//
+// The reason the trail exists. A whole-disk snapshot can restore last Tuesday; it cannot tell you
+// that a roster window moved on Tuesday, which is the question twelve days of silence raised. Pass
+// `to=today` to compare a stored copy against the live database without writing anything.
+app.get('/api/admin/backups/:from/diff/:to', requireCommissioner, (req, res) => {
+  const { from, to } = req.params;
+  if (!DATE_RE.test(from)) return res.status(400).json({ error: 'from must be YYYY-MM-DD' });
+
+  const before = readBackup(from);
+  if (!before) return res.status(404).json({ error: `No backup for ${from}`, available: listBackupDates() });
+
+  let after;
+  if (to === 'today' || to === 'live') {
+    const db = readDB();
+    after = buildIrreplaceableBackup(db, { certifiedTotals: certifiedTotalsForBackup(db) });
+  } else {
+    if (!DATE_RE.test(to)) return res.status(400).json({ error: 'to must be YYYY-MM-DD, or "today"' });
+    after = readBackup(to);
+    if (!after) return res.status(404).json({ error: `No backup for ${to}`, available: listBackupDates() });
+  }
+
+  res.json({ from, to, ...diffBackups(before, after) });
+});
+
+// POST /api/admin/backups — write today's copy now rather than waiting for 11pm. Idempotent:
+// the day's file is overwritten, so this is safe to run before any change worth being able to undo.
+app.post('/api/admin/backups', requireCommissioner, (req, res) => {
+  const result = writeLocalBackup(readDB());
+  res.status(result.ok ? 200 : 500).json(result);
+});
 
 // ============================================================
 // Current-season pointer
@@ -19736,6 +20142,9 @@ function armSchedulers() {
   scheduleMLBApiSync();
   scheduleScoreboardPost();
   scheduleWeeklyAutoAdvance();
+  // Deliberately NOT gated on season_closed like the four above. The offseason is exactly when a
+  // quiet corruption goes unnoticed, and this is the only thing watching for it.
+  scheduleLocalBackup();
 }
 
 // ============================================================
