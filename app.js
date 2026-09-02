@@ -800,150 +800,55 @@ function managerWeekSubtotal(seasonData, managerName, schedWeek, weekIdx, rowsAr
   if (!seasonData || !managerName) return 0;
   const round = schedWeek.round;
   const week = schedWeek.week;
-  const weekKey = `${round}|${week}`;
 
   // Every row for this round+week (legacy 'PP1P'/'PP2P' folded in), looked up once instead of
   // scanning the whole weekly array twice per call. See weeklyRowIndex.
   const weekBucket = (weeklyRowIndex(rowsArr) || new Map()).get(`${parentRound(round)}|${week}`) || EMPTY_WEEK_BUCKET;
 
-  const scheduleDates = seasonData.schedule_dates || [];
-  const seasonStartDate = scheduleDates[0] ? scheduleDates[0].start : null;
-  // Scope to THIS manager — eligibility must never pull in another manager's swap-in.
-  // The unscoped version leaked one manager's same-week add onto every other manager
-  // who also had a swap that week (e.g. Austin's Shane Baz showing on Anton's roster).
-  const approvedSwaps = (seasonData.swaps || []).filter((s) => s.status === 'approved' && s.manager === managerName);
-  const allMgrDates = (seasonData.roster_dates && seasonData.roster_dates[managerName]) || null;
-
-  let weekRoster = (seasonData.rosters &&
-    seasonData.rosters[managerName] &&
-    seasonData.rosters[managerName][weekKey]) || { batters: [], pitchers: [] };
-  const weekRosterDates =
-    (seasonData.roster_dates &&
-      seasonData.roster_dates[managerName] &&
-      seasonData.roster_dates[managerName][weekKey]) ||
-    {};
-
-  // wasDroppedBefore: strip players who were dropped in a previous week's
-  // roster_dates (drop_date < weekStart) and not re-added this week.
-  const weekStart = scheduleDates[weekIdx] ? scheduleDates[weekIdx].start : null;
-  if (weekStart && allMgrDates) {
-    const addedThisWeek = new Set([
-      ...approvedSwaps.filter((s) => s.player_in && s.week_key === weekKey).map((s) => s.player_in),
-      ...Object.entries(weekRosterDates)
-        .filter(([, d]) => d.add_date)
-        .map(([p]) => p),
-    ]);
-    const wasDroppedBefore = (player) => {
-      if (addedThisWeek.has(player)) return false;
-      for (const [wk, players] of Object.entries(allMgrDates)) {
-        if (wk === weekKey) continue;
-        const pd = players[player];
-        if (pd && pd.drop_date && pd.drop_date < weekStart) {
-          const reAddedLater = Object.values(allMgrDates).some(
-            (wkp) => wkp[player] && wkp[player].add_date > pd.drop_date && wkp[player].add_date < weekStart
-          );
-          if (!reAddedLater) return true;
-        }
-      }
-      return false;
-    };
-    weekRoster = {
-      batters: weekRoster.batters.filter((p) => !wasDroppedBefore(p)),
-      pitchers: weekRoster.pitchers.filter((p) => !wasDroppedBefore(p)),
-    };
-  }
-
-  // Carry-forward eligibility: a player added in an earlier (or this) week via
-  // roster_dates and not dropped as of this week is still rostered now, even if a
-  // stale roster array (or a first-season repair) never carried them into this
-  // week's array. Without this, a mid-season swap-in silently stops scoring the
-  // week after it was added (e.g. Devers added 5/9 vanished from Weeks 2+). Mirrors
-  // isStillActiveForMgr but evaluated as of this week's end.
-  const weekEnd = scheduleDates[weekIdx] ? scheduleDates[weekIdx].end : null;
-  // Scope carry-forward to this week's PERIOD so a prior period's players don't leak into a new
-  // submission period (matches the server's managerWeekSubtotal). null for PP1 leaves it unchanged.
-  const periodStart = periodStartForSeason(seasonData, round);
-  const activeByDates = [];
-  if (allMgrDates) {
-    const latestAdd = {};
-    const latestDrop = {};
-    for (const players of Object.values(allMgrDates)) {
-      for (const [p, d] of Object.entries(players)) {
-        if (
-          d.add_date &&
-          (!periodStart || d.add_date >= periodStart) &&
-          (!weekEnd || d.add_date <= weekEnd) &&
-          (!latestAdd[p] || d.add_date > latestAdd[p])
-        ) {
-          latestAdd[p] = d.add_date;
-        }
-        if (
-          d.drop_date &&
-          (!periodStart || d.drop_date >= periodStart) &&
-          (!weekEnd || d.drop_date <= weekEnd) &&
-          (!latestDrop[p] || d.drop_date > latestDrop[p])
-        ) {
-          latestDrop[p] = d.drop_date;
-        }
-      }
-    }
-    for (const p of Object.keys(latestAdd)) {
-      if (!latestDrop[p] || latestAdd[p] > latestDrop[p]) activeByDates.push(p);
-    }
-  }
-
-  // Eligibility set matches renderRosterData's historicalBatters /
-  // historicalPitchers exactly (post-pool-filter removal).
-  const eligible = new Set([
-    ...weekRoster[listKey],
-    ...activeByDates,
-    ...Object.keys(weekRosterDates).filter(
-      (p) => !seasonStartDate || !weekRosterDates[p].drop_date || weekRosterDates[p].drop_date >= seasonStartDate
-    ),
-    ...approvedSwaps
-      .filter(
-        (s) =>
-          s.player_in &&
-          s.week_key === weekKey &&
-          (!seasonStartDate || !s.swap_date || s.swap_date >= seasonStartDate) &&
-          (weekRosterDates[s.player_in] || weekBucket.rows.some((r) => r[playerKey] === s.player_in))
-      )
-      .map((s) => s.player_in),
-  ]);
-
-  // Manager-attributed rows first; then null-manager rows for eligible
-  // players, deduped by player so a stale ghost row can't double-count
-  // alongside an attributed entry.
-  const weekManagerRows = weekBucket.byManager.get(managerName) || [];
-  const allWeekRows = weekManagerRows.slice();
-  weekBucket.rows.forEach((r) => {
-    if (r.manager === managerName) return;
-    // A row attributed to ANOTHER manager still counts here when this manager held the player for
-    // part of the week — a mid-week handover (trade / waiver pickup). `manager` is a sticky derived
-    // cache naming whoever held him at compile time, so it cannot arbitrate a contested week; the
-    // date windows can, and manager_scores carries the split the server computed from daily data.
-    const contested = !!(r.manager_scores && Object.prototype.hasOwnProperty.call(r.manager_scores, managerName));
-    if (r.manager && !weekRosterDates[r[playerKey]] && !contested) return;
-    if (!eligible.has(r[playerKey]) || allWeekRows.some((x) => x[playerKey] === r[playerKey])) return;
-    allWeekRows.push(r);
+  // WHO this manager held, and for which days — one derivation, shared with the server through
+  // js/rosterWindows.js. This replaced a union of five heuristics (the roster array filtered by a
+  // was-he-dropped-earlier scan, a period-scoped carry-forward, this week's date bucket, and the
+  // approved swaps whose week_key matched) that the server had its own slightly different copy of.
+  // 43 of the 98 entries in MEMORY.md were the two disagreeing. See MEMORY.md 2026-09-02.
+  const weekDates = (seasonData.schedule_dates || [])[weekIdx] || {};
+  const windows = weekRosterWindows({
+    weekStart: weekDates.start || null,
+    weekEnd: weekDates.end || null,
+    periodStart: periodStartForSeason(seasonData, round),
+    mgrDates: (seasonData.roster_dates || {})[managerName] || {},
+    rosterArray: ((seasonData.rosters || {})[managerName] || {})[`${round}|${week}`] || {},
   });
 
-  const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
-  if (detailOut) {
-    // Per-player points for this week, restricted to players of this type (the eligibility
-    // set is type-agnostic — activeByDates / roster_dates keys span both lists — so include a
-    // player only when they have a row of this type or sit in this type's roster array). The
-    // scores still sum to the returned subtotal: array-only players contribute 0.
-    const scoreByPlayer = {};
-    for (const r of finalRows) {
-      scoreByPlayer[r[playerKey]] = (scoreByPlayer[r[playerKey]] || 0) + rowScore(r, managerName);
-    }
-    const typeRoster = new Set(weekRoster[listKey] || []);
-    for (const p of eligible) {
-      if (p in scoreByPlayer || typeRoster.has(p)) detailOut.push({ player: p, score: scoreByPlayer[p] || 0 });
+  // One row per player. A dual-source sync can leave two; prefer the one already attributed to this
+  // manager. A row attributed to ANOTHER manager still counts here when the windows say this manager
+  // held him — `manager` is a sticky derived cache naming whoever held him at compile time, so it
+  // cannot arbitrate a week the player changed hands in. rowScore reads the split for those.
+  const byPlayer = new Map();
+  for (const r of weekBucket.rows) {
+    if (!windows[r[playerKey]]) continue;
+    const existing = byPlayer.get(r[playerKey]);
+    if (!existing || (r.manager === managerName && existing.manager !== managerName)) {
+      byPlayer.set(r[playerKey], r);
     }
   }
-  return finalRows.reduce((s, r) => s + rowScore(r, managerName), 0);
+
+  if (detailOut) {
+    // Per-player points for this week, restricted to players of this type: the windows span both
+    // lists, so include a player only when he has a row of this type or sits in this type's roster
+    // array. The scores still sum to the returned subtotal — array-only players contribute 0.
+    const typeRoster = new Set(
+      (((seasonData.rosters || {})[managerName] || {})[`${round}|${week}`] || {})[listKey] || []
+    );
+    for (const player of Object.keys(windows)) {
+      const row = byPlayer.get(player);
+      if (row) detailOut.push({ player, score: rowScore(row, managerName) });
+      else if (typeRoster.has(player)) detailOut.push({ player, score: 0 });
+    }
+  }
+
+  let total = 0;
+  for (const row of byPlayer.values()) total += rowScore(row, managerName);
+  return total;
 }
 
 // What ONE manager earned from ONE weekly stat row. Normally the row's stored weekly_score — but a

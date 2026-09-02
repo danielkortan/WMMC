@@ -6322,12 +6322,29 @@ function managerWeekWindowServer(dates, weekDates) {
   return start || end ? { start, end } : null;
 }
 
-// `opts.rowScore(row, managerName)` replaces the row scorer. Default: managerRowScoreForWeek, the
-// live behaviour to the byte. The ONLY caller that passes it is auditEligibilityDrift, which uses it
-// to reproduce what app.js scores — the client is not sent daily rows, so its rowScore reads the
-// stored weekly_score or the manager_scores split and never clips to a window. Whether that agrees
-// with the server is a question nobody had asked.
-function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut, opts = {}) {
+// THE FORMER LIVE PATH. No longer scores anything: managerWeekSubtotal below is the windows
+// derivation now. This is kept, unchanged, as the shadow audit's control — the thing the new path is
+// measured against, on every season, forever. Delete it only when nobody wants that comparison
+// any more.
+//
+// It unions FIVE heuristics into an `eligible` set: the roster array filtered by a
+// was-he-dropped-earlier scan, a period-scoped carry-forward, this week's own date bucket, and the
+// approved swaps whose week_key matches. Forty-three of the ninety-eight entries in MEMORY.md are
+// this set disagreeing with the date windows.
+//
+// `opts.rowScore(row, managerName)` replaces the row scorer, which auditEligibilityDrift uses to
+// reproduce what app.js scores.
+function managerWeekSubtotalLegacy(
+  sd,
+  managerName,
+  schedWeek,
+  weekIdx,
+  rowsArr,
+  playerKey,
+  listKey,
+  detailOut,
+  opts = {}
+) {
   if (!sd || !managerName) return 0;
   const round = schedWeek.round;
   const week = schedWeek.week;
@@ -6761,7 +6778,7 @@ function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
 // of also changing how a row is valued. The window is handed over as the add/drop shape that
 // function already understands, where a boundary equal to the week's own boundary is expressed as
 // absent — which is how a full week keeps using the stored weekly_score, exactly as today.
-function managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, detailOut) {
+function managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, detailOut, opts = {}) {
   if (!sd || !managerName) return 0;
   const { round, week } = schedWeek;
   const weekKey = `${round}|${week}`;
@@ -6790,19 +6807,34 @@ function managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, row
 
   let total = 0;
   for (const [player, row] of byPlayer) {
-    const score = managerRowScoreForWeek(
-      sd,
-      row,
-      playerKey,
-      managerName,
-      weekKey,
-      weekDates,
-      windowAsDates(windows[player], weekDates.start, weekDates.end)
-    );
+    const score = opts.rowScore
+      ? opts.rowScore(row, managerName)
+      : managerRowScoreForWeek(
+          sd,
+          row,
+          playerKey,
+          managerName,
+          weekKey,
+          weekDates,
+          windowAsDates(windows[player], weekDates.start, weekDates.end)
+        );
     total += score;
     if (detailOut) detailOut.push({ player, score });
   }
   return total;
+}
+
+// THE LIVE PATH, as of R1. Windows in, points out.
+//
+// Every caller keeps the signature it always had — `listKey` is accepted and ignored, because the
+// windows carry both lists and there is nothing left to select. The five-heuristic union that used
+// to live here is managerWeekSubtotalLegacy, kept as the shadow audit's control.
+//
+// The switch was made after the burn-in on the frozen 2026 season came back with identical
+// per-manager totals from the legacy set, the windows, and what the browser scores — see
+// MEMORY.md 2026-09-02 and GET /api/seasons/:year/eligibility-shadow.
+function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut, opts = {}) {
+  return managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, detailOut, opts);
 }
 
 // What app.js scores a row at. The client is NOT sent daily rows, so it cannot clip to a window: it
@@ -6852,8 +6884,8 @@ function auditEligibilityDrift(sd) {
       ]) {
         const legacyDetail = [];
         const windowDetail = [];
-        const legacy = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, legacyDetail);
-        const candidate = managerWeekSubtotalFromWindows(sd, mgr, schedWeek, idx, rows, key, windowDetail);
+        const legacy = managerWeekSubtotalLegacy(sd, mgr, schedWeek, idx, rows, key, listKey, legacyDetail);
+        const candidate = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, windowDetail);
         // The SAME eligibility the server uses, scored the way the browser scores it. A difference
         // here is not a proposal — it is the app's scoreboard and the certified totals disagreeing
         // today.

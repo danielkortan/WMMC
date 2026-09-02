@@ -262,27 +262,26 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   unnoticed. It holds no stat rows, so it is a surgical repair source, never a whole-database
   restore.
 
-- **There are still TWO derivations of "who was rostered this week", and R1 is the plan to get to
-  one.** `managerWeekSubtotal` (server.js) builds an `eligible` SET by unioning five heuristics —
-  the roster array filtered by a was-he-dropped-earlier scan, a period-scoped carry-forward, this
-  week's own date bucket, and the approved swaps whose `week_key` matches. `js/rosterWindows.js`
-  (canonical, unit-tested) ↔ `server.js` builds a per-player WINDOW from `roster_dates` alone, with
-  the roster array as a NARROW fallback for a player who has no date event at all. **43 of the 98
-  MEMORY entries are the two disagreeing.** `managerWeekRosterWindows` is now a thin adapter over
-  the mirrored module; the extraction was verified behaviour-preserving against the original
-  implementation over 200,000 randomized inputs, so it changed no score. **The switch is NOT
-  flipped**: `managerWeekSubtotalFromWindows` is the candidate and nothing calls it except
-  `auditEligibilityDrift`, exposed read-only as `GET /api/seasons/:year/eligibility-shadow`. Flip it
-  when that comes back with an empty `totals_delta` on the frozen 2026 season. One asymmetry was
-  preserved deliberately rather than fixed blind: the array fallback tests PERIOD-SCOPED add/drop
-  maps, so a holdover whose only date event is in a prior period reads as having no dates and the
-  array puts him back — the shadow report counts it as `prior_period_via_array` so the fix is made
-  on real numbers.
+- **There is now ONE derivation of "who was rostered this week" (R1, done).** `js/rosterWindows.js` (canonical, unit-tested) is it, mirrored in
+  `server.js` and read off `window` by `app.js` — **all three copies of `managerWeekSubtotal` now
+  consume the same function.** It builds a per-player WINDOW from `roster_dates`, scoped to the
+  period, with the roster array as a NARROW fallback for a player who has no date event at all.
+  What it replaced was a union of five heuristics (the roster array filtered by a
+  was-he-dropped-earlier scan, a period-scoped carry-forward, this week's own date bucket, and the
+  approved swaps whose `week_key` matched), which server.js and app.js each had a slightly different
+  copy of — **43 of the 98 MEMORY entries are those disagreeing.**
+  **`managerWeekSubtotalLegacy` (server.js) is that union, kept unchanged as the shadow audit's
+  permanent control**, not as a scoring path; `GET /api/seasons/:year/eligibility-shadow` measures
+  the live path against it on any season, forever. Do not delete it while that comparison is wanted.
+  One asymmetry was preserved rather than fixed blind: the array fallback tests PERIOD-SCOPED
+  add/drop maps, so a holdover whose only date event is in a prior period reads as having no dates
+  and the array puts him back — the shadow counts it as `prior_period_via_array` (0 on production 2026) so the fix is made on real numbers.
 
-- **`managerWeekSubtotal` exists a THIRD time, in `app.js`, and it is what renders the scoreboard the
-  league reads.** `CLAUDE.md` never listed it as a mirrored pair and nothing guarded it. **R1's
-  switch therefore cannot be flipped on the server alone** — one side moving guarantees a window
-  where the app and the server disagree. Worse, the two do not even score a row the same way today:
+- **`managerWeekSubtotal` exists THREE times — server.js, app.js and the shared derivation they now
+  both call.** `CLAUDE.md` never listed the app.js copy as a mirrored pair and nothing guarded it; it
+  was found only by grepping for callers of the function about to be changed. **Before altering
+  anything on the scoring path, count the copies first.** The two sides still do not score a ROW the
+  same way, and that part is correct:
   the client is not sent daily rows, so `rowScore` (app.js) reads the stored `weekly_score` or the
   `manager_scores` split and **never clips to a window**, while the server's `managerRowScoreForWeek`
   re-derives from the daily rows inside the manager's window. `applyManagerScoreSplits` writes
