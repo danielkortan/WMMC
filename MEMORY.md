@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-01 | Season-one QA review: the roster-window problem, and an offseason archive plan                    | [MEMORY](#2026-09-01-season-one-qa-review-the-roster-window-problem-and-an-offseason-archive-plan)                                |
 | 2026-09-01 | The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`           | [MEMORY](#2026-09-01-the-staging-refresh-is-a-recurring-chore-and-two-open-prs-had-been-overtaken-by-main)                        |
 | 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
 | 2026-08-31 | A refused correction was an attribution repair, and the season closed on top of it                | [MEMORY](#2026-08-31-a-refused-correction-was-an-attribution-repair-and-the-season-closed-on-top-of-it)                           |
@@ -107,6 +108,84 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-01 — Season-one QA review: the roster-window problem, and an offseason archive plan
+
+First full season in the books, so: a deep-dive review of the code and the season's own record,
+written up as [`SEASON_ONE_REVIEW.md`](SEASON_ONE_REVIEW.md) and
+[`OFFSEASON_ARCHIVE_PLAN.md`](OFFSEASON_ARCHIVE_PLAN.md), plus a read-only measurement script
+(`scripts/season-storage-report.js`).
+
+**The season's bug list is one bug.** By categorization, 43 of the 98 logged entries (44%) are
+the same structural problem: _who was rostered, when_ is stored in four places that must agree
+(`roster_dates`, `sd.rosters`, the sticky `manager` field, `player_dates`) and recomputed at read
+time by unioning five heuristics in `managerWeekSubtotal`. Every clause of that union was added
+to fix a specific incident, so together they are a fixed-point of past bugs rather than a
+definition — nothing says what the answer _should_ be, so nothing can say when it is wrong.
+`managerWeekRosterWindows`, written for the drift audit, already derives the same answer from
+`roster_dates` alone in 60 lines. Promoting it to THE answer (shadow-compared during a burn-in) is
+the top recommendation.
+
+**Two findings worth acting on before anything else.**
+
+- **No re-attribution pass exists anywhere.** `rebuildWeeklyFromDaily` writes the `manager` field
+  and only ever runs for the week being synced; `recomputeAllWeeklyScores` recomputes every
+  week's score and never touches `manager`. That is the mechanism behind the 8/31 entry, and it
+  is still true. A `reattributeWeeklyRows(sd)` wired into `/recompute-scores` is a few hours.
+- **`alertOnRollupDrift` de-duplicates on a MODULE-SCOPE variable** (`lastRollupDriftSignature`),
+  so a drift whose signature does not change posts to Slack ONCE and is silent forever after.
+  A persistent defect is the case that most needs escalation and is the exact case this
+  suppresses — and nothing is persisted, so "was this week ever flagged?" is unanswerable after
+  the fact. This is why the audit that was built for exactly the 8/31 shape did not save us.
+  Persist findings the way `correction_flags` now works, re-post ones that age, and gate `/close`
+  on them.
+
+**Mirror audit, run today: everything is in sync.** `SCORING`, `SEASON_SCHEDULE` (round/week),
+`detectScoreSwings`, `checkSwapLimit`, `oddsWindowForDate`, `gameFactor`, `ROUND_LABELS`,
+`PARK_FACTORS`, `APPEARANCE_PRIORS`, `ODDS_WINDOW`, `SLACK_EMOJI` — no drift. Two notes: CLAUDE.md
+is stale in saying `gameFactor` differs by clamp name (it no longer does —
+`computeTeamQualityFactors` is the only one that still does), and the two copies of
+`calculateBattingScore`/`calculatePitchingScore` have **structurally** diverged: js/ is
+table-driven off `BATTING_STAT_KEYS`, server.js hardcodes eight lines. Values agree today, but
+adding a stat category would now update the client silently and the server not at all. Neither
+pair is mirror-guarded.
+
+**Storage: the cost is memory, not disk.** Measured on a synthesized 19.8 MB season-scale
+db.json: 272 ms to parse (paid on every request, TWICE on authenticated ones because the auth
+middleware reads the db and then the handler reads it again), 45 MB of heap per parsed copy,
+402 ms to serialize per write, 183 MB peak RSS for one parse+write cycle — against the 400 MB
+ceiling `render.yaml` already had to raise after the 2026-07-06 OOM crash loop. The 1 GB Render
+disk costs ~$0.25/month and is irrelevant. **Two seasons in one file is ~90 MB per parsed copy;
+three is the wall.**
+
+**~93% of the stat rows belong to players nobody rostered.** `performMLBSync` iterates the entire
+boxscore and pushes a daily row per player per game; `rebuildWeeklyFromDaily` then writes a weekly
+row per player per week with `manager: null`. The pool is MLB's whole active catalog (~1,600
+names) because that is what the swap-form autocomplete wants — but only the NAMES are needed for
+that, not sixteen weeks of stat lines. Filtering the sync to rostered players fixes six findings
+at once and is forward-looking (it does not touch 2026).
+
+**The archive is a compaction with a proof.** `POST /archive` keeps every rostered player-day and
+drops the rest, then re-runs `captureScoreSnapshot` and refuses to write unless the per-manager,
+per-week totals are identical to the cent — `force` does not override that one. It is the
+before/after totals vet CLAUDE.md already requires, applied to a change that should be invisible
+by construction. ~10× smaller, and an archived season fits under the Upstash 1 MB limit, which
+turns the backup from partial (it strips daily rows today) into complete.
+
+**The one real loss is the What If sandbox**, which scores counterfactuals from the full league.
+After archiving, a 2026 scenario can only use players someone actually rostered. Tier 1 (compact
+dailies, keep every weekly row) preserves league-wide totals at 4.5 MB instead of 0.8 MB if that
+matters more than the bytes. It is a league-experience call, not an engineering one.
+
+**Also found, small and real:** the asset cache-bust rewrite in server.js uses `/\?v=\d+/g` but
+the pre-push hook now stamps 8-char git hashes, so `app.js` and `mobile.css` are never rewritten
+and `styles.css?v=54461f12` comes out mangled as `?v=<timestamp>f12` — the hook's content hashes
+already do the job, so the runtime rewrite should just be deleted. `express.static(__dirname)`
+serves the repo root and `DB_FILE` defaults to `__dirname/db.json`, so on staging (which sets no
+`DB_PATH` on purpose) `GET /db.json` serves the database. `LOGIN_PASSWORD` defaults to a value
+committed in the source. And no test executes a line of `server.js` or `app.js` — all 640 import
+from `js/` only, leaving 39,137 of 44,571 lines uncovered, including the function that computed
+the season's standings.
 
 ## 2026-09-01 — The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`
 
