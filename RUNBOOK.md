@@ -336,6 +336,79 @@ Every applied change is logged server-side as `[Reattribute] …` and recorded i
 3. If weekly totals look stale after a roster correction, **Rebuild Totals** re-derives them
    from stored daily data without re-fetching from MLB.
 
+## Stat retention — storing only players somebody rostered
+
+85.5% of the rows in `db.json`, and 83.2% of its bytes, are per-game stats for players nobody in
+this league ever rostered. The sync writes a row for every player in every game it fetches. The cost
+is not the disk (a gigabyte, about a quarter a month) — it is that `readDB()` parses the whole file
+on every request, twice on an authenticated one, against a 400 MB heap on a 512 MB instance.
+
+`sd.stat_retention` turns that off for a season. **Default `'all'`, which is the behaviour this app
+has always had.** Set it to `'rostered'` and the four sync paths (the 4am daily sync, a manual week
+sync, and both Google Sheets processors) skip any player who is not in the season's keep-set.
+
+**The keep-set is deliberately permissive** — under-keeping loses points, over-keeping costs bytes,
+and those are not the same kind of mistake. A player is kept if he appears in ANY of: the roster
+arrays, `roster_dates`, either side of any swap **including a pending one**, any submission
+including one awaiting approval, or `sd.held_players`. Pending swaps matter: one approved on
+Thursday can be stamped with a Tuesday `add_date`, and Tuesday's rows have to already exist for
+that to score.
+
+It also **stands itself down** below a keep-set of 40 players (`RETENTION_MIN_KEEP`) — a season
+that small is far more likely half-loaded than genuinely tiny, and filtering against it would throw
+away a week of real stats. Every sync logs what it did: `[Retention] PP1 Week 2: kept 168 players,
+declined 1,204 unrostered row(s)`.
+
+### Check what it would cost, before turning it on
+
+```bash
+curl -s https://wmmc.live/api/seasons/2027/stat-retention \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+`rows_that_would_not_be_written` is measured against the rows already stored, so it is this season's
+own number rather than an estimate.
+
+### Turn it on
+
+```bash
+curl -s -X POST https://wmmc.live/api/seasons/2027/stat-retention \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"mode":"rostered"}' | jq
+```
+
+This is **forward-looking**: it changes what the next sync writes and touches not one stored row,
+which is why it needs no before/after totals vet. Turning it off (`{"mode":"all"}`) is always safe.
+
+### The one hazard, and its repair
+
+A player **nobody** had — not rostered, not submitted, not in any swap — who is then given a
+**back-dated** add by a commissioner. His rows for those days were never written, so he would score
+zero for them.
+
+The repair is the one that already exists for a stale week:
+
+```bash
+curl -s -X POST https://wmmc.live/api/mlb/sync \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"year":"2027","round":"PP1","week":"Week 2"}' | jq
+```
+
+That re-fetches the week from the MLB Stats API and now keeps him, because the keep-set changed the
+moment he was rostered. **This is why retention is a filter over regenerable data and not a delete.**
+
+To keep a player ahead of anyone rostering him (a call-up you want tracked), add him explicitly —
+he then survives every filter for the rest of the season:
+
+```bash
+-d '{"hold":["Roman Anthony"]}'
+```
+
 ## The local backup trail — dated copies of what cannot be re-fetched
 
 Render takes a disk snapshot every 24 hours and keeps seven days. That covers total corruption. It
