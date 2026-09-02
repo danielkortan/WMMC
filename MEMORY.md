@@ -154,6 +154,21 @@ between two managers is not inherently safe — what is dangerous is a write tha
 points. `allowReleases` still parses as an alias for `force`. Released rows are still listed in
 full rather than counted, because they are what a reader most needs to check by eye.
 
+**Applied to production the same day.** 1,295 rows relabelled across all 16 weeks, `totals_delta`
+empty, no force needed — the standings did not move by a hundredth of a point. The five rows that
+gained an owner:
+
+```
+PP1 Week 4 · Sandy Alcantara (pitching, -1.85): Alex Thalacker → Austin Johnson
+PP2 Week 5 · Bryce Elder     (pitching,   4.8): Alex Thalacker → Daniel Kortan
+PP2 Week 5 · Ryan Weathers   (pitching,  22.4): nobody → Daniel Kortan
+QF  Week 1 · Kyle Karros     (batting,     42): nobody → Alex Thalacker
+QF  Week 1 · Ian Seymour     (pitching,  19.9): nobody → Joey Auclair
+```
+
+The last three are the 8/31 defect's whole footprint. Their points always scored — only the label
+was missing. The console recipe is in `RUNBOOK.md` → "Repairing the `manager` field on closed weeks".
+
 **The dry run also took production down the first time it ran, and the cause was the clone.** It
 did `JSON.parse(JSON.stringify(sd))` on a 15.6 MB season of which 12.5 MB is daily rows it never
 mutates, then ran `captureScoreSnapshot` twice over it, against `--max-old-space-size=400` on a

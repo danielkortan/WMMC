@@ -249,6 +249,83 @@ curl -s -X POST https://wmmc.live/api/mlb/apply-corrections \
 that only changed OWNER does not appear in it at all, and a row the re-sync would DELETE does not
 either. The refusal post's row list covers both; the dry run does not.
 
+## Repairing the `manager` field on closed weeks (re-attribution)
+
+The `manager` field on a `weekly_batting` / `weekly_pitching` row says who is credited with that
+player that week. It is written in exactly ONE place — `rebuildWeeklyFromDaily`, which only ever
+runs for the week being synced — so once a week closes its attribution is frozen. `recomputeAllWeeklyScores`
+recomputes every week's SCORE and never touches it. `POST /api/seasons/:year/reattribute-weekly` is
+the only thing that can fix one.
+
+**It is DRY RUN by default.** An apply is refused with a 409 if it would move any manager's total,
+because re-attribution is a labelling repair and a totals change means either it is finding real
+lost points or the derivation is wrong. `force: true` overrides; read the changes first.
+
+**A large `released` count is normal and is not a red flag.** `managerWeekSubtotal` never trusted
+`manager` — the `eligible` set (roster_dates + the week arrays + the swap log) decides which rows a
+manager may claim — so a row stamped with a manager who did not hold that player was already
+filtered out of his subtotal. Releasing it changes no score. Judge the run by `totals_delta`, not by
+the direction of the changes. (The 2026 season's repair relabelled 1,295 rows, 1,290 of them
+releases, and moved exactly zero points.)
+
+What it DOES fix is every surface that reads a row directly rather than through the subtotal: Slack's
+Best/Worst lines, the Live tab, roster listings, and the Season Stats leaderboards.
+
+On **wmmc.live**, logged in as commissioner, DevTools (F12) → Console. Paste this once; it runs
+immediately. Change `apply: true` to `apply: false` for a dry run.
+
+```js
+(async () => {
+  const Y = String(new Date().getFullYear());
+  const res = await fetch(`/api/seasons/${Y}/reattribute-weekly`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Email': localStorage.wmmc_logged_in_email,
+      'X-User-Password': localStorage.wmmc_logged_in_password,
+    },
+    body: JSON.stringify({ apply: true }),
+  });
+  const d = await res.json();
+  window.wmmcReattr = d;
+
+  if (res.status === 409) {
+    console.error('REFUSED — this would move points, so nothing was written:');
+    console.error(d.error);
+    console.table(d.totals_delta);
+    return;
+  }
+  if (!res.ok) return console.error('Failed:', res.status, d.error || d);
+
+  const s = d.summary || {};
+  console.log(
+    `%c${d.applied ? 'APPLIED' : 'DRY RUN'} — ${s.total} rows relabelled across ${(s.weeks || []).length} weeks`,
+    'font-weight:bold;font-size:13px'
+  );
+  console.table({
+    claimed: s.claimed,
+    'changed hands': s.moved,
+    released: s.released,
+    'shared weeks': s.contested,
+  });
+
+  console.log('Per-manager totals delta (empty = no score moved):');
+  console.table(d.totals_delta);
+
+  const notReleased = (d.changes || []).filter((l) => !/ → nobody$/.test(l.replace(/ \[shared week\]$/, '')));
+  console.log(`The ${notReleased.length} changes that give a row to a manager:`);
+  for (const l of notReleased) console.log('  ' + l);
+
+  if (d.skipped_weeks && d.skipped_weeks.length) console.warn('Skipped weeks:', d.skipped_weeks);
+  console.log(
+    `All ${(d.changes || []).length} lines are in window.wmmcReattr.changes — e.g. copy(wmmcReattr.changes.join('\\n'))`
+  );
+})();
+```
+
+Every applied change is logged server-side as `[Reattribute] …` and recorded in the audit log under
+`reattribute_weekly` with the `totals_delta`.
+
 ## Diagnosing a stats problem
 
 1. **Data check** — per-week stored daily/weekly counts + attribution. Confirms whether a week
