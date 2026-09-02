@@ -15804,9 +15804,10 @@ app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) 
 // of anything touching attribution — and the dry run exists so that delta can be read before
 // anything is written.
 //
-// `released` rows (a row that stops counting for anyone) are the only direction that can take points
-// away, so they are listed in full rather than counted, and { apply: true } refuses while any are
-// present unless { allowReleases: true } is also passed.
+// The apply is gated on the TOTALS moving, not on the direction of any individual change: a row
+// released to nobody is harmless when nothing scored it through `manager` anyway, and a row moved
+// between two managers is not automatically safe. `force` overrides. Released rows are still listed
+// in full, because they are what a reader most needs to check by eye.
 app.post('/api/seasons/:year/reattribute-weekly', requireCommissioner, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
@@ -15816,12 +15817,21 @@ app.post('/api/seasons/:year/reattribute-weekly', requireCommissioner, (req, res
   if (!sd) return res.status(404).json({ error: 'Season not found' });
 
   const apply = !!(req.body && req.body.apply);
-  const allowReleases = !!(req.body && req.body.allowReleases);
+  const force = !!(req.body && (req.body.force || req.body.allowReleases));
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
-  // Plan against a throwaway clone so a dry run cannot leave a half-applied season behind, and so
-  // the "after" totals are real rather than predicted.
-  const candidate = JSON.parse(JSON.stringify(sd));
+  // Plan against a throwaway copy so a dry run cannot leave a half-applied season behind, and so the
+  // "after" totals are measured rather than predicted.
+  //
+  // Copy ONLY what gets written. A `JSON.parse(JSON.stringify(sd))` here deep-cloned the daily rows
+  // too — 12.5 MB of the 15.6 MB season, none of it mutated — and on the 400 MB heap that was enough
+  // to take the instance down when this was first run against production. The weekly arrays are the
+  // only thing reattributeWeeklyRows touches; everything else is shared by reference.
+  const candidate = {
+    ...sd,
+    weekly_batting: (sd.weekly_batting || []).map((r) => ({ ...r })),
+    weekly_pitching: (sd.weekly_pitching || []).map((r) => ({ ...r })),
+  };
   const { changes, summary, skipped_weeks } = reattributeWeeklyRows(db, candidate, { apply: true });
 
   const before = captureScoreSnapshot(sd, todayET).totals;
@@ -15844,13 +15854,27 @@ app.post('/api/seasons/:year/reattribute-weekly', requireCommissioner, (req, res
 
   if (!apply) return res.json(payload);
 
-  if (summary.released > 0 && !allowReleases) {
+  // The gate is the TOTALS, not the direction of the change.
+  //
+  // It used to refuse whenever any row would be released to nobody, on the assumption that a release
+  // removes points. Run against production that blocked 1,290 rows whose combined effect on the
+  // standings was exactly zero — because managerWeekSubtotal never trusted `manager` in the first
+  // place: the `eligible` set (roster_dates + the week arrays + the swap log) decides which rows a
+  // manager may claim, and a row stamped with a manager who did not hold that player is filtered out
+  // of his subtotal regardless. So a release is not inherently dangerous, and a MOVE between two
+  // managers is not inherently safe. What is dangerous is a write that moves somebody's points.
+  //
+  // captureScoreSnapshot has already measured that on the real candidate, so gate on it directly.
+  const movedManagers = Object.keys(totalsDelta);
+  if (movedManagers.length && !force) {
     return res.status(409).json({
       ...payload,
       error:
-        `Refusing to apply: ${summary.released} row(s) would stop counting for anybody ` +
-        `(${summary.released_rows.map(reattributionLine).join('; ')}). That is the one direction this repair ` +
-        `can take points AWAY, so it needs saying yes on purpose — re-run with allowReleases to proceed.`,
+        `Refusing to apply: this would change ${movedManagers.length} manager total(s) — ` +
+        movedManagers.map((m) => `${m} ${totalsDelta[m] > 0 ? '+' : ''}${totalsDelta[m]}`).join(', ') +
+        `. Re-attribution is a labelling repair and is expected to move nothing; a totals change means ` +
+        `either the repair is finding real lost points or the derivation is wrong. Read the changes, ` +
+        `then re-run with force to proceed.`,
       force_required: true,
     });
   }
