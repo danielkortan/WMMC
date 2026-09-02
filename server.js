@@ -6603,69 +6603,312 @@ function captureScoreSnapshot(sd, dateISO) {
 // the weekly rows or their sticky `manager` field, since those are the cache being audited. Falls
 // back to the week's roster array only for players with no date events at all (an initial
 // submission that predates roster_dates).
-function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
-  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
-  const weekStart = weekDates.start || null;
-  const weekEnd = weekDates.end || null;
+// ============================================================
+// Roster windows — mirrored from js/rosterWindows.js
+// ============================================================
+// Verbatim copy of js/rosterWindows.js (minus its `export` keywords), because server.js cannot
+// import an ES module. Guarded by tests/serverMirrors.test.js: edit js/rosterWindows.js and copy it
+// here, never one alone.
+//
+// This is the derivation the core scoring invariant describes. managerWeekRosterWindows below is now
+// a thin adapter over it — it gathers the four facts out of `sd` and calls this. Read the canonical
+// file's header for why the app has a SECOND derivation (managerWeekSubtotal's five-heuristic
+// `eligible` set) and what the plan is for retiring it.
+
+function weekRosterWindows({ weekStart, weekEnd, periodStart = null, mgrDates = {}, rosterArray = {} } = {}) {
   if (!weekStart || !weekEnd) return {};
 
-  const periodStart = periodStartForRound(sd, round);
-  const mgrDates = (sd.roster_dates || {})[manager] || {};
   const latestAdd = {};
   const latestDrop = {};
+
   // Players whose add lands AFTER this week. An effective-tomorrow swap submitted on a week's final
   // day stamps add_date = the NEXT week's first day, and files the entry under the week it was
   // submitted in — so the date is out of range for latestAdd below while sitting in this week's
   // bucket, and the incoming player is already in this week's roster array. That date is positive
-  // evidence he was not yet rostered here (the certified path reads it directly and scores him 0),
-  // so he must not reach the roster-array fallback and be credited a week he never played.
+  // evidence he was not yet rostered here, so he must not reach the roster-array fallback and be
+  // credited a week he never played.
   const joinedAfterWeek = new Set();
-  for (const players of Object.values(mgrDates)) {
-    for (const [p, d] of Object.entries(players || {})) {
+
+  const inPeriod = (date) => !periodStart || date >= periodStart;
+
+  for (const players of Object.values(mgrDates || {})) {
+    for (const [player, d] of Object.entries(players || {})) {
       if (!d) continue;
-      if (d.add_date && (!periodStart || d.add_date >= periodStart) && d.add_date > weekEnd) {
-        joinedAfterWeek.add(p);
+      if (d.add_date && inPeriod(d.add_date) && d.add_date > weekEnd) joinedAfterWeek.add(player);
+      if (d.add_date && inPeriod(d.add_date) && d.add_date <= weekEnd) {
+        if (!latestAdd[player] || d.add_date > latestAdd[player]) latestAdd[player] = d.add_date;
       }
-      if (
-        d.add_date &&
-        (!periodStart || d.add_date >= periodStart) &&
-        d.add_date <= weekEnd &&
-        (!latestAdd[p] || d.add_date > latestAdd[p])
-      ) {
-        latestAdd[p] = d.add_date;
-      }
-      if (
-        d.drop_date &&
-        (!periodStart || d.drop_date >= periodStart) &&
-        d.drop_date <= weekEnd &&
-        (!latestDrop[p] || d.drop_date > latestDrop[p])
-      ) {
-        latestDrop[p] = d.drop_date;
+      if (d.drop_date && inPeriod(d.drop_date) && d.drop_date <= weekEnd) {
+        if (!latestDrop[player] || d.drop_date > latestDrop[player]) latestDrop[player] = d.drop_date;
       }
     }
   }
 
   const windows = {};
-  for (const p of new Set([...Object.keys(latestAdd), ...Object.keys(latestDrop)])) {
-    const add = latestAdd[p] || null;
-    const drop = latestDrop[p] || null;
+  for (const player of new Set([...Object.keys(latestAdd), ...Object.keys(latestDrop)])) {
+    const add = latestAdd[player] || null;
+    const drop = latestDrop[player] || null;
     const start = add && add > weekStart ? add : weekStart;
     if (add && (!drop || add > drop)) {
-      windows[p] = { start, end: weekEnd }; // still rostered at the week's end
+      windows[player] = { start, end: weekEnd }; // still rostered at the week's end
     } else if (drop && drop >= weekStart) {
-      windows[p] = { start, end: drop }; // dropped mid-week; the drop day still counts
+      // drop_date is INCLUSIVE — the last day the player is rostered and still scores.
+      windows[player] = { start, end: drop };
     }
     // dropped before this week began, and not re-added: not his at all this week
   }
 
-  const arr = ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {};
-  for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
-    if (!windows[p] && !latestAdd[p] && !latestDrop[p] && !joinedAfterWeek.has(p)) {
-      windows[p] = { start: weekStart, end: weekEnd };
+  // The fallback, and the reason it is narrow. A player in the week's roster array with NO date
+  // event anywhere is one the array is the only record of — an original-draft player, or a week
+  // carried forward before dates were tracked. A player who has dates is governed by them, full
+  // stop, or the array would quietly resurrect somebody the dates say was dropped.
+  //
+  // KNOWN ASYMMETRY, preserved deliberately: latestAdd/latestDrop are PERIOD-SCOPED, so a holdover
+  // whose only date event is in a PRIOR period reads here as a player with no dates at all, and the
+  // array puts him back. In practice the array should never carry him — auto-advance refuses to
+  // cross a period boundary and rebuildRosterArraysFromDates re-derives from the dates — so this
+  // firing means a data anomaly rather than a normal week. Narrowing it is a scoring change, and
+  // this module was extracted to be byte-faithful to what the app already does; the shadow
+  // comparison reports it as `prior_period_via_array` so the decision is made on real numbers.
+  for (const player of [...(rosterArray.batters || []), ...(rosterArray.pitchers || [])]) {
+    if (!windows[player] && !latestAdd[player] && !latestDrop[player] && !joinedAfterWeek.has(player)) {
+      windows[player] = { start: weekStart, end: weekEnd };
     }
   }
+
   return windows;
 }
+
+// Is a window the whole week? A caller that scores by clipping daily rows can skip the clip — and,
+// more importantly, the stored weekly_score is right as it stands, which is what the existing
+// scoring path relies on.
+function isFullWeek(window, weekStart, weekEnd) {
+  if (!window) return false;
+  return (!window.start || window.start <= weekStart) && (!window.end || window.end >= weekEnd);
+}
+
+// Does this date fall inside the window? Both ends inclusive.
+function dateInWindow(window, date) {
+  if (!window || !date) return false;
+  return (!window.start || date >= window.start) && (!window.end || date <= window.end);
+}
+
+// The shape managerRowScoreForWeek already understands: an add/drop pair relative to the week,
+// where a boundary that equals the week's own boundary is expressed as absent. Lets the windows
+// derivation drive the EXISTING scorer rather than needing a second one written beside it.
+function windowAsDates(window, weekStart, weekEnd) {
+  if (!window) return null;
+  return {
+    add_date: window.start && window.start > weekStart ? window.start : undefined,
+    drop_date: window.end && window.end < weekEnd ? window.end : undefined,
+  };
+}
+
+// What the two derivations disagree about for one manager-week.
+//
+// The burn-in tool. `windows` is this module's answer; `eligible` is the legacy union of five
+// heuristics. `claimed_only_by_legacy` is the dangerous direction — a player the old path credits
+// and the windows say was not his — and `claimed_only_by_windows` is the other, which is usually a
+// player the array cache forgot.
+function diffEligibility(windows, eligible) {
+  const w = new Set(Object.keys(windows || {}));
+  const e = new Set(eligible || []);
+  return {
+    agree: [...w].filter((p) => e.has(p)).sort(),
+    claimed_only_by_windows: [...w].filter((p) => !e.has(p)).sort(),
+    claimed_only_by_legacy: [...e].filter((p) => !w.has(p)).sort(),
+  };
+}
+
+function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
+  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
+  return weekRosterWindows({
+    weekStart: weekDates.start || null,
+    weekEnd: weekDates.end || null,
+    periodStart: periodStartForRound(sd, round),
+    mgrDates: (sd.roster_dates || {})[manager] || {},
+    rosterArray: ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {},
+  });
+}
+
+// ============================================================
+// R1 — one derivation of eligibility, in shadow
+// ============================================================
+// managerWeekSubtotal decides who a manager may be paid for by unioning FIVE heuristics into an
+// `eligible` set. weekRosterWindows answers the same question from roster_dates alone. Forty-three
+// of the ninety-eight entries in MEMORY.md are the two disagreeing.
+//
+// The plan (SEASON_ONE_REVIEW.md R1) is to make the subtotal a thin consumer of the windows. That
+// is a scoring change, so it does not get shipped on an argument — it gets shipped when a burn-in
+// shows the two agree. This is the burn-in: the candidate implementation, side by side with the
+// live one, measured. It CHANGES NOTHING. Nothing calls managerWeekSubtotalFromWindows except the
+// comparison below.
+//
+// The 2026 season is the ideal subject: it is frozen, and the right answer is already known —
+// it is what the league played all year.
+
+// The candidate. Windows in, points out.
+//
+// It deliberately scores through managerRowScoreForWeek, the SAME scorer the live path uses, so the
+// comparison isolates the one variable that matters (who is eligible, and for which days) instead
+// of also changing how a row is valued. The window is handed over as the add/drop shape that
+// function already understands, where a boundary equal to the week's own boundary is expressed as
+// absent — which is how a full week keeps using the stored weekly_score, exactly as today.
+function managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, detailOut) {
+  if (!sd || !managerName) return 0;
+  const { round, week } = schedWeek;
+  const weekKey = `${round}|${week}`;
+  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
+  const windows = managerWeekRosterWindows(sd, managerName, round, week, weekIdx);
+
+  // Legacy 'PP1P' / 'PP2P' import variants share weeks with their parents — same rule as the live
+  // path, or the comparison would report a difference that is only about row matching.
+  const matchesRoundWeek = (r) => {
+    if (r.week !== week) return false;
+    if (r.round === round) return true;
+    if (r.round && r.round.endsWith('P') && r.round.slice(0, -1) === round) return true;
+    return false;
+  };
+
+  // One row per player. Dual-source syncs can leave two; prefer the one already attributed to this
+  // manager, which is what the live path's dedupe effectively does.
+  const byPlayer = new Map();
+  for (const r of rowsArr) {
+    if (!matchesRoundWeek(r) || !windows[r[playerKey]]) continue;
+    const existing = byPlayer.get(r[playerKey]);
+    if (!existing || (r.manager === managerName && existing.manager !== managerName)) {
+      byPlayer.set(r[playerKey], r);
+    }
+  }
+
+  let total = 0;
+  for (const [player, row] of byPlayer) {
+    const score = managerRowScoreForWeek(
+      sd,
+      row,
+      playerKey,
+      managerName,
+      weekKey,
+      weekDates,
+      windowAsDates(windows[player], weekDates.start, weekDates.end)
+    );
+    total += score;
+    if (detailOut) detailOut.push({ player, score });
+  }
+  return total;
+}
+
+// Run both derivations over an entire season and report every disagreement.
+//
+// Reports POINTS first, because that is the question: would flipping the switch move anybody. The
+// per-player sets follow, so a delta can be read rather than merely counted.
+//
+// `prior_period_via_array` is called out separately: it is the one asymmetry the extraction
+// preserved deliberately (see js/rosterWindows.js), and knowing how often it fires on real data is
+// the difference between fixing it and guessing at it.
+function auditEligibilityDrift(sd) {
+  const scheduleDates = sd.schedule_dates || [];
+  const managers = new Set(Object.keys(sd.rosters || {}));
+  for (const m of Object.keys(sd.roster_dates || {})) managers.add(m);
+  for (const r of sd.weekly_batting || []) if (r.manager) managers.add(r.manager);
+  for (const r of sd.weekly_pitching || []) if (r.manager) managers.add(r.manager);
+
+  const weeks = [];
+  const totals = {};
+  let priorPeriodViaArray = 0;
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (!scheduleDates[idx]) return;
+    const periodStart = periodStartForRound(sd, schedWeek.round);
+    for (const mgr of managers) {
+      const entry = { manager: mgr, round: schedWeek.round, week: schedWeek.week, sides: {} };
+      let any = false;
+
+      for (const [side, rows, key, listKey] of [
+        ['batting', sd.weekly_batting || [], 'batter', 'batters'],
+        ['pitching', sd.weekly_pitching || [], 'pitcher', 'pitchers'],
+      ]) {
+        const legacyDetail = [];
+        const windowDetail = [];
+        const legacy = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, legacyDetail);
+        const candidate = managerWeekSubtotalFromWindows(sd, mgr, schedWeek, idx, rows, key, windowDetail);
+        const delta = Math.round((candidate - legacy) * 100) / 100;
+
+        const diff = diffEligibility(
+          Object.fromEntries(windowDetail.map((d) => [d.player, {}])),
+          legacyDetail.map((d) => d.player)
+        );
+        if (Math.abs(delta) > 0.01 || diff.claimed_only_by_windows.length || diff.claimed_only_by_legacy.length) {
+          any = true;
+          entry.sides[side] = {
+            legacy: Math.round(legacy * 100) / 100,
+            candidate: Math.round(candidate * 100) / 100,
+            delta,
+            only_windows: diff.claimed_only_by_windows,
+            only_legacy: diff.claimed_only_by_legacy,
+          };
+          if (!totals[mgr]) totals[mgr] = 0;
+          totals[mgr] = Math.round((totals[mgr] + delta) * 100) / 100;
+        }
+      }
+
+      if (any) weeks.push(entry);
+
+      // How often the preserved asymmetry actually fires: a player the array puts back whose only
+      // date event is in a prior period.
+      if (periodStart) {
+        const mgrDates = (sd.roster_dates || {})[mgr] || {};
+        const arr = ((sd.rosters || {})[mgr] || {})[`${schedWeek.round}|${schedWeek.week}`] || {};
+        const hasAnyDate = (p) =>
+          Object.values(mgrDates).some(
+            (players) => players && players[p] && (players[p].add_date || players[p].drop_date)
+          );
+        const hasPeriodDate = (p) =>
+          Object.values(mgrDates).some(
+            (players) =>
+              players &&
+              players[p] &&
+              ((players[p].add_date && players[p].add_date >= periodStart) ||
+                (players[p].drop_date && players[p].drop_date >= periodStart))
+          );
+        for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
+          if (hasAnyDate(p) && !hasPeriodDate(p)) priorPeriodViaArray++;
+        }
+      }
+    }
+  });
+
+  const movedManagers = Object.fromEntries(Object.entries(totals).filter(([, d]) => Math.abs(d) > 0.01));
+  return {
+    clean: weeks.length === 0,
+    weeks_compared: scheduleDates.length,
+    managers_compared: managers.size,
+    disagreements: weeks.length,
+    totals_delta: movedManagers,
+    prior_period_via_array: priorPeriodViaArray,
+    detail: weeks,
+  };
+}
+
+// GET /api/seasons/:year/eligibility-shadow
+//
+// Read-only, writes nothing, changes no score. Run it against the frozen 2026 season: an empty
+// `totals_delta` and zero `disagreements` is the evidence R1's switch needs before it is flipped.
+app.get('/api/seasons/:year/eligibility-shadow', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  const sd = (readDB().seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const report = auditEligibilityDrift(sd);
+  const limit = Math.max(0, Math.min(500, Number(req.query.limit) || 50));
+  res.json({
+    year,
+    ...report,
+    detail: report.detail.slice(0, limit),
+    detail_truncated: report.detail.length > limit ? report.detail.length - limit : 0,
+  });
+});
 
 // ============================================================
 // Stat retention — what the sync is allowed to store

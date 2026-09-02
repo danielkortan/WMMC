@@ -336,6 +336,46 @@ Every applied change is logged server-side as `[Reattribute] …` and recorded i
 3. If weekly totals look stale after a roster correction, **Rebuild Totals** re-derives them
    from stored daily data without re-fetching from MLB.
 
+## Eligibility shadow — is the second derivation safe to retire?
+
+The app has TWO answers to "who was rostered this week". `managerWeekSubtotal` builds an `eligible`
+SET by unioning five heuristics; `weekRosterWindows` builds a per-player WINDOW from `roster_dates`
+alone. **43 of the 98 entries in `MEMORY.md` are the two disagreeing** — whichever one a surface
+happened to call is what that surface showed.
+
+The plan (`SEASON_ONE_REVIEW.md` R1) is to make the subtotal a thin consumer of the windows. That
+is a scoring change, so it ships on evidence, not on an argument. This endpoint is the evidence:
+
+```bash
+curl -s https://wmmc.live/api/seasons/2026/eligibility-shadow \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq '{clean, disagreements, totals_delta, prior_period_via_array}'
+```
+
+**Read-only. It scores the season twice and writes nothing.** Expect it to take several seconds on a
+full season — it is roughly two `captureScoreSnapshot` passes. It does not clone the season, so it is
+not the shape that took production down in #460.
+
+What to look at, in order:
+
+- **`totals_delta`** — every manager whose total would MOVE if the switch were flipped. **Empty is
+  the goal.** Anything here must be understood before R1 proceeds.
+- **`disagreements`** — manager-weeks where the two differ at all, including where they agree on
+  points but not on who was claimed. A non-zero count with an empty `totals_delta` is the common and
+  benign case: the legacy set claims a player it then scores at zero.
+- **`only_legacy`** on each entry — players the old path claims and the windows do not. The
+  dangerous direction, and the one to read by eye.
+- **`only_windows`** — usually a player the additive roster-array cache forgot.
+- **`prior_period_via_array`** — how often the one asymmetry the extraction deliberately preserved
+  actually fires (a holdover whose only date event is in a prior period, put back by the roster
+  array). Zero means it can be narrowed safely; a non-zero count is a data anomaly to look at first.
+
+`?limit=N` bounds the `detail` array (default 50, max 500); `detail_truncated` says how many were
+left out.
+
+Run it against the **frozen 2026 season**: the right answer there is already known, because it is
+what the league played all year.
+
 ## Stat retention — storing only players somebody rostered
 
 85.5% of the rows in `db.json`, and 83.2% of its bytes, are per-game stats for players nobody in
