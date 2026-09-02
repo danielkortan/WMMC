@@ -17,7 +17,8 @@ Be honest about this, because the obvious answer is wrong.
 Going from 20 MB to 2 MB saves nothing there, and it never will.
 
 **It is the memory ceiling.** `db.json` is fully parsed on **every request** and fully
-re-serialized on **every write**. Measured on a synthesized 19.8 MB season-scale file:
+re-serialized on **every write**. Measured on a synthesized 19.8 MB season-scale file — production
+turned out to be 17.3 MB, so these figures are slightly conservative rather than inflated:
 
 |                               |                                                                                                                       |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -40,10 +41,18 @@ That is one season against a 400 MB ceiling on a 512 MB instance. **Two seasons 
 it is not being forced onto a larger instance in 2028 — and not spending another July debugging
 an OOM crash loop.
 
-**It is the backup, which is currently incomplete.** Upstash's free-tier `/set` caps at ~1 MB, so
-`slimForBackup` strips the daily rows to fit. Disaster recovery today restores standings and
-loses per-game history. **A compacted season fits whole.** That converts the backup from partial
-to complete — a correctness win that happens to also be the cost win.
+**It is the backup, which is worse off than it looks.** Upstash's free-tier `/set` caps at ~1 MB,
+so `slimForBackup` strips the daily rows to fit. On the production numbers that is nowhere near
+enough: the daily rows are 12.47 MB of a 17.3 MB file, so the slimmed payload is still **~4.83 MB
+against a ~1 MB limit** — about five times over. Disaster recovery is not merely losing per-game
+history; the backup is very likely not being written at all. `serializeForUpstash` logs when this
+happens, and `GET /api/mlb/storage-status` reports `upstash_configured` — check both before
+relying on any of it.
+
+Archiving improves this but **does not on its own fix it**: a tier-4 2026 plus the ~1.71 MB that
+sits outside it comes to ~3.5 MB, or ~2.4 MB slimmed. Still over. Making the backup work needs its
+own decision — prune `score_snapshots` and the 2025 blob out of the backup payload, or move off
+the free tier — and the archive is a prerequisite rather than the answer.
 
 **It is egress.** `GET /api/seasons` ships every season's non-daily state to every browser on
 every load, and `GET /api/seasons/:year/daily-stats` ships ~15 MB more to anyone who opens Trends
@@ -95,20 +104,45 @@ node scripts/season-storage-report.js /var/data/db.json --year 2026
 
 It classifies every stat row as rostered or free-agent **from `roster_dates` + `schedule_dates`**
 — never from the sticky `manager` field, which is the field that was wrong for twelve days in the
-semifinal — and prices four tiers. On a season-scale synthetic (17.9 MB):
+semifinal — and prices four tiers. `RUNBOOK.md` carries a browser-console version that needs no
+shell and computes the same report from endpoints the app already serves.
 
-| Tier |                                                          | Result  |
-| ---- | -------------------------------------------------------- | ------- |
-| 0    | today                                                    | 17.9 MB |
-| 1    | dailies: rostered player-days only                       | 4.5 MB  |
-| 2    | + weeklies: rostered players only                        | 1.1 MB  |
-| 3    | + drop derived caches, shrink pools and maps             | 0.83 MB |
-| 4    | + drop the duplicated `cumulative` and zero-valued stats | 0.71 MB |
+**Measured against production on 2026-09-02.** `db.json` is **17.3 MB** on disk. The 2026 season
+as the API exposes it is 15.59 MB; the remaining 1.71 MB is 2026's `score_snapshots` (which the
+API strips), the 2025 season, the managers and the audit log.
 
-Working the same numbers bottom-up from the real roster shape (8 managers × ~14 slots × ~110 game
-days, batters appearing ~85% of days and pitchers ~30%): roughly **8,000 daily rows and ~1,800
-weekly rows, landing an archived 2026 at 1.5–3 MB against today's ~18–20 MB.** Call it **a 10×
-reduction**, and run the script for the exact figure.
+| Tier |                                                          | Result   | Saves     |
+| ---- | -------------------------------------------------------- | -------- | --------- |
+| 0    | today                                                    | 15.59 MB | —         |
+| 1    | dailies: rostered player-days only                       | 5.21 MB  | −10.38    |
+| 2    | + weeklies: rostered players only                        | 2.83 MB  | −2.38     |
+| 3    | + drop derived caches, shrink pools and maps             | 2.74 MB  | **−0.09** |
+| 4    | + drop the duplicated `cumulative` and zero-valued stats | 1.82 MB  | −0.92     |
+
+Rows, by whether anyone rostered the player:
+
+| array             | rostered        | free agent       | droppable |
+| ----------------- | --------------- | ---------------- | --------- |
+| `daily_batting`   | 6,294 / 1.77 MB | 25,532 / 7.16 MB | 80.2%     |
+| `daily_pitching`  | 1,093 / 0.31 MB | 15,993 / 3.23 MB | 91.4%     |
+| `weekly_batting`  | 1,093 / 0.24 MB | 5,510 / 1.14 MB  | 82.7%     |
+| `weekly_pitching` | 924 / 0.25 MB   | 8,621 / 1.24 MB  | 85.8%     |
+
+**85.5% of stat rows, and 83.2% of stat bytes, belong to players nobody rostered.**
+
+**Two things the measurement changed.** Tier 3 is nearly worthless — 0.09 MB — because the pools,
+team maps, `mlb_ids` and the odds/hot-takes caches together come to about a tenth of a megabyte;
+all the size is in the stat rows. And the per-row field trim (tier 4) saves **ten times** what
+tier 3 does, which makes it the second-most valuable step rather than a rounding-error extra. If
+only two steps are taken, take 1 and 4.
+
+Non-stat 2026 data — rosters, `roster_dates`, swaps, submissions, roasts, the whole scoring
+invariant — is **0.25 MB**. Everything the frozen views actually need is already tiny.
+
+The bottom-up estimate that preceded this measurement predicted ~8,000 rostered daily rows against
+a real 7,387, and ~1,800 weekly rows against a real 2,017: the row model was sound. The size
+estimate was optimistic. An archived 2026 lands at **1.82 MB, an 8.6× reduction**, not the 10–20×
+first claimed.
 
 Two of those tiers are free wins on row _shape_, worth taking because they are pure duplication:
 
@@ -149,7 +183,7 @@ POST /api/seasons/:year/archive     { dryRun?: true, tier?: 2|3|4, force?: true 
 5. **`assert.deepEqual(before, after)`** — per manager, per week, to the cent. Any difference at
    all: abort, write nothing, report the diff. `force` does **not** override this one.
 6. Stamp `sd.archived = { at, tier, kept_rows, dropped_rows, bytes_before, bytes_after }`.
-7. Write, and let the Upstash mirror carry the whole season for the first time.
+7. Write. (The Upstash mirror still will not fit — see §1. That is a separate decision.)
 
 **`dryRun: true` does 1–5 and reports, writing nothing.** Run that first, every time.
 
@@ -231,9 +265,9 @@ season.
 2. **Decide §7** — tier 2/3/4 or tier 1. It is a league-experience call, not an engineering one.
 3. **Build the endpoint** with `dryRun` first. Ship the dry run, look at the diff, then enable the
    write. One PR each.
-4. **Archive 2026** after a dry run comes back with a zero totals diff. Confirm the Upstash backup
-   now carries the whole season.
-5. **Then fix it forward** — recommendation **R5** in the review stops the app from writing 93%
+4. **Archive 2026** after a dry run comes back with a zero totals diff. Then settle the backup
+   question separately (§1) — the archive alone does not get the payload under 1 MB.
+5. **Then fix it forward** — recommendation **R5** in the review stops the app from writing 85%
    dead rows in the first place, which makes the archive a tidy-up rather than a rescue. Do this
    before the 2027 draft and the 2027 archive is nearly a no-op.
 6. **Then consider R11** (splitting `db.json` from `stats-<year>.json`), which makes multi-season
