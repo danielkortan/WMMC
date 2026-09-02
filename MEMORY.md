@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-02 | The two halves of the 8/31 defect, and the boot that rewrote the committed seed file              | [MEMORY](#2026-09-02-the-two-halves-of-the-831-defect-and-the-boot-that-rewrote-the-committed-seed-file)                          |
 | 2026-09-01 | Season-one QA review: the roster-window problem, and an offseason archive plan                    | [MEMORY](#2026-09-01-season-one-qa-review-the-roster-window-problem-and-an-offseason-archive-plan)                                |
 | 2026-09-01 | The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`           | [MEMORY](#2026-09-01-the-staging-refresh-is-a-recurring-chore-and-two-open-prs-had-been-overtaken-by-main)                        |
 | 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
@@ -108,6 +109,71 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-02 — The two halves of the 8/31 defect, and the boot that rewrote the committed seed file
+
+Four PRs off yesterday's review: #452 (the review itself), #453, #454, #455. All merged and
+deployed the same afternoon.
+
+**The 8/31 defect is closed on both sides, and they are genuinely two bugs.**
+
+- **Detection (#453).** `alertOnRollupDrift` de-duplicated on `lastRollupDriftSignature`, a
+  MODULE-SCOPE variable, so a drift whose signature never changed posted to Slack once and was
+  silent forever after — and a restart forgot even that. Nothing was persisted, so "was this week
+  ever flagged?" had no answer. Findings now live on `sd.rollup_drift` in the same shape
+  `recordCorrectionFlags` uses (replaced each run so a fix clears itself; `first_seen` carried
+  across so a standing problem's age survives a deploy), the alert returns every three days saying
+  how long it has been outstanding, and `/finalize-season` and `/close` refuse over one with
+  `force`. **Under that gate the 2026 season could not have been closed.**
+- **Repair (#455).** There was no way to fix a closed week at all. `rebuildWeeklyFromDaily` writes
+  `manager` and only ever runs for the week being synced; `recomputeAllWeeklyScores` recomputes
+  every week's SCORE and never touches it. `POST /reattribute-weekly` is the repair, DRY RUN BY
+  DEFAULT, and it takes its owners from `managerWeekRosterWindows` — the roster_dates derivation —
+  deliberately NOT `findManagerForPlayerWeek`, which answers from the `sd.rosters` ARRAY cache and
+  would re-derive attribution from a second cache that is additive-only and can be stale.
+
+**Unlike every other repair in this file, that one CHANGES TOTALS on purpose.** Putting a row back
+on the manager who rostered it is what returns the points, so "no change" is the wrong success
+criterion. Instead it plans against a throwaway clone, so the "after" totals are measured rather
+than predicted, and always returns the per-manager delta from `captureScoreSnapshot`. Rows that
+would stop counting for ANYBODY are the one direction that removes points, so they are listed in
+full rather than counted and an apply refuses while any are present without `allowReleases`.
+
+**The lesson under both: every guard in this file compares a total against another total.** A
+misattribution that moves points from one manager to nobody is invisible to all of them, which is
+why it took an audit that re-derives the week from the daily rows to see it, and why that audit
+falling silent was fatal rather than annoying.
+
+**Booting the server against a test fixture rewrote `managers_seed.json` down to that fixture's
+one manager (#454), and it was staged into a commit before anyone noticed.** The `googleEmail`
+backfill in `main()` runs on EVERY boot against whatever `db.json` is present — a fixture, a
+partial restore, a staging instance that reseeded — and wrote the git-tracked seed file as a side
+effect. That file is the last line of disaster recovery for a fresh deploy. The call is gone (the
+backfill is idempotent, so a reseeded db just gets it again next boot), and `writeManagersSeed`
+now refuses to DROP anyone unless the caller opts in; only `POST /api/managers` passes
+`allowShrink`, being commissioner-only, audited, and a full replace by intent. It happened a
+SECOND time while boot-testing #455, which was branched off `main` before the guard landed — which
+is the argument for taking a guard like this before the work that needs it, not after.
+
+**Asset cache-busting had been broken for a while (#454).** The runtime rewrite matched
+`/\?v=\d+/g`, but `.githooks/pre-push` long ago moved to 8-character git content hashes and the
+regex needs a DIGIT right after the `=`. So `app.js?v=b9eb2308` and `mobile.css?v=c44aa827` were
+never rewritten at all, while `styles.css?v=54461f12` had its leading digits eaten and shipped as
+`?v=<timestamp>f12` — one stylesheet busted by accident, the other not. The hook's hashes are the
+better mechanism (they change with the file's content, not on every restart), so the rewrite was
+deleted rather than repaired. `scripts/` also came under lint for the first time; every file in
+there had been failing `no-undef` on `require`/`console`/`process`, unseen because nothing linted
+them.
+
+**Two new mirrored pairs**, `js/rollupDrift.js` and `js/attribution.js`, both guarded by
+`tests/serverMirrors.test.js`. 675 tests. The pattern held up well under a real merge conflict:
+both branches added a guard at the same anchor, and keeping both was the whole resolution.
+
+**Still open, in rough order:** R1 (one derivation of eligibility — everything else in the S1
+group is downstream of it), R4 (the roster-array heal still only ever grows), R5 (stop storing
+stat rows for players nobody rostered), R6 (the auth findings, including `GET /db.json` on
+staging), R7, R8, R9, R11, R12 — and the offseason archive endpoint itself, which
+`OFFSEASON_ARCHIVE_PLAN.md` specifies and nothing implements.
 
 ## 2026-09-01 — Season-one QA review: the roster-window problem, and an offseason archive plan
 
