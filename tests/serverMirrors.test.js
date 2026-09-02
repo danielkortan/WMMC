@@ -62,6 +62,28 @@ function extractConstObject(source, name) {
   throw new Error(`unbalanced braces in ${name}`);
 }
 
+// app.js is the browser's copy of the scoring path. It is not a js/ module, so nothing guarded it —
+// which is how the client came to score a row differently from the server without anyone noticing.
+const APP = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+
+describe('app.js ↔ server.js scoring pairs', () => {
+  // What ONE manager earned from ONE weekly row, as the BROWSER computes it. The client is not sent
+  // daily rows, so it cannot clip to a window: it reads weekly_score, or the manager_scores split
+  // when the server stored one. server.js carries a copy under a different name so
+  // auditEligibilityDrift can reproduce what the scoreboard shows; if the two drift, that audit
+  // starts answering about a client that does not exist.
+  it('carries app.js rowScore as clientRowScore', () => {
+    const client = extractFunction(SERVER, 'clientRowScore');
+    const app = extractFunction(APP, 'rowScore');
+    assert.equal(
+      client.replace('function clientRowScore', 'function rowScore'),
+      app,
+      'server.js clientRowScore has drifted from app.js rowScore — the shadow audit would then be ' +
+        'comparing against a client that does not exist'
+    );
+  });
+});
+
 describe('server.js mirrors of js/ modules', () => {
   it('carries js/history.js verbatim', () => {
     const canonical = canonicalTail(read('js/history.js'), 'export const WMMC_HISTORICAL_RESULTS');
