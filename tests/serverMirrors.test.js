@@ -175,6 +175,14 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  it('carries js/attribution.js verbatim', () => {
+    const canonical = canonicalTail(read('js/attribution.js'), 'export function chooseOwner');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/attribution.js — the weekly-row attribution repair must be identical in both'
+    );
+  });
+
   // The elimination ladder. lastRoundPlayed is the one that encodes "the semifinal knocks
   // nobody out of the schedule", so a drift here would put the 3rd-place game's two managers
   // back where this pair was added to get them out of: unable to submit a Finals roster.

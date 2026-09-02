@@ -6218,6 +6218,177 @@ function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
   return windows;
 }
 
+// ============================================================
+// Weekly-row attribution repair
+// ============================================================
+// The pure half lives in js/attribution.js and is mirrored VERBATIM below;
+// tests/serverMirrors.test.js fails if the two copies drift. Edit both.
+
+function chooseOwner(windowsByManager) {
+  const entries = Object.entries(windowsByManager || {});
+  if (entries.length === 0) return { owner: null, contested: false };
+  if (entries.length === 1) return { owner: entries[0][0], contested: false };
+
+  // Latest start wins (a null start means "held from the week's first day", so it loses to any
+  // explicit later add). Then latest end, then the name, so the result never depends on key order.
+  const sorted = entries.slice().sort((a, b) => {
+    const as = a[1] && a[1].start ? a[1].start : '';
+    const bs = b[1] && b[1].start ? b[1].start : '';
+    if (as !== bs) return as < bs ? 1 : -1;
+    const ae = a[1] && a[1].end ? a[1].end : '￿';
+    const be = b[1] && b[1].end ? b[1].end : '￿';
+    if (ae !== be) return ae < be ? 1 : -1;
+    return a[0].localeCompare(b[0]);
+  });
+  return { owner: sorted[0][0], contested: true };
+}
+
+// What one week's rows would change to. `rows` are that week's weekly_* rows, `playerKey` is
+// 'batter' or 'pitcher', and `ownerByPlayer` maps a player name to the result of chooseOwner.
+//
+// Reports rather than mutates, so the same call drives both the dry run and the apply. A row whose
+// `manager` already matches is not reported at all.
+function planReattribution(rows, playerKey, ownerByPlayer) {
+  const changes = [];
+  for (const row of rows || []) {
+    const player = row[playerKey];
+    const resolved = (ownerByPlayer && ownerByPlayer[player]) || { owner: null, contested: false };
+    const from = row.manager || null;
+    const to = resolved.owner || null;
+    if (from === to) continue;
+    changes.push({
+      round: row.round,
+      week: row.week,
+      type: playerKey === 'batter' ? 'batting' : 'pitching',
+      player,
+      from,
+      to,
+      contested: !!resolved.contested,
+      weekly_score: row.weekly_score || 0,
+      kind: !from ? 'claimed' : !to ? 'released' : 'moved',
+    });
+  }
+  return changes;
+}
+
+// Group the changes into the three things a commissioner actually needs to judge before applying.
+//
+// `claimed` is a row nobody was credited with that somebody now is — the 8/31 shape, and the one
+// that only ever adds points back. `moved` is a row changing hands. `released` is a row that stops
+// counting for anyone: the only direction that can take points away from a manager, so it is
+// listed separately and named in full rather than counted.
+function summarizeReattribution(changes) {
+  const claimed = [];
+  const moved = [];
+  const released = [];
+  for (const c of changes || []) {
+    if (c.kind === 'claimed') claimed.push(c);
+    else if (c.kind === 'released') released.push(c);
+    else moved.push(c);
+  }
+  const weeks = new Set((changes || []).map((c) => `${c.round}|${c.week}`));
+  return {
+    total: (changes || []).length,
+    claimed: claimed.length,
+    moved: moved.length,
+    released: released.length,
+    contested: (changes || []).filter((c) => c.contested).length,
+    weeks: [...weeks].sort(),
+    released_rows: released,
+  };
+}
+
+// One line per change, for a log or a confirm dialog.
+function reattributionLine(c) {
+  const who =
+    c.kind === 'claimed' ? `nobody → ${c.to}` : c.kind === 'released' ? `${c.from} → nobody` : `${c.from} → ${c.to}`;
+  const pts = Math.round((c.weekly_score || 0) * 100) / 100;
+  return `${c.round} ${c.week} · ${c.player} (${c.type}, ${pts} pts): ${who}${c.contested ? ' [shared week]' : ''}`;
+}
+
+// Who owned each player in one week, from the roster-date windows. Inverts managerWeekRosterWindows
+// (player -> window, per manager) into player -> { manager: window }, which is what chooseOwner
+// wants. roster_dates is the authority here on purpose: findManagerForPlayerWeek would answer from
+// the sd.rosters ARRAY cache, which is additive-only and can hold a player a swap already removed.
+function weekOwnersByPlayer(sd, round, week, weekIdx, managers) {
+  const byPlayer = {};
+  for (const mgr of managers) {
+    const windows = managerWeekRosterWindows(sd, mgr, round, week, weekIdx);
+    for (const [player, w] of Object.entries(windows)) {
+      if (!byPlayer[player]) byPlayer[player] = {};
+      byPlayer[player][mgr] = w;
+    }
+  }
+  const resolved = {};
+  for (const [player, windows] of Object.entries(byPlayer)) resolved[player] = chooseOwner(windows);
+  return resolved;
+}
+
+// Every name that could legitimately own a row. db.managers is the canonical list per the scoring
+// invariant; roster_dates and the existing row attributions are folded in so a manager who is only
+// present in the season data (a rename, a legacy import) is still a candidate rather than being
+// silently released.
+function attributionCandidateManagers(db, sd) {
+  const managers = new Set((db && db.managers ? db.managers : []).map((m) => m.name).filter(Boolean));
+  for (const m of Object.keys(sd.rosters || {})) managers.add(m);
+  for (const m of Object.keys(sd.roster_dates || {})) managers.add(m);
+  for (const r of sd.weekly_batting || []) if (r.manager) managers.add(r.manager);
+  for (const r of sd.weekly_pitching || []) if (r.manager) managers.add(r.manager);
+  return [...managers];
+}
+
+// Work out what every weekly row's `manager` should say, and optionally write it.
+//
+// Weeks with no schedule dates are SKIPPED, not cleared: managerWeekRosterWindows needs the week's
+// calendar to resolve a window and returns {} without it, so re-attributing such a week would
+// release every row in it. A week that was never scheduled has nothing to repair anyway.
+//
+// Applying also re-runs applyManagerScoreSplits for each touched week, since a week whose owners
+// changed may have gained or lost the shared-ownership split that makes a mid-week handover score
+// correctly for both sides.
+function reattributeWeeklyRows(db, sd, { apply = false } = {}) {
+  const managers = attributionCandidateManagers(db, sd);
+  const scheduleDates = sd.schedule_dates || [];
+  const changes = [];
+  const skipped = [];
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const { round, week } = schedWeek;
+    const dates = scheduleDates[idx];
+    if (!dates || !dates.start || !dates.end) {
+      skipped.push(`${round}|${week}`);
+      return;
+    }
+    const matches = (r) => r.round === round && r.week === week;
+    const batRows = (sd.weekly_batting || []).filter(matches);
+    const pitRows = (sd.weekly_pitching || []).filter(matches);
+    if (batRows.length === 0 && pitRows.length === 0) return;
+
+    const owners = weekOwnersByPlayer(sd, round, week, idx, managers);
+    const weekChanges = [
+      ...planReattribution(batRows, 'batter', owners),
+      ...planReattribution(pitRows, 'pitcher', owners),
+    ];
+    if (weekChanges.length === 0) return;
+    changes.push(...weekChanges);
+
+    if (apply) {
+      const byPlayer = new Map(weekChanges.map((c) => [`${c.type}|${c.player}`, c.to]));
+      for (const r of batRows) {
+        const key = `batting|${r.batter}`;
+        if (byPlayer.has(key)) r.manager = byPlayer.get(key);
+      }
+      for (const r of pitRows) {
+        const key = `pitching|${r.pitcher}`;
+        if (byPlayer.has(key)) r.manager = byPlayer.get(key);
+      }
+      applyManagerScoreSplits(sd, round, week);
+    }
+  });
+
+  return { changes, summary: summarizeReattribution(changes), skipped_weeks: skipped };
+}
+
 // Compare every manager-week's certified subtotal against the same week rebuilt from daily rows.
 // Returns one finding per disagreeing manager-week, each naming the players responsible.
 function auditWeeklyRollupDrift(sd, { tolerance = 0.5 } = {}) {
@@ -15440,6 +15611,85 @@ app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) 
   db.seasons[year] = sd;
   writeDB(db);
   res.json({ ok: true });
+});
+
+// POST /api/seasons/:year/reattribute-weekly — repair the `manager` field on weekly stat rows.
+//
+// DRY RUN BY DEFAULT. Pass { apply: true } to write. This is the only operation in the app that can
+// repair a closed week's attribution: rebuildWeeklyFromDaily writes `manager` and only ever runs for
+// the week being synced, and recomputeAllWeeklyScores recomputes every week's score while never
+// touching it. Before this, a correction applied after a week closed left that week mis-attributed
+// permanently — and mis-attributed points are invisible to every guard in the file, because they all
+// compare a total against another total.
+//
+// Unlike POST /recompute-scores this CHANGES TOTALS, on purpose: putting a row back on the manager
+// who rostered it is what returns the points. So the response always carries the per-manager
+// before/after delta, computed with captureScoreSnapshot — the before/after vet CLAUDE.md requires
+// of anything touching attribution — and the dry run exists so that delta can be read before
+// anything is written.
+//
+// `released` rows (a row that stops counting for anyone) are the only direction that can take points
+// away, so they are listed in full rather than counted, and { apply: true } refuses while any are
+// present unless { allowReleases: true } is also passed.
+app.post('/api/seasons/:year/reattribute-weekly', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const apply = !!(req.body && req.body.apply);
+  const allowReleases = !!(req.body && req.body.allowReleases);
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+  // Plan against a throwaway clone so a dry run cannot leave a half-applied season behind, and so
+  // the "after" totals are real rather than predicted.
+  const candidate = JSON.parse(JSON.stringify(sd));
+  const { changes, summary, skipped_weeks } = reattributeWeeklyRows(db, candidate, { apply: true });
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+  const after = captureScoreSnapshot(candidate, todayET).totals;
+  const totalsDelta = {};
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+    if (Math.abs(d) > 0.01) totalsDelta[m] = Math.round(d * 10) / 10;
+  }
+
+  const payload = {
+    year,
+    applied: false,
+    dry_run: !apply,
+    summary,
+    skipped_weeks,
+    totals_delta: totalsDelta,
+    changes: changes.map(reattributionLine),
+  };
+
+  if (!apply) return res.json(payload);
+
+  if (summary.released > 0 && !allowReleases) {
+    return res.status(409).json({
+      ...payload,
+      error:
+        `Refusing to apply: ${summary.released} row(s) would stop counting for anybody ` +
+        `(${summary.released_rows.map(reattributionLine).join('; ')}). That is the one direction this repair ` +
+        `can take points AWAY, so it needs saying yes on purpose — re-run with allowReleases to proceed.`,
+      force_required: true,
+    });
+  }
+
+  db.seasons[year] = candidate;
+  addAuditEntry(
+    db,
+    'reattribute_weekly',
+    { year, ...summary, released_rows: undefined, totals_delta: totalsDelta },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  for (const line of changes) console.log(`[Reattribute] ${reattributionLine(line)}`);
+
+  res.json({ ...payload, applied: true, dry_run: false, _rev: computeSeasonRev(candidate) });
 });
 
 // ============================================================
