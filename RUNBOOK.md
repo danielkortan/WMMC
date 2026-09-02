@@ -249,6 +249,83 @@ curl -s -X POST https://wmmc.live/api/mlb/apply-corrections \
 that only changed OWNER does not appear in it at all, and a row the re-sync would DELETE does not
 either. The refusal post's row list covers both; the dry run does not.
 
+## Repairing the `manager` field on closed weeks (re-attribution)
+
+The `manager` field on a `weekly_batting` / `weekly_pitching` row says who is credited with that
+player that week. It is written in exactly ONE place — `rebuildWeeklyFromDaily`, which only ever
+runs for the week being synced — so once a week closes its attribution is frozen. `recomputeAllWeeklyScores`
+recomputes every week's SCORE and never touches it. `POST /api/seasons/:year/reattribute-weekly` is
+the only thing that can fix one.
+
+**It is DRY RUN by default.** An apply is refused with a 409 if it would move any manager's total,
+because re-attribution is a labelling repair and a totals change means either it is finding real
+lost points or the derivation is wrong. `force: true` overrides; read the changes first.
+
+**A large `released` count is normal and is not a red flag.** `managerWeekSubtotal` never trusted
+`manager` — the `eligible` set (roster_dates + the week arrays + the swap log) decides which rows a
+manager may claim — so a row stamped with a manager who did not hold that player was already
+filtered out of his subtotal. Releasing it changes no score. Judge the run by `totals_delta`, not by
+the direction of the changes. (The 2026 season's repair relabelled 1,295 rows, 1,290 of them
+releases, and moved exactly zero points.)
+
+What it DOES fix is every surface that reads a row directly rather than through the subtotal: Slack's
+Best/Worst lines, the Live tab, roster listings, and the Season Stats leaderboards.
+
+On **wmmc.live**, logged in as commissioner, DevTools (F12) → Console. Paste this once; it runs
+immediately. Change `apply: true` to `apply: false` for a dry run.
+
+```js
+(async () => {
+  const Y = String(new Date().getFullYear());
+  const res = await fetch(`/api/seasons/${Y}/reattribute-weekly`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Email': localStorage.wmmc_logged_in_email,
+      'X-User-Password': localStorage.wmmc_logged_in_password,
+    },
+    body: JSON.stringify({ apply: true }),
+  });
+  const d = await res.json();
+  window.wmmcReattr = d;
+
+  if (res.status === 409) {
+    console.error('REFUSED — this would move points, so nothing was written:');
+    console.error(d.error);
+    console.table(d.totals_delta);
+    return;
+  }
+  if (!res.ok) return console.error('Failed:', res.status, d.error || d);
+
+  const s = d.summary || {};
+  console.log(
+    `%c${d.applied ? 'APPLIED' : 'DRY RUN'} — ${s.total} rows relabelled across ${(s.weeks || []).length} weeks`,
+    'font-weight:bold;font-size:13px'
+  );
+  console.table({
+    claimed: s.claimed,
+    'changed hands': s.moved,
+    released: s.released,
+    'shared weeks': s.contested,
+  });
+
+  console.log('Per-manager totals delta (empty = no score moved):');
+  console.table(d.totals_delta);
+
+  const notReleased = (d.changes || []).filter((l) => !/ → nobody$/.test(l.replace(/ \[shared week\]$/, '')));
+  console.log(`The ${notReleased.length} changes that give a row to a manager:`);
+  for (const l of notReleased) console.log('  ' + l);
+
+  if (d.skipped_weeks && d.skipped_weeks.length) console.warn('Skipped weeks:', d.skipped_weeks);
+  console.log(
+    `All ${(d.changes || []).length} lines are in window.wmmcReattr.changes — e.g. copy(wmmcReattr.changes.join('\\n'))`
+  );
+})();
+```
+
+Every applied change is logged server-side as `[Reattribute] …` and recorded in the audit log under
+`reattribute_weekly` with the `totals_delta`.
+
 ## Diagnosing a stats problem
 
 1. **Data check** — per-week stored daily/weekly counts + attribution. Confirms whether a week
@@ -258,3 +335,353 @@ either. The refusal post's row list covers both; the dry run does not.
    roster/feed name mismatches on unmapped players).
 3. If weekly totals look stale after a roster correction, **Rebuild Totals** re-derives them
    from stored daily data without re-fetching from MLB.
+
+## Eligibility shadow — is the live derivation still right?
+
+There is now ONE answer to "who was rostered this week": `weekRosterWindows`, which `server.js` and
+`app.js` both consume. What it replaced was an `eligible` SET built by unioning five heuristics,
+which each file had its own slightly different copy of — **43 of the 98 entries in `MEMORY.md` are
+those disagreeing.**
+
+**The old union is still in `server.js` as `managerWeekSubtotalLegacy`, and it is not dead code.** It
+is the permanent control this endpoint measures the live path against. Run it after any change that
+touches rosters, swaps, dates or scoring — it is the cheapest before/after totals vet in the repo,
+and it works on any season.
+
+```bash
+curl -s https://wmmc.live/api/seasons/2026/eligibility-shadow \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  | jq '{clean, disagreements, totals_delta, client_totals_delta, prior_period_via_array}'
+```
+
+**Read-only. It scores the season twice and writes nothing.** Expect it to take several seconds on a
+full season — it is roughly two `captureScoreSnapshot` passes. It does not clone the season, so it is
+not the shape that took production down in #460.
+
+What to look at, in order:
+
+- **`client_totals_delta`** — read this FIRST, because it is not a proposal. It is the app's
+  scoreboard against the server's certified totals, **today**. The browser is not sent daily rows,
+  so `rowScore` (app.js) cannot clip to a window: it reads the stored `weekly_score`, or the
+  `manager_scores` split when the server wrote one — and `applyManagerScoreSplits` writes that split
+  only when TWO OR MORE managers claim the player that week. So wherever the server's eligibility set
+  claims a player it then clips to zero, the client has nothing to read but the full weekly score.
+  **A non-zero entry here is a live discrepancy, not a plan.**
+- **`totals_delta`** — every manager whose total differs between the live path and the control.
+  **Empty is the goal**, and it was empty on 2026 when the switch was made.
+- **`disagreements`** — manager-weeks where the two differ at all, including where they agree on
+  points but not on who was claimed. A non-zero count with an empty `totals_delta` is the common and
+  benign case: the control's looser set claims a player it then scores at zero. On 2026 there are
+  twelve, one per manager.
+- **`only_legacy`** on each entry — players the old path claims and the windows do not. The
+  dangerous direction, and the one to read by eye.
+- **`only_windows`** — usually a player the additive roster-array cache forgot.
+- **`prior_period_via_array`** — how often the one asymmetry the extraction deliberately preserved
+  actually fires (a holdover whose only date event is in a prior period, put back by the roster
+  array). Zero means it can be narrowed safely; a non-zero count is a data anomaly to look at first.
+
+Each `detail` entry carries all three numbers for the manager-week — `legacy` (what the server
+scores now), `candidate` (what the windows would score) and `client` (what the browser shows) —
+plus `delta` and `client_delta` against the legacy figure.
+
+`?limit=N` bounds the `detail` array (default 50, max 500); `detail_truncated` says how many were
+left out.
+
+**The switch moved both sides at once**, because `managerWeekSubtotal` exists in `app.js` too and it
+is what renders the scoreboard the league reads. Moving one alone would guarantee a window where the
+app and the server disagree. The client column is how that stays checkable.
+
+Run it against the **frozen 2026 season**: the right answer there is already known, because it is
+what the league played all year.
+
+## Stat retention — storing only players somebody rostered
+
+85.5% of the rows in `db.json`, and 83.2% of its bytes, are per-game stats for players nobody in
+this league ever rostered. The sync writes a row for every player in every game it fetches. The cost
+is not the disk (a gigabyte, about a quarter a month) — it is that `readDB()` parses the whole file
+on every request, twice on an authenticated one, against a 400 MB heap on a 512 MB instance.
+
+`sd.stat_retention` turns that off for a season. **Default `'all'`, which is the behaviour this app
+has always had.** Set it to `'rostered'` and the four sync paths (the 4am daily sync, a manual week
+sync, and both Google Sheets processors) skip any player who is not in the season's keep-set.
+
+**The keep-set is deliberately permissive** — under-keeping loses points, over-keeping costs bytes,
+and those are not the same kind of mistake. A player is kept if he appears in ANY of: the roster
+arrays, `roster_dates`, either side of any swap **including a pending one**, any submission
+including one awaiting approval, or `sd.held_players`. Pending swaps matter: one approved on
+Thursday can be stamped with a Tuesday `add_date`, and Tuesday's rows have to already exist for
+that to score.
+
+It also **stands itself down** below a keep-set of 40 players (`RETENTION_MIN_KEEP`) — a season
+that small is far more likely half-loaded than genuinely tiny, and filtering against it would throw
+away a week of real stats. Every sync logs what it did: `[Retention] PP1 Week 2: kept 168 players,
+declined 1,204 unrostered row(s)`.
+
+### Check what it would cost, before turning it on
+
+```bash
+curl -s https://wmmc.live/api/seasons/2027/stat-retention \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+`rows_that_would_not_be_written` is measured against the rows already stored, so it is this season's
+own number rather than an estimate.
+
+### Turn it on
+
+```bash
+curl -s -X POST https://wmmc.live/api/seasons/2027/stat-retention \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"mode":"rostered"}' | jq
+```
+
+This is **forward-looking**: it changes what the next sync writes and touches not one stored row,
+which is why it needs no before/after totals vet. Turning it off (`{"mode":"all"}`) is always safe.
+
+### The one hazard, and its repair
+
+A player **nobody** had — not rostered, not submitted, not in any swap — who is then given a
+**back-dated** add by a commissioner. His rows for those days were never written, so he would score
+zero for them.
+
+The repair is the one that already exists for a stale week:
+
+```bash
+curl -s -X POST https://wmmc.live/api/mlb/sync \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"year":"2027","round":"PP1","week":"Week 2"}' | jq
+```
+
+That re-fetches the week from the MLB Stats API and now keeps him, because the keep-set changed the
+moment he was rostered. **This is why retention is a filter over regenerable data and not a delete.**
+
+To keep a player ahead of anyone rostering him (a call-up you want tracked), add him explicitly —
+he then survives every filter for the rest of the season:
+
+```bash
+-d '{"hold":["Roman Anthony"]}'
+```
+
+## The local backup trail — dated copies of what cannot be re-fetched
+
+Render takes a disk snapshot every 24 hours and keeps seven days. That covers total corruption. It
+does **not** cover the shape of failure this app actually produces:
+
+- **Seven days of memory.** The 8/31 misattribution went unnoticed for twelve.
+- **All-or-nothing.** Rolling back to recover one manager's swap log throws away every stat sync and
+  every other manager's swaps since. In-season you would never actually press it.
+- **Opaque.** You cannot see what a snapshot holds without restoring it.
+
+The trail is the answer to those three. `<db dir>/backups/wmmc-YYYY-MM-DD.json`, one per day at
+**11pm Eastern**, a year of them, ~90 MB in total. It holds only what exists nowhere else:
+`roster_dates`, `rosters`, the swaps, the submissions, the roasts, the hand-set `schedule_dates`,
+the `mlb_ids` map, the audit log, and manager identities. **Passwords are stripped**, following
+`managers_seed.json`'s rule — a commissioner re-issues one in a minute, and a dated trail of copies
+would multiply the exposure of a plaintext credential.
+
+Every copy also carries **`certified_totals`** — each season's per-manager totals from
+`captureScoreSnapshot`, the same function every before/after vet in this repo uses. That is what
+makes a restored file checkable rather than merely present.
+
+Everything omitted is regenerable, and the payload says so in its own `omitted` block: the stat
+rows re-fetch from the MLB Stats API, the pools re-bootstrap, the weekly rollups rebuild from the
+dailies, the odds and hot takes recompute.
+
+### List what you have
+
+```bash
+curl -s https://wmmc.live/api/admin/backups \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+Each entry reports the things a person actually asks about — how many swaps, how many roster
+events, how many managers have a certified total — not just a byte count.
+
+### Answer "when did this change?"
+
+This is the reason the trail exists, and the one thing no whole-disk snapshot can do at any
+retention:
+
+```bash
+curl -s https://wmmc.live/api/admin/backups/2026-08-19/diff/today \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+`to` can be another date or the literal `today` (compares against the live database, writing
+nothing). It reports, per season: swaps added, removed, or changed status; roster windows added,
+removed, or moved; and every manager whose certified total moved. Bisect with it — halve the
+interval until the diff names one day.
+
+### Read one day in full, and repair surgically
+
+```bash
+curl -s https://wmmc.live/api/admin/backups/2026-08-19 \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq '.seasons["2026"].swaps'
+```
+
+Then put back the one thing that moved, through the normal endpoints. **That is the point:** you
+repair the swap log without rolling the machine back and losing every sync since.
+
+### Take one now
+
+```bash
+curl -s -X POST https://wmmc.live/api/admin/backups \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq
+```
+
+Idempotent — the day's file is overwritten — so run it before any change worth being able to undo.
+
+**This does not replace the Upstash mirror or Render's snapshots**, and it is not a whole-database
+restore: a copy holds no stat rows, so recovering from one means re-syncing the season from the MLB
+Stats API afterwards. It is the surgical half, and the half that remembers longer than a week.
+
+## Season storage report — how big is db.json, and what would an archive save?
+
+Answers "what is the database actually made of" and prices the offseason archive tiers. See
+[`OFFSEASON_ARCHIVE_PLAN.md`](OFFSEASON_ARCHIVE_PLAN.md) for what the tiers mean.
+
+**Two ways to run it. The console one needs nothing installed.**
+
+### From the browser (no deploy, no shell)
+
+On **wmmc.live**, logged in as commissioner, DevTools (F12) → Console. Paste this once; it runs
+immediately. It reads only — nothing is written.
+
+```js
+(async () => {
+  const Y = String(new Date().getFullYear());
+  const h = () => ({
+    'X-User-Email': localStorage.wmmc_logged_in_email,
+    'X-User-Password': localStorage.wmmc_logged_in_password,
+  });
+  const B = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
+  const MB = (n) => +(n / 1048576).toFixed(2);
+  console.log('Fetching… the daily rows are several MB, give it a moment.');
+
+  const [seasons, daily, disk] = await Promise.all([
+    fetch('/api/seasons').then((r) => r.json()),
+    fetch(`/api/seasons/${Y}/daily-stats`).then((r) => r.json()),
+    fetch('/api/mlb/storage-status', { headers: h() })
+      .then((r) => r.json())
+      .catch(() => ({})),
+  ]);
+  const sd = seasons[Y];
+  if (!sd) return console.error(`No season ${Y} in the payload.`);
+
+  // Who was rostered, when — from roster_dates + the schedule, never from the sticky
+  // `manager` field on a stat row (that is the field this app has had wrong before).
+  const sched = sd.schedule_dates || [];
+  const s0 = sched[0] && sched[0].start;
+  const e0 = sched[sched.length - 1] && sched[sched.length - 1].end;
+  const spans = new Map();
+  for (const weeks of Object.values(sd.roster_dates || {}))
+    for (const players of Object.values(weeks || {}))
+      for (const [p, d] of Object.entries(players || {})) {
+        const s = (d && d.add_date) || s0,
+          e = (d && d.drop_date) || e0;
+        if (!s || !e || s > e) continue;
+        if (!spans.has(p)) spans.set(p, []);
+        spans.get(p).push([s, e]);
+      }
+  const onDate = (p, dt) => (spans.get(p) || []).some(([s, e]) => dt >= s && dt <= e);
+  const inSpan = (p, a, b) => (spans.get(p) || []).some(([s, e]) => s <= b && e >= a);
+
+  const wk = new Map();
+  for (const r of [...(daily.batting || []), ...(daily.pitching || [])]) {
+    const k = `${r.round}|${r.week}`,
+      c = wk.get(k) || { start: r.date, end: r.date };
+    if (r.date < c.start) c.start = r.date;
+    if (r.date > c.end) c.end = r.date;
+    wk.set(k, c);
+  }
+
+  const split = (rows, key, isDaily) => {
+    const o = { keepN: 0, keepB: 0, dropN: 0, dropB: 0, trimB: 0 };
+    for (const r of rows || []) {
+      const b = B(r),
+        n = r[key],
+        sp = wk.get(`${r.round}|${r.week}`);
+      const keep = isDaily ? onDate(n, r.date) : sp ? inSpan(n, sp.start, sp.end) : !!r.manager;
+      if (!keep) {
+        o.dropN++;
+        o.dropB += b;
+        continue;
+      }
+      o.keepN++;
+      o.keepB += b;
+      if (isDaily && r.delta) {
+        if (r.cumulative && JSON.stringify(r.cumulative) === JSON.stringify(r.delta))
+          o.trimB += B(r.cumulative) + key.length;
+        o.trimB += B(r.delta) - B(Object.fromEntries(Object.entries(r.delta).filter(([, v]) => v)));
+      }
+    }
+    return o;
+  };
+
+  const dB = split(daily.batting, 'batter', true),
+    dP = split(daily.pitching, 'pitcher', true);
+  const wB = split(sd.weekly_batting, 'batter', false),
+    wP = split(sd.weekly_pitching, 'pitcher', false);
+
+  const disposable = ['playoff_odds', 'bracket_odds', 'hot_takes', 'upload_log'].reduce((s, k) => s + B(sd[k]), 0);
+  const shrinkable = ['batters_pool', 'pitchers_pool', 'batters_team', 'pitchers_team', 'mlb_ids'].reduce(
+    (s, k) => s + B(sd[k]),
+    0
+  );
+
+  const seen = B(sd) + B(daily.batting) + B(daily.pitching);
+  const t1 = seen - dB.dropB - dP.dropB;
+  const t2 = t1 - wB.dropB - wP.dropB;
+  const t3 = t2 - disposable - Math.round(shrinkable * 0.9);
+  const t4 = t3 - dB.trimB - dP.trimB;
+
+  console.log(`\n=== SEASON ${Y} ===`);
+  console.log(`On disk (whole db.json, every season): ${MB(disk.db_size_bytes || 0)} MB`);
+  console.log(`This season, as the API exposes it:    ${MB(seen)} MB  (score_snapshots not visible here)\n`);
+  console.table(
+    Object.entries({ daily_batting: dB, daily_pitching: dP, weekly_batting: wB, weekly_pitching: wP }).map(
+      ([k, v]) => ({
+        rows: k,
+        'rostered rows': v.keepN,
+        'rostered MB': MB(v.keepB),
+        'free-agent rows': v.dropN,
+        'free-agent MB': MB(v.dropB),
+        'droppable %': +((100 * v.dropB) / (v.keepB + v.dropB || 1)).toFixed(1),
+      })
+    )
+  );
+  console.table(
+    [
+      ['0 — today', seen],
+      ['1 — dailies: rostered player-days only', t1],
+      ['2 — + weeklies: rostered players only', t2],
+      ['3 — + drop derived caches, shrink pools', t3],
+      ['4 — + drop duplicate cumulative and zero stats', t4],
+    ].map(([tier, v]) => ({ tier, MB: MB(v), 'of today %': +((100 * v) / seen).toFixed(1) }))
+  );
+  console.log(`Upstash backup limit is ~1.00 MB. Tier 4 ${t4 <= 1048576 ? 'FITS' : 'does NOT fit'}.`);
+  if (spans.size === 0) console.warn('roster_dates was empty — nothing could be classified. Numbers are meaningless.');
+})();
+```
+
+### From a shell (exact, includes `score_snapshots`)
+
+Needs the repo checked out somewhere that can read a copy of `db.json` — a Render Shell on the
+prod service (paid instance types only), or your own machine with a downloaded copy. **The script
+must be on the branch you are running from**; it does not exist on `main` until this PR merges.
+
+```
+node scripts/season-storage-report.js /var/data/db.json --year 2026
+```
+
+`--json` emits the same report as machine-readable JSON. Both forms are read-only.

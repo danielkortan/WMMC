@@ -62,6 +62,28 @@ function extractConstObject(source, name) {
   throw new Error(`unbalanced braces in ${name}`);
 }
 
+// app.js is the browser's copy of the scoring path. It is not a js/ module, so nothing guarded it —
+// which is how the client came to score a row differently from the server without anyone noticing.
+const APP = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+
+describe('app.js ↔ server.js scoring pairs', () => {
+  // What ONE manager earned from ONE weekly row, as the BROWSER computes it. The client is not sent
+  // daily rows, so it cannot clip to a window: it reads weekly_score, or the manager_scores split
+  // when the server stored one. server.js carries a copy under a different name so
+  // auditEligibilityDrift can reproduce what the scoreboard shows; if the two drift, that audit
+  // starts answering about a client that does not exist.
+  it('carries app.js rowScore as clientRowScore', () => {
+    const client = extractFunction(SERVER, 'clientRowScore');
+    const app = extractFunction(APP, 'rowScore');
+    assert.equal(
+      client.replace('function clientRowScore', 'function rowScore'),
+      app,
+      'server.js clientRowScore has drifted from app.js rowScore — the shadow audit would then be ' +
+        'comparing against a client that does not exist'
+    );
+  });
+});
+
 describe('server.js mirrors of js/ modules', () => {
   it('carries js/history.js verbatim', () => {
     const canonical = canonicalTail(read('js/history.js'), 'export const WMMC_HISTORICAL_RESULTS');
@@ -172,6 +194,55 @@ describe('server.js mirrors of js/ modules', () => {
     assert.ok(
       SERVER.includes(canonical),
       'server.js has drifted from js/seasonRecap.js — the season-recap formatters must be identical in both'
+    );
+  });
+
+  it('carries js/rollupDrift.js verbatim', () => {
+    const canonical = canonicalTail(read('js/rollupDrift.js'), 'export const ROLLUP_DRIFT_NAG_DAYS');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/rollupDrift.js — the drift-flag recording, the alert cadence and the ' +
+        'season-close gate must be identical in both'
+    );
+  });
+
+  // The write-side keep-set. A server copy that has drifted into a NARROWER keep-set than the
+  // tested one drops stat rows for players somebody actually rostered, which is the one direction
+  // this filter must never fail in.
+  it('carries js/statRetention.js verbatim', () => {
+    const canonical = canonicalTail(read('js/statRetention.js'), 'export const STAT_RETENTION_MODES');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/statRetention.js — the stat-row keep-set must be identical in both'
+    );
+  });
+
+  // The backup's contents. A server copy that has drifted into a NARROWER key list silently stops
+  // backing something up, and the way you find out is the day you need it.
+  it('carries js/backupSet.js verbatim', () => {
+    const canonical = canonicalTail(read('js/backupSet.js'), 'export const BACKUP_FORMAT');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/backupSet.js — the irreplaceable-field lists and the diff must be identical in both'
+    );
+  });
+
+  // The derivation the core scoring invariant describes. If the server copy drifts, the scoreboard
+  // and the drift audit stop agreeing about who was rostered — which is the bug class 43 of the 98
+  // MEMORY entries are made of.
+  it('carries js/rosterWindows.js verbatim', () => {
+    const canonical = canonicalTail(read('js/rosterWindows.js'), 'export function weekRosterWindows');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/rosterWindows.js — the roster-window derivation must be identical in both'
+    );
+  });
+
+  it('carries js/attribution.js verbatim', () => {
+    const canonical = canonicalTail(read('js/attribution.js'), 'export function chooseOwner');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/attribution.js — the weekly-row attribution repair must be identical in both'
     );
   });
 

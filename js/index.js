@@ -71,6 +71,7 @@ import {
   explainPlayer,
 } from './hypothetical.js';
 import { seedFromPeriodTotals } from './seeding.js';
+import { weekRosterWindows } from './rosterWindows.js';
 import { computePlayoffStatuses, playoffStatusLabel, statusKeyForPosition } from './playoffStatus.js';
 import {
   WMMC_HISTORICAL_RESULTS,
@@ -108,6 +109,7 @@ Object.assign(window, {
   bracketOddsWindowForDate,
   formatOddsPct,
   orderWithSwapChains,
+  weekRosterWindows,
   checkSwapLimit,
   checkSwapEffectiveWindow,
   swapReasonLabel,

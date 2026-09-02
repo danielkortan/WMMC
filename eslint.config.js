@@ -41,6 +41,7 @@ const projectGlobals = {
   bracketOddsWindowForDate: 'readonly',
   formatOddsPct: 'readonly',
   orderWithSwapChains: 'readonly',
+  weekRosterWindows: 'readonly',
   checkSwapLimit: 'readonly',
   swapReasonLabel: 'readonly',
   checkSwapEffectiveWindow: 'readonly',
@@ -112,6 +113,15 @@ module.exports = [
   // Backend: node only, CommonJS.
   {
     files: ['server.js'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: { ...globals.node, ...projectGlobals },
+    },
+  },
+  // Maintenance scripts: node, CommonJS. Outside the lint surface until now, which is why every
+  // file in scripts/ failed `eslint` on no-undef for require/console/process.
+  {
+    files: ['scripts/**/*.js'],
     languageOptions: {
       sourceType: 'commonjs',
       globals: { ...globals.node, ...projectGlobals },

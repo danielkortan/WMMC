@@ -329,10 +329,18 @@ function requireCommissioner(req, res, next) {
 // Static file serving
 // ============================================================
 
-// Serve index.html through a dedicated route so we can inject the dynamic
-// version stamp and set aggressive no-cache headers that cannot be overridden.
+// Serve index.html through a dedicated route so we can set aggressive no-cache headers that
+// cannot be overridden. The shell itself is never cached, so it always names the current assets.
+//
+// It used to rewrite the assets' `?v=` stamps here at request time with `/\?v=\d+/g`. That
+// matched when the committed placeholders were plain numbers; .githooks/pre-push has since moved
+// to 8-character git content hashes, and the regex requires a DIGIT right after the `=`. So
+// `app.js?v=b9eb2308` and `mobile.css?v=c44aa827` were never rewritten at all, while
+// `styles.css?v=54461f12` had its leading digits eaten and went out as `?v=<timestamp>f12`. The
+// hook's hashes are the better mechanism anyway — they change when the file's content changes,
+// rather than on every restart — so the rewrite is gone rather than repaired.
 app.get(['/', '/index.html'], (req, res) => {
-  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8').replace(/\?v=\d+/g, '?v=' + ASSET_VERSION);
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
@@ -493,6 +501,339 @@ async function loadTimestampedBackup(dateKey) {
     console.error('[Upstash] Backup load failed:', dateKey, e.message);
     return null;
   }
+}
+
+// ============================================================
+// Backing up by replaceability — mirrored from js/backupSet.js
+// ============================================================
+// Verbatim copy of js/backupSet.js (minus its `export` keywords), because server.js cannot import
+// an ES module and the local backup writer below is the only runtime caller. Guarded by
+// tests/serverMirrors.test.js: edit js/backupSet.js and copy it here, never one alone.
+//
+// Read that file's header for the argument. The short version: Render's disk snapshot covers total
+// corruption for seven days; it cannot answer "when did this week's attribution change", and this
+// app's defects take longer than a week to notice.
+
+const BACKUP_FORMAT = 'wmmc-irreplaceable-v1';
+
+// Default retention for the dated local copies. A year of them is ~90 MB against a 1 GB disk.
+const BACKUP_KEEP_DAYS = 365;
+
+// Season fields that exist nowhere but this database.
+//
+// schedule_dates is on this list for a reason that is not size: its silent wipe is the incident
+// that motivated the boot-time integrity audit in the first place, and it is hand-set, so nothing
+// regenerates it.
+const IRREPLACEABLE_SEASON_KEYS = [
+  'status',
+  'schedule_dates',
+  'roster_dates',
+  'rosters',
+  'swaps',
+  'initial_submissions',
+  'period_submissions',
+  'submission_windows',
+  'eliminated',
+  'roasts',
+  'season_closed',
+  'mlb_ids',
+  'held_players',
+  'stat_retention',
+  'correction_flags',
+  'rollup_drift',
+];
+
+// Top-level fields likewise. audit_log is here because it is the only record of who did what —
+// a stat row can be re-fetched, a decision cannot.
+const IRREPLACEABLE_ROOT_KEYS = ['active_season', 'banner_config', 'audit_log', 'last_saved_at'];
+
+// Everything deliberately left out, with the reason. Carried in the payload so a person reading a
+// restored file three months from now does not have to guess whether something went missing.
+const REPLACEABLE_NOTE = {
+  daily_batting: 're-fetch from the MLB Stats API',
+  daily_pitching: 're-fetch from the MLB Stats API',
+  weekly_batting: 'rebuilt from the daily rows',
+  weekly_pitching: 'rebuilt from the daily rows',
+  batters_pool: 're-bootstraps from the MLB catalog',
+  pitchers_pool: 're-bootstraps from the MLB catalog',
+  batters_team: 'rewritten by the next sync',
+  pitchers_team: 'rewritten by the next sync',
+  playoff_odds: 'recomputed nightly',
+  bracket_odds: 'recomputed nightly',
+  hot_takes: 'regenerated daily',
+  score_snapshots: 'the guard trail — the certified totals below are the part worth keeping',
+  upload_log: 'a log of syncs that can be run again',
+  passwords: 'stripped on purpose — a commissioner re-issues one',
+};
+
+// Manager identities without credentials.
+function backupManagers(managers) {
+  return (managers || []).map((m) => {
+    const { password: _password, ...rest } = m || {};
+    return rest;
+  });
+}
+
+function pick(source, keys) {
+  const out = {};
+  for (const k of keys) if (source && source[k] !== undefined) out[k] = source[k];
+  return out;
+}
+
+// The payload. `certifiedTotals` maps a year to that season's per-manager totals — the caller
+// computes them (captureScoreSnapshot is server-only glue), and they are what makes this backup
+// SELF-VERIFYING: a restore can be checked against what the season actually was, rather than
+// against a hope. Without them a restored file is a set of roster dates nobody can confirm.
+function buildIrreplaceableBackup(db, { certifiedTotals = {}, createdAt = null } = {}) {
+  const seasons = {};
+  for (const [year, sd] of Object.entries((db && db.seasons) || {})) {
+    if (!sd || typeof sd !== 'object') continue;
+    seasons[year] = pick(sd, IRREPLACEABLE_SEASON_KEYS);
+    if (certifiedTotals[year]) seasons[year].certified_totals = certifiedTotals[year];
+  }
+  return {
+    format: BACKUP_FORMAT,
+    created_at: createdAt || new Date().toISOString(),
+    omitted: REPLACEABLE_NOTE,
+    ...pick(db || {}, IRREPLACEABLE_ROOT_KEYS),
+    managers: backupManagers((db || {}).managers),
+    seasons,
+  };
+}
+
+// One-glance contents, for the restore-point picker and for the list endpoint. Deliberately counts
+// the things a human would ask about — how many swaps, how many roster events — rather than bytes.
+function describeBackup(payload) {
+  const seasons = {};
+  for (const [year, sd] of Object.entries((payload && payload.seasons) || {})) {
+    let rosterEvents = 0;
+    for (const weeks of Object.values((sd || {}).roster_dates || {})) {
+      for (const players of Object.values(weeks || {})) rosterEvents += Object.keys(players || {}).length;
+    }
+    seasons[year] = {
+      status: (sd || {}).status || null,
+      schedule_dates: Array.isArray((sd || {}).schedule_dates) ? sd.schedule_dates.length : 0,
+      managers_with_dates: Object.keys((sd || {}).roster_dates || {}).length,
+      roster_events: rosterEvents,
+      swaps: Array.isArray((sd || {}).swaps) ? sd.swaps.length : 0,
+      roasts: Object.keys((sd || {}).roasts || {}).length,
+      season_closed: !!(sd || {}).season_closed,
+      certified_managers: Object.keys((sd || {}).certified_totals || {}).length,
+    };
+  }
+  return {
+    format: (payload && payload.format) || null,
+    created_at: (payload && payload.created_at) || null,
+    managers: ((payload && payload.managers) || []).length,
+    seasons,
+  };
+}
+
+// A stable identity for one swap, so two backups can be compared without depending on array order.
+function swapId(s, i) {
+  if (!s || typeof s !== 'object') return `#${i}`;
+  return [s.manager || '', s.player_out || '', s.player_in || '', s.week_key || '', s.submitted_at || ''].join('|');
+}
+
+// What changed between two dated backups.
+//
+// This is the whole argument for keeping them. A whole-disk snapshot can restore last Tuesday; it
+// cannot tell you that this week's attribution changed on Tuesday, which is the question twelve days
+// of silence actually raised. Reports per season: swaps added, removed or changed status; roster
+// events added or removed; and every manager whose certified total moved.
+function diffBackups(before, after) {
+  const years = new Set([
+    ...Object.keys((before && before.seasons) || {}),
+    ...Object.keys((after && after.seasons) || {}),
+  ]);
+  const seasons = {};
+  let changed = false;
+
+  for (const year of [...years].sort()) {
+    const a = ((before && before.seasons) || {})[year] || {};
+    const b = ((after && after.seasons) || {})[year] || {};
+
+    const aSwaps = new Map((a.swaps || []).map((s, i) => [swapId(s, i), s]));
+    const bSwaps = new Map((b.swaps || []).map((s, i) => [swapId(s, i), s]));
+    const swapsAdded = [...bSwaps.keys()].filter((k) => !aSwaps.has(k)).map((k) => bSwaps.get(k));
+    const swapsRemoved = [...aSwaps.keys()].filter((k) => !bSwaps.has(k)).map((k) => aSwaps.get(k));
+    const swapsChanged = [];
+    for (const [k, swap] of bSwaps) {
+      const prior = aSwaps.get(k);
+      if (prior && prior.status !== swap.status) {
+        swapsChanged.push({ swap, from: prior.status || null, to: swap.status || null });
+      }
+    }
+
+    const flatten = (sd) => {
+      const out = new Map();
+      for (const [mgr, weeks] of Object.entries((sd || {}).roster_dates || {})) {
+        for (const [wk, players] of Object.entries(weeks || {})) {
+          for (const [player, d] of Object.entries(players || {})) {
+            out.set(`${mgr}|${wk}|${player}`, `${(d || {}).add_date || ''}→${(d || {}).drop_date || ''}`);
+          }
+        }
+      }
+      return out;
+    };
+    const aEvents = flatten(a);
+    const bEvents = flatten(b);
+    const rosterAdded = [...bEvents.keys()].filter((k) => !aEvents.has(k));
+    const rosterRemoved = [...aEvents.keys()].filter((k) => !bEvents.has(k));
+    const rosterMoved = [...bEvents.keys()]
+      .filter((k) => aEvents.has(k) && aEvents.get(k) !== bEvents.get(k))
+      .map((k) => ({ key: k, from: aEvents.get(k), to: bEvents.get(k) }));
+
+    const totalsMoved = {};
+    const aT = a.certified_totals || {};
+    const bT = b.certified_totals || {};
+    for (const mgr of new Set([...Object.keys(aT), ...Object.keys(bT)])) {
+      const d = ((bT[mgr] || {}).total || 0) - ((aT[mgr] || {}).total || 0);
+      if (Math.abs(d) > 0.01) totalsMoved[mgr] = Math.round(d * 10) / 10;
+    }
+
+    const any =
+      swapsAdded.length ||
+      swapsRemoved.length ||
+      swapsChanged.length ||
+      rosterAdded.length ||
+      rosterRemoved.length ||
+      rosterMoved.length ||
+      Object.keys(totalsMoved).length;
+    if (!any) continue;
+    changed = true;
+    seasons[year] = {
+      swaps_added: swapsAdded,
+      swaps_removed: swapsRemoved,
+      swaps_changed: swapsChanged,
+      roster_events_added: rosterAdded,
+      roster_events_removed: rosterRemoved,
+      roster_events_moved: rosterMoved,
+      certified_totals_moved: totalsMoved,
+    };
+  }
+
+  return { changed, seasons };
+}
+
+// Which dated files to delete. Keeps everything within `keepDays` of today, and — because a file
+// this small is not worth a cliff — never deletes the newest one even if it has aged out.
+function expiredBackupDates(dates, todayISO, keepDays = BACKUP_KEEP_DAYS) {
+  const sorted = [...new Set(dates || [])].filter(Boolean).sort();
+  if (sorted.length <= 1) return [];
+  const cutoff = new Date(`${todayISO}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - keepDays);
+  const cutoffISO = cutoff.toISOString().slice(0, 10);
+  const newest = sorted[sorted.length - 1];
+  return sorted.filter((d) => d < cutoffISO && d !== newest);
+}
+
+// ============================================================
+// The local backup trail
+// ============================================================
+// Dated copies of the irreplaceable half of the database, next to db.json on the persistent disk.
+// One per day, a year of them, ~90 MB in total — five current db.json files.
+//
+// This is NOT a replacement for Render's disk snapshot, and it is not trying to be: a snapshot can
+// restore the whole machine and this cannot. It answers the question a snapshot cannot, which is the
+// one this app actually produces — WHEN did a roster window change, and what did the standings look
+// like before it did. Seven days of whole-disk rollback never answered that, and the 8/31
+// misattribution took twelve days to notice.
+
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(DB_FILE), 'backups');
+const BACKUP_FILE_RE = /^wmmc-(\d{4}-\d{2}-\d{2})\.json$/;
+
+function backupPathFor(dateISO) {
+  return path.join(BACKUP_DIR, `wmmc-${dateISO}.json`);
+}
+
+// Dates of the copies on disk, oldest first. Returns [] when the directory does not exist yet,
+// because "no backups" and "no directory" are the same answer to every caller.
+function listBackupDates() {
+  try {
+    return fs
+      .readdirSync(BACKUP_DIR)
+      .map((f) => (BACKUP_FILE_RE.exec(f) || [])[1])
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function readBackup(dateISO) {
+  try {
+    return JSON.parse(fs.readFileSync(backupPathFor(dateISO), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// The certified totals that make a restored file checkable rather than merely present. Computed
+// per season through captureScoreSnapshot — the same function every other before/after vet in this
+// file uses, so the number in a backup is the number the scoreboard would have shown.
+function certifiedTotalsForBackup(db) {
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const out = {};
+  for (const [year, sd] of Object.entries((db && db.seasons) || {})) {
+    if (!sd || typeof sd !== 'object') continue;
+    try {
+      out[year] = captureScoreSnapshot(sd, todayET).totals;
+    } catch (e) {
+      console.error(`[Backup] Could not certify ${year}:`, e.message);
+    }
+  }
+  return out;
+}
+
+// Write today's copy and prune what has aged out. Same-day writes overwrite, so a busy day leaves
+// one file holding that day's final state rather than hundreds of intermediate ones.
+//
+// Never throws: a backup that fails must not take a request down with it. It logs and reports.
+function writeLocalBackup(db, opts = {}) {
+  const dateISO = opts.dateISO || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const payload = buildIrreplaceableBackup(db, { certifiedTotals: certifiedTotalsForBackup(db) });
+    const json = JSON.stringify(payload);
+    const file = backupPathFor(dateISO);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, json);
+    fs.renameSync(tmp, file);
+
+    const expired = expiredBackupDates(listBackupDates(), dateISO, BACKUP_KEEP_DAYS);
+    for (const d of expired) {
+      try {
+        fs.unlinkSync(backupPathFor(d));
+      } catch (e) {
+        console.error('[Backup] Could not prune', d, e.message);
+      }
+    }
+    // Byte length, not string length — the two differ wherever a name carries an accent, and a
+    // listing that disagrees with `ls` about the same file is a small thing that wastes real time.
+    const bytes = Buffer.byteLength(json);
+    console.log(`[Backup] Wrote ${file} (${(bytes / 1024).toFixed(1)} KB), pruned ${expired.length}`);
+    return { ok: true, date: dateISO, bytes, pruned: expired, summary: describeBackup(payload) };
+  } catch (e) {
+    console.error('[Backup] Failed:', e.message);
+    return { ok: false, date: dateISO, error: e.message };
+  }
+}
+
+// Once a day is the whole point — the trail is one copy per day, and a copy taken every hour would
+// bury the day a roster window moved in twenty-three that look the same. Armed at boot, and armed
+// regardless of season_closed: the offseason is exactly when a quiet corruption goes unnoticed.
+let backupTimer = null;
+function scheduleLocalBackup() {
+  if (backupTimer) clearTimeout(backupTimer);
+  const next = getNextEasternHour(23);
+  const delay = Math.max(60_000, next.getTime() - Date.now());
+  backupTimer = setTimeout(() => {
+    writeLocalBackup(readDB());
+    scheduleLocalBackup();
+  }, delay);
+  if (backupTimer.unref) backupTimer.unref();
+  console.log(`[Backup] Daily copy scheduled for ${next.toISOString()} (11pm Eastern)`);
 }
 
 // One-glance integrity summary of a DB snapshot for the restore-point picker: when it was last
@@ -731,14 +1072,41 @@ function formatPool(pool) {
   return /^pool\b/i.test(s) ? s : `Pool ${s}`;
 }
 
-function writeManagersSeed(managers) {
+// Mirror the league's manager identities into the git-committed seed file, so a fresh deploy (or a
+// db.json that never arrived) still knows who is in the league.
+//
+// It refuses to DROP anyone unless the caller says so. managers_seed.json is the last line of
+// disaster recovery, it lives in the repository, and every writer here hands it the whole
+// `db.managers` array — so any code path running against a partial or test database would
+// otherwise replace the real roster with that database's. That is not hypothetical: booting the
+// server against a one-manager fixture rewrote the committed file down to that one manager, via
+// the googleEmail backfill in main(), and the change was staged into a commit before anyone
+// noticed. Removing a manager for real goes through POST /api/managers, which is a deliberate,
+// commissioner-only, audited full replace and passes allowShrink.
+function writeManagersSeed(managers, { allowShrink = false } = {}) {
   try {
+    const incoming = Array.isArray(managers) ? managers : [];
+    if (!allowShrink) {
+      const emails = new Set(incoming.map((m) => (m.email || '').toLowerCase()).filter(Boolean));
+      const existing = readManagersSeed();
+      const dropped = existing.map((m) => (m.email || '').toLowerCase()).filter((e) => e && !emails.has(e));
+      if (dropped.length) {
+        console.error(
+          `[Managers seed] REFUSED a write that would drop ${dropped.length} manager(s) from ` +
+            `managers_seed.json (${dropped.join(', ')}). The file was left alone. If this is a ` +
+            `deliberate removal, do it through the commissioner panel (POST /api/managers).`
+        );
+        return false;
+      }
+    }
     // Strip credentials (password + Google auth token) — they belong in db.json
     // only, never in the git-committed seed file.
-    const seedRecords = managers.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
+    const seedRecords = incoming.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
     fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
+    return true;
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
+    return false;
   }
 }
 
@@ -816,6 +1184,79 @@ function addAuditEntry(db, action, details, email) {
     db.audit_log = db.audit_log.slice(0, MAX_AUDIT_ENTRIES);
   }
 }
+
+// ============================================================
+// The local backup trail — endpoints
+// ============================================================
+
+// GET /api/admin/backups — every dated copy on disk, newest first, each with its contents.
+//
+// summarizeBackup was written to answer "what is in this snapshot without restoring it" and has
+// been inert since; describeBackup is the same idea for this trail, and here it is actually wired
+// to something a commissioner can call.
+app.get('/api/admin/backups', requireCommissioner, (req, res) => {
+  const dates = listBackupDates().reverse();
+  const backups = dates.map((date) => {
+    let bytes;
+    try {
+      bytes = fs.statSync(backupPathFor(date)).size;
+    } catch {
+      bytes = 0;
+    }
+    const payload = readBackup(date);
+    return { date, bytes, ...(payload ? describeBackup(payload) : { unreadable: true }) };
+  });
+  res.json({
+    dir: BACKUP_DIR,
+    keep_days: BACKUP_KEEP_DAYS,
+    count: backups.length,
+    total_bytes: backups.reduce((n, b) => n + b.bytes, 0),
+    backups,
+  });
+});
+
+// GET /api/admin/backups/:date — one copy in full. This is the surgical restore the whole-disk
+// snapshot cannot do: read the swap log as it stood that day and put back the one thing that moved,
+// instead of rolling the machine back and losing every sync since.
+app.get('/api/admin/backups/:date', requireCommissioner, (req, res) => {
+  const { date } = req.params;
+  if (!DATE_RE.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  const payload = readBackup(date);
+  if (!payload) return res.status(404).json({ error: `No backup for ${date}`, available: listBackupDates() });
+  res.json(payload);
+});
+
+// GET /api/admin/backups/:from/diff/:to — what changed between two days.
+//
+// The reason the trail exists. A whole-disk snapshot can restore last Tuesday; it cannot tell you
+// that a roster window moved on Tuesday, which is the question twelve days of silence raised. Pass
+// `to=today` to compare a stored copy against the live database without writing anything.
+app.get('/api/admin/backups/:from/diff/:to', requireCommissioner, (req, res) => {
+  const { from, to } = req.params;
+  if (!DATE_RE.test(from)) return res.status(400).json({ error: 'from must be YYYY-MM-DD' });
+
+  const before = readBackup(from);
+  if (!before) return res.status(404).json({ error: `No backup for ${from}`, available: listBackupDates() });
+
+  let after;
+  if (to === 'today' || to === 'live') {
+    const db = readDB();
+    after = buildIrreplaceableBackup(db, { certifiedTotals: certifiedTotalsForBackup(db) });
+  } else {
+    if (!DATE_RE.test(to)) return res.status(400).json({ error: 'to must be YYYY-MM-DD, or "today"' });
+    after = readBackup(to);
+    if (!after) return res.status(404).json({ error: `No backup for ${to}`, available: listBackupDates() });
+  }
+
+  res.json({ from, to, ...diffBackups(before, after) });
+});
+
+// POST /api/admin/backups — write today's copy now rather than waiting for 11pm. Idempotent:
+// the day's file is overwritten, so this is safe to run before any change worth being able to undo.
+app.post('/api/admin/backups', requireCommissioner, (req, res) => {
+  const result = writeLocalBackup(readDB());
+  res.status(result.ok ? 200 : 500).json(result);
+});
 
 // ============================================================
 // Current-season pointer
@@ -1433,6 +1874,12 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // flag a later sweep already cleared.
     if (existingSd.correction_flags) sd.correction_flags = existingSd.correction_flags;
     else delete sd.correction_flags;
+
+    // Scoring-drift flags, written only by the twice-daily audit and read by the season close, are
+    // the same family for the same reasons — including that `first_seen` is what makes a standing
+    // problem's age real. A client save carrying no copy must not reset the clock on one.
+    if (existingSd.rollup_drift) sd.rollup_drift = existingSd.rollup_drift;
+    else delete sd.rollup_drift;
 
     // The season-close record is server-authoritative for the same reason: it is written only
     // by POST /close and cleared only by POST /reopen, and it is what every scheduler reads to
@@ -3327,8 +3774,10 @@ app.post('/api/managers', requireCommissioner, (req, res) => {
   });
   addAuditEntry(db, 'managers_save', { count: req.body.length }, req.get('X-User-Email'));
   writeDB(db);
-  // Keep the committed seed file in sync so managers survive the next redeploy
-  writeManagersSeed(db.managers);
+  // Keep the committed seed file in sync so managers survive the next redeploy. This is the one
+  // caller allowed to remove someone: it is commissioner-only, audited, and a full replace is
+  // exactly what the panel's Save button means.
+  writeManagersSeed(db.managers, { allowShrink: true });
   res.json({ ok: true });
 });
 
@@ -5873,7 +6322,29 @@ function managerWeekWindowServer(dates, weekDates) {
   return start || end ? { start, end } : null;
 }
 
-function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut) {
+// THE FORMER LIVE PATH. No longer scores anything: managerWeekSubtotal below is the windows
+// derivation now. This is kept, unchanged, as the shadow audit's control — the thing the new path is
+// measured against, on every season, forever. Delete it only when nobody wants that comparison
+// any more.
+//
+// It unions FIVE heuristics into an `eligible` set: the roster array filtered by a
+// was-he-dropped-earlier scan, a period-scoped carry-forward, this week's own date bucket, and the
+// approved swaps whose week_key matches. Forty-three of the ninety-eight entries in MEMORY.md are
+// this set disagreeing with the date windows.
+//
+// `opts.rowScore(row, managerName)` replaces the row scorer, which auditEligibilityDrift uses to
+// reproduce what app.js scores.
+function managerWeekSubtotalLegacy(
+  sd,
+  managerName,
+  schedWeek,
+  weekIdx,
+  rowsArr,
+  playerKey,
+  listKey,
+  detailOut,
+  opts = {}
+) {
   if (!sd || !managerName) return 0;
   const round = schedWeek.round;
   const week = schedWeek.week;
@@ -6004,16 +6475,18 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   });
 
   const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
-  const rowScore = (r) =>
-    managerRowScoreForWeek(
-      sd,
-      r,
-      playerKey,
-      managerName,
-      weekKey,
-      scheduleDates[weekIdx],
-      weekRosterDates[r[playerKey]]
-    );
+  const rowScore = opts.rowScore
+    ? (r) => opts.rowScore(r, managerName)
+    : (r) =>
+        managerRowScoreForWeek(
+          sd,
+          r,
+          playerKey,
+          managerName,
+          weekKey,
+          scheduleDates[weekIdx],
+          weekRosterDates[r[playerKey]]
+        );
   if (detailOut) {
     for (const r of finalRows) detailOut.push({ player: r[playerKey], score: rowScore(r) });
   }
@@ -6154,68 +6627,620 @@ function captureScoreSnapshot(sd, dateISO) {
 // the weekly rows or their sticky `manager` field, since those are the cache being audited. Falls
 // back to the week's roster array only for players with no date events at all (an initial
 // submission that predates roster_dates).
-function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
-  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
-  const weekStart = weekDates.start || null;
-  const weekEnd = weekDates.end || null;
+// ============================================================
+// Roster windows — mirrored from js/rosterWindows.js
+// ============================================================
+// Verbatim copy of js/rosterWindows.js (minus its `export` keywords), because server.js cannot
+// import an ES module. Guarded by tests/serverMirrors.test.js: edit js/rosterWindows.js and copy it
+// here, never one alone.
+//
+// This is the derivation the core scoring invariant describes. managerWeekRosterWindows below is now
+// a thin adapter over it — it gathers the four facts out of `sd` and calls this. Read the canonical
+// file's header for why the app has a SECOND derivation (managerWeekSubtotal's five-heuristic
+// `eligible` set) and what the plan is for retiring it.
+
+function weekRosterWindows({ weekStart, weekEnd, periodStart = null, mgrDates = {}, rosterArray = {} } = {}) {
   if (!weekStart || !weekEnd) return {};
 
-  const periodStart = periodStartForRound(sd, round);
-  const mgrDates = (sd.roster_dates || {})[manager] || {};
   const latestAdd = {};
   const latestDrop = {};
+
   // Players whose add lands AFTER this week. An effective-tomorrow swap submitted on a week's final
   // day stamps add_date = the NEXT week's first day, and files the entry under the week it was
   // submitted in — so the date is out of range for latestAdd below while sitting in this week's
   // bucket, and the incoming player is already in this week's roster array. That date is positive
-  // evidence he was not yet rostered here (the certified path reads it directly and scores him 0),
-  // so he must not reach the roster-array fallback and be credited a week he never played.
+  // evidence he was not yet rostered here, so he must not reach the roster-array fallback and be
+  // credited a week he never played.
   const joinedAfterWeek = new Set();
-  for (const players of Object.values(mgrDates)) {
-    for (const [p, d] of Object.entries(players || {})) {
+
+  const inPeriod = (date) => !periodStart || date >= periodStart;
+
+  for (const players of Object.values(mgrDates || {})) {
+    for (const [player, d] of Object.entries(players || {})) {
       if (!d) continue;
-      if (d.add_date && (!periodStart || d.add_date >= periodStart) && d.add_date > weekEnd) {
-        joinedAfterWeek.add(p);
+      if (d.add_date && inPeriod(d.add_date) && d.add_date > weekEnd) joinedAfterWeek.add(player);
+      if (d.add_date && inPeriod(d.add_date) && d.add_date <= weekEnd) {
+        if (!latestAdd[player] || d.add_date > latestAdd[player]) latestAdd[player] = d.add_date;
       }
-      if (
-        d.add_date &&
-        (!periodStart || d.add_date >= periodStart) &&
-        d.add_date <= weekEnd &&
-        (!latestAdd[p] || d.add_date > latestAdd[p])
-      ) {
-        latestAdd[p] = d.add_date;
-      }
-      if (
-        d.drop_date &&
-        (!periodStart || d.drop_date >= periodStart) &&
-        d.drop_date <= weekEnd &&
-        (!latestDrop[p] || d.drop_date > latestDrop[p])
-      ) {
-        latestDrop[p] = d.drop_date;
+      if (d.drop_date && inPeriod(d.drop_date) && d.drop_date <= weekEnd) {
+        if (!latestDrop[player] || d.drop_date > latestDrop[player]) latestDrop[player] = d.drop_date;
       }
     }
   }
 
   const windows = {};
-  for (const p of new Set([...Object.keys(latestAdd), ...Object.keys(latestDrop)])) {
-    const add = latestAdd[p] || null;
-    const drop = latestDrop[p] || null;
+  for (const player of new Set([...Object.keys(latestAdd), ...Object.keys(latestDrop)])) {
+    const add = latestAdd[player] || null;
+    const drop = latestDrop[player] || null;
     const start = add && add > weekStart ? add : weekStart;
     if (add && (!drop || add > drop)) {
-      windows[p] = { start, end: weekEnd }; // still rostered at the week's end
+      windows[player] = { start, end: weekEnd }; // still rostered at the week's end
     } else if (drop && drop >= weekStart) {
-      windows[p] = { start, end: drop }; // dropped mid-week; the drop day still counts
+      // drop_date is INCLUSIVE — the last day the player is rostered and still scores.
+      windows[player] = { start, end: drop };
     }
     // dropped before this week began, and not re-added: not his at all this week
   }
 
-  const arr = ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {};
-  for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
-    if (!windows[p] && !latestAdd[p] && !latestDrop[p] && !joinedAfterWeek.has(p)) {
-      windows[p] = { start: weekStart, end: weekEnd };
+  // The fallback, and the reason it is narrow. A player in the week's roster array with NO date
+  // event anywhere is one the array is the only record of — an original-draft player, or a week
+  // carried forward before dates were tracked. A player who has dates is governed by them, full
+  // stop, or the array would quietly resurrect somebody the dates say was dropped.
+  //
+  // KNOWN ASYMMETRY, preserved deliberately: latestAdd/latestDrop are PERIOD-SCOPED, so a holdover
+  // whose only date event is in a PRIOR period reads here as a player with no dates at all, and the
+  // array puts him back. In practice the array should never carry him — auto-advance refuses to
+  // cross a period boundary and rebuildRosterArraysFromDates re-derives from the dates — so this
+  // firing means a data anomaly rather than a normal week. Narrowing it is a scoring change, and
+  // this module was extracted to be byte-faithful to what the app already does; the shadow
+  // comparison reports it as `prior_period_via_array` so the decision is made on real numbers.
+  for (const player of [...(rosterArray.batters || []), ...(rosterArray.pitchers || [])]) {
+    if (!windows[player] && !latestAdd[player] && !latestDrop[player] && !joinedAfterWeek.has(player)) {
+      windows[player] = { start: weekStart, end: weekEnd };
     }
   }
+
   return windows;
+}
+
+// Is a window the whole week? A caller that scores by clipping daily rows can skip the clip — and,
+// more importantly, the stored weekly_score is right as it stands, which is what the existing
+// scoring path relies on.
+function isFullWeek(window, weekStart, weekEnd) {
+  if (!window) return false;
+  return (!window.start || window.start <= weekStart) && (!window.end || window.end >= weekEnd);
+}
+
+// Does this date fall inside the window? Both ends inclusive.
+function dateInWindow(window, date) {
+  if (!window || !date) return false;
+  return (!window.start || date >= window.start) && (!window.end || date <= window.end);
+}
+
+// The shape managerRowScoreForWeek already understands: an add/drop pair relative to the week,
+// where a boundary that equals the week's own boundary is expressed as absent. Lets the windows
+// derivation drive the EXISTING scorer rather than needing a second one written beside it.
+function windowAsDates(window, weekStart, weekEnd) {
+  if (!window) return null;
+  return {
+    add_date: window.start && window.start > weekStart ? window.start : undefined,
+    drop_date: window.end && window.end < weekEnd ? window.end : undefined,
+  };
+}
+
+// What the two derivations disagree about for one manager-week.
+//
+// The burn-in tool. `windows` is this module's answer; `eligible` is the legacy union of five
+// heuristics. `claimed_only_by_legacy` is the dangerous direction — a player the old path credits
+// and the windows say was not his — and `claimed_only_by_windows` is the other, which is usually a
+// player the array cache forgot.
+function diffEligibility(windows, eligible) {
+  const w = new Set(Object.keys(windows || {}));
+  const e = new Set(eligible || []);
+  return {
+    agree: [...w].filter((p) => e.has(p)).sort(),
+    claimed_only_by_windows: [...w].filter((p) => !e.has(p)).sort(),
+    claimed_only_by_legacy: [...e].filter((p) => !w.has(p)).sort(),
+  };
+}
+
+function managerWeekRosterWindows(sd, manager, round, week, weekIdx) {
+  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
+  return weekRosterWindows({
+    weekStart: weekDates.start || null,
+    weekEnd: weekDates.end || null,
+    periodStart: periodStartForRound(sd, round),
+    mgrDates: (sd.roster_dates || {})[manager] || {},
+    rosterArray: ((sd.rosters || {})[manager] || {})[`${round}|${week}`] || {},
+  });
+}
+
+// ============================================================
+// R1 — one derivation of eligibility, in shadow
+// ============================================================
+// managerWeekSubtotal decides who a manager may be paid for by unioning FIVE heuristics into an
+// `eligible` set. weekRosterWindows answers the same question from roster_dates alone. Forty-three
+// of the ninety-eight entries in MEMORY.md are the two disagreeing.
+//
+// The plan (SEASON_ONE_REVIEW.md R1) is to make the subtotal a thin consumer of the windows. That
+// is a scoring change, so it does not get shipped on an argument — it gets shipped when a burn-in
+// shows the two agree. This is the burn-in: the candidate implementation, side by side with the
+// live one, measured. It CHANGES NOTHING. Nothing calls managerWeekSubtotalFromWindows except the
+// comparison below.
+//
+// The 2026 season is the ideal subject: it is frozen, and the right answer is already known —
+// it is what the league played all year.
+
+// The candidate. Windows in, points out.
+//
+// It deliberately scores through managerRowScoreForWeek, the SAME scorer the live path uses, so the
+// comparison isolates the one variable that matters (who is eligible, and for which days) instead
+// of also changing how a row is valued. The window is handed over as the add/drop shape that
+// function already understands, where a boundary equal to the week's own boundary is expressed as
+// absent — which is how a full week keeps using the stored weekly_score, exactly as today.
+function managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, detailOut, opts = {}) {
+  if (!sd || !managerName) return 0;
+  const { round, week } = schedWeek;
+  const weekKey = `${round}|${week}`;
+  const weekDates = (sd.schedule_dates || [])[weekIdx] || {};
+  const windows = managerWeekRosterWindows(sd, managerName, round, week, weekIdx);
+
+  // Legacy 'PP1P' / 'PP2P' import variants share weeks with their parents — same rule as the live
+  // path, or the comparison would report a difference that is only about row matching.
+  const matchesRoundWeek = (r) => {
+    if (r.week !== week) return false;
+    if (r.round === round) return true;
+    if (r.round && r.round.endsWith('P') && r.round.slice(0, -1) === round) return true;
+    return false;
+  };
+
+  // One row per player. Dual-source syncs can leave two; prefer the one already attributed to this
+  // manager, which is what the live path's dedupe effectively does.
+  const byPlayer = new Map();
+  for (const r of rowsArr) {
+    if (!matchesRoundWeek(r) || !windows[r[playerKey]]) continue;
+    const existing = byPlayer.get(r[playerKey]);
+    if (!existing || (r.manager === managerName && existing.manager !== managerName)) {
+      byPlayer.set(r[playerKey], r);
+    }
+  }
+
+  let total = 0;
+  for (const [player, row] of byPlayer) {
+    const score = opts.rowScore
+      ? opts.rowScore(row, managerName)
+      : managerRowScoreForWeek(
+          sd,
+          row,
+          playerKey,
+          managerName,
+          weekKey,
+          weekDates,
+          windowAsDates(windows[player], weekDates.start, weekDates.end)
+        );
+    total += score;
+    if (detailOut) detailOut.push({ player, score });
+  }
+  return total;
+}
+
+// THE LIVE PATH, as of R1. Windows in, points out.
+//
+// Every caller keeps the signature it always had — `listKey` is accepted and ignored, because the
+// windows carry both lists and there is nothing left to select. The five-heuristic union that used
+// to live here is managerWeekSubtotalLegacy, kept as the shadow audit's control.
+//
+// The switch was made after the burn-in on the frozen 2026 season came back with identical
+// per-manager totals from the legacy set, the windows, and what the browser scores — see
+// MEMORY.md 2026-09-02 and GET /api/seasons/:year/eligibility-shadow.
+function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut, opts = {}) {
+  return managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, detailOut, opts);
+}
+
+// What app.js scores a row at. The client is NOT sent daily rows, so it cannot clip to a window: it
+// reads the stored weekly_score, or the manager_scores split when the server computed one.
+//
+// applyManagerScoreSplits only writes that split when TWO OR MORE managers have a claim on the
+// player that week — for a single claimant it deletes it. So wherever the server's eligibility set
+// claims a player it then clips to zero, the client has nothing to read but the full weekly_score.
+// Mirrors rowScore in app.js.
+function clientRowScore(row, managerName) {
+  if (row.manager_scores && Object.prototype.hasOwnProperty.call(row.manager_scores, managerName)) {
+    return row.manager_scores[managerName] || 0;
+  }
+  return row.weekly_score || 0;
+}
+
+// Run all three derivations over an entire season and report every disagreement.
+//
+// Reports POINTS first, because that is the question: would flipping the switch move anybody. The
+// per-player sets follow, so a delta can be read rather than merely counted.
+//
+// `prior_period_via_array` is called out separately: it is the one asymmetry the extraction
+// preserved deliberately (see js/rosterWindows.js), and knowing how often it fires on real data is
+// the difference between fixing it and guessing at it.
+function auditEligibilityDrift(sd) {
+  const scheduleDates = sd.schedule_dates || [];
+  const managers = new Set(Object.keys(sd.rosters || {}));
+  for (const m of Object.keys(sd.roster_dates || {})) managers.add(m);
+  for (const r of sd.weekly_batting || []) if (r.manager) managers.add(r.manager);
+  for (const r of sd.weekly_pitching || []) if (r.manager) managers.add(r.manager);
+
+  const weeks = [];
+  const totals = {};
+  const clientTotals = {};
+  let priorPeriodViaArray = 0;
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (!scheduleDates[idx]) return;
+    const periodStart = periodStartForRound(sd, schedWeek.round);
+    for (const mgr of managers) {
+      const entry = { manager: mgr, round: schedWeek.round, week: schedWeek.week, sides: {} };
+      let any = false;
+
+      for (const [side, rows, key, listKey] of [
+        ['batting', sd.weekly_batting || [], 'batter', 'batters'],
+        ['pitching', sd.weekly_pitching || [], 'pitcher', 'pitchers'],
+      ]) {
+        const legacyDetail = [];
+        const windowDetail = [];
+        const legacy = managerWeekSubtotalLegacy(sd, mgr, schedWeek, idx, rows, key, listKey, legacyDetail);
+        const candidate = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, windowDetail);
+        // The SAME eligibility the server uses, scored the way the browser scores it. A difference
+        // here is not a proposal — it is the app's scoreboard and the certified totals disagreeing
+        // today.
+        const client = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, null, {
+          rowScore: clientRowScore,
+        });
+        const delta = Math.round((candidate - legacy) * 100) / 100;
+        const clientDelta = Math.round((client - legacy) * 100) / 100;
+
+        const diff = diffEligibility(
+          Object.fromEntries(windowDetail.map((d) => [d.player, {}])),
+          legacyDetail.map((d) => d.player)
+        );
+        if (
+          Math.abs(delta) > 0.01 ||
+          Math.abs(clientDelta) > 0.01 ||
+          diff.claimed_only_by_windows.length ||
+          diff.claimed_only_by_legacy.length
+        ) {
+          any = true;
+          entry.sides[side] = {
+            legacy: Math.round(legacy * 100) / 100,
+            candidate: Math.round(candidate * 100) / 100,
+            client: Math.round(client * 100) / 100,
+            delta,
+            client_delta: clientDelta,
+            only_windows: diff.claimed_only_by_windows,
+            only_legacy: diff.claimed_only_by_legacy,
+          };
+          if (!totals[mgr]) totals[mgr] = 0;
+          totals[mgr] = Math.round((totals[mgr] + delta) * 100) / 100;
+          if (!clientTotals[mgr]) clientTotals[mgr] = 0;
+          clientTotals[mgr] = Math.round((clientTotals[mgr] + clientDelta) * 100) / 100;
+        }
+      }
+
+      if (any) weeks.push(entry);
+
+      // How often the preserved asymmetry actually fires: a player the array puts back whose only
+      // date event is in a prior period.
+      if (periodStart) {
+        const mgrDates = (sd.roster_dates || {})[mgr] || {};
+        const arr = ((sd.rosters || {})[mgr] || {})[`${schedWeek.round}|${schedWeek.week}`] || {};
+        const hasAnyDate = (p) =>
+          Object.values(mgrDates).some(
+            (players) => players && players[p] && (players[p].add_date || players[p].drop_date)
+          );
+        const hasPeriodDate = (p) =>
+          Object.values(mgrDates).some(
+            (players) =>
+              players &&
+              players[p] &&
+              ((players[p].add_date && players[p].add_date >= periodStart) ||
+                (players[p].drop_date && players[p].drop_date >= periodStart))
+          );
+        for (const p of [...(arr.batters || []), ...(arr.pitchers || [])]) {
+          if (hasAnyDate(p) && !hasPeriodDate(p)) priorPeriodViaArray++;
+        }
+      }
+    }
+  });
+
+  const movedManagers = Object.fromEntries(Object.entries(totals).filter(([, d]) => Math.abs(d) > 0.01));
+  const movedClient = Object.fromEntries(Object.entries(clientTotals).filter(([, d]) => Math.abs(d) > 0.01));
+  return {
+    clean: weeks.length === 0,
+    weeks_compared: scheduleDates.length,
+    managers_compared: managers.size,
+    disagreements: weeks.length,
+    totals_delta: movedManagers,
+    client_totals_delta: movedClient,
+    prior_period_via_array: priorPeriodViaArray,
+    detail: weeks,
+  };
+}
+
+// GET /api/seasons/:year/eligibility-shadow
+//
+// Read-only, writes nothing, changes no score. Run it against the frozen 2026 season: an empty
+// `totals_delta` and zero `disagreements` is the evidence R1's switch needs before it is flipped.
+app.get('/api/seasons/:year/eligibility-shadow', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  const sd = (readDB().seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const report = auditEligibilityDrift(sd);
+  const limit = Math.max(0, Math.min(500, Number(req.query.limit) || 50));
+  res.json({
+    year,
+    ...report,
+    detail: report.detail.slice(0, limit),
+    detail_truncated: report.detail.length > limit ? report.detail.length - limit : 0,
+  });
+});
+
+// ============================================================
+// Stat retention — what the sync is allowed to store
+// ============================================================
+
+// GET /api/seasons/:year/stat-retention
+//
+// What the keep-set currently holds, and what turning it on would have cost. `would_drop` is
+// measured against the rows already stored, so the answer is this season's own numbers rather than
+// an estimate: it is the count of stored rows whose player is not in the keep-set.
+app.get('/api/seasons/:year/stat-retention', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+  const sd = (readDB().seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const names = seasonRetentionNames(sd);
+  const held = (sd.held_players || []).slice();
+  let kept = 0;
+  let dropped = 0;
+  const tally = (rows, key) => {
+    for (const r of rows || []) {
+      if (names.has(retentionKey(r[key]))) kept++;
+      else dropped++;
+    }
+  };
+  tally(sd.daily_batting, 'batter');
+  tally(sd.daily_pitching, 'pitcher');
+  tally(sd.weekly_batting, 'batter');
+  tally(sd.weekly_pitching, 'pitcher');
+
+  res.json({
+    year,
+    mode: statRetentionMode(sd),
+    floor: RETENTION_MIN_KEEP,
+    keep_set: names.size,
+    held_players: held,
+    stored_rows: kept + dropped,
+    rows_for_rostered_players: kept,
+    rows_that_would_not_be_written: dropped,
+    pct_unrostered: kept + dropped ? Math.round((dropped / (kept + dropped)) * 1000) / 10 : 0,
+  });
+});
+
+// POST /api/seasons/:year/stat-retention   { mode?: 'all'|'rostered', hold?: string[] }
+//
+// Turning this on is FORWARD-LOOKING: it changes what the next sync writes and touches not one
+// stored row, which is why it needs no totals vet. Turning it off is always safe — the rows it
+// declined are re-fetchable from the MLB Stats API by re-syncing the week.
+//
+// `hold` is the escape hatch, for a player who must be tracked before anybody can roster him.
+app.post('/api/seasons/:year/stat-retention', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const body = req.body || {};
+  if (body.mode !== undefined && !STAT_RETENTION_MODES.includes(body.mode)) {
+    return res.status(400).json({ error: `mode must be one of: ${STAT_RETENTION_MODES.join(', ')}` });
+  }
+  if (body.hold !== undefined && !Array.isArray(body.hold)) {
+    return res.status(400).json({ error: 'hold must be an array of player names' });
+  }
+
+  const before = statRetentionMode(sd);
+  if (body.mode !== undefined) sd.stat_retention = body.mode;
+  const held = body.hold ? retainPlayers(sd, body.hold) : [];
+
+  const filter = buildRetentionFilter(sd);
+  addAuditEntry(
+    db,
+    'stat_retention',
+    { year, from: before, to: statRetentionMode(sd), held, keep_set: filter.size },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+
+  res.json({
+    year,
+    mode: statRetentionMode(sd),
+    was: before,
+    keep_set: filter.size,
+    active: filter.active,
+    reason: filter.reason,
+    held_players_added: held,
+  });
+});
+
+// ============================================================
+// Weekly-row attribution repair
+// ============================================================
+// The pure half lives in js/attribution.js and is mirrored VERBATIM below;
+// tests/serverMirrors.test.js fails if the two copies drift. Edit both.
+
+function chooseOwner(windowsByManager) {
+  const entries = Object.entries(windowsByManager || {});
+  if (entries.length === 0) return { owner: null, contested: false };
+  if (entries.length === 1) return { owner: entries[0][0], contested: false };
+
+  // Latest start wins (a null start means "held from the week's first day", so it loses to any
+  // explicit later add). Then latest end, then the name, so the result never depends on key order.
+  const sorted = entries.slice().sort((a, b) => {
+    const as = a[1] && a[1].start ? a[1].start : '';
+    const bs = b[1] && b[1].start ? b[1].start : '';
+    if (as !== bs) return as < bs ? 1 : -1;
+    const ae = a[1] && a[1].end ? a[1].end : '￿';
+    const be = b[1] && b[1].end ? b[1].end : '￿';
+    if (ae !== be) return ae < be ? 1 : -1;
+    return a[0].localeCompare(b[0]);
+  });
+  return { owner: sorted[0][0], contested: true };
+}
+
+// What one week's rows would change to. `rows` are that week's weekly_* rows, `playerKey` is
+// 'batter' or 'pitcher', and `ownerByPlayer` maps a player name to the result of chooseOwner.
+//
+// Reports rather than mutates, so the same call drives both the dry run and the apply. A row whose
+// `manager` already matches is not reported at all.
+function planReattribution(rows, playerKey, ownerByPlayer) {
+  const changes = [];
+  for (const row of rows || []) {
+    const player = row[playerKey];
+    const resolved = (ownerByPlayer && ownerByPlayer[player]) || { owner: null, contested: false };
+    const from = row.manager || null;
+    const to = resolved.owner || null;
+    if (from === to) continue;
+    changes.push({
+      round: row.round,
+      week: row.week,
+      type: playerKey === 'batter' ? 'batting' : 'pitching',
+      player,
+      from,
+      to,
+      contested: !!resolved.contested,
+      weekly_score: row.weekly_score || 0,
+      kind: !from ? 'claimed' : !to ? 'released' : 'moved',
+    });
+  }
+  return changes;
+}
+
+// Group the changes into the three things a commissioner actually needs to judge before applying.
+//
+// `claimed` is a row nobody was credited with that somebody now is — the 8/31 shape, and the one
+// that only ever adds points back. `moved` is a row changing hands. `released` is a row that stops
+// counting for anyone: the only direction that can take points away from a manager, so it is
+// listed separately and named in full rather than counted.
+function summarizeReattribution(changes) {
+  const claimed = [];
+  const moved = [];
+  const released = [];
+  for (const c of changes || []) {
+    if (c.kind === 'claimed') claimed.push(c);
+    else if (c.kind === 'released') released.push(c);
+    else moved.push(c);
+  }
+  const weeks = new Set((changes || []).map((c) => `${c.round}|${c.week}`));
+  return {
+    total: (changes || []).length,
+    claimed: claimed.length,
+    moved: moved.length,
+    released: released.length,
+    contested: (changes || []).filter((c) => c.contested).length,
+    weeks: [...weeks].sort(),
+    released_rows: released,
+  };
+}
+
+// One line per change, for a log or a confirm dialog.
+function reattributionLine(c) {
+  const who =
+    c.kind === 'claimed' ? `nobody → ${c.to}` : c.kind === 'released' ? `${c.from} → nobody` : `${c.from} → ${c.to}`;
+  const pts = Math.round((c.weekly_score || 0) * 100) / 100;
+  return `${c.round} ${c.week} · ${c.player} (${c.type}, ${pts} pts): ${who}${c.contested ? ' [shared week]' : ''}`;
+}
+
+// Who owned each player in one week, from the roster-date windows. Inverts managerWeekRosterWindows
+// (player -> window, per manager) into player -> { manager: window }, which is what chooseOwner
+// wants. roster_dates is the authority here on purpose: findManagerForPlayerWeek would answer from
+// the sd.rosters ARRAY cache, which is additive-only and can hold a player a swap already removed.
+function weekOwnersByPlayer(sd, round, week, weekIdx, managers) {
+  const byPlayer = {};
+  for (const mgr of managers) {
+    const windows = managerWeekRosterWindows(sd, mgr, round, week, weekIdx);
+    for (const [player, w] of Object.entries(windows)) {
+      if (!byPlayer[player]) byPlayer[player] = {};
+      byPlayer[player][mgr] = w;
+    }
+  }
+  const resolved = {};
+  for (const [player, windows] of Object.entries(byPlayer)) resolved[player] = chooseOwner(windows);
+  return resolved;
+}
+
+// Every name that could legitimately own a row. db.managers is the canonical list per the scoring
+// invariant; roster_dates and the existing row attributions are folded in so a manager who is only
+// present in the season data (a rename, a legacy import) is still a candidate rather than being
+// silently released.
+function attributionCandidateManagers(db, sd) {
+  const managers = new Set((db && db.managers ? db.managers : []).map((m) => m.name).filter(Boolean));
+  for (const m of Object.keys(sd.rosters || {})) managers.add(m);
+  for (const m of Object.keys(sd.roster_dates || {})) managers.add(m);
+  for (const r of sd.weekly_batting || []) if (r.manager) managers.add(r.manager);
+  for (const r of sd.weekly_pitching || []) if (r.manager) managers.add(r.manager);
+  return [...managers];
+}
+
+// Work out what every weekly row's `manager` should say, and optionally write it.
+//
+// Weeks with no schedule dates are SKIPPED, not cleared: managerWeekRosterWindows needs the week's
+// calendar to resolve a window and returns {} without it, so re-attributing such a week would
+// release every row in it. A week that was never scheduled has nothing to repair anyway.
+//
+// Applying also re-runs applyManagerScoreSplits for each touched week, since a week whose owners
+// changed may have gained or lost the shared-ownership split that makes a mid-week handover score
+// correctly for both sides.
+function reattributeWeeklyRows(db, sd, { apply = false } = {}) {
+  const managers = attributionCandidateManagers(db, sd);
+  const scheduleDates = sd.schedule_dates || [];
+  const changes = [];
+  const skipped = [];
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    const { round, week } = schedWeek;
+    const dates = scheduleDates[idx];
+    if (!dates || !dates.start || !dates.end) {
+      skipped.push(`${round}|${week}`);
+      return;
+    }
+    const matches = (r) => r.round === round && r.week === week;
+    const batRows = (sd.weekly_batting || []).filter(matches);
+    const pitRows = (sd.weekly_pitching || []).filter(matches);
+    if (batRows.length === 0 && pitRows.length === 0) return;
+
+    const owners = weekOwnersByPlayer(sd, round, week, idx, managers);
+    const weekChanges = [
+      ...planReattribution(batRows, 'batter', owners),
+      ...planReattribution(pitRows, 'pitcher', owners),
+    ];
+    if (weekChanges.length === 0) return;
+    changes.push(...weekChanges);
+
+    if (apply) {
+      const byPlayer = new Map(weekChanges.map((c) => [`${c.type}|${c.player}`, c.to]));
+      for (const r of batRows) {
+        const key = `batting|${r.batter}`;
+        if (byPlayer.has(key)) r.manager = byPlayer.get(key);
+      }
+      for (const r of pitRows) {
+        const key = `pitching|${r.pitcher}`;
+        if (byPlayer.has(key)) r.manager = byPlayer.get(key);
+      }
+      applyManagerScoreSplits(sd, round, week);
+    }
+  });
+
+  return { changes, summary: summarizeReattribution(changes), skipped_weeks: skipped };
 }
 
 // Compare every manager-week's certified subtotal against the same week rebuilt from daily rows.
@@ -6306,7 +7331,7 @@ function auditWeeklyRollupDrift(sd, { tolerance = 0.5 } = {}) {
   return findings;
 }
 
-function buildRollupDriftSlackText(findings, year) {
+function buildRollupDriftSlackText(findings, year, oldestDays = 0) {
   const lines = findings.slice(0, 8).map((f) => {
     const who = f.players
       .slice(0, 4)
@@ -6323,25 +7348,150 @@ function buildRollupDriftSlackText(findings, year) {
     `:mag: *Scoring drift detected (${year})* — the certified totals disagree with the stats they are ` +
     `derived from. The posted scoreboard is using the certified numbers, so they are wrong until this ` +
     `is resolved.\n${lines.join('\n')}${more}\n` +
+    (oldestDays >= ROLLUP_DRIFT_NAG_DAYS
+      ? `:rotating_light: *This has been outstanding for ${oldestDays} day${oldestDays === 1 ? '' : 's'}.* ` +
+        `It will keep coming back every ${ROLLUP_DRIFT_NAG_DAYS} days until it is resolved, and the season ` +
+        `cannot be closed while it stands.\n`
+      : '') +
     `_Rebuild Totals recompiles the rollups from the stored daily rows — Sync Now only touches the ` +
     `current week, so it cannot fix a finished one. If it persists, check the named player's ` +
     `add/drop dates against that week's start and end._`
   );
 }
 
-// One alert per distinct finding-set per process — the 4am compile and the 7am post both run this,
-// and an unresolved drift would otherwise re-post every morning.
-let lastRollupDriftSignature = null;
+// The pure half of the drift machinery — how a finding is recorded, when the alert repeats, and
+// whether it may be certified over — lives in js/rollupDrift.js and is mirrored VERBATIM below.
+// tests/serverMirrors.test.js fails if the two copies drift. Edit both.
 
-async function alertOnRollupDrift(sd, year, trigger) {
+const ROLLUP_DRIFT_NAG_DAYS = 3;
+
+// Whole days between two ISO 'YYYY-MM-DD' dates (b - a). Both are date-only, so parsing them as
+// UTC midnight avoids the off-by-one a local-time parse gives across a DST boundary.
+function daysBetweenISO(a, b) {
+  if (!a || !b) return 0;
+  const ms = Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.round(ms / 86400000) : 0;
+}
+
+// Record the current findings on the season, keyed `manager|week`, in the shape
+// recordCorrectionFlags uses for refused corrections — and for the same reason. A drift that
+// exists only as a Slack post cannot be asked about later, cannot be shown in the app, and cannot
+// be checked at season close.
+//
+// The map is REPLACED each run rather than merged, so a drift that has been fixed clears itself
+// the next time the audit runs clean — the same self-healing property the correction flags have.
+// `first_seen` and `last_alerted` are carried across from the previous run, so the age of a
+// standing problem is real and is not reset by a deploy or a restart.
+function recordRollupDriftFlags(sd, findings, todayISO) {
+  const prev = sd && sd.rollup_drift && typeof sd.rollup_drift === 'object' ? sd.rollup_drift : {};
+  const next = {};
+  for (const f of findings || []) {
+    const key = `${f.manager}|${f.week}`;
+    const before = prev[key] || {};
+    next[key] = {
+      manager: f.manager,
+      week: f.week,
+      certified: f.certified,
+      from_daily: f.from_daily,
+      delta: f.delta,
+      players: (f.players || []).slice(0, 6),
+      first_seen: before.first_seen || todayISO,
+      last_seen: todayISO,
+      last_alerted: before.last_alerted || null,
+      alerted_delta: Object.prototype.hasOwnProperty.call(before, 'alerted_delta') ? before.alerted_delta : null,
+    };
+  }
+  if (Object.keys(next).length) sd.rollup_drift = next;
+  else delete sd.rollup_drift;
+  return next;
+}
+
+// Which stored flags to post about right now. Three ways to qualify: never posted, the number
+// moved since it was last posted, or it has been quiet for `nagDays` and is still there. Anything
+// already posted today is excluded, which is what keeps the 4am and 7am runs — and any manual
+// re-run in between — from double-posting the same finding.
+function rollupDriftDueForAlert(flags, todayISO, nagDays = ROLLUP_DRIFT_NAG_DAYS) {
+  return Object.values(flags || {}).filter((f) => {
+    if (!f.last_alerted) return true;
+    if (f.last_alerted === todayISO) return false;
+    if (f.alerted_delta !== f.delta) return true;
+    return daysBetweenISO(f.last_alerted, todayISO) >= nagDays;
+  });
+}
+
+// The outstanding drift, as lines a human can read. Mirrors outstandingCorrectionFlags.
+function outstandingRollupDrift(sd) {
+  return Object.values((sd && sd.rollup_drift) || {}).map((f) => ({
+    manager: f.manager,
+    week: f.week,
+    delta: f.delta,
+    certified: f.certified,
+    from_daily: f.from_daily,
+    first_seen: f.first_seen,
+    last_seen: f.last_seen,
+  }));
+}
+
+// Is a scoring disagreement standing in the way of certifying this season?
+//
+// The same gate, and the same argument, as correctionCloseBlock: a drifted week is one whose
+// CERTIFIED scores the server itself says disagree with the stats underneath them, and a completed
+// week's scores are what the bracket, the placements, the roasts, the recap and the permanent
+// record are all computed from. The 2026 season closed on top of exactly this — 31.1 points
+// credited to nobody across the semifinal that decided the Championship pairing.
+//
+// Blocks rather than warns, and takes `force`, because closing the season is a once-a-year
+// irreversible-feeling action and the commissioner should have to say yes on purpose. Returns null
+// when there is nothing in the way.
+function rollupDriftCloseBlock(sd, force) {
+  const drift = outstandingRollupDrift(sd);
+  if (!drift.length || force) return null;
+  const lines = drift.map(
+    (d) =>
+      `${d.manager} ${d.week} (certified ${d.certified} vs ${d.from_daily} from the daily rows, ` +
+      `off by ${Math.abs(d.delta)}, first seen ${d.first_seen || 'unknown'})`
+  );
+  return {
+    error:
+      `Cannot close the season — ${drift.length} manager-week(s) have certified totals that disagree with the ` +
+      `stats they are derived from: ${lines.join('; ')}. Those weeks feed the bracket, the placements and the ` +
+      `permanent record. Resolve them first (Rebuild Totals recompiles the rollups from the stored daily rows; ` +
+      `if it persists, check the named player's add/drop dates against that week), or re-run with force to ` +
+      `close anyway.`,
+    rollup_drift: drift,
+    force_required: true,
+  };
+}
+
+// Audit the season, persist what was found, and post about anything due. Takes a YEAR rather than
+// an `sd` and does its own read-modify-write: it now records state, and a caller that handed in a
+// detached season object would have that state thrown away.
+async function alertOnRollupDrift(year, trigger) {
   try {
+    const db = readDB();
+    const sd = (db.seasons || {})[year];
+    if (!sd) return [];
     const findings = auditWeeklyRollupDrift(sd);
+    const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const before = JSON.stringify(sd.rollup_drift || null);
+
+    const flags = recordRollupDriftFlags(sd, findings, todayISO);
+    const due = rollupDriftDueForAlert(flags, todayISO);
+    for (const f of due) {
+      f.last_alerted = todayISO;
+      f.alerted_delta = f.delta;
+    }
+    if (JSON.stringify(sd.rollup_drift || null) !== before) {
+      db.seasons[year] = sd;
+      writeDB(db);
+    }
+
     if (findings.length === 0) return [];
     const signature = findings.map((f) => `${f.manager}|${f.week}|${f.delta}`).join(';');
     console.error(`[Rollup audit] (${trigger}) ${findings.length} manager-week(s) drifted: ${signature}`);
-    if (signature !== lastRollupDriftSignature) {
-      lastRollupDriftSignature = signature;
-      await postSlack(buildRollupDriftSlackText(findings, year)).catch(() => {});
+    if (due.length) {
+      const oldest = due.reduce((n, f) => Math.max(n, daysBetweenISO(f.first_seen, todayISO)), 0);
+      await postSlack(buildRollupDriftSlackText(due, year, oldest)).catch(() => {});
     }
     return findings;
   } catch (e) {
@@ -9236,9 +10386,16 @@ function processBattingRows(rows, sd, scheduleWeek, syncDate) {
 
   if (!sd.daily_batting) sd.daily_batting = [];
 
+  // Same keep-set as the MLB paths. The sheet is the break-glass fallback, so it is filtered too —
+  // a season that stores only rostered players must not quietly re-inflate when the fallback runs.
+  // Skipping is per PLAYER and total, so the daily cumulative→delta chain a kept player depends on
+  // is never broken by a gap in the middle of it.
+  const retention = buildRetentionFilter(sd);
+
   rows.forEach((row) => {
     const batter = findCol(row, ['batter', 'player', 'name']);
     if (!batter) return;
+    if (!retainsPlayer(retention, batter)) return;
 
     // Update player→team map from sheet's Team column (handles new players + mid-season trades)
     const team = findCol(row, ['team', 'Team']);
@@ -9384,9 +10541,12 @@ function processPitchingRows(rows, sd, scheduleWeek, syncDate) {
 
   if (!sd.daily_pitching) sd.daily_pitching = [];
 
+  const retention = buildRetentionFilter(sd);
+
   rows.forEach((row) => {
     const pitcher = findCol(row, ['pitcher', 'player', 'name']);
     if (!pitcher) return;
+    if (!retainsPlayer(retention, pitcher)) return;
 
     // Update player→team map from sheet's Team column (handles new players + mid-season trades)
     const team = findCol(row, ['team', 'Team']);
@@ -11328,6 +12488,175 @@ app.get('/api/mlb/compare', requireCommissioner, async (req, res) => {
   }
 });
 
+// ============================================================
+// Stat retention — mirrored from js/statRetention.js
+// ============================================================
+// Verbatim copy of js/statRetention.js (minus its `export` keywords), because server.js cannot
+// import an ES module and the sync paths below are the only runtime callers. Guarded by
+// tests/serverMirrors.test.js: edit js/statRetention.js and copy it here, never one alone.
+//
+// Read that file's header for why this exists. The short version: 85% of the rows this sync writes
+// are for players nobody in the league ever rostered, and readDB() parses all of them on every
+// request.
+
+const STAT_RETENTION_MODES = ['all', 'rostered'];
+
+// What a season does when the mode has never been set. 'all' is today's behaviour to the byte, so
+// adding this module changes nothing until a commissioner turns it on for a season.
+const DEFAULT_STAT_RETENTION = 'all';
+
+// A season whose keep-set is smaller than this is almost certainly half-loaded rather than
+// genuinely tiny — a fresh season before the draft, a partial restore — and filtering against it
+// would silently throw away a week of real stats. performMLBSync falls back to 'all' below it.
+const RETENTION_MIN_KEEP = 40;
+
+function statRetentionMode(sd) {
+  const mode = sd && sd.stat_retention;
+  return STAT_RETENTION_MODES.includes(mode) ? mode : DEFAULT_STAT_RETENTION;
+}
+
+// Match key for a player name. Looser than the row and roster names themselves on purpose: an
+// accent, a suffix or a stray period must never be the reason a rostered player's stats are
+// dropped. (js/utils.js normalizeName is the same idea; this module stays self-contained so its
+// server mirror can be a verbatim copy.)
+function retentionKey(name) {
+  return String(name == null ? '' : name)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\b(jr|sr|ii|iii|iv)\.?\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Every player any manager has held, asked for, or been offered this season.
+//
+// Five sources, unioned, and each one is here because it can be the ONLY record of a player at some
+// point in his life on this league:
+//
+//   rosters          — the per-week arrays. A derived cache, but additive, so it never forgets.
+//   roster_dates     — the authority for who was rostered when. The one that must never be missed.
+//   swaps            — BOTH sides, and pending as well as approved. The player coming in has no
+//                      roster entry until approval, and approval can back-date him.
+//   submissions      — initial and per-period, including a roster still awaiting approval.
+//   held_players     — an explicit escape hatch (see retainPlayers below) for anything the four
+//                      derivations cannot see.
+//
+// Returns a Set of retentionKey()s.
+function seasonRetentionNames(sd) {
+  const names = new Set();
+  const add = (n) => {
+    const key = retentionKey(n);
+    if (key) names.add(key);
+  };
+
+  for (const weekRosters of Object.values((sd && sd.rosters) || {})) {
+    for (const roster of Object.values(weekRosters || {})) {
+      ((roster || {}).batters || []).forEach(add);
+      ((roster || {}).pitchers || []).forEach(add);
+    }
+  }
+
+  for (const weeks of Object.values((sd && sd.roster_dates) || {})) {
+    for (const players of Object.values(weeks || {})) {
+      Object.keys(players || {}).forEach(add);
+    }
+  }
+
+  for (const swap of (sd && sd.swaps) || []) {
+    add((swap || {}).player_in);
+    add((swap || {}).player_out);
+  }
+
+  const fromSubmission = (s) => {
+    ((s || {}).batters || []).forEach(add);
+    ((s || {}).pitchers || []).forEach(add);
+  };
+  for (const s of Object.values((sd && sd.initial_submissions) || {})) fromSubmission(s);
+  for (const period of Object.values((sd && sd.period_submissions) || {})) {
+    for (const s of Object.values(period || {})) fromSubmission(s);
+  }
+
+  ((sd && sd.held_players) || []).forEach(add);
+
+  return names;
+}
+
+// The decision object the sync paths carry for one run. Built once per sync rather than per row,
+// because seasonRetentionNames walks the whole season.
+//
+// `active` is the only field a caller needs to branch on: it is false whenever the mode is 'all',
+// and false when the keep-set is too small to trust, so a caller that forgets the mode check still
+// writes everything rather than nothing.
+function buildRetentionFilter(sd) {
+  const mode = statRetentionMode(sd);
+  if (mode !== 'rostered') return { mode, active: false, names: null, size: 0, reason: 'mode is all' };
+  const names = seasonRetentionNames(sd);
+  if (names.size < RETENTION_MIN_KEEP) {
+    return {
+      mode,
+      active: false,
+      names,
+      size: names.size,
+      reason: `keep-set is ${names.size} players, below the ${RETENTION_MIN_KEEP} floor — storing everything`,
+    };
+  }
+  return { mode, active: true, names, size: names.size, reason: null };
+}
+
+// Does a row for this player get written? An inactive filter keeps everything, which is what makes
+// this safe to call unconditionally at every write site.
+function retainsPlayer(filter, name) {
+  if (!filter || !filter.active || !filter.names) return true;
+  return filter.names.has(retentionKey(name));
+}
+
+// The escape hatch. Names added here survive every filter for the rest of the season, whatever
+// happens to the rosters — for the case where a player must be tracked before anyone can roster him
+// (a commissioner watching a call-up) or where a derivation has been found wanting after the fact.
+function retainPlayers(sd, names) {
+  if (!sd) return [];
+  const existing = new Set((sd.held_players || []).map(retentionKey));
+  const added = [];
+  for (const n of names || []) {
+    const key = retentionKey(n);
+    if (!key || existing.has(key)) continue;
+    existing.add(key);
+    added.push(String(n));
+  }
+  if (added.length) sd.held_players = [...(sd.held_players || []), ...added];
+  return added;
+}
+
+// How much a run actually skipped, for the sync's response and its log line. Reported rather than
+// silent: a retention filter that has quietly stopped keeping anyone would otherwise look exactly
+// like a quiet day in the majors.
+function retentionSummary(filter, counts) {
+  const c = counts || {};
+  return {
+    mode: (filter && filter.mode) || DEFAULT_STAT_RETENTION,
+    active: !!(filter && filter.active),
+    keep_set: (filter && filter.size) || 0,
+    reason: (filter && filter.reason) || null,
+    skipped_batting: c.batting || 0,
+    skipped_pitching: c.pitching || 0,
+  };
+}
+
+// One line per sync saying what the keep-set did. A retention filter that has quietly stopped
+// keeping anybody looks exactly like a quiet day in the majors, so it says the size of the set and
+// how many rows it declined every time it runs — and says why when it stood itself down.
+function logRetention(report, label) {
+  if (!report || report.mode !== 'rostered') return;
+  if (!report.active) {
+    console.log(`[Retention] ${label}: storing everything — ${report.reason}`);
+    return;
+  }
+  const skipped = report.skipped_batting + report.skipped_pitching;
+  console.log(`[Retention] ${label}: kept ${report.keep_set} players, declined ${skipped} unrostered row(s)`);
+}
+
 // Core MLB-API sync logic, shared by the manual /api/mlb/sync endpoint and
 // the daily 4am Eastern auto-sync scheduler. Mutates `sd` in place but does
 // not write the db — the caller decides how to persist and audit.
@@ -11359,9 +12688,21 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     pitImported = 0,
     pitSkipped = 0;
 
+  // Whose rows are worth storing. Built ONCE per run — seasonRetentionNames walks the whole season,
+  // and this loop runs per player per game. Inactive unless the season opted in, so on a season
+  // that has not, retainsPlayer is a constant true and this is the behaviour it has always had.
+  const retention = buildRetentionFilter(sd);
+  const retentionSkipped = { batting: 0, pitching: 0 };
+
   // Store one daily record per player per game, then recompute weekly totals.
   for (const { gameId, date, batting, pitching } of gameRecords) {
     for (const [name, gameStats] of Object.entries(batting)) {
+      // Nobody in this league has ever held him, asked for him, or been offered him. His row is
+      // 85% of this file and is re-fetchable from the MLB Stats API the day that stops being true.
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.batting++;
+        continue;
+      }
       const manager =
         findManagerForPlayerWeek(sd, name, 'batting', schedWeek.round, schedWeek.week) ||
         findManagerForPlayer(sd, name, 'batting');
@@ -11418,6 +12759,10 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     }
 
     for (const [name, gameStats] of Object.entries(pitching)) {
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.pitching++;
+        continue;
+      }
       const manager =
         findManagerForPlayerWeek(sd, name, 'pitching', schedWeek.round, schedWeek.week) ||
         findManagerForPlayer(sd, name, 'pitching');
@@ -11484,9 +12829,13 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     games: gameRecords.length,
     batting_imported: batImported,
     pitching_imported: pitImported,
+    ...(retention.active ? { retention_skipped: retentionSkipped.batting + retentionSkipped.pitching } : {}),
     ...(opts.note ? { note: opts.note } : {}),
   });
   pruneSyncHistory(sd);
+
+  const retentionReport = retentionSummary(retention, retentionSkipped);
+  logRetention(retentionReport, `${round} ${week}`);
 
   return {
     games_fetched: gameRecords.length,
@@ -11494,6 +12843,7 @@ async function performMLBSync(sd, schedWeek, dates, opts = {}) {
     batting_skipped: batSkipped,
     pitching_imported: pitImported,
     pitching_skipped: pitSkipped,
+    retention: retentionReport,
   };
 }
 
@@ -11527,8 +12877,17 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
   let batImported = 0,
     pitImported = 0;
 
+  // Same keep-set as performMLBSync, built once. This is the 4am path — the one that writes most of
+  // the season — so it is the one the storage number actually turns on.
+  const retention = buildRetentionFilter(sd);
+  const retentionSkipped = { batting: 0, pitching: 0 };
+
   for (const { gameId, date, batting, pitching } of gameRecords) {
     for (const [name, gameStats] of Object.entries(batting)) {
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.batting++;
+        continue;
+      }
       const locked = sd.daily_batting.find(
         (r) =>
           r.game_id === gameId &&
@@ -11573,6 +12932,10 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
       batImported++;
     }
     for (const [name, gameStats] of Object.entries(pitching)) {
+      if (!retainsPlayer(retention, name)) {
+        retentionSkipped.pitching++;
+        continue;
+      }
       const locked = sd.daily_pitching.find(
         (r) =>
           r.game_id === gameId &&
@@ -11628,9 +12991,13 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
     games: gameRecords.length,
     batting_imported: batImported,
     pitching_imported: pitImported,
+    ...(retention.active ? { retention_skipped: retentionSkipped.batting + retentionSkipped.pitching } : {}),
     note: `daily-delta:${dateISO}`,
   });
   pruneSyncHistory(sd);
+
+  const retentionReport = retentionSummary(retention, retentionSkipped);
+  logRetention(retentionReport, `${round} ${week} ${dateISO}`);
 
   return {
     games_fetched: gameRecords.length,
@@ -11638,6 +13005,7 @@ async function performMLBDailySync(sd, dateISO, opts = {}) {
     pitching_imported: pitImported,
     round,
     week,
+    retention: retentionReport,
   };
 }
 
@@ -11932,7 +13300,15 @@ app.get('/api/diag/rollup-audit', requireCommissioner, (req, res) => {
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
   const tolerance = Number.isFinite(parseFloat(req.query.tolerance)) ? parseFloat(req.query.tolerance) : 0.5;
   const findings = auditWeeklyRollupDrift(sd, { tolerance });
-  res.json({ year, tolerance, clean: findings.length === 0, findings });
+  res.json({
+    year,
+    tolerance,
+    clean: findings.length === 0,
+    findings,
+    // What the twice-daily audit has on record, with each finding's age — the question the old
+    // Slack-only alert could not answer after the fact.
+    outstanding: outstandingRollupDrift(sd),
+  });
 });
 
 app.get('/api/diag/manager', requireCommissioner, (req, res) => {
@@ -15442,6 +16818,109 @@ app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) 
   res.json({ ok: true });
 });
 
+// POST /api/seasons/:year/reattribute-weekly — repair the `manager` field on weekly stat rows.
+//
+// DRY RUN BY DEFAULT. Pass { apply: true } to write. This is the only operation in the app that can
+// repair a closed week's attribution: rebuildWeeklyFromDaily writes `manager` and only ever runs for
+// the week being synced, and recomputeAllWeeklyScores recomputes every week's score while never
+// touching it. Before this, a correction applied after a week closed left that week mis-attributed
+// permanently — and mis-attributed points are invisible to every guard in the file, because they all
+// compare a total against another total.
+//
+// Unlike POST /recompute-scores this CHANGES TOTALS, on purpose: putting a row back on the manager
+// who rostered it is what returns the points. So the response always carries the per-manager
+// before/after delta, computed with captureScoreSnapshot — the before/after vet CLAUDE.md requires
+// of anything touching attribution — and the dry run exists so that delta can be read before
+// anything is written.
+//
+// The apply is gated on the TOTALS moving, not on the direction of any individual change: a row
+// released to nobody is harmless when nothing scored it through `manager` anyway, and a row moved
+// between two managers is not automatically safe. `force` overrides. Released rows are still listed
+// in full, because they are what a reader most needs to check by eye.
+app.post('/api/seasons/:year/reattribute-weekly', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const apply = !!(req.body && req.body.apply);
+  const force = !!(req.body && (req.body.force || req.body.allowReleases));
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+  // Plan against a throwaway copy so a dry run cannot leave a half-applied season behind, and so the
+  // "after" totals are measured rather than predicted.
+  //
+  // Copy ONLY what gets written. A `JSON.parse(JSON.stringify(sd))` here deep-cloned the daily rows
+  // too — 12.5 MB of the 15.6 MB season, none of it mutated — and on the 400 MB heap that was enough
+  // to take the instance down when this was first run against production. The weekly arrays are the
+  // only thing reattributeWeeklyRows touches; everything else is shared by reference.
+  const candidate = {
+    ...sd,
+    weekly_batting: (sd.weekly_batting || []).map((r) => ({ ...r })),
+    weekly_pitching: (sd.weekly_pitching || []).map((r) => ({ ...r })),
+  };
+  const { changes, summary, skipped_weeks } = reattributeWeeklyRows(db, candidate, { apply: true });
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+  const after = captureScoreSnapshot(candidate, todayET).totals;
+  const totalsDelta = {};
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+    if (Math.abs(d) > 0.01) totalsDelta[m] = Math.round(d * 10) / 10;
+  }
+
+  const payload = {
+    year,
+    applied: false,
+    dry_run: !apply,
+    summary,
+    skipped_weeks,
+    totals_delta: totalsDelta,
+    changes: changes.map(reattributionLine),
+  };
+
+  if (!apply) return res.json(payload);
+
+  // The gate is the TOTALS, not the direction of the change.
+  //
+  // It used to refuse whenever any row would be released to nobody, on the assumption that a release
+  // removes points. Run against production that blocked 1,290 rows whose combined effect on the
+  // standings was exactly zero — because managerWeekSubtotal never trusted `manager` in the first
+  // place: the `eligible` set (roster_dates + the week arrays + the swap log) decides which rows a
+  // manager may claim, and a row stamped with a manager who did not hold that player is filtered out
+  // of his subtotal regardless. So a release is not inherently dangerous, and a MOVE between two
+  // managers is not inherently safe. What is dangerous is a write that moves somebody's points.
+  //
+  // captureScoreSnapshot has already measured that on the real candidate, so gate on it directly.
+  const movedManagers = Object.keys(totalsDelta);
+  if (movedManagers.length && !force) {
+    return res.status(409).json({
+      ...payload,
+      error:
+        `Refusing to apply: this would change ${movedManagers.length} manager total(s) — ` +
+        movedManagers.map((m) => `${m} ${totalsDelta[m] > 0 ? '+' : ''}${totalsDelta[m]}`).join(', ') +
+        `. Re-attribution is a labelling repair and is expected to move nothing; a totals change means ` +
+        `either the repair is finding real lost points or the derivation is wrong. Read the changes, ` +
+        `then re-run with force to proceed.`,
+      force_required: true,
+    });
+  }
+
+  db.seasons[year] = candidate;
+  addAuditEntry(
+    db,
+    'reattribute_weekly',
+    { year, ...summary, released_rows: undefined, totals_delta: totalsDelta },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  for (const line of changes) console.log(`[Reattribute] ${reattributionLine(line)}`);
+
+  res.json({ ...payload, applied: true, dry_run: false, _rev: computeSeasonRev(candidate) });
+});
+
 // ============================================================
 // Elimination Roasts
 // ============================================================
@@ -18685,6 +20164,10 @@ app.post('/api/seasons/:year/finalize-season', requireCommissioner, (req, res) =
   const blocked = correctionCloseBlock(sd, !!(req.body && req.body.force));
   if (blocked) return res.status(409).json(blocked);
 
+  // …nor on top of a week whose certified total disagrees with the stats it came from.
+  const drifted = rollupDriftCloseBlock(sd, !!(req.body && req.body.force));
+  if (drifted) return res.status(409).json(drifted);
+
   if (!Array.isArray(sd.finalized_rounds)) sd.finalized_rounds = [];
   if (!sd.finalized_rounds.includes('Finals')) sd.finalized_rounds.push('Finals');
   if (!Array.isArray(sd.losers_dumped)) sd.losers_dumped = [];
@@ -18745,6 +20228,9 @@ app.post('/api/seasons/:year/close', requireCommissioner, async (req, res) => {
   // the "Re-run Season Close" button calls it without re-finalizing.
   const correctionBlock = correctionCloseBlock(sd, !!(req.body && req.body.force));
   if (correctionBlock) return res.status(409).json(correctionBlock);
+
+  const driftBlock = rollupDriftCloseBlock(sd, !!(req.body && req.body.force));
+  if (driftBlock) return res.status(409).json(driftBlock);
 
   const closedAt = new Date().toISOString();
   sd.season_closed = {
@@ -18971,6 +20457,9 @@ function armSchedulers() {
   scheduleMLBApiSync();
   scheduleScoreboardPost();
   scheduleWeeklyAutoAdvance();
+  // Deliberately NOT gated on season_closed like the four above. The offseason is exactly when a
+  // quiet corruption goes unnoticed, and this is the only thing watching for it.
+  scheduleLocalBackup();
 }
 
 // ============================================================
@@ -19804,7 +21293,7 @@ function scheduleScoreboardPost() {
           // Vet the numbers about to be posted against the stats they come from. The post goes out
           // either way (a silent wrong scoreboard is worse than a flagged one) — but the
           // commissioner gets told, instead of finding out hours later from a manager.
-          .then(() => alertOnRollupDrift((readDB().seasons || {})[season], season, '7am-scoreboard'))
+          .then(() => alertOnRollupDrift(season, '7am-scoreboard'))
           .then(() => postScoreboardSlack(readDB(), season, plan))
           .then(() =>
             console.log(
@@ -20120,7 +21609,7 @@ function scheduleMLBApiSync() {
         // holds rejected scores, and the numbers that matter are the ones actually on disk — the
         // ones the 7am post will use.
         if (statsCompiled) {
-          await alertOnRollupDrift((readDB().seasons || {})[season], season, 'auto-4am');
+          await alertOnRollupDrift(season, 'auto-4am');
         }
 
         // Refresh the playoff odds after the stats settle (no-op outside PP2
@@ -20309,7 +21798,10 @@ async function main() {
       });
       if (changed) {
         writeDB(dbGE);
-        writeManagersSeed(dbGE.managers);
+        // Deliberately does NOT touch managers_seed.json. This runs on every boot against
+        // whatever database is present — including a fixture or a partial restore — and the seed
+        // file is a git-tracked disaster-recovery artifact. The backfill is idempotent, so a
+        // reseeded db just gets it again on the next boot.
         console.log('Backfilled googleEmail for managers missing it');
       }
     } catch (e) {

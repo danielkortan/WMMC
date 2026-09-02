@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "lint": "eslint server.js app.js js/",
-    "lint:fix": "eslint server.js app.js js/ --fix",
+    "lint": "eslint server.js app.js js/ scripts/",
+    "lint:fix": "eslint server.js app.js js/ scripts/ --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sanitize:db": "node scripts/sanitize-db.js",

@@ -114,7 +114,7 @@ const weeklyPitching = [];
 let teamIdx = 0;
 let mlbIdSeq = 600000;
 
-MANAGERS.forEach((m, mi) => {
+MANAGERS.forEach((m, _mi) => {
   // Each manager has a fixed set of invented players for the whole season.
   const batters = Array.from({ length: BATTERS_PER_ROSTER }, (_, i) => `${m.name.split(' ')[0]} Batter ${i + 1}`);
   const pitchers = Array.from({ length: PITCHERS_PER_ROSTER }, (_, i) => `${m.name.split(' ')[0]} Pitcher ${i + 1}`);
@@ -130,7 +130,7 @@ MANAGERS.forEach((m, mi) => {
 
   rosters[m.name] = {};
 
-  SEASON_SCHEDULE.forEach((sw, idx) => {
+  SEASON_SCHEDULE.forEach((sw, _idx) => {
     // Only populate pool-play weeks; playoffs left empty (a valid
     // "pool play complete, bracket seeded, playoffs pending" state).
     if (sw.round !== 'PP1' && sw.round !== 'PP2') return;
@@ -200,7 +200,7 @@ MANAGERS.forEach((m, mi) => {
 // 16 weekly date ranges aligned to SEASON_SCHEDULE (only used for drop logic; we
 // have no drops, but the array length/start must be present for the scoreboard).
 const scheduleDates = [];
-let cur = new Date(Date.UTC(2026, 2, 26)); // 2026-03-26
+const cur = new Date(Date.UTC(2026, 2, 26)); // 2026-03-26
 const iso = (d) => d.toISOString().slice(0, 10);
 for (let i = 0; i < SEASON_SCHEDULE.length; i++) {
   const start = new Date(cur);

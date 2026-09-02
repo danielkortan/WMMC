@@ -9,6 +9,10 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-02 | R1's burn-in passed, and the third copy of the scoring function                                   | [MEMORY](#2026-09-02-r1s-burn-in-passed-and-the-third-copy-of-the-scoring-function)                                               |
+| 2026-09-02 | The two halves of the 8/31 defect, and the boot that rewrote the committed seed file              | [MEMORY](#2026-09-02-the-two-halves-of-the-831-defect-and-the-boot-that-rewrote-the-committed-seed-file)                          |
+| 2026-09-01 | Season-one QA review: the roster-window problem, and an offseason archive plan                    | [MEMORY](#2026-09-01-season-one-qa-review-the-roster-window-problem-and-an-offseason-archive-plan)                                |
+| 2026-09-01 | The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`           | [MEMORY](#2026-09-01-the-staging-refresh-is-a-recurring-chore-and-two-open-prs-had-been-overtaken-by-main)                        |
 | 2026-08-31 | "End Finals" produced neither roasts nor a recap, and left every scheduler running                | [MEMORY](#2026-08-31-end-finals-produced-neither-roasts-nor-a-recap-and-left-every-scheduler-running)                             |
 | 2026-08-31 | A refused correction was an attribution repair, and the season closed on top of it                | [MEMORY](#2026-08-31-a-refused-correction-was-an-attribution-repair-and-the-season-closed-on-top-of-it)                           |
 | 2026-08-19 | The Slack swap post said "IL Swap" while the app said "IL/RST"; the label became a mirror         | [MEMORY](#2026-08-19-the-slack-swap-post-said-il-swap-while-the-app-said-ilrst-the-label-became-a-mirror)                         |
@@ -106,6 +110,274 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-02 — R1's burn-in passed, and the third copy of the scoring function
+
+PRs #465 and #466. Both read-only; neither changed a score.
+
+**The shadow comparison says the switch is safe, on both sides.** Run against the frozen 2026
+season, `weekRosterWindows` and `managerWeekSubtotal`'s five-heuristic `eligible` set produce
+identical per-manager totals — `totals_delta` empty — and identical totals to what the BROWSER
+scores as well (`client_totals_delta` empty). `prior_period_via_array` is 0, so the one asymmetry
+the extraction deliberately preserved never fires on real data.
+
+They disagree in exactly **twelve manager-weeks, one per manager**, always the same shape: the
+legacy set claims one extra player and scores him zero. `only_windows` is empty everywhere. **The
+old derivation is strictly looser, never tighter, and the looseness costs nothing.**
+
+**`managerWeekSubtotal` exists a THIRD time, in `app.js`.** It renders the scoreboard the league
+actually reads. `CLAUDE.md` never listed it as a mirrored pair and nothing guarded it; it was found
+by grepping for callers, after this session had already told the maintainer the switch was safe to
+flip. **R1's switch cannot be flipped on the server alone** — one side moving guarantees a window
+where the app and the server disagree.
+
+**The client cannot clip a row to a window, and for a while that looked like a live bug.** app.js is
+not sent daily rows, so its `rowScore` reads the stored `weekly_score`, or the `manager_scores`
+split when the server wrote one — and `applyManagerScoreSplits` writes that split only when TWO OR
+MORE managers claim the player. So wherever the server's loose set claims a player it then clips to
+zero, the client appeared to have nothing to read but the full weekly score.
+
+**It is not a bug, and the reason is worth writing down: the clipping happens at WRITE time.**
+`syncPlayerDatesFromRosterDates` merges every manager's window for a (week, player) into
+`sd.player_dates`, and `computeEffective{Batting,Pitching}Score` — which `rebuildWeeklyFromDaily`
+uses to compute `weekly_score` — filters the daily rows through it. **The number the client reads
+was already clipped before it was stored.** `manager_scores` covers the one case that union cannot
+express, a player two managers shared inside one week. `managerRowScoreForWeek` re-deriving on the
+server is belt and braces that lands on the same answer.
+
+So the architecture is: clip at write, split at write when contested, and let the client read. That
+is why a client with no daily rows can be correct at all, and it should not be "fixed" by teaching
+the client to clip.
+
+**The lesson is the one this file keeps writing down.** Two derivations of the same fact had been
+measured against each other; a THIRD was found only by grepping for callers of the function about to
+be changed. Before altering anything on the scoring path, count the copies first — the mirror tests
+guard the pairs somebody remembered to add, and `app.js` was in none of them until #466 taught
+`tests/serverMirrors.test.js` to read it.
+
+## 2026-09-02 — The two halves of the 8/31 defect, and the boot that rewrote the committed seed file
+
+Nine PRs off yesterday's review: #452 (the review itself), #453, #454, #455, the three factual
+corrections to the review documents (#457, #458, #459) and #460. All merged and deployed the same
+day.
+
+**The 8/31 defect is closed on both sides, and they are genuinely two bugs.**
+
+- **Detection (#453).** `alertOnRollupDrift` de-duplicated on `lastRollupDriftSignature`, a
+  MODULE-SCOPE variable, so a drift whose signature never changed posted to Slack once and was
+  silent forever after — and a restart forgot even that. Nothing was persisted, so "was this week
+  ever flagged?" had no answer. Findings now live on `sd.rollup_drift` in the same shape
+  `recordCorrectionFlags` uses (replaced each run so a fix clears itself; `first_seen` carried
+  across so a standing problem's age survives a deploy), the alert returns every three days saying
+  how long it has been outstanding, and `/finalize-season` and `/close` refuse over one with
+  `force`. **Under that gate the 2026 season could not have been closed.**
+- **Repair (#455).** There was no way to fix a closed week at all. `rebuildWeeklyFromDaily` writes
+  `manager` and only ever runs for the week being synced; `recomputeAllWeeklyScores` recomputes
+  every week's SCORE and never touches it. `POST /reattribute-weekly` is the repair, DRY RUN BY
+  DEFAULT, and it takes its owners from `managerWeekRosterWindows` — the roster_dates derivation —
+  deliberately NOT `findManagerForPlayerWeek`, which answers from the `sd.rosters` ARRAY cache and
+  would re-derive attribution from a second cache that is additive-only and can be stale.
+
+**Unlike every other repair in this file, that one CAN CHANGE TOTALS.** Putting a row back on the
+manager who rostered it is what would return the points, so "no change" is not automatically the
+success criterion. It plans against a throwaway copy, so the "after" totals are measured rather
+than predicted, and always returns the per-manager delta from `captureScoreSnapshot`.
+
+**Run against production (#460) it turned out to move nothing at all, and the first version of the
+gate was reading the wrong signal.** 1,295 rows are mislabelled across all 16 weeks — 3 claimed by
+a manager, 2 changing hands, and **1,290 released to nobody** — and the per-manager totals delta is
+EMPTY. That is not a coincidence, it is the invariant holding: `managerWeekSubtotal` never trusted
+`manager`, because the `eligible` set (roster_dates + the week arrays + the swap log) decides which
+rows a manager may claim, and a row stamped with a manager who did not hold that player is filtered
+out of his subtotal regardless. So the field is decorative to SCORING and load-bearing to
+everything that reads a row directly — Slack's Best/Worst, the Live tab, roster listings, the
+Season Stats leaderboards. The original gate refused whenever any row would be released, on the
+assumption that a release removes points; it blocked all 1,290 of a repair worth exactly zero
+points. **The gate is now the measured `totals_delta` itself** (`force_required` in the 409), which
+is both stricter and looser in the right places: a release is not inherently dangerous, and a move
+between two managers is not inherently safe — what is dangerous is a write that moves somebody's
+points. `allowReleases` still parses as an alias for `force`. Released rows are still listed in
+full rather than counted, because they are what a reader most needs to check by eye.
+
+**Applied to production the same day.** 1,295 rows relabelled across all 16 weeks, `totals_delta`
+empty, no force needed — the standings did not move by a hundredth of a point. The five rows that
+gained an owner:
+
+```
+PP1 Week 4 · Sandy Alcantara (pitching, -1.85): Alex Thalacker → Austin Johnson
+PP2 Week 5 · Bryce Elder     (pitching,   4.8): Alex Thalacker → Daniel Kortan
+PP2 Week 5 · Ryan Weathers   (pitching,  22.4): nobody → Daniel Kortan
+QF  Week 1 · Kyle Karros     (batting,     42): nobody → Alex Thalacker
+QF  Week 1 · Ian Seymour     (pitching,  19.9): nobody → Joey Auclair
+```
+
+The last three are the 8/31 defect's whole footprint. Their points always scored — only the label
+was missing. The console recipe is in `RUNBOOK.md` → "Repairing the `manager` field on closed weeks".
+
+**The dry run also took production down the first time it ran, and the cause was the clone.** It
+did `JSON.parse(JSON.stringify(sd))` on a 15.6 MB season of which 12.5 MB is daily rows it never
+mutates, then ran `captureScoreSnapshot` twice over it, against `--max-old-space-size=400` on a
+512 MB instance. Copy only what gets written: the two weekly arrays, shallow-copied row by row,
+everything else shared by reference.
+
+**The lesson under both: every guard in this file compares a total against another total.** A
+misattribution that moves points from one manager to nobody is invisible to all of them, which is
+why it took an audit that re-derives the week from the daily rows to see it, and why that audit
+falling silent was fatal rather than annoying.
+
+**Booting the server against a test fixture rewrote `managers_seed.json` down to that fixture's
+one manager (#454), and it was staged into a commit before anyone noticed.** The `googleEmail`
+backfill in `main()` runs on EVERY boot against whatever `db.json` is present — a fixture, a
+partial restore, a staging instance that reseeded — and wrote the git-tracked seed file as a side
+effect. That file is the last line of disaster recovery for a fresh deploy. The call is gone (the
+backfill is idempotent, so a reseeded db just gets it again next boot), and `writeManagersSeed`
+now refuses to DROP anyone unless the caller opts in; only `POST /api/managers` passes
+`allowShrink`, being commissioner-only, audited, and a full replace by intent. It happened a
+SECOND time while boot-testing #455, which was branched off `main` before the guard landed — which
+is the argument for taking a guard like this before the work that needs it, not after.
+
+**Asset cache-busting had been broken for a while (#454).** The runtime rewrite matched
+`/\?v=\d+/g`, but `.githooks/pre-push` long ago moved to 8-character git content hashes and the
+regex needs a DIGIT right after the `=`. So `app.js?v=b9eb2308` and `mobile.css?v=c44aa827` were
+never rewritten at all, while `styles.css?v=54461f12` had its leading digits eaten and shipped as
+`?v=<timestamp>f12` — one stylesheet busted by accident, the other not. The hook's hashes are the
+better mechanism (they change with the file's content, not on every restart), so the rewrite was
+deleted rather than repaired. `scripts/` also came under lint for the first time; every file in
+there had been failing `no-undef` on `require`/`console`/`process`, unseen because nothing linted
+them.
+
+**Two new mirrored pairs**, `js/rollupDrift.js` and `js/attribution.js`, both guarded by
+`tests/serverMirrors.test.js`. 675 tests. The pattern held up well under a real merge conflict:
+both branches added a guard at the same anchor, and keeping both was the whole resolution.
+
+**Still open, in rough order:** R1 (one derivation of eligibility — everything else in the S1
+group is downstream of it), R4 (the roster-array heal still only ever grows), R5 (stop storing
+stat rows for players nobody rostered), R6 (the auth findings, including `GET /db.json` on
+staging), R7, R8, R9, R11, R12 — and the offseason archive endpoint itself, which
+`OFFSEASON_ARCHIVE_PLAN.md` specifies and nothing implements.
+
+## 2026-09-01 — Season-one QA review: the roster-window problem, and an offseason archive plan
+
+First full season in the books, so: a deep-dive review of the code and the season's own record,
+written up as [`SEASON_ONE_REVIEW.md`](SEASON_ONE_REVIEW.md) and
+[`OFFSEASON_ARCHIVE_PLAN.md`](OFFSEASON_ARCHIVE_PLAN.md), plus a read-only measurement script
+(`scripts/season-storage-report.js`).
+
+**The season's bug list is one bug.** By categorization, 43 of the 98 logged entries (44%) are
+the same structural problem: _who was rostered, when_ is stored in four places that must agree
+(`roster_dates`, `sd.rosters`, the sticky `manager` field, `player_dates`) and recomputed at read
+time by unioning five heuristics in `managerWeekSubtotal`. Every clause of that union was added
+to fix a specific incident, so together they are a fixed-point of past bugs rather than a
+definition — nothing says what the answer _should_ be, so nothing can say when it is wrong.
+`managerWeekRosterWindows`, written for the drift audit, already derives the same answer from
+`roster_dates` alone in 60 lines. Promoting it to THE answer (shadow-compared during a burn-in) is
+the top recommendation.
+
+**Two findings worth acting on before anything else.**
+
+- **No re-attribution pass exists anywhere.** `rebuildWeeklyFromDaily` writes the `manager` field
+  and only ever runs for the week being synced; `recomputeAllWeeklyScores` recomputes every
+  week's score and never touches `manager`. That is the mechanism behind the 8/31 entry, and it
+  is still true. A `reattributeWeeklyRows(sd)` wired into `/recompute-scores` is a few hours.
+- **`alertOnRollupDrift` de-duplicates on a MODULE-SCOPE variable** (`lastRollupDriftSignature`),
+  so a drift whose signature does not change posts to Slack ONCE and is silent forever after.
+  A persistent defect is the case that most needs escalation and is the exact case this
+  suppresses — and nothing is persisted, so "was this week ever flagged?" is unanswerable after
+  the fact. This is why the audit that was built for exactly the 8/31 shape did not save us.
+  Persist findings the way `correction_flags` now works, re-post ones that age, and gate `/close`
+  on them.
+
+**Mirror audit, run today: everything is in sync.** `SCORING`, `SEASON_SCHEDULE` (round/week),
+`detectScoreSwings`, `checkSwapLimit`, `oddsWindowForDate`, `gameFactor`, `ROUND_LABELS`,
+`PARK_FACTORS`, `APPEARANCE_PRIORS`, `ODDS_WINDOW`, `SLACK_EMOJI` — no drift. Two notes: CLAUDE.md
+is stale in saying `gameFactor` differs by clamp name (it no longer does —
+`computeTeamQualityFactors` is the only one that still does), and the two copies of
+`calculateBattingScore`/`calculatePitchingScore` have **structurally** diverged: js/ is
+table-driven off `BATTING_STAT_KEYS`, server.js hardcodes eight lines. Values agree today, but
+adding a stat category would now update the client silently and the server not at all. Neither
+pair is mirror-guarded.
+
+**Storage: the cost is memory, not disk.** Measured on a synthesized 19.8 MB season-scale
+db.json: 272 ms to parse (paid on every request, TWICE on authenticated ones because the auth
+middleware reads the db and then the handler reads it again), 45 MB of heap per parsed copy,
+402 ms to serialize per write, 183 MB peak RSS for one parse+write cycle — against the 400 MB
+ceiling `render.yaml` already had to raise after the 2026-07-06 OOM crash loop. The 1 GB Render
+disk costs ~$0.25/month and is irrelevant. **Two seasons in one file is ~90 MB per parsed copy;
+three is the wall.**
+
+**~93% of the stat rows belong to players nobody rostered.** `performMLBSync` iterates the entire
+boxscore and pushes a daily row per player per game; `rebuildWeeklyFromDaily` then writes a weekly
+row per player per week with `manager: null`. The pool is MLB's whole active catalog (~1,600
+names) because that is what the swap-form autocomplete wants — but only the NAMES are needed for
+that, not sixteen weeks of stat lines. Filtering the sync to rostered players fixes six findings
+at once and is forward-looking (it does not touch 2026).
+
+**The archive is a compaction with a proof.** `POST /archive` keeps every rostered player-day and
+drops the rest, then re-runs `captureScoreSnapshot` and refuses to write unless the per-manager,
+per-week totals are identical to the cent — `force` does not override that one. It is the
+before/after totals vet CLAUDE.md already requires, applied to a change that should be invisible
+by construction. ~10× smaller, and an archived season fits under the Upstash 1 MB limit, which
+turns the backup from partial (it strips daily rows today) into complete.
+
+**The one real loss is the What If sandbox**, which scores counterfactuals from the full league.
+After archiving, a 2026 scenario can only use players someone actually rostered. Tier 1 (compact
+dailies, keep every weekly row) preserves league-wide totals at 4.5 MB instead of 0.8 MB if that
+matters more than the bytes. It is a league-experience call, not an engineering one.
+
+**Also found, small and real:** the asset cache-bust rewrite in server.js uses `/\?v=\d+/g` but
+the pre-push hook now stamps 8-char git hashes, so `app.js` and `mobile.css` are never rewritten
+and `styles.css?v=54461f12` comes out mangled as `?v=<timestamp>f12` — the hook's content hashes
+already do the job, so the runtime rewrite should just be deleted. `express.static(__dirname)`
+serves the repo root and `DB_FILE` defaults to `__dirname/db.json`, so on staging (which sets no
+`DB_PATH` on purpose) `GET /db.json` serves the database. `LOGIN_PASSWORD` defaults to a value
+committed in the source. And no test executes a line of `server.js` or `app.js` — all 640 import
+from `js/` only, leaving 39,137 of 44,571 lines uncovered, including the function that computed
+the season's standings.
+
+## 2026-09-01 — The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`
+
+Second sweep in three weeks. It mostly confirms the 2026-08-12 entry rather than adding to it.
+
+**Everything was in prod; nothing was stuck.** `main` at `dbf6aa3` (#450) was green — 640 tests,
+Prettier clean — and every PR from #437 to #450 was merged and deployed. `staging` was 43 commits
+behind, last refreshed 2026-08-12 at `main@5a5aebc`. As predicted, the ahead/behind counts
+(875/43) were noise; the tree check settled it in one command — `git diff --stat 5a5aebc
+origin/staging` returned only `version.json`, so staging held nothing unique and the refresh was a
+pure catch-up. **Do the tree diff first. The commit counts on this branch have now been misleading
+three sweeps running.**
+
+New detail worth recording: **all 143 tags live on staging's lineage, not `main`'s** (through
+`v9.9`, 2026-05-21, when tagging stopped). If staging is ever hard-reset instead of merged, those
+old commits stay reachable through the tags, so no history is lost either way.
+
+**Thirteen PRs reached production without a staging rehearsal.** #437–#450 all went straight to
+prod, including the whole one-button season close (#448/#449/#450) and the late-submission window
+(#445). That is the cost of the refresh being a manual chore: staging only earns its keep if it is
+refreshed _before_ the risky change, not weeks after. Refresh it at the start of a big piece of
+work, not at cleanup time.
+
+**Both open PRs were stale in different ways, and neither was a merge conflict.**
+
+- **#440** (3rd-place managers missing from the Finals submission status) was _already fixed_ —
+  #446 landed the same change on 2026-08-19. `main` already returns `getSFParticipants(sd)` for the
+  `finals` period and tags each of the four with his game via `finalsGameField`. Redundant; closed.
+- **#441** (mark semifinal losers eliminated) was _contradicted_. `main` deliberately went the
+  other way: `app.js` clears stale `'SF'` markers, `server.js` sets fourth place to `'Finals'` at
+  close, and `CLAUDE.md` records that nothing should ever write `sd.eliminated[m] = 'SF'` again.
+  Its secondary fix targeted `crownChampionAndRoastFinals`, which #448 deleted outright. Closed as
+  a settled product decision, not a rebase job. **The one salvageable idea:** the 3rd-place game
+  buys a Pot 1 draft slot, not a medal — that per-matchup `stakes` line never landed in
+  `js/roundPreview.js` and depends on none of the `eliminated` change.
+
+The triage lesson: a PR left open across a fast-moving month is more likely to be **superseded or
+reversed** than merely conflicted. Check what `main` did to the same lines before planning a rebase.
+
+**Three repeats from 2026-08-12, all confirmed again:** ref deletion still 403s for agent sessions
+(pushes work, deletes do not — the 12 branches were handed to the commissioner as a command); the
+pre-push hook still needs two pushes, and the second prints a misleading "Everything up-to-date"
+while still moving the ref, so verify with `git ls-remote origin refs/heads/<branch>`; and
+`npm run lint` still fails with `Cannot find module '@eslint/js'` on a fresh container until
+`npm install` has run — environment, not code.
 
 ## 2026-08-31 — "End Finals" produced neither roasts nor a recap, and left every scheduler running
 
