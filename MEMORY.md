@@ -112,8 +112,9 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 ## 2026-09-02 — The two halves of the 8/31 defect, and the boot that rewrote the committed seed file
 
-Four PRs off yesterday's review: #452 (the review itself), #453, #454, #455. All merged and
-deployed the same afternoon.
+Nine PRs off yesterday's review: #452 (the review itself), #453, #454, #455, the three factual
+corrections to the review documents (#457, #458, #459) and #460. All merged and deployed the same
+day.
 
 **The 8/31 defect is closed on both sides, and they are genuinely two bugs.**
 
@@ -132,12 +133,32 @@ deployed the same afternoon.
   deliberately NOT `findManagerForPlayerWeek`, which answers from the `sd.rosters` ARRAY cache and
   would re-derive attribution from a second cache that is additive-only and can be stale.
 
-**Unlike every other repair in this file, that one CHANGES TOTALS on purpose.** Putting a row back
-on the manager who rostered it is what returns the points, so "no change" is the wrong success
-criterion. Instead it plans against a throwaway clone, so the "after" totals are measured rather
-than predicted, and always returns the per-manager delta from `captureScoreSnapshot`. Rows that
-would stop counting for ANYBODY are the one direction that removes points, so they are listed in
-full rather than counted and an apply refuses while any are present without `allowReleases`.
+**Unlike every other repair in this file, that one CAN CHANGE TOTALS.** Putting a row back on the
+manager who rostered it is what would return the points, so "no change" is not automatically the
+success criterion. It plans against a throwaway copy, so the "after" totals are measured rather
+than predicted, and always returns the per-manager delta from `captureScoreSnapshot`.
+
+**Run against production (#460) it turned out to move nothing at all, and the first version of the
+gate was reading the wrong signal.** 1,295 rows are mislabelled across all 16 weeks — 3 claimed by
+a manager, 2 changing hands, and **1,290 released to nobody** — and the per-manager totals delta is
+EMPTY. That is not a coincidence, it is the invariant holding: `managerWeekSubtotal` never trusted
+`manager`, because the `eligible` set (roster_dates + the week arrays + the swap log) decides which
+rows a manager may claim, and a row stamped with a manager who did not hold that player is filtered
+out of his subtotal regardless. So the field is decorative to SCORING and load-bearing to
+everything that reads a row directly — Slack's Best/Worst, the Live tab, roster listings, the
+Season Stats leaderboards. The original gate refused whenever any row would be released, on the
+assumption that a release removes points; it blocked all 1,290 of a repair worth exactly zero
+points. **The gate is now the measured `totals_delta` itself** (`force_required` in the 409), which
+is both stricter and looser in the right places: a release is not inherently dangerous, and a move
+between two managers is not inherently safe — what is dangerous is a write that moves somebody's
+points. `allowReleases` still parses as an alias for `force`. Released rows are still listed in
+full rather than counted, because they are what a reader most needs to check by eye.
+
+**The dry run also took production down the first time it ran, and the cause was the clone.** It
+did `JSON.parse(JSON.stringify(sd))` on a 15.6 MB season of which 12.5 MB is daily rows it never
+mutates, then ran `captureScoreSnapshot` twice over it, against `--max-old-space-size=400` on a
+512 MB instance. Copy only what gets written: the two weekly arrays, shallow-copied row by row,
+everything else shared by reference.
 
 **The lesson under both: every guard in this file compares a total against another total.** A
 misattribution that moves points from one manager to nobody is invisible to all of them, which is
