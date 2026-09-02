@@ -279,6 +279,20 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   array puts him back — the shadow report counts it as `prior_period_via_array` so the fix is made
   on real numbers.
 
+- **`managerWeekSubtotal` exists a THIRD time, in `app.js`, and it is what renders the scoreboard the
+  league reads.** `CLAUDE.md` never listed it as a mirrored pair and nothing guarded it. **R1's
+  switch therefore cannot be flipped on the server alone** — one side moving guarantees a window
+  where the app and the server disagree. Worse, the two do not even score a row the same way today:
+  the client is not sent daily rows, so `rowScore` (app.js) reads the stored `weekly_score` or the
+  `manager_scores` split and **never clips to a window**, while the server's `managerRowScoreForWeek`
+  re-derives from the daily rows inside the manager's window. `applyManagerScoreSplits` writes
+  `manager_scores` only when TWO OR MORE managers claim a player that week, so wherever the server's
+  loose eligibility set claims a player it then clips to zero, the client has nothing to read but the
+  full weekly score. `clientRowScore` (server.js) is a copy of app.js's `rowScore` that exists purely
+  so `auditEligibilityDrift` can reproduce what the browser shows; the pair is now mechanized in
+  `tests/serverMirrors.test.js`, which reads `app.js` for the first time. The shadow endpoint reports
+  `client_totals_delta` — **that one is not a proposal, it is a live measurement**.
+
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.

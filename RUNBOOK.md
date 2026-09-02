@@ -349,7 +349,8 @@ is a scoring change, so it ships on evidence, not on an argument. This endpoint 
 ```bash
 curl -s https://wmmc.live/api/seasons/2026/eligibility-shadow \
   -H 'X-User-Email: <commissioner-email>' \
-  -H 'X-User-Password: <password>' | jq '{clean, disagreements, totals_delta, prior_period_via_array}'
+  -H 'X-User-Password: <password>' \
+  | jq '{clean, disagreements, totals_delta, client_totals_delta, prior_period_via_array}'
 ```
 
 **Read-only. It scores the season twice and writes nothing.** Expect it to take several seconds on a
@@ -358,6 +359,13 @@ not the shape that took production down in #460.
 
 What to look at, in order:
 
+- **`client_totals_delta`** — read this FIRST, because it is not a proposal. It is the app's
+  scoreboard against the server's certified totals, **today**. The browser is not sent daily rows,
+  so `rowScore` (app.js) cannot clip to a window: it reads the stored `weekly_score`, or the
+  `manager_scores` split when the server wrote one — and `applyManagerScoreSplits` writes that split
+  only when TWO OR MORE managers claim the player that week. So wherever the server's eligibility set
+  claims a player it then clips to zero, the client has nothing to read but the full weekly score.
+  **A non-zero entry here is a live discrepancy, not a plan.**
 - **`totals_delta`** — every manager whose total would MOVE if the switch were flipped. **Empty is
   the goal.** Anything here must be understood before R1 proceeds.
 - **`disagreements`** — manager-weeks where the two differ at all, including where they agree on
@@ -370,8 +378,17 @@ What to look at, in order:
   actually fires (a holdover whose only date event is in a prior period, put back by the roster
   array). Zero means it can be narrowed safely; a non-zero count is a data anomaly to look at first.
 
+Each `detail` entry carries all three numbers for the manager-week — `legacy` (what the server
+scores now), `candidate` (what the windows would score) and `client` (what the browser shows) —
+plus `delta` and `client_delta` against the legacy figure.
+
 `?limit=N` bounds the `detail` array (default 50, max 500); `detail_truncated` says how many were
 left out.
+
+**R1's switch cannot be flipped on the server alone.** `managerWeekSubtotal` exists a THIRD time, in
+`app.js`, and it is what renders the scoreboard the league reads. Flipping one side would guarantee
+a window where the app and the server disagree. That is why the client column exists: it has to be
+zero, or already understood, before either side moves.
 
 Run it against the **frozen 2026 season**: the right answer there is already known, because it is
 what the league played all year.

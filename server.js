@@ -6322,7 +6322,12 @@ function managerWeekWindowServer(dates, weekDates) {
   return start || end ? { start, end } : null;
 }
 
-function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut) {
+// `opts.rowScore(row, managerName)` replaces the row scorer. Default: managerRowScoreForWeek, the
+// live behaviour to the byte. The ONLY caller that passes it is auditEligibilityDrift, which uses it
+// to reproduce what app.js scores — the client is not sent daily rows, so its rowScore reads the
+// stored weekly_score or the manager_scores split and never clips to a window. Whether that agrees
+// with the server is a question nobody had asked.
+function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playerKey, listKey, detailOut, opts = {}) {
   if (!sd || !managerName) return 0;
   const round = schedWeek.round;
   const week = schedWeek.week;
@@ -6453,16 +6458,18 @@ function managerWeekSubtotal(sd, managerName, schedWeek, weekIdx, rowsArr, playe
   });
 
   const finalRows = allWeekRows.filter((r) => eligible.has(r[playerKey]));
-  const rowScore = (r) =>
-    managerRowScoreForWeek(
-      sd,
-      r,
-      playerKey,
-      managerName,
-      weekKey,
-      scheduleDates[weekIdx],
-      weekRosterDates[r[playerKey]]
-    );
+  const rowScore = opts.rowScore
+    ? (r) => opts.rowScore(r, managerName)
+    : (r) =>
+        managerRowScoreForWeek(
+          sd,
+          r,
+          playerKey,
+          managerName,
+          weekKey,
+          scheduleDates[weekIdx],
+          weekRosterDates[r[playerKey]]
+        );
   if (detailOut) {
     for (const r of finalRows) detailOut.push({ player: r[playerKey], score: rowScore(r) });
   }
@@ -6798,7 +6805,21 @@ function managerWeekSubtotalFromWindows(sd, managerName, schedWeek, weekIdx, row
   return total;
 }
 
-// Run both derivations over an entire season and report every disagreement.
+// What app.js scores a row at. The client is NOT sent daily rows, so it cannot clip to a window: it
+// reads the stored weekly_score, or the manager_scores split when the server computed one.
+//
+// applyManagerScoreSplits only writes that split when TWO OR MORE managers have a claim on the
+// player that week — for a single claimant it deletes it. So wherever the server's eligibility set
+// claims a player it then clips to zero, the client has nothing to read but the full weekly_score.
+// Mirrors rowScore in app.js.
+function clientRowScore(row, managerName) {
+  if (row.manager_scores && Object.prototype.hasOwnProperty.call(row.manager_scores, managerName)) {
+    return row.manager_scores[managerName] || 0;
+  }
+  return row.weekly_score || 0;
+}
+
+// Run all three derivations over an entire season and report every disagreement.
 //
 // Reports POINTS first, because that is the question: would flipping the switch move anybody. The
 // per-player sets follow, so a delta can be read rather than merely counted.
@@ -6815,6 +6836,7 @@ function auditEligibilityDrift(sd) {
 
   const weeks = [];
   const totals = {};
+  const clientTotals = {};
   let priorPeriodViaArray = 0;
 
   SEASON_SCHEDULE.forEach((schedWeek, idx) => {
@@ -6832,23 +6854,39 @@ function auditEligibilityDrift(sd) {
         const windowDetail = [];
         const legacy = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, legacyDetail);
         const candidate = managerWeekSubtotalFromWindows(sd, mgr, schedWeek, idx, rows, key, windowDetail);
+        // The SAME eligibility the server uses, scored the way the browser scores it. A difference
+        // here is not a proposal — it is the app's scoreboard and the certified totals disagreeing
+        // today.
+        const client = managerWeekSubtotal(sd, mgr, schedWeek, idx, rows, key, listKey, null, {
+          rowScore: clientRowScore,
+        });
         const delta = Math.round((candidate - legacy) * 100) / 100;
+        const clientDelta = Math.round((client - legacy) * 100) / 100;
 
         const diff = diffEligibility(
           Object.fromEntries(windowDetail.map((d) => [d.player, {}])),
           legacyDetail.map((d) => d.player)
         );
-        if (Math.abs(delta) > 0.01 || diff.claimed_only_by_windows.length || diff.claimed_only_by_legacy.length) {
+        if (
+          Math.abs(delta) > 0.01 ||
+          Math.abs(clientDelta) > 0.01 ||
+          diff.claimed_only_by_windows.length ||
+          diff.claimed_only_by_legacy.length
+        ) {
           any = true;
           entry.sides[side] = {
             legacy: Math.round(legacy * 100) / 100,
             candidate: Math.round(candidate * 100) / 100,
+            client: Math.round(client * 100) / 100,
             delta,
+            client_delta: clientDelta,
             only_windows: diff.claimed_only_by_windows,
             only_legacy: diff.claimed_only_by_legacy,
           };
           if (!totals[mgr]) totals[mgr] = 0;
           totals[mgr] = Math.round((totals[mgr] + delta) * 100) / 100;
+          if (!clientTotals[mgr]) clientTotals[mgr] = 0;
+          clientTotals[mgr] = Math.round((clientTotals[mgr] + clientDelta) * 100) / 100;
         }
       }
 
@@ -6879,12 +6917,14 @@ function auditEligibilityDrift(sd) {
   });
 
   const movedManagers = Object.fromEntries(Object.entries(totals).filter(([, d]) => Math.abs(d) > 0.01));
+  const movedClient = Object.fromEntries(Object.entries(clientTotals).filter(([, d]) => Math.abs(d) > 0.01));
   return {
     clean: weeks.length === 0,
     weeks_compared: scheduleDates.length,
     managers_compared: managers.size,
     disagreements: weeks.length,
     totals_delta: movedManagers,
+    client_totals_delta: movedClient,
     prior_period_via_array: priorPeriodViaArray,
     detail: weeks,
   };
