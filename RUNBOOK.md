@@ -258,3 +258,144 @@ either. The refusal post's row list covers both; the dry run does not.
    roster/feed name mismatches on unmapped players).
 3. If weekly totals look stale after a roster correction, **Rebuild Totals** re-derives them
    from stored daily data without re-fetching from MLB.
+
+## Season storage report — how big is db.json, and what would an archive save?
+
+Answers "what is the database actually made of" and prices the offseason archive tiers. See
+[`OFFSEASON_ARCHIVE_PLAN.md`](OFFSEASON_ARCHIVE_PLAN.md) for what the tiers mean.
+
+**Two ways to run it. The console one needs nothing installed.**
+
+### From the browser (no deploy, no shell)
+
+On **wmmc.live**, logged in as commissioner, DevTools (F12) → Console. Paste this once; it runs
+immediately. It reads only — nothing is written.
+
+```js
+(async () => {
+  const Y = String(new Date().getFullYear());
+  const h = () => ({
+    'X-User-Email': localStorage.wmmc_logged_in_email,
+    'X-User-Password': localStorage.wmmc_logged_in_password,
+  });
+  const B = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
+  const MB = (n) => +(n / 1048576).toFixed(2);
+  console.log('Fetching… the daily rows are several MB, give it a moment.');
+
+  const [seasons, daily, disk] = await Promise.all([
+    fetch('/api/seasons').then((r) => r.json()),
+    fetch(`/api/seasons/${Y}/daily-stats`).then((r) => r.json()),
+    fetch('/api/mlb/storage-status', { headers: h() })
+      .then((r) => r.json())
+      .catch(() => ({})),
+  ]);
+  const sd = seasons[Y];
+  if (!sd) return console.error(`No season ${Y} in the payload.`);
+
+  // Who was rostered, when — from roster_dates + the schedule, never from the sticky
+  // `manager` field on a stat row (that is the field this app has had wrong before).
+  const sched = sd.schedule_dates || [];
+  const s0 = sched[0] && sched[0].start;
+  const e0 = sched[sched.length - 1] && sched[sched.length - 1].end;
+  const spans = new Map();
+  for (const weeks of Object.values(sd.roster_dates || {}))
+    for (const players of Object.values(weeks || {}))
+      for (const [p, d] of Object.entries(players || {})) {
+        const s = (d && d.add_date) || s0,
+          e = (d && d.drop_date) || e0;
+        if (!s || !e || s > e) continue;
+        if (!spans.has(p)) spans.set(p, []);
+        spans.get(p).push([s, e]);
+      }
+  const onDate = (p, dt) => (spans.get(p) || []).some(([s, e]) => dt >= s && dt <= e);
+  const inSpan = (p, a, b) => (spans.get(p) || []).some(([s, e]) => s <= b && e >= a);
+
+  const wk = new Map();
+  for (const r of [...(daily.batting || []), ...(daily.pitching || [])]) {
+    const k = `${r.round}|${r.week}`,
+      c = wk.get(k) || { start: r.date, end: r.date };
+    if (r.date < c.start) c.start = r.date;
+    if (r.date > c.end) c.end = r.date;
+    wk.set(k, c);
+  }
+
+  const split = (rows, key, isDaily) => {
+    const o = { keepN: 0, keepB: 0, dropN: 0, dropB: 0, trimB: 0 };
+    for (const r of rows || []) {
+      const b = B(r),
+        n = r[key],
+        sp = wk.get(`${r.round}|${r.week}`);
+      const keep = isDaily ? onDate(n, r.date) : sp ? inSpan(n, sp.start, sp.end) : !!r.manager;
+      if (!keep) {
+        o.dropN++;
+        o.dropB += b;
+        continue;
+      }
+      o.keepN++;
+      o.keepB += b;
+      if (isDaily && r.delta) {
+        if (r.cumulative && JSON.stringify(r.cumulative) === JSON.stringify(r.delta))
+          o.trimB += B(r.cumulative) + key.length;
+        o.trimB += B(r.delta) - B(Object.fromEntries(Object.entries(r.delta).filter(([, v]) => v)));
+      }
+    }
+    return o;
+  };
+
+  const dB = split(daily.batting, 'batter', true),
+    dP = split(daily.pitching, 'pitcher', true);
+  const wB = split(sd.weekly_batting, 'batter', false),
+    wP = split(sd.weekly_pitching, 'pitcher', false);
+
+  const disposable = ['playoff_odds', 'bracket_odds', 'hot_takes', 'upload_log'].reduce((s, k) => s + B(sd[k]), 0);
+  const shrinkable = ['batters_pool', 'pitchers_pool', 'batters_team', 'pitchers_team', 'mlb_ids'].reduce(
+    (s, k) => s + B(sd[k]),
+    0
+  );
+
+  const seen = B(sd) + B(daily.batting) + B(daily.pitching);
+  const t1 = seen - dB.dropB - dP.dropB;
+  const t2 = t1 - wB.dropB - wP.dropB;
+  const t3 = t2 - disposable - Math.round(shrinkable * 0.9);
+  const t4 = t3 - dB.trimB - dP.trimB;
+
+  console.log(`\n=== SEASON ${Y} ===`);
+  console.log(`On disk (whole db.json, every season): ${MB(disk.db_size_bytes || 0)} MB`);
+  console.log(`This season, as the API exposes it:    ${MB(seen)} MB  (score_snapshots not visible here)\n`);
+  console.table(
+    Object.entries({ daily_batting: dB, daily_pitching: dP, weekly_batting: wB, weekly_pitching: wP }).map(
+      ([k, v]) => ({
+        rows: k,
+        'rostered rows': v.keepN,
+        'rostered MB': MB(v.keepB),
+        'free-agent rows': v.dropN,
+        'free-agent MB': MB(v.dropB),
+        'droppable %': +((100 * v.dropB) / (v.keepB + v.dropB || 1)).toFixed(1),
+      })
+    )
+  );
+  console.table(
+    [
+      ['0 — today', seen],
+      ['1 — dailies: rostered player-days only', t1],
+      ['2 — + weeklies: rostered players only', t2],
+      ['3 — + drop derived caches, shrink pools', t3],
+      ['4 — + drop duplicate cumulative and zero stats', t4],
+    ].map(([tier, v]) => ({ tier, MB: MB(v), 'of today %': +((100 * v) / seen).toFixed(1) }))
+  );
+  console.log(`Upstash backup limit is ~1.00 MB. Tier 4 ${t4 <= 1048576 ? 'FITS' : 'does NOT fit'}.`);
+  if (spans.size === 0) console.warn('roster_dates was empty — nothing could be classified. Numbers are meaningless.');
+})();
+```
+
+### From a shell (exact, includes `score_snapshots`)
+
+Needs the repo checked out somewhere that can read a copy of `db.json` — a Render Shell on the
+prod service (paid instance types only), or your own machine with a downloaded copy. **The script
+must be on the branch you are running from**; it does not exist on `main` until this PR merges.
+
+```
+node scripts/season-storage-report.js /var/data/db.json --year 2026
+```
+
+`--json` emits the same report as machine-readable JSON. Both forms are read-only.
