@@ -43,10 +43,10 @@ credited to nobody in the semifinal for twelve days (`MEMORY.md` 2026-08-31). Ja
 that game by 25.4. Had it gone the other way, the app would have put the wrong manager in the
 Championship. This is the single most important thing on this page.
 
-**The scale model does not survive season two.** One season is ~18–20 MB of `db.json`, ~93% of
-which is stat rows for players nobody rostered, and the whole file is re-parsed on every
-request. That is already why `render.yaml` carries a `--max-old-space-size=400` workaround for
-an OOM crash loop.
+**The scale model does not survive season two.** Measured against production on 2026-09-02:
+`db.json` is **17.3 MB**, and **85.5% of its stat rows belong to players nobody rostered**. The
+whole file is re-parsed on every request. That is already why `render.yaml` carries a
+`--max-old-space-size=400` workaround for an OOM crash loop.
 
 ---
 
@@ -199,15 +199,15 @@ Ranked by what they can cost. Every item was verified in the code today.
 
 ### S2 — Scale, cost and availability
 
-| #   | Finding                                                                                                                                                                                                                                                                                                                                                                                                 | Evidence                     |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| 7   | Stat rows are stored for **every MLB player in every game**, not just rostered ones. `performMLBSync` iterates the whole boxscore and pushes a row per player per game; `rebuildWeeklyFromDaily` then writes a weekly row per player per week with `manager: null`. ~93% of stored rows belong to players nobody rostered.                                                                              | server.js:11365, 11450, 4183 |
-| 8   | `readDB()` does a full `readFileSync` + `JSON.parse` on **every request**, and authenticated requests pay it **twice** (`loadManagerFromHeaders` reads it, then the handler reads it again). Measured on a 19.8 MB season-scale file: 272 ms to parse, 45 MB of heap per parsed copy, 402 ms to re-serialize on every write, 183 MB peak RSS for one parse+write cycle — against a 400 MB heap ceiling. | benchmark, `render.yaml`     |
-| 9   | The daily-row sync is O(n²): `sd.daily_batting = sd.daily_batting.filter(…)` runs **inside the per-player, per-game loop**, rebuilding a 35k-row array once per player per game.                                                                                                                                                                                                                        | server.js:11400, 11453       |
-| 10  | `GET /api/seasons/:year/daily-stats` returns the entire daily corpus (~15 MB), **unauthenticated**, and GET is **not rate-limited** (`RATE_LIMITED_METHODS` is POST/PUT/PATCH/DELETE only). One loop knocks the instance over and bills the bandwidth.                                                                                                                                                  | server.js:15208, 245         |
-| 11  | The Upstash backup is structurally incomplete: `slimForBackup` must strip the daily rows to fit the ~1 MB limit, so disaster recovery restores standings but loses the per-game history the weekly rollups derive from.                                                                                                                                                                                 | server.js:391                |
-| 12  | Nothing prunes. Season two lands on top of season one in the same file, parsed on every request. `score_snapshots` (21), `audit_log` (500) and `upload_log` (50) are capped; the stat arrays are not.                                                                                                                                                                                                   | —                            |
-| 13  | The swap endpoint deep-clones the whole season (`JSON.parse(JSON.stringify(sd))`, ~45 MB) and runs two full `captureScoreSnapshot` passes, each of which filters the 35k-row daily array once per player per week per manager.                                                                                                                                                                          | server.js:1980               |
+| #   | Finding                                                                                                                                                                                                                                                                                                                                                                                                                           | Evidence                     |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| 7   | Stat rows are stored for **every MLB player in every game**, not just rostered ones. `performMLBSync` iterates the whole boxscore and pushes a row per player per game; `rebuildWeeklyFromDaily` then writes a weekly row per player per week with `manager: null`. Measured on production: **85.5% of stored stat rows, and 83.2% of stat bytes**, belong to players nobody rostered.                                            | server.js:11365, 11450, 4183 |
+| 8   | `readDB()` does a full `readFileSync` + `JSON.parse` on **every request**, and authenticated requests pay it **twice** (`loadManagerFromHeaders` reads it, then the handler reads it again). Measured on a 19.8 MB season-scale file: 272 ms to parse, 45 MB of heap per parsed copy, 402 ms to re-serialize on every write, 183 MB peak RSS for one parse+write cycle — against a 400 MB heap ceiling.                           | benchmark, `render.yaml`     |
+| 9   | The daily-row sync is O(n²): `sd.daily_batting = sd.daily_batting.filter(…)` runs **inside the per-player, per-game loop**, rebuilding a 35k-row array once per player per game.                                                                                                                                                                                                                                                  | server.js:11400, 11453       |
+| 10  | `GET /api/seasons/:year/daily-stats` returns the entire daily corpus (~15 MB), **unauthenticated**, and GET is **not rate-limited** (`RATE_LIMITED_METHODS` is POST/PUT/PATCH/DELETE only). One loop knocks the instance over and bills the bandwidth.                                                                                                                                                                            | server.js:15208, 245         |
+| 11  | The Upstash backup does not fit even after slimming. `slimForBackup` strips the daily rows to get under the ~1 MB limit, but those are 12.47 MB of a 17.3 MB file, leaving **~4.83 MB — about five times over**. Disaster recovery is not merely losing per-game history; the backup is very likely not being written at all. Check `upstash_configured` on `GET /api/mlb/storage-status` and the `serializeForUpstash` log line. | server.js:391                |
+| 12  | Nothing prunes. Season two lands on top of season one in the same file, parsed on every request. `score_snapshots` (21), `audit_log` (500) and `upload_log` (50) are capped; the stat arrays are not.                                                                                                                                                                                                                             | —                            |
+| 13  | The swap endpoint deep-clones the whole season (`JSON.parse(JSON.stringify(sd))`, ~45 MB) and runs two full `captureScoreSnapshot` passes, each of which filters the 35k-row daily array once per player per week per manager.                                                                                                                                                                                                    | server.js:1980               |
 
 ### S3 — Security
 
@@ -270,7 +270,7 @@ Filter both sync paths to players in `getRosteredNames(sd)` ∪ this season's po
 players before writing daily and weekly rows. This is the single change that fixes findings 7, 8,
 9, 11, 12 and 13 at once, and it is _forward-looking_ — it does not touch 2026. Keep the full pool
 for the swap-form autocomplete (`batters_pool` is names only, ~30 KB); it is the stat rows that
-are 93% dead weight. Note the one real cost: the What If sandbox can only score players who were
+are 85% dead weight. Note the one real cost: the What If sandbox can only score players who were
 rostered. Decide that explicitly. (See `OFFSEASON_ARCHIVE_PLAN.md` §7 for the same trade-off.)
 
 ### Do these when convenient
@@ -330,7 +330,8 @@ pain into permanent coverage, and it is the highest-value use of the frozen 2026
   `gameFactor` — **all in sync**. Intentional signature differences (not drift) in
   `periodStartForRound`, `calculateBattingScore`, `calculatePitchingScore`,
   `computeTeamQualityFactors` — see finding 18.
-- **Storage benchmark** on a synthesized 19.8 MB season-scale `db.json`: 272 ms parse, 45 MB heap
+- **Storage benchmark** on a synthesized 19.8 MB season-scale `db.json` (production measured 17.3 MB
+  the next day, so these are slightly conservative): 272 ms parse, 45 MB heap
   per copy, 402 ms serialize, 183 MB peak RSS.
 - **Endpoint census**: 93 API routes; 24 unauthenticated; 26 diagnostic or repair.
 - **Cache-bust regex**: reproduced the mangling and the two silent misses.
