@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-02 | R1's burn-in passed, and the third copy of the scoring function                                   | [MEMORY](#2026-09-02-r1s-burn-in-passed-and-the-third-copy-of-the-scoring-function)                                               |
 | 2026-09-02 | The two halves of the 8/31 defect, and the boot that rewrote the committed seed file              | [MEMORY](#2026-09-02-the-two-halves-of-the-831-defect-and-the-boot-that-rewrote-the-committed-seed-file)                          |
 | 2026-09-01 | Season-one QA review: the roster-window problem, and an offseason archive plan                    | [MEMORY](#2026-09-01-season-one-qa-review-the-roster-window-problem-and-an-offseason-archive-plan)                                |
 | 2026-09-01 | The staging refresh is a recurring chore, and two open PRs had been overtaken by `main`           | [MEMORY](#2026-09-01-the-staging-refresh-is-a-recurring-chore-and-two-open-prs-had-been-overtaken-by-main)                        |
@@ -109,6 +110,50 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-02 — R1's burn-in passed, and the third copy of the scoring function
+
+PRs #465 and #466. Both read-only; neither changed a score.
+
+**The shadow comparison says the switch is safe, on both sides.** Run against the frozen 2026
+season, `weekRosterWindows` and `managerWeekSubtotal`'s five-heuristic `eligible` set produce
+identical per-manager totals — `totals_delta` empty — and identical totals to what the BROWSER
+scores as well (`client_totals_delta` empty). `prior_period_via_array` is 0, so the one asymmetry
+the extraction deliberately preserved never fires on real data.
+
+They disagree in exactly **twelve manager-weeks, one per manager**, always the same shape: the
+legacy set claims one extra player and scores him zero. `only_windows` is empty everywhere. **The
+old derivation is strictly looser, never tighter, and the looseness costs nothing.**
+
+**`managerWeekSubtotal` exists a THIRD time, in `app.js`.** It renders the scoreboard the league
+actually reads. `CLAUDE.md` never listed it as a mirrored pair and nothing guarded it; it was found
+by grepping for callers, after this session had already told the maintainer the switch was safe to
+flip. **R1's switch cannot be flipped on the server alone** — one side moving guarantees a window
+where the app and the server disagree.
+
+**The client cannot clip a row to a window, and for a while that looked like a live bug.** app.js is
+not sent daily rows, so its `rowScore` reads the stored `weekly_score`, or the `manager_scores`
+split when the server wrote one — and `applyManagerScoreSplits` writes that split only when TWO OR
+MORE managers claim the player. So wherever the server's loose set claims a player it then clips to
+zero, the client appeared to have nothing to read but the full weekly score.
+
+**It is not a bug, and the reason is worth writing down: the clipping happens at WRITE time.**
+`syncPlayerDatesFromRosterDates` merges every manager's window for a (week, player) into
+`sd.player_dates`, and `computeEffective{Batting,Pitching}Score` — which `rebuildWeeklyFromDaily`
+uses to compute `weekly_score` — filters the daily rows through it. **The number the client reads
+was already clipped before it was stored.** `manager_scores` covers the one case that union cannot
+express, a player two managers shared inside one week. `managerRowScoreForWeek` re-deriving on the
+server is belt and braces that lands on the same answer.
+
+So the architecture is: clip at write, split at write when contested, and let the client read. That
+is why a client with no daily rows can be correct at all, and it should not be "fixed" by teaching
+the client to clip.
+
+**The lesson is the one this file keeps writing down.** Two derivations of the same fact had been
+measured against each other; a THIRD was found only by grepping for callers of the function about to
+be changed. Before altering anything on the scoring path, count the copies first — the mirror tests
+guard the pairs somebody remembered to add, and `app.js` was in none of them until #466 taught
+`tests/serverMirrors.test.js` to read it.
 
 ## 2026-09-02 — The two halves of the 8/31 defect, and the boot that rewrote the committed seed file
 
