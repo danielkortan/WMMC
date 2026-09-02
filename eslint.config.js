@@ -117,6 +117,15 @@ module.exports = [
       globals: { ...globals.node, ...projectGlobals },
     },
   },
+  // Maintenance scripts: node, CommonJS. Outside the lint surface until now, which is why every
+  // file in scripts/ failed `eslint` on no-undef for require/console/process.
+  {
+    files: ['scripts/**/*.js'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: { ...globals.node, ...projectGlobals },
+    },
+  },
   // Tests: node, ES modules.
   {
     files: ['tests/**/*.js'],
