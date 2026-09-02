@@ -41,18 +41,28 @@ That is one season against a 400 MB ceiling on a 512 MB instance. **Two seasons 
 it is not being forced onto a larger instance in 2028 — and not spending another July debugging
 an OOM crash loop.
 
-**It is the backup, which is worse off than it looks.** Upstash's free-tier `/set` caps at ~1 MB,
-so `slimForBackup` strips the daily rows to fit. On the production numbers that is nowhere near
-enough: the daily rows are 12.47 MB of a 17.3 MB file, so the slimmed payload is still **~4.83 MB
-against a ~1 MB limit** — about five times over. Disaster recovery is not merely losing per-game
-history; the backup is very likely not being written at all. `serializeForUpstash` logs when this
-happens, and `GET /api/mlb/storage-status` reports `upstash_configured` — check both before
-relying on any of it.
+**It is not the backup, because there isn't one.** Production reports
+`upstash_configured: false`, so `saveToUpstash` has returned immediately every time it has ever
+been called. The dated snapshots, `GET /api/admin/db-backups`, `POST /api/admin/db-restore` and
+the fixture-refresh workflow are all inert for the same reason. The single Render disk is the only
+copy of the league.
 
-Archiving improves this but **does not on its own fix it**: a tier-4 2026 plus the ~1.71 MB that
-sits outside it comes to ~3.5 MB, or ~2.4 MB slimmed. Still over. Making the backup work needs its
-own decision — prune `score_snapshots` and the 2025 blob out of the backup payload, or move off
-the free tier — and the archive is a prerequisite rather than the answer.
+The size problem is real but _latent_: turning Upstash on today would not work either, since the
+slimmed payload is ~4.83 MB against a ~1 MB cap, and even a tier-4 archive only gets the whole
+file to ~3.5 MB (~2.4 MB slimmed).
+
+**The fix is not a bigger backup — it is a smaller one, chosen differently.** `slimForBackup`
+strips by SIZE. The right criterion is REPLACEABILITY:
+
+| data                                                      | size    | replaceable?                          |
+| --------------------------------------------------------- | ------- | ------------------------------------- |
+| daily + weekly stat rows                                  | 15.3 MB | yes — re-fetch from the MLB Stats API |
+| pools, team maps, `mlb_ids`                               | ~0.1 MB | yes — re-bootstrap from the catalog   |
+| `roster_dates`, `swaps`, submissions, `rosters`, `roasts` | 0.25 MB | **no — exists nowhere else**          |
+
+Losing every stat row in the file costs a re-sync. Losing the swap log costs the season. Back up
+the quarter of a megabyte that cannot be rebuilt and the free tier is ten times more than enough,
+archived or not. See recommendation **R13** in the review.
 
 **It is egress.** `GET /api/seasons` ships every season's non-daily state to every browser on
 every load, and `GET /api/seasons/:year/daily-stats` ships ~15 MB more to anyone who opens Trends
