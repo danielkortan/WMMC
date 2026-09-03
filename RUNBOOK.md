@@ -395,6 +395,53 @@ app and the server disagree. The client column is how that stays checkable.
 Run it against the **frozen 2026 season**: the right answer there is already known, because it is
 what the league played all year.
 
+## Pruning the roster arrays
+
+`rebuildRosterArraysFromDates` has always been purely **additive**: it pushes each week's active
+players into `sd.rosters[manager][week]` and never removes anyone. So a player the dates say was
+dropped stays in that week's array forever, and the surfaces that read an array directly — roster
+listings, the Live tab, `findManagerForPlayerWeek`, Slack's Best/Worst — keep showing him.
+
+```
+POST /api/seasons/:year/prune-roster-arrays   { dryRun?: true }
+```
+
+**DRY RUN BY DEFAULT.** Pass `{"dryRun": false}` to write. Idempotent — a second run removes nothing.
+
+### The pruned set is the WINDOWS, not "players with a live add_date"
+
+This distinction is the whole reason the change was deferred until now, and it is worth
+understanding before running it.
+
+The array is the **fallback** `weekRosterWindows` uses for a player who has no date event anywhere —
+an original-draft player, or a week carried forward before dates were tracked. Replacing the array
+with dates-only actives would delete exactly those players and **lose their points**.
+
+Taking the keep-set from `weekRosterWindows` — the one derivation the scoreboard now scores from —
+keeps them by construction. It is also what makes the operation idempotent: the fallback players are
+still in the array on the next run, so the second pass computes the identical set.
+
+**This is not theoretical.** Running it against a fixture with a dates-only keep-set refused with a
+409 and a `-378` delta for one manager: his array held a holdover whose only date event was in a
+prior period. The totals gate caught it and wrote nothing.
+
+### Expect an empty totals delta
+
+The arrays are a derived cache the scoring path no longer reads, so pruning them must move nothing.
+The endpoint captures per-manager totals before and after and **refuses to write on any difference at
+all** — same idiom as the archive. A totals change means the pruned set is wrong, not that the prune
+is finding lost points.
+
+```bash
+curl -s -X POST https://wmmc.live/api/seasons/2026/prune-roster-arrays \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{}' | jq '{totals_check, totals_delta, players_removed, removals}'
+```
+
+Read `removals` by eye before applying — it names every manager, week and player.
+
 ## Archiving a finished season
 
 `js/statRetention.js` stops 85% of stat rows being written from 2027 onward. This is the other half:
