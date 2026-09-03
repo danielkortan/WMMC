@@ -314,6 +314,16 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 /api/mlb/backfill` is the rehydrate and the ONLY path that clears the flag — it re-fetches the
   season from the MLB Stats API, which is what made dropping the rows safe in the first place.
 
+- **Authenticating a request used to parse the whole database.** `loadManagerFromHeaders` called
+  `readDB()` to read `db.managers` — a 4 KB array out of a 17.3 MB file — so every authenticated
+  request paid ~272 ms of blocked event loop and ~45 MB of heap, twice, because the handler then
+  read the database again. `cachedManagers()` holds just that array against `dbFingerprint()`, the
+  same key `seasonsPayload` uses: the in-process write counter plus the file's mtime and size, so a
+  password change through the API AND an outside rewrite of `db.json` both invalidate it. Measured
+  on a 21.5 MB database: **298 ms → 9 ms per authenticated request.** The manager is returned as a
+  COPY — nothing mutates `req.manager` today, but a cached object handed to a request is exactly the
+  shape that turns a future one-line mutation into a cross-request leak.
+
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.
