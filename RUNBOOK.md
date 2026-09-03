@@ -479,11 +479,21 @@ does **not** cover the shape of failure this app actually produces:
 - **Opaque.** You cannot see what a snapshot holds without restoring it.
 
 The trail is the answer to those three. `<db dir>/backups/wmmc-YYYY-MM-DD.json`, one per day at
-**11pm Eastern**, a year of them, ~90 MB in total. It holds only what exists nowhere else:
+**11pm Eastern** — but only when something actually changed. It holds only what exists nowhere else:
 `roster_dates`, `rosters`, the swaps, the submissions, the roasts, the hand-set `schedule_dates`,
 the `mlb_ids` map, the audit log, and manager identities. **Passwords are stripped**, following
 `managers_seed.json`'s rule — a commissioner re-issues one in a minute, and a dated trail of copies
 would multiply the exposure of a plaintext credential.
+
+**A copy is 877 KB on production, and one is written only when its content differs from the newest
+one on disk** (`created_at` and `last_saved_at` excluded — both are timestamps every run bumps).
+Written blindly a year would be ~320 MB of a 1 GB disk; through the offseason nothing changes, so it
+costs nothing. That makes the trail a list of **change points**, which is a better answer to "when
+did this change?" than 364 identical files with the one interesting day buried among them.
+
+`last_run` on the listing endpoint records every run, written or not — that is how you tell **"it
+ran and had nothing to say"** from **"it never ran"**. The first is a quiet week; the second is a
+broken scheduler.
 
 Every copy also carries **`certified_totals`** — each season's per-manager totals from
 `captureScoreSnapshot`, the same function every before/after vet in this repo uses. That is what

@@ -252,7 +252,13 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   SIZE. The local trail (`js/backupSet.js` ↔ `server.js`, must stay identical) selects by
   REPLACEABILITY: it keeps only what exists nowhere else — `roster_dates`, `rosters`, swaps,
   submissions, roasts, the hand-set `schedule_dates`, `mlb_ids`, the audit log, manager identities
-  **with passwords stripped** — which on production is 0.25 MB, so a year of daily copies is ~90 MB.
+  **with passwords stripped**. A whole copy is 877 KB on production (the season's 0.25 MB plus the
+  audit log, the manager identities and each season's certified totals), so a copy is written ONLY
+  when its content differs from the newest one on disk — `created_at` and `last_saved_at` excluded,
+  since both are timestamps every run bumps. Written blindly a year would be ~320 MB of a 1 GB disk;
+  in the offseason nothing changes, so it costs nothing. The trail is therefore a list of CHANGE
+  POINTS, and `last_run` on the listing endpoint is how you tell "it ran and had nothing to say"
+  from "it never ran".
   It is the only one that can answer **when** something changed (`GET
 /api/admin/backups/:from/diff/:to`, where `:to` may be `today`), which is the question twelve days
   of silence raised on 8/31 and which no whole-disk snapshot answers at any retention. Each copy

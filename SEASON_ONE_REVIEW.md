@@ -328,7 +328,7 @@ the pools re-bootstrap from the catalog, but `roster_dates`, `swaps`, `initial_s
 `period_submissions`, `rosters` and `roasts` exist nowhere else. On production that is **0.25 MB**.
 
 At that size the retention argument inverts: a year of DAILY copies of the league's irreplaceable
-history is ~90 MB, about five current `db.json` files. Keep them dated and diffable and the
+history is small — and smaller still if a copy is written only when something changed. Keep them dated and diffable and the
 twelve-day question — _when did this week's attribution change?_ — becomes answerable, which no
 whole-disk snapshot can do at any retention. Losing every stat row costs a re-sync. Losing the
 swap log costs the season.

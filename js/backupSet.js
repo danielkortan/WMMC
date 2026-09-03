@@ -20,11 +20,15 @@
 //   are all derived. But roster_dates, the swaps, the submissions, the roster arrays, the roasts
 //   and the hand-set schedule exist NOWHERE ELSE. On production that is 0.25 MB.
 //
-// At that size the retention argument inverts. A year of DAILY copies of the league's irreplaceable
-// history is about 90 MB — five current db.json files — and because they are dated and diffable,
-// the twelve-day question ("when did this week's attribution change?") becomes answerable, which no
-// whole-disk snapshot can do at any retention. Losing every stat row costs a re-sync. Losing the
-// swap log costs the season.
+// A whole copy comes to 877 KB on production — the season's 0.25 MB plus the audit log, the manager
+// identities and each season's certified totals. A year of them written blindly would be ~320 MB,
+// which on a 1 GB disk is a third of it, so a copy is written ONLY when its content differs from the
+// newest one already on disk (see backupsEqual). The offseason changes nothing, so it costs nothing.
+//
+// That also makes the trail BETTER, not merely smaller: a list of change-points answers "when did
+// this week's attribution change?" directly, where a year of near-identical copies buries the one
+// day that mattered among 364 that did not. No whole-disk snapshot can answer it at any retention.
+// Losing every stat row costs a re-sync. Losing the swap log costs the season.
 //
 // PASSWORDS ARE STRIPPED, following managers_seed.json's rule: a dated trail of copies multiplies
 // the exposure of a plaintext credential, and a commissioner can re-issue a password in a minute.
@@ -232,6 +236,22 @@ export function diffBackups(before, after) {
   }
 
   return { changed, seasons };
+}
+
+// Two runs are the same when everything but the TIMESTAMPS matches.
+//
+// Both exclusions are load-bearing. `created_at` changes on every run by construction. And
+// `last_saved_at` is bumped by every writeDB — so a single unrelated request would otherwise make
+// the day look changed and write another 877 KB, which is exactly the cost this avoids. Neither is
+// content: they are metadata about when, not about what.
+export function backupContentKey(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const { created_at: _createdAt, last_saved_at: _lastSaved, ...rest } = payload;
+  return JSON.stringify(rest);
+}
+
+export function backupsEqual(a, b) {
+  return !!a && !!b && backupContentKey(a) === backupContentKey(b);
 }
 
 // Which dated files to delete. Keeps everything within `keepDays` of today, and — because a file
