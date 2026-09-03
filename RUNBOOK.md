@@ -442,6 +442,48 @@ curl -s -X POST https://wmmc.live/api/seasons/2026/prune-roster-arrays \
 
 Read `removals` by eye before applying — it names every manager, week and player.
 
+## Starting the next season
+
+**One action, in the admin panel: "Create New Season".** It previews what will happen, asks once,
+and then does all three steps:
+
+1. Creates the next year's season — managers, pool assignments and credentials carry forward;
+   rosters, player pools, stats and swap history start clean.
+2. Points every automation at it (`active_season`).
+3. **Archives the season that was active**, at tier 4.
+
+```
+POST /api/admin/start-next-season   { year?, tier?, archivePrior?, dryRun?, force? }
+```
+
+Dry run by default; the button runs the dry run first and shows you its result in the confirm.
+
+### Why these are one action
+
+They used to be three things in a required order, and nothing connected them. "Create New Season"
+made the season and told you to go and switch the selector; moving `active_season` was a separate
+control; and the archive could not run until that pointer had moved, because **"not the active
+season" is one of the archive's four preconditions**. So the archive was the step that got
+forgotten — which is the whole reason a finished season sat at full size.
+
+### The archive step can skip, and that is deliberate
+
+Step 3 goes through the same planner as `POST .../archive` — the same four preconditions and the
+same totals gate. A prior season that is not closed, has a refused stat correction, or shows rollup
+drift is **skipped with its reason**, never forced.
+
+Steps 1 and 2 still happen. A season that cannot be archived today can be archived later with
+`POST /api/seasons/:year/archive`; blocking the new season on it would be the wrong trade.
+
+The confirm dialog names the outcome either way — either the rows and megabytes the archive will
+save, or the reason it is being skipped.
+
+### If you want the steps separately
+
+They all still exist on their own: `POST /api/admin/active-season` moves the pointer,
+`POST /api/seasons/:year/archive` archives. The combined endpoint takes `archivePrior: false` to do
+just the first two.
+
 ## Archiving a finished season
 
 `js/statRetention.js` stops 85% of stat rows being written from 2027 onward. This is the other half:

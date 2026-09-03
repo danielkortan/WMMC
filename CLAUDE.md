@@ -336,6 +336,18 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   difference at all. Taking the keep-set from the windows also makes it idempotent, because the
   fallback players are still in the array on the next run.
 
+- **Starting the next season is ONE action, and the archive is the step that used to fall off the
+  end.** `POST /api/admin/start-next-season` (the "Create New Season" button) creates next year,
+  repoints `active_season`, and archives the season that was active — in that order, because it is
+  the only order that works: **"not the active season" is one of the archive's four preconditions**,
+  so the archive could not run until the pointer had moved, and nothing connected the two. The
+  archive step goes through `planSeasonArchive`, the same planner and the same totals gate as
+  `POST .../archive`, so a prior season that is not closed or shows drift is SKIPPED with its reason
+  rather than forced — and steps 1 and 2 still happen, because blocking a new season on an
+  un-archivable old one is the wrong trade. The new season object is built SERVER-side; the button
+  used to construct a whole season in the browser and POST it, which is the clobber-prone full-season
+  save path.
+
 - **Passwords are scrypt hashes now, and `LOGIN_PASSWORD` has no published default.** `verifyPassword`
   accepts BOTH formats forever — a stored value that is not `scrypt$…` is compared as plaintext —
   which is what let the change ship with no migration step and no possibility of a lockout. A

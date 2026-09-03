@@ -4218,6 +4218,135 @@ app.get('/api/admin/active-season', (req, res) => {
   });
 });
 
+// POST /api/admin/start-next-season   { year?, tier?, archivePrior?, dryRun?, force? }
+//
+// DRY RUN BY DEFAULT. Pass { dryRun: false } to write.
+//
+// Starting the next season used to be three things a commissioner had to remember in order: click
+// "Create New Season", then switch the season pointer (a separate control, which the create button
+// only told you to go and use), then archive last season — which could not run until the pointer had
+// moved, because "not the active season" is one of the archive's four preconditions. Nothing
+// connected them, so the archive was the step that got forgotten.
+//
+// This is those three as one action, in the only order they can happen in:
+//
+//   1. create the new season (managers, pools and credentials carry forward; rosters and stats do not)
+//   2. repoint active_season at it
+//   3. archive the season that was active, at tier 4
+//
+// Step 3 goes through planSeasonArchive — the same preconditions and the same totals gate as the
+// standalone endpoint — so a prior season that is not closed, or has a refused correction, or shows
+// rollup drift, SKIPS the archive with its reason rather than being forced. Steps 1 and 2 still
+// happen: a season that cannot be archived today can be archived later with POST .../archive, and
+// blocking the new season on it would be the wrong trade.
+app.post('/api/admin/start-next-season', requireCommissioner, (req, res) => {
+  const body = req.body || {};
+  const dryRun = body.dryRun !== false;
+  const archivePrior = body.archivePrior !== false;
+  const tier = body.tier === undefined ? DEFAULT_ARCHIVE_TIER : Number(body.tier);
+
+  const db = readDB();
+  const seasons = db.seasons || {};
+  const years = Object.keys(seasons)
+    .map(Number)
+    .filter((n) => !Number.isNaN(n))
+    .sort((a, b) => b - a);
+  const nextYear = String(body.year || (years.length ? years[0] + 1 : new Date().getFullYear()));
+  if (!isValidYear(nextYear)) return res.status(400).json({ error: 'Invalid year' });
+
+  const priorYear = activeSeason(db);
+  if (nextYear === priorYear) {
+    return res.status(400).json({ error: `${nextYear} is already the active season` });
+  }
+
+  const steps = [];
+  const created = !seasons[nextYear];
+  steps.push(
+    created
+      ? { step: 'create_season', year: nextYear, done: true }
+      : { step: 'create_season', year: nextYear, done: false, note: 'already exists — left untouched' }
+  );
+  steps.push({ step: 'repoint_active_season', from: priorYear || null, to: nextYear, done: true });
+
+  // Plan the archive BEFORE mutating anything, so a dry run reports exactly what the write would do.
+  // The precondition "not the active season" is evaluated against the pointer as it WILL be, which is
+  // why this passes a db whose pointer has already moved in memory.
+  let archive = null;
+  if (archivePrior && priorYear && seasons[priorYear]) {
+    const planningDb = { ...db, active_season: nextYear };
+    const plan = planSeasonArchive(planningDb, priorYear, { tier, force: !!body.force });
+    archive =
+      plan.status === 200
+        ? { step: 'archive_prior', year: priorYear, eligible: true, ...plan.payload }
+        : {
+            step: 'archive_prior',
+            year: priorYear,
+            eligible: false,
+            skipped_because: plan.payload.error,
+            ...plan.payload,
+          };
+    steps.push({
+      step: 'archive_prior',
+      year: priorYear,
+      done: plan.status === 200,
+      ...(plan.status === 200 ? { tier, reduction: plan.payload.reduction } : { skipped_because: plan.payload.error }),
+    });
+    if (plan.status === 200 && !dryRun) {
+      commitSeasonArchive(db, priorYear, plan, req.get('X-User-Email'));
+    }
+  } else if (archivePrior) {
+    steps.push({ step: 'archive_prior', done: false, skipped_because: 'there is no prior season to archive' });
+  }
+
+  const payload = { dry_run: dryRun, next_year: nextYear, prior_year: priorYear || null, steps, archive };
+  if (dryRun) return res.json(payload);
+
+  if (created) {
+    // Managers, pool assignments and credentials carry forward; player pools, rosters, stats and
+    // swap history start clean. Built HERE rather than in the browser: the client-side version
+    // POSTed a whole-season payload, which is the clobber-prone path CLAUDE.md warns about.
+    const fresh = {
+      status: 'active',
+      batters_pool: [],
+      pitchers_pool: [],
+      weekly_batting: [],
+      weekly_pitching: [],
+      daily_batting: [],
+      daily_pitching: [],
+      rosters: {},
+      roster_dates: {},
+      swaps: [],
+      upload_log: [],
+      team_weekly: [],
+      initial_submissions: {},
+      period_submissions: { pp2: {}, qf: {}, sf: {}, finals: {} },
+    };
+    for (const m of db.managers || []) {
+      if (m.active === false) continue;
+      fresh.rosters[m.name] = {};
+      fresh.initial_submissions[m.name] = { batters: [], pitchers: [], status: 'draft' };
+      for (const period of ['pp2', 'qf', 'sf', 'finals']) {
+        fresh.period_submissions[period][m.name] = { batters: [], pitchers: [], status: 'draft' };
+      }
+    }
+    db.seasons[nextYear] = fresh;
+  }
+
+  db.active_season = nextYear;
+  addAuditEntry(
+    db,
+    'start_next_season',
+    { next_year: nextYear, prior_year: priorYear || null, created, archived: !!(archive && archive.eligible) },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  armSchedulers();
+  console.log(
+    `[Season] Started ${nextYear} (was ${priorYear || 'none'}); archive of ${priorYear}: ${archive && archive.eligible ? 'done' : 'skipped'}`
+  );
+  res.json({ ...payload, dry_run: false });
+});
+
 // POST /api/admin/active-season { season } — repoint every automation at a different season.
 // This is the pointer's only writer. It used to be `POST /api/google-sheets/config { season }`,
 // which buried an app-wide setting inside a dormant integration's config endpoint.
@@ -7560,39 +7689,38 @@ function archivePreconditions(db, year, sd) {
 // captured before and after with captureScoreSnapshot, and any difference at all aborts the write.
 // `force` overrides the preconditions; it does NOT override the totals check, because a compaction
 // that moves a point is not a compaction.
-app.post('/api/seasons/:year/archive', requireCommissioner, (req, res) => {
-  const { year } = req.params;
-  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
-
-  const db = readDB();
+// Plan an archive. Returns { status, payload, compacted } — status 200 means it may be written,
+// 400/404/409 means it may not and `payload.error` says why. Shared by POST .../archive and the
+// season transition below, so the flow that archives last year as part of starting the next one
+// runs the SAME preconditions and the same totals gate, rather than a second implementation of them.
+function planSeasonArchive(db, year, { tier = DEFAULT_ARCHIVE_TIER, force = false } = {}) {
   const sd = (db.seasons || {})[year];
-  if (!sd) return res.status(404).json({ error: 'Season not found' });
-
-  const body = req.body || {};
-  const dryRun = body.dryRun !== false;
-  const force = !!body.force;
-  const tier = body.tier === undefined ? DEFAULT_ARCHIVE_TIER : Number(body.tier);
-  if (!ARCHIVE_TIERS.includes(tier)) {
-    return res.status(400).json({ error: `tier must be one of: ${ARCHIVE_TIERS.join(', ')}` });
+  if (!sd) return { status: 404, payload: { error: `Season ${year} not found` } };
+  if (!ARCHIVE_TIERS.includes(Number(tier))) {
+    return { status: 400, payload: { error: `tier must be one of: ${ARCHIVE_TIERS.join(', ')}` } };
   }
   if (sd.archived && !force) {
-    return res.status(409).json({
-      error: `${year} is already archived (${sd.archived.at}, tier ${sd.archived.tier})`,
-      archived: sd.archived,
-      force_required: true,
-    });
+    return {
+      status: 409,
+      payload: {
+        error: `${year} is already archived (${sd.archived.at}, tier ${sd.archived.tier})`,
+        archived: sd.archived,
+        force_required: true,
+      },
+    };
   }
 
   const problems = archivePreconditions(db, year, sd);
   if (problems.length && !force) {
-    return res
-      .status(409)
-      .json({ error: `Refusing to archive ${year}: ${problems.join('; ')}.`, problems, force_required: true });
+    return {
+      status: 409,
+      payload: { error: `Refusing to archive ${year}: ${problems.join('; ')}.`, problems, force_required: true },
+    };
   }
 
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const { keptDays, keptPlayers, managers } = archiveKeepSets(sd);
-  const compacted = compactSeason(sd, { tier, keptDays, keptPlayers });
+  const compacted = compactSeason(sd, { tier: Number(tier), keptDays, keptPlayers });
 
   const before = captureScoreSnapshot(sd, todayET).totals;
   const after = captureScoreSnapshot(compacted, todayET).totals;
@@ -7604,8 +7732,7 @@ app.post('/api/seasons/:year/archive', requireCommissioner, (req, res) => {
 
   const payload = {
     year,
-    tier,
-    dry_run: dryRun,
+    tier: Number(tier),
     archived: false,
     managers,
     kept_players: keptPlayers.size,
@@ -7617,38 +7744,64 @@ app.post('/api/seasons/:year/archive', requireCommissioner, (req, res) => {
   // The one gate force cannot open. A compaction that moves a manager's total is not a compaction,
   // it is data loss wearing its coat.
   if (Object.keys(totalsDelta).length) {
-    return res.status(409).json({
-      ...payload,
-      error:
-        `Refusing to archive ${year}: compaction would change ${Object.keys(totalsDelta).length} manager total(s) — ` +
-        Object.entries(totalsDelta)
-          .map(([m, d]) => `${m} ${d > 0 ? '+' : ''}${d}`)
-          .join(', ') +
-        `. Compaction is correct exactly when it is invisible, so this is a bug in the keep-set, not something ` +
-        `to force past. Nothing was written.`,
-      totals_check: 'FAILED',
-    });
+    return {
+      status: 409,
+      payload: {
+        ...payload,
+        error:
+          `Refusing to archive ${year}: compaction would change ${Object.keys(totalsDelta).length} manager total(s) — ` +
+          Object.entries(totalsDelta)
+            .map(([m, d]) => `${m} ${d > 0 ? '+' : ''}${d}`)
+            .join(', ') +
+          `. Compaction is correct exactly when it is invisible, so this is a bug in the keep-set, not something ` +
+          `to force past. Nothing was written.`,
+        totals_check: 'FAILED',
+      },
+    };
   }
 
-  if (dryRun) return res.json({ ...payload, totals_check: 'PASSED' });
+  return { status: 200, payload: { ...payload, totals_check: 'PASSED' }, compacted };
+}
 
+// Commit a planned archive onto `db`. The caller writes.
+function commitSeasonArchive(db, year, plan, email) {
+  const { payload, compacted } = plan;
   compacted.archived = {
     at: new Date().toISOString(),
-    tier,
-    kept_players: keptPlayers.size,
-    kept_player_days: keptDays.size,
+    tier: payload.tier,
+    kept_players: payload.kept_players,
+    kept_player_days: payload.kept_player_days,
     rows_before: payload.rows_before,
     rows_after: payload.rows_after,
     bytes_before: payload.bytes_before,
     bytes_after: payload.bytes_after,
   };
   db.seasons[year] = compacted;
-  addAuditEntry(db, 'season_archived', { year, tier, ...compacted.archived }, req.get('X-User-Email'));
-  writeDB(db);
+  addAuditEntry(db, 'season_archived', { year, tier: payload.tier, ...compacted.archived }, email);
   console.log(
-    `[Archive] ${year} tier ${tier}: ${payload.rows_before} -> ${payload.rows_after} rows, ${payload.mb_before} -> ${payload.mb_after} MB (${payload.reduction})`
+    `[Archive] ${year} tier ${payload.tier}: ${payload.rows_before} -> ${payload.rows_after} rows, ` +
+      `${payload.mb_before} -> ${payload.mb_after} MB (${payload.reduction})`
   );
-  res.json({ ...payload, dry_run: false, archived: compacted.archived, totals_check: 'PASSED' });
+  return compacted.archived;
+}
+
+app.post('/api/seasons/:year/archive', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const body = req.body || {};
+  const dryRun = body.dryRun !== false;
+  const plan = planSeasonArchive(db, year, {
+    tier: body.tier === undefined ? DEFAULT_ARCHIVE_TIER : Number(body.tier),
+    force: !!body.force,
+  });
+  if (plan.status !== 200) return res.status(plan.status).json({ ...plan.payload, dry_run: dryRun });
+  if (dryRun) return res.json({ ...plan.payload, dry_run: true });
+
+  const archived = commitSeasonArchive(db, year, plan, req.get('X-User-Email'));
+  writeDB(db);
+  res.json({ ...plan.payload, dry_run: false, archived });
 });
 
 // The hard gate. Every one of these rebuilds weekly rows or scores from the DAILY rows, and an
