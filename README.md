@@ -44,18 +44,18 @@ npm install
 
 All configuration is via environment variables (no `.env` loader is bundled — set them in your shell or in `render.yaml` for deployments).
 
-| Variable                       | Default        | Description                                                                                                                                  |
-| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                         | `3000`         | HTTP port                                                                                                                                    |
-| `LOGIN_PASSWORD`               | `Welcome2Hell` | Global fallback password used when a manager has no per-account password set                                                                 |
-| `DB_PATH`                      | `./db.json`    | Path to the runtime JSON database. On Render, point this at a persistent disk mount.                                                         |
-| `UPSTASH_REDIS_REST_URL`       | _(unset)_      | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.                                                     |
-| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_      | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                                                                             |
-| `SLACK_WEBHOOK_URL`            | _(unset)_      | General notifications channel (swaps, sync errors).                                                                                          |
-| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_      | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`.                                                 |
-| `SLACK_SIGNING_SECRET`         | _(unset)_      | Required if you wire up the `/api/slack/command` slash command.                                                                              |
-| `ANTHROPIC_API_KEY`            | _(unset)_      | Optional. Enables AI-written elimination roasts and the daily playoff "Hot Takes"; unset (or any API failure) falls back to a template bank. |
-| `GOOGLE_CLIENT_ID`             | _(unset)_      | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).                                                               |
+| Variable                       | Default           | Description                                                                                                                                                                                                                         |
+| ------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                         | `3000`            | HTTP port                                                                                                                                                                                                                           |
+| `LOGIN_PASSWORD`               | _random per boot_ | Fallback password for a manager with no password of their own. **Unset it and that fallback is random**, so those managers cannot sign in — the boot log names them. It used to default to a constant committed to this repository. |
+| `DB_PATH`                      | `./db.json`       | Path to the runtime JSON database. On Render, point this at a persistent disk mount.                                                                                                                                                |
+| `UPSTASH_REDIS_REST_URL`       | _(unset)_         | Optional. When set, `db.json` is mirrored to Upstash so it survives ephemeral redeploys.                                                                                                                                            |
+| `UPSTASH_REDIS_REST_TOKEN`     | _(unset)_         | Auth token paired with `UPSTASH_REDIS_REST_URL`.                                                                                                                                                                                    |
+| `SLACK_WEBHOOK_URL`            | _(unset)_         | General notifications channel (swaps, sync errors).                                                                                                                                                                                 |
+| `SLACK_SCOREBOARD_WEBHOOK_URL` | _(unset)_         | Channel for the daily scoreboard post. Required for it — no fallback to `SLACK_WEBHOOK_URL`.                                                                                                                                        |
+| `SLACK_SIGNING_SECRET`         | _(unset)_         | Required if you wire up the `/api/slack/command` slash command.                                                                                                                                                                     |
+| `ANTHROPIC_API_KEY`            | _(unset)_         | Optional. Enables AI-written elimination roasts and the daily playoff "Hot Takes"; unset (or any API failure) falls back to a template bank.                                                                                        |
+| `GOOGLE_CLIENT_ID`             | _(unset)_         | Optional. OAuth 2.0 Web client ID — enables "Sign in with Google" (see below).                                                                                                                                                      |
 
 ### Running
 

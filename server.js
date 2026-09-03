@@ -12,7 +12,15 @@ const DB_FILE = process.env.DB_PATH || path.join(__dirname, 'db.json');
 // Committed seed file — persists manager identity (name/email/role) across fresh deploys.
 // Passwords are never stored here; they live only in db.json so git pulls can't reset them.
 const MANAGERS_SEED_FILE = path.join(__dirname, 'managers_seed.json');
-const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'Welcome2Hell';
+// The shared fallback password, used by any manager who has not set one of their own.
+//
+// This used to default to a literal string committed to a public repository, which meant anyone who
+// read the repo could sign in as any manager without a custom password. When LOGIN_PASSWORD is
+// unset we now generate a random one per boot instead: nobody can guess it, and nobody is locked out
+// who had a real password. reportSharedPasswordRisk() names, at boot, exactly which managers are
+// relying on it, so the gap is visible rather than silent.
+const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || crypto.randomBytes(24).toString('hex');
+const LOGIN_PASSWORD_IS_RANDOM = !process.env.LOGIN_PASSWORD;
 
 // Upstash Redis REST — optional durable backup for db.json across Render ephemeral deploys.
 // Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Render env vars to enable.
@@ -311,6 +319,120 @@ function cachedManagers() {
   return managers;
 }
 
+// ============================================================
+// Password storage
+// ============================================================
+// Passwords were stored as plaintext in db.json — so a copy of the database, a backup, or a stray
+// log line was a copy of everyone's credentials. They are stored as scrypt hashes now.
+//
+// verifyPassword accepts BOTH formats forever: a stored value that is not in the hash format is
+// compared as plaintext, which is what lets an existing database keep working with no migration
+// step and no possibility of a lockout. A plaintext password is upgraded to a hash the first time
+// its owner successfully signs in with it — and only after the new hash has been checked to verify
+// against the same password, so a bug in the hashing can never persist a credential nobody can use.
+const SCRYPT_PREFIX = 'scrypt$';
+const SCRYPT_KEYLEN = 64;
+
+function hashPassword(plain) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const key = crypto.scryptSync(String(plain), salt, SCRYPT_KEYLEN).toString('hex');
+  return `${SCRYPT_PREFIX}${salt}$${key}`;
+}
+
+function isHashedPassword(stored) {
+  return typeof stored === 'string' && stored.startsWith(SCRYPT_PREFIX);
+}
+
+// Constant-time throughout. A plaintext comparison that short-circuits on the first wrong byte leaks
+// the password one character at a time to anyone who can measure the response.
+function verifyPassword(stored, supplied) {
+  if (typeof stored !== 'string' || typeof supplied !== 'string' || !stored || !supplied) return false;
+  if (!isHashedPassword(stored)) return timingSafeEqualStr(stored, supplied);
+  const [, salt, key] = stored.split('$');
+  if (!salt || !key) return false;
+  let derived;
+  try {
+    derived = crypto.scryptSync(supplied, salt, SCRYPT_KEYLEN).toString('hex');
+  } catch {
+    return false;
+  }
+  return timingSafeEqualStr(key, derived);
+}
+
+// timingSafeEqual throws on a length mismatch, which would itself leak the length. Hash both sides
+// to a fixed width first, then compare.
+function timingSafeEqualStr(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// Upgrade one manager's plaintext password in place, once. Guarded in memory so a burst of
+// concurrent requests cannot each trigger a write, and refuses to persist a hash that does not
+// verify against the very password it was made from.
+const passwordsUpgraded = new Set();
+
+function upgradePlaintextPassword(email, plain) {
+  if (!email || passwordsUpgraded.has(email)) return;
+  passwordsUpgraded.add(email);
+  try {
+    const hashed = hashPassword(plain);
+    if (!verifyPassword(hashed, plain)) {
+      console.error(`[Auth] Refusing to store a hash for ${email} — it did not verify. Left as-is.`);
+      return;
+    }
+    const db = readDB();
+    const record = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email.toLowerCase());
+    if (!record || isHashedPassword(record.password) || record.password !== plain) return;
+    record.password = hashed;
+    writeDB(db);
+    console.log(`[Auth] Upgraded ${email}'s stored password to a scrypt hash.`);
+  } catch (e) {
+    console.error('[Auth] Password upgrade failed:', e.message);
+  }
+}
+
+// ============================================================
+// Failed-authentication throttle
+// ============================================================
+// The existing rateLimit() covers mutating verbs only, so a password could be guessed as fast as the
+// network allowed by hammering any authenticated GET. This counts FAILURES per IP and locks that IP
+// out of authentication for a while once there are too many. Successes clear the counter, so a
+// legitimate user who mistypes a few times is never affected.
+const AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_FAIL_MAX = 10;
+const authFailures = new Map();
+
+function authThrottled(ip) {
+  const entry = authFailures.get(ip);
+  if (!entry) return false;
+  if (Date.now() - entry.start > AUTH_FAIL_WINDOW_MS) {
+    authFailures.delete(ip);
+    return false;
+  }
+  return entry.count >= AUTH_FAIL_MAX;
+}
+
+function noteAuthFailure(ip) {
+  if (!ip) return;
+  const now = Date.now();
+  const entry = authFailures.get(ip);
+  if (!entry || now - entry.start > AUTH_FAIL_WINDOW_MS) authFailures.set(ip, { start: now, count: 1 });
+  else entry.count++;
+}
+
+function noteAuthSuccess(ip) {
+  if (ip) authFailures.delete(ip);
+}
+
+setInterval(
+  () => {
+    const cutoff = Date.now() - AUTH_FAIL_WINDOW_MS * 2;
+    for (const [ip, entry] of authFailures) if (entry.start < cutoff) authFailures.delete(ip);
+  },
+  5 * 60 * 1000
+).unref();
+
 function loadManagerFromHeaders(req) {
   const email = (req.get('X-User-Email') || '').toLowerCase();
   const password = req.get('X-User-Password') || '';
@@ -322,8 +444,12 @@ function loadManagerFromHeaders(req) {
   // auth token issued after Google sign-in (see /api/auth/google). Either proves
   // identity — there is no session store, so both are re-verified on every request.
   const expected = manager.password || LOGIN_PASSWORD;
-  const tokenMatch = !!manager.authToken && password === manager.authToken;
-  if (password !== expected && !tokenMatch) return null;
+  const tokenMatch = !!manager.authToken && timingSafeEqualStr(manager.authToken, password);
+  if (!verifyPassword(expected, password) && !tokenMatch) return null;
+  // Correct password, still stored as plaintext: hash it now. Once per manager per boot.
+  if (manager.password && !isHashedPassword(manager.password) && !tokenMatch) {
+    upgradePlaintextPassword(manager.email, password);
+  }
   return manager;
 }
 
@@ -1417,18 +1543,29 @@ app.post('/api/login', (req, res) => {
     return res.status(400).json({ error: 'Invalid email format' });
   }
 
+  const ip = req.ip || (req.connection && req.connection.remoteAddress);
+  if (authThrottled(ip)) {
+    return res.status(429).json({ error: 'Too many failed sign-in attempts. Try again in a few minutes.' });
+  }
+
   const db = readDB();
   const managers = db.managers || [];
   const manager = managers.find((m) => m.email && m.email.toLowerCase() === email.toLowerCase());
 
   if (!manager) {
+    noteAuthFailure(ip);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
   // Check manager-specific password first, then global password
   const expectedPassword = manager.password || LOGIN_PASSWORD;
-  if (password !== expectedPassword) {
+  if (!verifyPassword(expectedPassword, password)) {
+    noteAuthFailure(ip);
     return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  noteAuthSuccess(ip);
+  if (manager.password && !isHashedPassword(manager.password)) {
+    upgradePlaintextPassword(manager.email, password);
   }
 
   addAuditEntry(db, 'login', { email: manager.email }, manager.email);
@@ -3884,7 +4021,7 @@ app.post('/api/managers/:email/password', requireCommissioner, (req, res) => {
   if (!manager) {
     return res.status(404).json({ error: 'Manager not found' });
   }
-  manager.password = password.trim();
+  manager.password = hashPassword(password.trim());
   addAuditEntry(db, 'manager_password_set', { email }, req.get('X-User-Email'));
   writeDB(db);
   writeManagersSeed(db.managers);
@@ -3919,10 +4056,10 @@ app.post('/api/managers/:email/change-password', (req, res) => {
     return res.status(404).json({ error: 'Manager not found' });
   }
   const expectedPassword = manager.password || LOGIN_PASSWORD;
-  if (currentPassword !== expectedPassword) {
+  if (!verifyPassword(expectedPassword, currentPassword)) {
     return res.status(401).json({ error: 'Current password is incorrect' });
   }
-  manager.password = newPassword.trim();
+  manager.password = hashPassword(newPassword.trim());
   addAuditEntry(db, 'manager_password_changed', { email }, email);
   writeDB(db);
   writeManagersSeed(db.managers);
@@ -21061,6 +21198,38 @@ function standDownSchedulers() {
 // Arm (or re-arm) every recurring scheduler. Each schedule* function checks the halt flag
 // itself and returns without arming when the season is closed, so this is also the correct
 // thing to call at boot: one call, and the closed/open decision is made in one place.
+// Name, at boot, exactly who can sign in with the shared fallback password. When LOGIN_PASSWORD is
+// unset that fallback is random per boot, so those managers cannot sign in at all until a password
+// is set for them — which is the correct posture, and far better than the published constant this
+// replaced, but it must not be a surprise.
+function reportSharedPasswordRisk(db) {
+  const sharing = (db.managers || []).filter((m) => m.active !== false && !m.password).map((m) => m.email || m.name);
+  if (!sharing.length) {
+    if (LOGIN_PASSWORD_IS_RANDOM) {
+      console.log('[Auth] LOGIN_PASSWORD is unset, but every active manager has their own password. Nothing to do.');
+    }
+    return;
+  }
+  if (LOGIN_PASSWORD_IS_RANDOM) {
+    console.error(
+      `[Auth] LOGIN_PASSWORD is NOT SET and ${sharing.length} active manager(s) have no password of their own, so ` +
+        `they CANNOT SIGN IN: ${sharing.join(', ')}. Set LOGIN_PASSWORD in the environment, or give each of them a ` +
+        `password with POST /api/managers/:email/password.`
+    );
+  } else {
+    console.warn(
+      `[Auth] ${sharing.length} active manager(s) sign in with the shared LOGIN_PASSWORD rather than one of their ` +
+        `own: ${sharing.join(', ')}.`
+    );
+  }
+  const plaintext = (db.managers || []).filter((m) => m.password && !isHashedPassword(m.password)).length;
+  if (plaintext) {
+    console.log(
+      `[Auth] ${plaintext} stored password(s) are still plaintext; each is hashed on its owner's next sign-in.`
+    );
+  }
+}
+
 function armSchedulers() {
   scheduleGSheetsSync();
   scheduleMLBApiSync();
@@ -22562,6 +22731,7 @@ async function main() {
     if (seasonSchedulingHalted()) {
       console.log('[Season close] Active season is closed — no schedulers armed this boot.');
     }
+    reportSharedPasswordRisk(readDB());
   });
 }
 
