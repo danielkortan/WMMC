@@ -348,6 +348,19 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   used to construct a whole season in the browser and POST it, which is the clobber-prone full-season
   save path.
 
+- **Passwords are scrypt hashes now, and `LOGIN_PASSWORD` has no published default.** `verifyPassword`
+  accepts BOTH formats forever — a stored value that is not `scrypt$…` is compared as plaintext —
+  which is what let the change ship with no migration step and no possibility of a lockout. A
+  plaintext password is upgraded on its owner's next successful sign-in, once per manager per boot,
+  and only after the new hash has been verified against that same password, so a hashing bug cannot
+  persist a credential nobody can use. Both comparisons are constant-time (`timingSafeEqualStr`
+  hashes each side to a fixed width first, because `timingSafeEqual` throws on a length mismatch and
+  that throw itself leaks the length). **`LOGIN_PASSWORD` used to default to a constant committed to
+  this repository**; unset, it is now random per boot, and `reportSharedPasswordRisk` names at boot
+  every active manager who has no password of their own and therefore cannot sign in. `render.yaml`
+  declares it `sync: false`, so it is set per-service in the Render dashboard. Failed sign-ins are
+  throttled separately from `rateLimit()`, which only covers mutating verbs.
+
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.

@@ -562,6 +562,58 @@ League-wide leaderboards lose their free-agent lines. `OFFSEASON_ARCHIVE_PLAN.md
 trade and the alternatives; archiving at tier 1 keeps every weekly row if the sandbox matters more
 than the megabytes.
 
+## Sign-in and passwords
+
+### Passwords are stored hashed
+
+Stored as `scrypt$<salt>$<key>`, so a copy of `db.json` — or a backup, or a stray log line — is no
+longer a copy of everyone's credentials.
+
+**No migration step, and no possibility of a lockout.** `verifyPassword` accepts both formats
+forever: a stored value that is not in the hash format is compared as plaintext. A plaintext password
+is upgraded the first time its owner signs in with it, and only after the new hash has been checked
+to verify against that same password — so a bug in the hashing can never persist a credential nobody
+can use. The boot log says how many are still plaintext.
+
+### `LOGIN_PASSWORD` no longer has a published default
+
+It used to default to a literal string committed to this repository, which meant anyone who read the
+repo could sign in as any manager who had not set their own password.
+
+**When `LOGIN_PASSWORD` is unset, the fallback is now random per boot** — nobody can guess it, and
+nobody who had a real password is affected. Managers with no password of their own cannot sign in at
+all until one is set for them, which is the correct posture but must not be a surprise: the boot log
+**names them**.
+
+```
+[Auth] LOGIN_PASSWORD is NOT SET and 10 active manager(s) have no password of their own, so they
+CANNOT SIGN IN: … Set LOGIN_PASSWORD in the environment, or give each of them a password with
+POST /api/managers/:email/password.
+```
+
+`render.yaml` declares `LOGIN_PASSWORD` with `sync: false`, so it is set per-service in the Render
+dashboard. **Check it is set there** — production and staging separately.
+
+To give one manager their own password instead:
+
+```bash
+curl -s -X POST https://wmmc.live/api/managers/<email>/password \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"password":"..."}'
+```
+
+### Failed sign-ins are throttled
+
+Ten failures from one IP inside fifteen minutes returns `429` for the rest of that window. A success
+clears the counter, so mistyping a few times never matters. The pre-existing `rateLimit()` covers
+mutating verbs only — a password could otherwise be guessed as fast as the network allowed by
+hammering any authenticated GET.
+
+If a commissioner locks themselves out, the window is fifteen minutes; a restart also clears it,
+since the counter is in memory.
+
 ## Stat retention — storing only players somebody rostered
 
 85.5% of the rows in `db.json`, and 83.2% of its bytes, are per-game stats for players nobody in
