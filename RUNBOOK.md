@@ -614,6 +614,42 @@ hammering any authenticated GET.
 If a commissioner locks themselves out, the window is fifteen minutes; a restart also clears it,
 since the counter is in memory.
 
+## Which repair endpoints are still earning their place
+
+Ten endpoints exist to repair a data model that was coming apart — rebuild the weekly rollups,
+reconstruct wiped rosters, re-attribute stat rows, purge orphaned boundary rosters. Most were written
+for one incident. With one derivation of eligibility (R1), a write-side stat filter (R5) and the
+roster-array prune (R4), most should now be dead.
+
+**"Should be" is not evidence.** A deletion audit run on judgement concluded "keep everything" once
+already (`MEMORY.md` 2026-08-06) and taught nothing. So every call is recorded instead:
+
+```bash
+curl -s https://wmmc.live/api/admin/repair-usage \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' | jq '{never_called, never_called_endpoints, read_only_only}'
+```
+
+**R9's rule: an endpoint with zero calls through a full season is one that can be deleted at its
+close.** The report lists the WHOLE registry, so the never-called rows — the interesting ones — are
+present rather than absent.
+
+Three things it distinguishes:
+
+- **`calls` vs `writes`.** Every dry-runnable endpoint here defaults to a dry run, so a write is the
+  explicit case. An endpoint people look at but never actually run (`read_only_only`) is a different
+  fact from one nobody touches.
+- **Failures are not counted.** A 401, a 404 or a refused precondition says nothing about whether the
+  repair is needed.
+- **Never-called is not the same as never-registered.** `tests/repairRegistry.test.js` checks the
+  registry against the routes in both directions, so a repair endpoint added later cannot read as
+  unused forever and then be deleted on evidence nobody collected.
+
+Usage lives in `repair-usage.json` beside `db.json`, **not inside it**. Recording into `db.json`
+would be a read-modify-write race against the very handlers being measured — the recording reads,
+the next repair writes, and whichever finishes last wins, so a usage counter could clobber a real
+repair. That is not hypothetical: it lost a record the first time it was tested.
+
 ## What is public, and what is behind sign-in
 
 ### The league's data is behind auth

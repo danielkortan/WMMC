@@ -375,6 +375,18 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   and shows the login screen rather than looping (`apiFetch` only force-reloads on a 401 when it
   actually sent credentials).
 
+- **Repair-endpoint usage is measured, and it lives OUTSIDE `db.json`.** Ten repair endpoints exist
+  for a data model that was coming apart; R9's rule is that one with zero calls through a full season
+  can be deleted at its close, so `REPAIR_ENDPOINTS` + middleware records every call and
+  `GET /api/admin/repair-usage` reports the WHOLE registry including the never-called rows. It counts
+  `calls` and `writes` separately (every dry-runnable one here DEFAULTS to a dry run, so a write is
+  the explicit `dryRun: false` / `apply: true` case) and ignores any response ≥ 400. The record is
+  written to `repair-usage.json` beside `db.json`: an earlier version wrote into `db.json` from
+  `res.on('finish')`, which is a read-modify-write race against the very handlers being measured — a
+  usage counter could clobber a real repair's changes, and it did lose a record under two rapid
+  calls. `tests/repairRegistry.test.js` checks the registry against the routes BOTH ways, so a new
+  repair endpoint cannot read as unused forever and then be deleted on evidence nobody collected.
+
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.

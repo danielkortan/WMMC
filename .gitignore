@@ -2,3 +2,6 @@ node_modules/
 db.json
 *.xlsx
 *.docx
+
+# Repair-endpoint call counts, written beside db.json (see REPAIR_ENDPOINTS in server.js)
+repair-usage.json

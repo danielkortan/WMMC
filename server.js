@@ -279,6 +279,120 @@ setInterval(
   5 * 60 * 1000
 ).unref();
 
+// ============================================================
+// Repair-endpoint usage
+// ============================================================
+// Ten endpoints in this file exist to repair a data model that was coming apart: rebuild the weekly
+// rollups, reconstruct wiped rosters, re-attribute stat rows, purge orphaned boundary rosters, and
+// so on. Most were written for a specific incident. With one derivation of eligibility (R1), a
+// write-side stat filter (R5) and the roster-array prune (R4), most of them should now be dead.
+//
+// "Should be" is not evidence, and a deletion audit run on judgement concluded "keep everything"
+// once already (MEMORY.md 2026-08-06). So this measures instead: every call to one of these is
+// recorded, and the report lists the WHOLE registry including the ones nobody has called. At the
+// close of the 2027 season, an endpoint with zero calls is one that can go.
+//
+// A REGISTRY plus middleware rather than a line inside each handler — a per-handler call is the kind
+// of thing that gets forgotten when the eleventh endpoint is added, and then the register quietly
+// under-reports exactly the endpoint nobody remembers.
+const REPAIR_ENDPOINTS = [
+  { name: 'mlb/backfill', re: /^\/api\/mlb\/backfill$/, note: 'rehydrate a season from the MLB Stats API' },
+  { name: 'mlb/backfill-unscored', re: /^\/api\/mlb\/backfill-unscored$/, note: 'fill rows that never scored' },
+  { name: 'mlb/rebuild-weeklies', re: /^\/api\/mlb\/rebuild-weeklies$/, note: 'weekly rollups from the daily rows' },
+  { name: 'recompute-scores', re: /^\/api\/seasons\/\d{4}\/recompute-scores$/, note: 'every weekly score' },
+  { name: 'rebuild-roster-arrays', re: /^\/api\/seasons\/\d{4}\/rebuild-roster-arrays$/, note: 'additive roster heal' },
+  {
+    name: 'prune-roster-arrays',
+    dryRunnable: true,
+    re: /^\/api\/seasons\/\d{4}\/prune-roster-arrays$/,
+    note: 'pruning roster heal (R4)',
+  },
+  {
+    name: 'reconstruct-rosters',
+    dryRunnable: true,
+    re: /^\/api\/seasons\/\d{4}\/reconstruct-rosters$/,
+    note: 'rebuild wiped rosters',
+  },
+  {
+    name: 'reattribute-weekly',
+    dryRunnable: true,
+    re: /^\/api\/seasons\/\d{4}\/reattribute-weekly$/,
+    note: 'repair the manager field',
+  },
+  {
+    name: 'purge-orphan-boundary-rosters',
+    dryRunnable: true,
+    re: /^\/api\/seasons\/\d{4}\/purge-orphan-boundary-rosters$/,
+    note: 'drop period-boundary orphans',
+  },
+  {
+    name: 'playoff-odds/recompute',
+    re: /^\/api\/seasons\/\d{4}\/playoff-odds\/recompute$/,
+    note: 'force an odds recompute',
+  },
+];
+
+function repairEndpointFor(pathname) {
+  return REPAIR_ENDPOINTS.find((e) => e.re.test(pathname)) || null;
+}
+
+// Recorded to its OWN small file beside db.json, never into db.json itself.
+//
+// The first version did a readDB/writeDB here, after the handler had already written. That is a
+// read-modify-write race against the very handlers being measured: the recording reads the database,
+// the next repair writes it, and whichever finishes last wins — so a usage counter could clobber a
+// real repair's changes. Caught when two calls in quick succession lost one of their records; the
+// data loss was the same shape and would not have announced itself.
+//
+// A separate file has no such interaction, and costs no 17 MB parse per call.
+const REPAIR_USAGE_FILE = path.join(path.dirname(DB_FILE), 'repair-usage.json');
+
+function readRepairUsage() {
+  try {
+    return JSON.parse(fs.readFileSync(REPAIR_USAGE_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function recordRepairCall(name, wrote, email) {
+  try {
+    const usage = readRepairUsage();
+    const now = new Date().toISOString();
+    const rec = usage[name] || { calls: 0, writes: 0, first_called: now };
+    rec.calls++;
+    if (wrote) rec.writes++;
+    rec.last_called = now;
+    rec.last_by = email || null;
+    usage[name] = rec;
+    const tmp = `${REPAIR_USAGE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(usage, null, 2));
+    fs.renameSync(tmp, REPAIR_USAGE_FILE);
+  } catch (e) {
+    console.error('[Repair usage] Could not record the call:', e.message);
+  }
+}
+
+app.use((req, res, next) => {
+  if (req.method !== 'POST') return next();
+  const entry = repairEndpointFor(req.path);
+  if (!entry) return next();
+  // Whether this call WROTE anything. Every dry-runnable endpoint here defaults to a dry run, so a
+  // write is the explicit case — `dryRun: false` or `apply: true`. Getting this backwards (treating
+  // an empty body as a write) counted two dry runs as writes the first time this was tested, which
+  // would have made an endpoint nobody uses for real look load-bearing.
+  const body = req.body || {};
+  const wrote = !entry.dryRunnable || body.dryRun === false || body.apply === true;
+  const email = req.get('X-User-Email') || null;
+  res.on('finish', () => {
+    // Only count calls that actually ran. A 401, a 404 or a refused precondition says nothing about
+    // whether the repair is needed.
+    if (res.statusCode >= 400) return;
+    recordRepairCall(entry.name, wrote, email);
+  });
+  next();
+});
+
 app.use(rateLimit);
 
 // Security headers
@@ -1506,6 +1620,41 @@ app.get('/api/admin/backups/:from/diff/:to', requireCommissioner, (req, res) => 
 app.post('/api/admin/backups', requireCommissioner, (req, res) => {
   const result = writeLocalBackup(readDB());
   res.status(result.ok ? 200 : 500).json(result);
+});
+
+// GET /api/admin/repair-usage
+//
+// The whole registry, including the endpoints nobody has called — which are the interesting rows.
+// R9's rule: an endpoint with zero calls through a full season is one that can be deleted at its
+// close. This is the evidence for that decision, so it is not made on judgement the way the
+// 2026-08-06 audit was, which concluded "keep everything" and taught nothing.
+app.get('/api/admin/repair-usage', requireCommissioner, (req, res) => {
+  const usage = readRepairUsage();
+  const rows = REPAIR_ENDPOINTS.map((e) => {
+    const u = usage[e.name] || {};
+    return {
+      endpoint: e.name,
+      what_it_does: e.note,
+      calls: u.calls || 0,
+      writes: u.writes || 0,
+      first_called: u.first_called || null,
+      last_called: u.last_called || null,
+      last_by: u.last_by || null,
+    };
+  }).sort((a, b) => a.calls - b.calls || a.endpoint.localeCompare(b.endpoint));
+
+  const unused = rows.filter((r) => r.calls === 0).map((r) => r.endpoint);
+  res.json({
+    tracked_since: Object.values(usage).reduce(
+      (earliest, u) => (u.first_called && (!earliest || u.first_called < earliest) ? u.first_called : earliest),
+      null
+    ),
+    endpoints: rows.length,
+    never_called: unused.length,
+    never_called_endpoints: unused,
+    read_only_only: rows.filter((r) => r.calls > 0 && r.writes === 0).map((r) => r.endpoint),
+    usage: rows,
+  });
 });
 
 // ============================================================
