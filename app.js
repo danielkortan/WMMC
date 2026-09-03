@@ -12177,70 +12177,73 @@ function setupSeasonSetupToggle() {
   const createBtn = document.getElementById('create-new-season-btn');
   const createStatus = document.getElementById('create-new-season-status');
   if (createBtn) {
-    createBtn.onclick = () => {
-      const seasons = getSeasons();
-      const existingYears = Object.keys(seasons)
-        .map(Number)
-        .sort((a, b) => b - a);
-      const latestYear = existingYears.length > 0 ? existingYears[0] : CURRENT_YEAR;
-      const newYear = latestYear + 1;
-
-      if (seasons[newYear]) {
-        if (createStatus) {
-          createStatus.innerHTML = `<p style="color:var(--success);">Season ${newYear} already exists.</p>`;
-        }
-        return;
-      }
-
-      const confirmed = confirm(
-        `Create a new ${newYear} season?\n\n` +
-          'This will:\n' +
-          '  - Create a fresh season for ' +
-          newYear +
-          '\n' +
-          '  - Carry forward all manager accounts and pool assignments\n' +
-          '  - Start with empty player pools, rosters, and stats\n\n' +
-          'The current season will not be affected.'
-      );
-      if (!confirmed) return;
-
-      // Build the new season — managers carry forward (pool assignments preserved)
-      seasons[newYear] = {
-        status: 'active',
-        batters_pool: [],
-        pitchers_pool: [],
-        weekly_batting: [],
-        weekly_pitching: [],
-        rosters: {},
-        swaps: [],
-        upload_log: [],
-        team_weekly: [],
-        initial_submissions: {},
-        period_submissions: { pp2: {}, qf: {}, sf: {}, finals: {} },
+    // ONE action, server-side: create the next season, repoint every automation at it, and archive
+    // the season that was active. Those used to be three separate things in a required order, and
+    // the archive — which cannot run until the pointer has moved — was the one that got forgotten.
+    // The server does the whole thing so the season object is built there rather than POSTed as a
+    // whole-season payload from the browser, which is the clobber-prone path.
+    createBtn.onclick = async () => {
+      const say = (html) => {
+        if (createStatus) createStatus.innerHTML = html;
       };
-
-      // Pre-populate rosters map for each manager (empty, but keyed)
-      const managers = getManagers();
-      managers.forEach((m) => {
-        seasons[newYear].rosters[m.name] = {};
-        seasons[newYear].initial_submissions[m.name] = { batters: [], pitchers: [], status: 'draft' };
-        for (const p of ['pp2', 'qf', 'sf', 'finals']) {
-          seasons[newYear].period_submissions[p][m.name] = { batters: [], pitchers: [], status: 'draft' };
+      createBtn.disabled = true;
+      try {
+        say('<p class="upload-hint">Checking…</p>');
+        const preview = await apiFetch('/api/admin/start-next-season', {
+          method: 'POST',
+          body: JSON.stringify({ dryRun: true }),
+        }).then((r) => r.json());
+        if (preview.error) {
+          say(`<p style="color:var(--danger);">${esc(preview.error)}</p>`);
+          return;
         }
-      });
 
-      setSeasonsLocal(seasons);
-      apiFetch('/api/seasons/' + newYear, {
-        method: 'POST',
-        body: JSON.stringify(seasons[newYear]),
-      }).catch(() => {});
+        const arch = preview.archive;
+        const archiveLine = !arch
+          ? '  - No prior season to archive'
+          : arch.eligible
+            ? `  - Archive ${arch.year} at tier ${arch.tier}: ${arch.rows_before} rows to ${arch.rows_after}, ` +
+              `${arch.mb_before} MB to ${arch.mb_after} MB (${arch.reduction})`
+            : `  - Archive ${arch.year}: SKIPPED - ${arch.skipped_because}`;
 
-      if (createStatus) {
-        createStatus.innerHTML = `<p style="color:var(--success);font-weight:600;">Season ${newYear} created! Switch to it using the season selector in the header.</p>`;
+        const confirmed = confirm(
+          `Start the ${preview.next_year} season?\n\n` +
+            'This will:\n' +
+            `  - Create the ${preview.next_year} season (managers and pool assignments carry forward; ` +
+            'rosters, pools and stats start clean)\n' +
+            `  - Point every automation at ${preview.next_year}\n` +
+            archiveLine +
+            '\n\nThe archive keeps every rostered player-day and is refused outright if it would move ' +
+            'any manager total.'
+        );
+        if (!confirmed) {
+          say('');
+          return;
+        }
+
+        say('<p class="upload-hint">Working…</p>');
+        const result = await apiFetch('/api/admin/start-next-season', {
+          method: 'POST',
+          body: JSON.stringify({ dryRun: false }),
+        }).then((r) => r.json());
+        if (result.error) {
+          say(`<p style="color:var(--danger);">${esc(result.error)}</p>`);
+          return;
+        }
+        const done = (result.steps || [])
+          .map((s) => `${s.done ? '✅' : '⏭️'} ${esc(s.step.replace(/_/g, ' '))}`)
+          .join('<br>');
+        say(
+          `<p style="color:var(--success);font-weight:600;">Season ${esc(result.next_year)} started.</p>` +
+            `<p class="upload-hint">${done}</p>`
+        );
+        await loadData();
+        buildSeasonSelector();
+      } catch (e) {
+        say(`<p style="color:var(--danger);">${esc(e.message || String(e))}</p>`);
+      } finally {
+        createBtn.disabled = false;
       }
-
-      // Refresh the season selector
-      buildSeasonSelector();
     };
   }
 
