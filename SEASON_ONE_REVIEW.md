@@ -342,6 +342,37 @@ history (large, cold, append-only). Splitting them — `db.json` plus `stats-<ye
 lazily — is the structural fix behind R5 and R7, and it is what makes multi-season storage a
 non-issue rather than a recurring chore. Bigger than one PR; worth scoping in the offseason.
 
+> **Measured 2026-09-03, after R5, R7 and the archive shipped — RECOMMEND DEFERRING.**
+>
+> R11 was written when `db.json` was 17.3 MB and every authenticated request parsed it twice. Three
+> cheaper changes have since taken most of that away, so the case has to be re-made on today's
+> numbers rather than the ones that motivated it.
+>
+> `JSON.parse` against real data, median of seven:
+>
+> | scenario                                            | `db.json` | parse     |
+> | --------------------------------------------------- | --------- | --------- |
+> | today                                               | 17.3 MB   | 167 ms    |
+> | two full seasons (the case R11 was written against) | 21.5 MB   | 229 ms    |
+> | **projected 2027**: retention on + 2026 archived    | **~5 MB** | **43 ms** |
+> | an archived season alone                            | 1.8 MB    | 15 ms     |
+>
+> R5 stops ~85% of stat rows being written from 2027 onward; the archive compacts a finished season
+> 8.6×; R7 removed the second parse on every authenticated request. Together they take the projected
+> steady state from 229 ms to about **43 ms**, before R11 does anything.
+>
+> Against that, R11 is a refactor of **141 `readDB` and 92 `writeDB` call sites** in the file that
+> holds the league's scoring data — every one needing a decision about which store it touches. That
+> is the highest-risk change on the list, and it would now be buying roughly 40 ms per request.
+>
+> **The cheaper next step, if that 43 ms matters:** finish R7 by extending the cache to read-only GET
+> handlers. R7 deliberately scoped itself to the manager array because the risk in caching the whole
+> database is a handler that mutates the cached object without writing. Scoping a whole-db cache to
+> GET paths is a much smaller change than splitting the store and captures most of the same win.
+>
+> Revisit R11 if the projected 5 MB turns out to be optimistic — the number to watch is
+> `GET /api/mlb/storage-status`'s `db_size_bytes` once 2027 has a few weeks of stats in it.
+
 **R12. Put a test around the scoring path.** Not "test `server.js`" — extract
 `managerWeekRosterWindows` + the subtotal into `js/rosterWindows.js` as part of R1, mirror it back,
 and unit-test it against fixtures built from the 2026 season's real incidents: the mid-week
