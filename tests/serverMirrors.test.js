@@ -238,6 +238,16 @@ describe('server.js mirrors of js/ modules', () => {
     );
   });
 
+  // The compaction. A server copy that has drifted into a WIDER drop than the tested one throws
+  // away stat rows a frozen season still needs, and the season it did that to is the archived one.
+  it('carries js/seasonArchive.js verbatim', () => {
+    const canonical = canonicalTail(read('js/seasonArchive.js'), 'export const ARCHIVE_TIERS');
+    assert.ok(
+      SERVER.includes(canonical),
+      'server.js has drifted from js/seasonArchive.js — the season compaction must be identical in both'
+    );
+  });
+
   it('carries js/attribution.js verbatim', () => {
     const canonical = canonicalTail(read('js/attribution.js'), 'export function chooseOwner');
     assert.ok(
