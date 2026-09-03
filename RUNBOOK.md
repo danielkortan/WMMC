@@ -395,6 +395,84 @@ app and the server disagree. The client column is how that stays checkable.
 Run it against the **frozen 2026 season**: the right answer there is already known, because it is
 what the league played all year.
 
+## Archiving a finished season
+
+`js/statRetention.js` stops 85% of stat rows being written from 2027 onward. This is the other half:
+the one-time compaction of a season already written. On production 2026 that is 15.59 MB down to
+**1.82 MB**.
+
+```
+POST /api/seasons/:year/archive   { dryRun?: true, tier?: 1|2|3|4, force?: true }
+```
+
+**DRY RUN BY DEFAULT.** Pass `{"dryRun": false}` to write.
+
+### The tiers are cumulative
+
+| Tier |                                                          | 2026    | Saves  |
+| ---- | -------------------------------------------------------- | ------- | ------ |
+| 1    | dailies filtered to rostered player-days                 | 5.21 MB | −10.38 |
+| 2    | + weeklies filtered to rostered players                  | 2.83 MB | −2.38  |
+| 3    | + drop derived caches, shrink pools and maps             | 2.74 MB | −0.09  |
+| 4    | + trim the duplicated `cumulative` and zero-valued stats | 1.82 MB | −0.92  |
+
+Tier 3 is nearly worthless and tier 4 saves ten times as much. **If you only take two steps, take 1
+and 4** — which is what tier 4 does, since they are cumulative. Tier 4 is the default.
+
+### It proves itself rather than asserting
+
+The whole design rests on one claim: every row the scoreboard can reach belongs to a rostered player
+on a rostered day. So the endpoint captures per-manager totals with `captureScoreSnapshot` before and
+after, and **refuses to write on any difference at all**. `force` does not override that one — a
+compaction that moves a point is not a compaction. Compaction is correct exactly when it is
+invisible.
+
+The keep-set comes from `weekRosterWindows` over every manager × every scheduled week — the same
+derivation the scoreboard scores from — never from the `manager` field on a stat row.
+
+### Four preconditions, all of them
+
+1. `season_closed` is set (run `POST /close` first).
+2. No outstanding refused stat corrections.
+3. No rollup drift — **do not freeze a season that disagrees with itself.**
+4. It is not the active season — point `active_season` elsewhere first.
+
+`force: true` overrides these four. It does not override the totals check.
+
+### Run it
+
+```bash
+# Dry run first, every time. Read totals_delta and totals_check.
+curl -s -X POST https://wmmc.live/api/seasons/2026/archive \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Email: <commissioner-email>' \
+  -H 'X-User-Password: <password>' \
+  -d '{"tier":4}' | jq '{totals_check, totals_delta, rows_before, rows_after, mb_before, mb_after, reduction}'
+
+# Then write.
+  -d '{"tier":4,"dryRun":false}'
+```
+
+**Take a backup first** — `POST /api/admin/backups` — and verify the frozen views the same day.
+
+### After archiving
+
+`sd.archived` is a hard gate. `POST /api/mlb/rebuild-weeklies`, `POST .../recompute-scores`,
+`POST /api/mlb/apply-corrections`, `POST /api/mlb/sync` and `POST .../reopen` all refuse with a 409,
+because every one of them rebuilds from the daily rows and those are now a subset. **This is the one
+way the archive can lose points, and the gate is what prevents it.**
+
+To undo: `POST /api/mlb/backfill` re-fetches the season from the MLB Stats API — which is what made
+dropping the rows safe in the first place — and clears `sd.archived` on success. Only then can the
+season be reopened or rebuilt.
+
+### What is lost
+
+The What If sandbox can only score players somebody actually rostered, on an archived season.
+League-wide leaderboards lose their free-agent lines. `OFFSEASON_ARCHIVE_PLAN.md` §7 spells out the
+trade and the alternatives; archiving at tier 1 keeps every weekly row if the sandbox matters more
+than the megabytes.
+
 ## Stat retention — storing only players somebody rostered
 
 85.5% of the rows in `db.json`, and 83.2% of its bytes, are per-game stats for players nobody in
