@@ -269,6 +269,87 @@ describe('server.js mirrors of js/ modules', () => {
     });
   }
 
+  // R8: the last of the old unguarded pairs.
+  //
+  // periodStartForRound encodes "a new submission period starts fresh from its own submission",
+  // which is one clause of the core scoring invariant. It used to exist twice with different
+  // signatures; server.js now wraps the pure form as periodStartForSeason, the same way app.js
+  // does, so there is one implementation and two adapters.
+  it('carries periodStartForRound from js/eligibility.js verbatim', () => {
+    assert.equal(
+      extractFunction(SERVER, 'periodStartForRound'),
+      extractFunction(read('js/eligibility.js'), 'periodStartForRound'),
+      'server.js has drifted from js/eligibility.js in periodStartForRound — the period-scoping rule must be identical'
+    );
+  });
+
+  // The score-swing guard. CLAUDE.md has always said "edit both"; nothing enforced it until now.
+  it('carries detectScoreSwings from js/scoring.js verbatim', () => {
+    assert.equal(
+      extractFunction(SERVER, 'detectScoreSwings'),
+      extractFunction(read('js/scoring.js'), 'detectScoreSwings'),
+      'server.js has drifted from js/scoring.js in detectScoreSwings — the swing guard must be identical in both'
+    );
+  });
+
+  // The swap-limit rule. The js copy is the swap form's pre-check and the server copy enforces it,
+  // so a drift shows up as a swap the form offers and the server then refuses.
+  it('carries checkSwapLimit from js/swaps.js verbatim', () => {
+    assert.equal(
+      extractFunction(SERVER, 'checkSwapLimit'),
+      extractFunction(read('js/swaps.js'), 'checkSwapLimit'),
+      'server.js has drifted from js/swaps.js in checkSwapLimit — the swap-limit rule must be identical in both'
+    );
+  });
+
+  // SCORING and SEASON_SCHEDULE cannot be compared as text: prettier keeps server.js's pitching
+  // table on one line and js/scoring.js's expanded, and the js SEASON_SCHEDULE entries carry a
+  // `label` the server's do not. So compare what actually has to match — the VALUES.
+  it('carries the same SCORING values as js/scoring.js', () => {
+    // Parsed PER SECTION, not into one flat map: `BB` exists in both batting (2) and pitching
+    // (-0.6), so a flat map collapses them and would miss exactly the drift most worth catching.
+    const values = (src) => {
+      const block = extractConstObject(src, 'SCORING');
+      const out = {};
+      for (const section of ['batting', 'pitching']) {
+        const at = block.indexOf(`${section}:`);
+        assert.notEqual(at, -1, `SCORING is missing its ${section} table`);
+        const open = block.indexOf('{', at);
+        const close = block.indexOf('}', open);
+        const pairs = {};
+        for (const m of block.slice(open, close).matchAll(/(?:'([^']+)'|([A-Za-z0-9]+))\s*:\s*(-?[\d.]+)/g)) {
+          pairs[m[1] || m[2]] = Number(m[3]);
+        }
+        out[section] = pairs;
+      }
+      return out;
+    };
+    const server = values(SERVER);
+    assert.equal(Object.keys(server.batting).length, 8);
+    assert.equal(Object.keys(server.pitching).length, 10);
+    assert.deepEqual(
+      server,
+      values(read('js/scoring.js')),
+      'SCORING has drifted — every points value must be identical in server.js and js/scoring.js'
+    );
+  });
+
+  it('carries the same SEASON_SCHEDULE round/week order as js/scoring.js', () => {
+    const weeks = (src) => {
+      const at = src.search(/^(?:export )?const SEASON_SCHEDULE\b/m);
+      assert.notEqual(at, -1, 'no SEASON_SCHEDULE');
+      const end = src.indexOf('];', at);
+      return [...src.slice(at, end).matchAll(/round:\s*'([^']+)',\s*week:\s*'([^']+)'/g)].map((m) => `${m[1]}|${m[2]}`);
+    };
+    const server = weeks(SERVER);
+    assert.equal(server.length, 16, 'the season is 16 scheduled weeks');
+    assert.deepEqual(
+      server,
+      weeks(read('js/scoring.js')),
+      'SEASON_SCHEDULE has drifted — round and week must match exactly in both (only `label` may differ)'
+    );
+  });
+
   // The odds engine is the oldest untested mirror pair in the repo. These are the functions
   // whose two copies are byte-identical — the rest of the engine (computeTeamQualityFactors,
   // gameFactor) differs only in the name of the local clamp helper, which server.js has to
