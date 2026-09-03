@@ -361,6 +361,20 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   declares it `sync: false`, so it is set per-service in the Render dashboard. Failed sign-ins are
   throttled separately from `rateLimit()`, which only covers mutating verbs.
 
+- **Static serving is an ALLOWLIST, and the league's data is behind auth.** `express.static(__dirname)`
+  used to serve the whole repository: `GET /managers_seed.json` returned every manager's name and
+  email unauthenticated, `GET /server.js` the 1 MB source, `GET /render.yaml` the infrastructure
+  config. Only `PUBLIC_ASSETS` (`app.js`, `styles.css`, `mobile.css`, `version.json`, `data.json`)
+  and the `js/` directory are served now — **add a new browser-fetched file to that set or it 404s**,
+  which is the failure this is designed to have, because a missing denial leaks quietly and a missing
+  allowance breaks one asset loudly. The gate normalizes the path first: without that,
+  `/js/../server.js` passes a prefix check and then resolves INSIDE express.static's root, so the
+  traversal it would correctly refuse gets waved through by the gate in front of it. Separately,
+  `GET /api/managers`, `/api/seasons` and `/api/seasons/:year/daily-stats` now require auth; the
+  client fetches them through `apiFetch` rather than raw `fetch`, and a signed-out browser gets a 401
+  and shows the login screen rather than looping (`apiFetch` only force-reloads on a 401 when it
+  actually sent credentials).
+
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.

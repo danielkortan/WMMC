@@ -495,7 +495,40 @@ app.get(['/', '/index.html'], (req, res) => {
   res.type('html').send(html);
 });
 
-// Serve remaining static files (js/, css/, data.json, etc.)
+// Everything the browser is allowed to fetch by name, and nothing else.
+//
+// This used to be `express.static(__dirname)` with no filter, which served the WHOLE repository
+// directory. Measured: `GET /managers_seed.json` returned every manager's name, email and Google
+// email to anyone who asked, unauthenticated; `GET /server.js` returned the 1 MB source; render.yaml
+// gave up the infrastructure config and every environment variable name; and every planning document
+// in the repo was public. None of that is what a static file server is for.
+//
+// An ALLOWLIST rather than a denylist, because the failure modes are not symmetric: a missing entry
+// breaks one asset visibly and is fixed in a line, while a missing denial leaks a file quietly and
+// is found by someone else.
+const PUBLIC_ASSETS = new Set(['app.js', 'styles.css', 'mobile.css', 'version.json', 'data.json']);
+const PUBLIC_DIRS = ['js/'];
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path === '/' || req.path.startsWith('/api/')) return next();
+
+  // Normalize BEFORE testing. Without this, `/js/../server.js` starts with `js/`, passes a naive
+  // prefix check, and then resolves inside express.static's root — which is the repository — so the
+  // traversal that express.static itself correctly refuses would have been waved through by the
+  // gate in front of it.
+  let rel;
+  try {
+    rel = path.posix.normalize(decodeURIComponent(req.path)).replace(/^\/+/, '');
+  } catch {
+    return res.status(400).send('Bad request');
+  }
+  if (!rel || rel.includes('..')) return res.status(404).send('Not found');
+  if (PUBLIC_ASSETS.has(rel) || PUBLIC_DIRS.some((d) => rel.startsWith(d))) return next();
+  return res.status(404).send('Not found');
+});
+
+// Serve the allowed static files (js/, css, app.js, data.json)
 app.use(
   express.static(__dirname, {
     index: false, // index.html is handled by the route above
@@ -1830,7 +1863,9 @@ function seasonsPayload() {
   return payload;
 }
 
-app.get('/api/seasons', (req, res) => {
+// requireAuth: the whole league's rosters, swaps, submissions and scores. Same reasoning as
+// /api/managers — the client sends credentials, a signed-out browser gets a 401 and shows login.
+app.get('/api/seasons', requireAuth, (req, res) => {
   sendPreparedJson(req, res, seasonsPayload());
 });
 
@@ -3964,7 +3999,10 @@ app.get('/api/pending-count', (req, res) => {
 });
 
 // GET /api/managers — return managers list
-app.get('/api/managers', (req, res) => {
+// requireAuth: this returns every manager's name, email and Google email. It was open, so the whole
+// league's contact list was one unauthenticated request away. The client sends credentials for it now
+// (apiFetch, not raw fetch); a signed-out browser gets a 401 here and simply shows the login screen.
+app.get('/api/managers', requireAuth, (req, res) => {
   const db = readDB();
   // Strip credentials from response, but indicate if a custom password is set.
   // authToken is a login credential and must never reach the client.
@@ -17473,7 +17511,8 @@ app.post('/api/seasons/:year/roster-remove', requireCommissioner, (req, res) => 
 
 // GET /api/seasons/:year/daily-stats
 // Query: player (optional), type ('batter'|'pitcher', optional), round (optional), week (optional)
-app.get('/api/seasons/:year/daily-stats', (req, res) => {
+// requireAuth: every per-game stat row for the season. Same treatment as the two above.
+app.get('/api/seasons/:year/daily-stats', requireAuth, (req, res) => {
   const { year } = req.params;
   if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
   const db = readDB();
