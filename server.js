@@ -738,6 +738,22 @@ function diffBackups(before, after) {
   return { changed, seasons };
 }
 
+// Two runs are the same when everything but the TIMESTAMPS matches.
+//
+// Both exclusions are load-bearing. `created_at` changes on every run by construction. And
+// `last_saved_at` is bumped by every writeDB — so a single unrelated request would otherwise make
+// the day look changed and write another 877 KB, which is exactly the cost this avoids. Neither is
+// content: they are metadata about when, not about what.
+function backupContentKey(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const { created_at: _createdAt, last_saved_at: _lastSaved, ...rest } = payload;
+  return JSON.stringify(rest);
+}
+
+function backupsEqual(a, b) {
+  return !!a && !!b && backupContentKey(a) === backupContentKey(b);
+}
+
 // Which dated files to delete. Keeps everything within `keepDays` of today, and — because a file
 // this small is not worth a cliff — never deletes the newest one even if it has aged out.
 function expiredBackupDates(dates, todayISO, keepDays = BACKUP_KEEP_DAYS) {
@@ -754,7 +770,7 @@ function expiredBackupDates(dates, todayISO, keepDays = BACKUP_KEEP_DAYS) {
 // The local backup trail
 // ============================================================
 // Dated copies of the irreplaceable half of the database, next to db.json on the persistent disk.
-// One per day, a year of them, ~90 MB in total — five current db.json files.
+// One per day, but written only when something changed — see writeLocalBackup.
 //
 // This is NOT a replacement for Render's disk snapshot, and it is not trying to be: a snapshot can
 // restore the whole machine and this cannot. It answers the question a snapshot cannot, which is the
@@ -780,6 +796,35 @@ function listBackupDates() {
       .sort();
   } catch {
     return [];
+  }
+}
+
+// When the trail last ran, and when it last had anything to say. Kept beside the copies so a day
+// that wrote nothing stays distinguishable from a night the scheduler never fired.
+const BACKUP_RUN_FILE = 'last-run.json';
+
+function recordBackupRun(dateISO, writtenDate) {
+  try {
+    const prior = readBackupRun() || {};
+    fs.writeFileSync(
+      path.join(BACKUP_DIR, BACKUP_RUN_FILE),
+      JSON.stringify({
+        last_run_at: new Date().toISOString(),
+        last_run_date: dateISO,
+        last_written_date: writtenDate || prior.last_written_date || null,
+        unchanged_runs: writtenDate ? 0 : (prior.unchanged_runs || 0) + 1,
+      })
+    );
+  } catch (e) {
+    console.error('[Backup] Could not record the run:', e.message);
+  }
+}
+
+function readBackupRun() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(BACKUP_DIR, BACKUP_RUN_FILE), 'utf8'));
+  } catch {
+    return null;
   }
 }
 
@@ -817,6 +862,23 @@ function writeLocalBackup(db, opts = {}) {
   try {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
     const payload = buildIrreplaceableBackup(db, { certifiedTotals: certifiedTotalsForBackup(db) });
+
+    // Write only when something changed. A copy is 877 KB on production, so a year written blindly
+    // is ~320 MB of a 1 GB disk — and through the offseason every copy would be identical to the
+    // last. Skipping makes the trail a list of CHANGE POINTS, which answers "when did this change?"
+    // better than 364 identical files with the one interesting day buried among them.
+    //
+    // The run is recorded either way, so "did the backup run last night?" stays answerable on a day
+    // it wrote nothing. That distinction is the whole reason this is not a silent no-op.
+    const existing = listBackupDates();
+    const newestDate = existing.length ? existing[existing.length - 1] : null;
+    const unchanged = newestDate && newestDate !== dateISO && backupsEqual(readBackup(newestDate), payload);
+    recordBackupRun(dateISO, unchanged ? null : dateISO);
+    if (unchanged) {
+      console.log(`[Backup] ${dateISO}: unchanged since ${newestDate} — nothing written`);
+      return { ok: true, date: dateISO, unchanged: true, same_as: newestDate, pruned: [] };
+    }
+
     const json = JSON.stringify(payload);
     const file = backupPathFor(dateISO);
     const tmp = `${file}.tmp`;
@@ -1236,6 +1298,10 @@ app.get('/api/admin/backups', requireCommissioner, (req, res) => {
     keep_days: BACKUP_KEEP_DAYS,
     count: backups.length,
     total_bytes: backups.reduce((n, b) => n + b.bytes, 0),
+    // A copy is written only when its content changed, so these dates are CHANGE POINTS, not a
+    // per-day roll call. last_run is how you tell "it ran and had nothing to say" from "it never
+    // ran" — the second is a broken scheduler and the first is a quiet week.
+    last_run: readBackupRun(),
     backups,
   });
 });

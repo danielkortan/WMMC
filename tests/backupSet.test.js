@@ -4,7 +4,9 @@ import {
   BACKUP_FORMAT,
   BACKUP_KEEP_DAYS,
   IRREPLACEABLE_SEASON_KEYS,
+  backupContentKey,
   backupManagers,
+  backupsEqual,
   buildIrreplaceableBackup,
   describeBackup,
   diffBackups,
@@ -226,6 +228,53 @@ describe('diffBackups', () => {
     next.seasons['2027'] = { swaps: [{ manager: 'M', player_out: 'X', player_in: 'Y', status: 'approved' }] };
     const d = diffBackups(base, next);
     assert.equal(d.seasons['2027'].swaps_added.length, 1);
+  });
+});
+
+describe('backupsEqual', () => {
+  it('ignores created_at, which changes on every run by construction', () => {
+    const a = buildIrreplaceableBackup(DB, { createdAt: '2026-09-02T23:00:00.000Z' });
+    const b = buildIrreplaceableBackup(DB, { createdAt: '2026-09-03T23:00:00.000Z' });
+    assert.equal(backupsEqual(a, b), true, 'two runs over the same data are the same backup');
+    assert.notEqual(a.created_at, b.created_at);
+  });
+
+  it('ignores last_saved_at, which any unrelated write bumps', () => {
+    const a = buildIrreplaceableBackup({ ...DB, last_saved_at: '2026-09-02T12:00:00.000Z' });
+    const b = buildIrreplaceableBackup({ ...DB, last_saved_at: '2026-09-03T04:00:00.000Z' });
+    assert.equal(backupsEqual(a, b), true, 'a write that changed nothing is not a change');
+  });
+
+  it('sees a swap that appeared', () => {
+    const a = buildIrreplaceableBackup(DB);
+    const moved = JSON.parse(JSON.stringify(DB));
+    moved.seasons['2026'].swaps.push({ manager: 'M', player_out: 'X', player_in: 'Y', status: 'pending' });
+    assert.equal(backupsEqual(a, buildIrreplaceableBackup(moved)), false);
+  });
+
+  it('sees a roster window that moved', () => {
+    const a = buildIrreplaceableBackup(DB);
+    const moved = JSON.parse(JSON.stringify(DB));
+    moved.seasons['2026'].roster_dates['Daniel Kortan']['PP1|Week 1']['Aaron Judge'].drop_date = '2026-05-08';
+    assert.equal(backupsEqual(a, buildIrreplaceableBackup(moved)), false);
+  });
+
+  it('sees a certified total that moved', () => {
+    const a = buildIrreplaceableBackup(DB, { certifiedTotals: { 2026: { M: { total: 1 } } } });
+    const b = buildIrreplaceableBackup(DB, { certifiedTotals: { 2026: { M: { total: 2 } } } });
+    assert.equal(backupsEqual(a, b), false);
+  });
+
+  it('is false when either side is missing — never skip a write on nothing', () => {
+    const a = buildIrreplaceableBackup(DB);
+    assert.equal(backupsEqual(a, null), false);
+    assert.equal(backupsEqual(null, a), false);
+    assert.equal(backupsEqual(null, null), false);
+  });
+
+  it('backupContentKey answers empty for a non-object', () => {
+    assert.equal(backupContentKey(null), '');
+    assert.equal(backupContentKey('nope'), '');
   });
 });
 
