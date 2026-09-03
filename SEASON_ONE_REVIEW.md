@@ -232,6 +232,27 @@ Ranked by what they can cost. Every item was verified in the code today.
 
 ## 4. Recommendations for season two
 
+> **Status, 2026-09-03 — the review is closed.**
+>
+> |                                           |              |                                                  |
+> | ----------------------------------------- | ------------ | ------------------------------------------------ |
+> | **R1** one derivation of eligibility      | done         | #465, #466, #468                                 |
+> | **R2** stop trusting the `manager` field  | done         | #455, #460                                       |
+> | **R3** drift audit escalates              | done         | #453                                             |
+> | **R4** roster-array prune                 | done         | #473                                             |
+> | **R5** store only what somebody rostered  | done         | #463                                             |
+> | **R6** auth findings                      | done         | #475, #476                                       |
+> | **R7** cache the parsed database          | done         | #471                                             |
+> | **R8** guard the remaining mirrors        | done         | #472                                             |
+> | **R9** retire the repair endpoints        | measuring    | #477 — deletions need a 2027 season of data      |
+> | **R10** cache-bust regex, lint `scripts/` | done         | #454                                             |
+> | **R11** split the store                   | **deferred** | measured below                                   |
+> | **R12** test the scoring path             | done         | `js/rosterWindows.js` carries the incident tests |
+> | **R13** back up by replaceability         | done         | #464, #470                                       |
+>
+> Plus two things this document asked for indirectly: the archive endpoint `OFFSEASON_ARCHIVE_PLAN.md`
+> specified (#469) and the one-flow season transition that makes it run (#474).
+
 Ordered so that each one makes the next one easier. Effort is rough; risk is what a bad version
 of the change could cost.
 
