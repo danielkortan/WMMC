@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-03 | Closing the season-one review: eleven PRs, and four lessons worth the space                       | [MEMORY](#2026-09-03-closing-the-season-one-review-eleven-prs-and-four-lessons-worth-the-space)                                   |
 | 2026-09-02 | R1's burn-in passed, and the third copy of the scoring function                                   | [MEMORY](#2026-09-02-r1s-burn-in-passed-and-the-third-copy-of-the-scoring-function)                                               |
 | 2026-09-02 | The two halves of the 8/31 defect, and the boot that rewrote the committed seed file              | [MEMORY](#2026-09-02-the-two-halves-of-the-831-defect-and-the-boot-that-rewrote-the-committed-seed-file)                          |
 | 2026-09-01 | Season-one QA review: the roster-window problem, and an offseason archive plan                    | [MEMORY](#2026-09-01-season-one-qa-review-the-roster-window-problem-and-an-offseason-archive-plan)                                |
@@ -110,6 +111,93 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-03 — Closing the season-one review: eleven PRs, and four lessons worth the space
+
+PRs #469-#478. R1, R4, R5, R6, R7, R8, R9, R10, R12 and R13 are done, plus the archive endpoint and
+the season transition. R11 is measured and deferred; R2 and R3 shipped on 09-02.
+
+**Everything below is a fact about this codebase that cost something to learn. The PR bodies have
+the rest.**
+
+### The pruned roster array is the WINDOWS, not the players with a live add_date
+
+R4 asks `rebuildRosterArraysFromDates` to replace each week's array instead of only appending. The
+obvious implementation — keep the players whose latest date event is an add — is wrong, and wrong in
+the direction that loses points. **The array is the FALLBACK `weekRosterWindows` uses for a player
+with no date event anywhere**: an original-draft player, or a week carried forward before dates were
+tracked. A dates-only keep-set deletes exactly those players.
+
+That is measured, not reasoned: built deliberately wrong, it refused with a 409 and a **-378 delta**
+for one manager whose array held a holdover with no current-period date event. Taking the keep-set
+from `weekRosterWindows` keeps them by construction, and is what makes the prune idempotent.
+
+### A usage counter can destroy the thing it is counting
+
+R9's first version recorded repair-endpoint calls into `db.json` from `res.on('finish')`. That is a
+read-modify-write race against the very handlers being measured: the recording reads, the next repair
+writes, whichever finishes last wins. **A counter could have clobbered a real repair's changes**, and
+the loss would have had exactly the shape of the incidents those endpoints exist to fix.
+
+It announced itself as a missing row under two rapid calls — the mildest possible symptom of the
+worst possible bug. `repair-usage.json` sits beside `db.json` now and never touches it.
+
+Its sibling mistake, same PR: dry runs counted as writes, because every dry-runnable repair here
+DEFAULTS to a dry run and the detection assumed the opposite. That would have made an endpoint
+nobody runs for real look load-bearing — the precise wrong answer for a feature whose only purpose
+is deciding what to delete.
+
+### Compaction is correct exactly when it is invisible, and it can prove that
+
+`POST /api/seasons/:year/archive` captures per-manager totals before and after with
+`captureScoreSnapshot` and refuses to write on any difference. `force` overrides the four
+preconditions and NOT that check, because a compaction that moves a point is not a compaction. Tier 4
+removed 88% of rows and 90% of bytes from a fixture and the rendered scoreboard came back
+byte-identical with a matching screenshot hash.
+
+**The measured tier ordering is the opposite of the plan's.** Tier 3 (drop derived caches, shrink
+pools) saves 0.09 MB; tier 4 (drop the `cumulative` that duplicates `delta`, drop zero-valued stat
+keys) saves 0.92 MB. Ten times as much, from what was written up as a rounding-error extra.
+
+### Two things were open to the world, and neither was in the review
+
+`express.static(__dirname)` had no filter, so the whole repository was served: `GET
+/managers_seed.json` returned **every manager's name, email and Google email** unauthenticated,
+`/server.js` the 1 MB source, `/render.yaml` the infrastructure config. It is an allowlist now, and
+the gate normalizes the path first — without that, `/js/../server.js` passes a prefix check and then
+resolves INSIDE express.static's root, so the traversal express itself refuses gets waved through by
+the gate in front of it.
+
+And `LOGIN_PASSWORD` defaulted to a constant committed to this repository. Anyone who read the repo
+could sign in as any manager without their own password. Unset, it is random per boot now, and
+`reportSharedPasswordRisk` names at boot who that affects. Chosen over failing to boot, which the
+review suggested: a boot failure on a service whose environment cannot be inspected from here is an
+outage, and this closes the same hole without one.
+
+Passwords are scrypt hashes, with `verifyPassword` accepting both formats forever and the upgrade
+happening on a successful sign-in only after the new hash has been checked against that same
+password. No migration step, and no way for a hashing bug to persist a credential nobody can use.
+
+### R11 was re-measured rather than assumed
+
+`db.json` parses in 167 ms today and 229 ms at the two-full-seasons size R11 was written against.
+The projected 2027 steady state — retention on, 2026 archived — is **~5 MB and 43 ms**. R5, the
+archive and R7 took the pressure off before R11 did anything.
+
+R11 is 141 `readDB` and 92 `writeDB` call sites in the file holding the league's scoring data, now
+buying about 40 ms. **Deferred**, with the number to watch written down: `db_size_bytes` once 2027
+has a few weeks of stats.
+
+### The method that kept working
+
+Every scoring-path change this week was vetted the same way: run the old and new implementations
+side by side on real or realistic data and compare per-manager totals, then render the actual
+scoreboard in a real browser and compare it byte for byte. The R1 extraction was additionally
+property-tested against the original over 200,000 randomized inputs.
+
+That is why R1, R4 and the archive could ship at all. **A totals gate that refuses to write is worth
+more than any amount of reading the diff carefully** — three separate times this week it caught
+something that reading had not.
 
 ## 2026-09-02 — R1's burn-in passed, and the third copy of the scoring function
 
