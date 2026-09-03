@@ -614,6 +614,40 @@ hammering any authenticated GET.
 If a commissioner locks themselves out, the window is fifteen minutes; a restart also clears it,
 since the counter is in memory.
 
+## What is public, and what is behind sign-in
+
+### The league's data is behind auth
+
+`GET /api/managers`, `GET /api/seasons` and `GET /api/seasons/:year/daily-stats` require
+authentication. They were open, so the whole league's contact list, rosters, swaps, submissions and
+scores were one unauthenticated request away.
+
+The client sends credentials for them now (`apiFetch`, not raw `fetch`). A signed-out browser gets a
+401 and shows the login screen — verified in a real browser: one navigation, no reload loop, no page
+errors. A signed-in browser renders exactly as before, pixel for pixel.
+
+Still public, because they are needed before anyone can sign in: `/api/auth/config`, `/api/build`,
+`/api/banner-config`, `/api/time`, `/api/login`, `/api/auth/google`.
+
+### Only the browser's own assets are served
+
+Static serving was `express.static(__dirname)` with no filter — **the whole repository directory**.
+Measured before the fix:
+
+| request                           | returned                                                      |
+| --------------------------------- | ------------------------------------------------------------- |
+| `GET /managers_seed.json`         | every manager's name, email and Google email                  |
+| `GET /server.js`                  | the 1 MB source                                               |
+| `GET /render.yaml`                | the infrastructure config and every environment variable name |
+| `GET /CLAUDE.md`, `/MEMORY.md`, … | every planning document in the repo                           |
+
+It is an **allowlist** now — `app.js`, `styles.css`, `mobile.css`, `version.json`, `data.json` and
+the `js/` directory. Everything else 404s, including `/js/../server.js` and its URL-encoded form.
+
+**If you add a file the browser needs to fetch by name, add it to `PUBLIC_ASSETS` in `server.js`.**
+The symptom is a 404 on that one asset — visible immediately, and a one-line fix. That asymmetry is
+the point: a missing denial leaks a file quietly and someone else finds it.
+
 ## Stat retention — storing only players somebody rostered
 
 85.5% of the rows in `db.json`, and 83.2% of its bytes, are per-game stats for players nobody in

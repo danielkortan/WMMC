@@ -942,7 +942,7 @@ function getDailyStatsCached(year) {
 function ensureDailyStats(year, onLoaded) {
   if (DAILY_STATS_CACHE[year] || DAILY_STATS_PENDING[year]) return;
   DAILY_STATS_PENDING[year] = true;
-  fetch(`/api/seasons/${year}/daily-stats`)
+  apiFetch(`/api/seasons/${year}/daily-stats`)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
     .then((d) => {
       DAILY_STATS_CACHE[year] = { batting: d.batting || [], pitching: d.pitching || [] };
@@ -1011,7 +1011,7 @@ async function saveSeason(year, data, opts = {}) {
       // Stale snapshot (or a blocked destructive save). Pull the current server state down so the
       // local cache is correct again.
       try {
-        const fresh = await fetch('/api/seasons');
+        const fresh = await apiFetch('/api/seasons');
         if (fresh.ok) {
           const srv = await fresh.json();
           if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
@@ -1405,7 +1405,7 @@ async function loadData() {
   // ---- Sync from server (shared database) ----
   let changed = false;
   try {
-    const [seasonsResp, managersResp] = await Promise.all([fetch('/api/seasons'), fetch('/api/managers')]);
+    const [seasonsResp, managersResp] = await Promise.all([apiFetch('/api/seasons'), apiFetch('/api/managers')]);
     if (seasonsResp.ok) {
       const serverSeasons = await seasonsResp.json();
       if (serverSeasons && Object.keys(serverSeasons).length > 0) {
@@ -1530,7 +1530,7 @@ async function loadData() {
 // ============================================================
 async function syncFromServer() {
   try {
-    const [seasonsResp, managersResp] = await Promise.all([fetch('/api/seasons'), fetch('/api/managers')]);
+    const [seasonsResp, managersResp] = await Promise.all([apiFetch('/api/seasons'), apiFetch('/api/managers')]);
     let changed = false;
     if (seasonsResp.ok) {
       const serverSeasons = await seasonsResp.json();
@@ -10757,7 +10757,7 @@ window.submitSwapRequest = async function (managerName, ev) {
       // commissioner approve flow).
       if (!pendingReview) {
         try {
-          const fresh = await fetch('/api/seasons');
+          const fresh = await apiFetch('/api/seasons');
           if (fresh.ok) {
             const srv = await fresh.json();
             if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
@@ -10864,7 +10864,7 @@ window.approveSwap = async function (swapId) {
     }
     // Pull down the authoritative season the server just rebuilt (rosters / roster_dates / weekly).
     try {
-      const fresh = await fetch('/api/seasons');
+      const fresh = await apiFetch('/api/seasons');
       if (fresh.ok) {
         const srv = await fresh.json();
         if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
@@ -10936,7 +10936,7 @@ window.undoSwap = async function (swapId) {
     }
     // Pull down the authoritative season the server just rebuilt.
     try {
-      const fresh = await fetch('/api/seasons');
+      const fresh = await apiFetch('/api/seasons');
       if (fresh.ok) {
         const srv = await fresh.json();
         if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
@@ -11630,7 +11630,7 @@ window.toggleScheduledSwapEdit = function (editId) {
 // the auto-apply submission and commissioner approve flows).
 async function refreshSeasonsFromServer() {
   try {
-    const fresh = await fetch('/api/seasons');
+    const fresh = await apiFetch('/api/seasons');
     if (fresh.ok) {
       const srv = await fresh.json();
       if (srv && Object.keys(srv).length > 0) setSeasonsLocal(srv);
@@ -16133,7 +16133,7 @@ window.reopenSeason = async function () {
 // local copy is how those get rolled back.
 async function resyncSeasonsFromServer() {
   try {
-    const fresh = await fetch('/api/seasons');
+    const fresh = await apiFetch('/api/seasons');
     if (!fresh.ok) return false;
     const serverSeasons = await fresh.json();
     if (serverSeasons && Object.keys(serverSeasons).length > 0) {
