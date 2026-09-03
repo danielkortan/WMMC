@@ -6983,6 +6983,347 @@ app.get('/api/seasons/:year/eligibility-shadow', requireCommissioner, (req, res)
 });
 
 // ============================================================
+// Season archive — mirrored from js/seasonArchive.js
+// ============================================================
+// Verbatim copy of js/seasonArchive.js (minus its `export` keywords), because server.js cannot
+// import an ES module and the archive endpoint below is the only runtime caller. Guarded by
+// tests/serverMirrors.test.js: edit js/seasonArchive.js and copy it here, never one alone.
+
+const ARCHIVE_TIERS = [1, 2, 3, 4];
+const DEFAULT_ARCHIVE_TIER = 4;
+
+// How many of each rolling trail to keep. The last score snapshot is the certified-totals record —
+// dropping it would leave a frozen season with no way to check itself.
+const ARCHIVE_KEEP_SNAPSHOTS = 1;
+const ARCHIVE_KEEP_UPLOADS = 5;
+
+// Stat keys safe to drop when zero, because every reader in the app already writes `d[k] || 0`.
+// An ALLOWLIST rather than "any zero-valued key", so no structural field can ever be trimmed away
+// by a stat row that happens to carry a zero.
+const TRIMMABLE_STAT_KEYS = new Set([
+  '1b',
+  '2b',
+  '3b',
+  'hr',
+  'r',
+  'rbi',
+  'sb',
+  'bb',
+  'abs',
+  'so',
+  'lob',
+  'w',
+  'qs',
+  'cg',
+  'cgso',
+  'nh',
+  'ip',
+  'h',
+  'er',
+  'k',
+  'sv',
+  'hld',
+  'l',
+]);
+
+function dayKey(player, date) {
+  return `${player}|${date}`;
+}
+
+// Tier 1. A daily row survives when somebody held that player ON that date.
+function compactDailyRows(rows, playerKey, keptDays) {
+  return (rows || []).filter((r) => keptDays.has(dayKey(r[playerKey], r.date)));
+}
+
+// Tier 2. A weekly row survives when somebody held that player at some point in the season. The
+// looser test is deliberate: a weekly row is one per player per week and cheap, and the frozen
+// Season Stats views read them for players a manager held in ANY week.
+function compactWeeklyRows(rows, playerKey, keptPlayers) {
+  return (rows || []).filter((r) => keptPlayers.has(r[playerKey]));
+}
+
+// Tier 3. Restrict a name-keyed map (batters_team, pitchers_team, mlb_ids) to the kept names.
+function restrictMap(map, keptPlayers) {
+  const out = {};
+  for (const [name, value] of Object.entries(map || {})) if (keptPlayers.has(name)) out[name] = value;
+  return out;
+}
+
+// Tier 4. Two pure duplications, worth 32% and 44% of a row respectively.
+//
+// `cumulative` is byte-identical to `delta` on every per-game row the MLB sync writes — it sets
+// `cumulative: gameStats, delta: gameStats` — and every reader already does `r.delta || r.cumulative`.
+// It is dropped ONLY when the two are actually equal, so a gsheets-era row (where cumulative is a
+// running week-to-date total and genuinely differs) keeps both.
+function trimStatRow(row) {
+  const out = { ...row };
+  const trimObj = (o) => {
+    const t = {};
+    for (const [k, v] of Object.entries(o || {})) {
+      if (v === 0 && TRIMMABLE_STAT_KEYS.has(k.toLowerCase())) continue;
+      t[k] = v;
+    }
+    return t;
+  };
+  if (out.delta && out.cumulative && JSON.stringify(out.delta) === JSON.stringify(out.cumulative)) {
+    delete out.cumulative;
+  }
+  if (out.delta) out.delta = trimObj(out.delta);
+  if (out.cumulative) out.cumulative = trimObj(out.cumulative);
+  for (const [k, v] of Object.entries(out)) {
+    if (v === 0 && TRIMMABLE_STAT_KEYS.has(k.toLowerCase())) delete out[k];
+  }
+  return out;
+}
+
+// The whole operation. Returns a NEW season object; `sd` is untouched, so a dry run and an apply
+// run exactly the same code and the caller decides whether to keep the result.
+function compactSeason(sd, { tier = DEFAULT_ARCHIVE_TIER, keptDays, keptPlayers } = {}) {
+  const out = { ...sd };
+  const days = keptDays || new Set();
+  const players = keptPlayers || new Set();
+
+  if (tier >= 1) {
+    out.daily_batting = compactDailyRows(sd.daily_batting, 'batter', days);
+    out.daily_pitching = compactDailyRows(sd.daily_pitching, 'pitcher', days);
+  }
+  if (tier >= 2) {
+    out.weekly_batting = compactWeeklyRows(sd.weekly_batting, 'batter', players);
+    out.weekly_pitching = compactWeeklyRows(sd.weekly_pitching, 'pitcher', players);
+  }
+  if (tier >= 3) {
+    // The swing guard's rolling trail is meaningless once nothing can change — but the LAST entry
+    // is the certified-totals record, and a frozen season with no way to check itself is worse
+    // than a slightly larger one.
+    if (Array.isArray(sd.score_snapshots)) out.score_snapshots = sd.score_snapshots.slice(-ARCHIVE_KEEP_SNAPSHOTS);
+    if (Array.isArray(sd.upload_log)) out.upload_log = sd.upload_log.slice(-ARCHIVE_KEEP_UPLOADS);
+    delete out.playoff_odds;
+    delete out.bracket_odds;
+    delete out.hot_takes;
+    // The pools are the whole MLB active catalog, carried only for the live swap form's
+    // autocomplete. A frozen season has no swap form.
+    const sorted = [...players].sort();
+    out.batters_pool = sorted.filter((p) => (sd.batters_pool || []).includes(p));
+    out.pitchers_pool = sorted.filter((p) => (sd.pitchers_pool || []).includes(p));
+    out.batters_team = restrictMap(sd.batters_team, players);
+    out.pitchers_team = restrictMap(sd.pitchers_team, players);
+    if (sd.mlb_ids) out.mlb_ids = restrictMap(sd.mlb_ids, players);
+  }
+  if (tier >= 4) {
+    out.daily_batting = (out.daily_batting || []).map(trimStatRow);
+    out.daily_pitching = (out.daily_pitching || []).map(trimStatRow);
+    out.weekly_batting = (out.weekly_batting || []).map(trimStatRow);
+    out.weekly_pitching = (out.weekly_pitching || []).map(trimStatRow);
+  }
+  return out;
+}
+
+// What the compaction did, in the terms a person would ask about.
+function archiveSummary(before, after) {
+  const count = (sd, k) => (Array.isArray(sd[k]) ? sd[k].length : 0);
+  const bytes = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
+  const arrays = ['daily_batting', 'daily_pitching', 'weekly_batting', 'weekly_pitching'];
+  const rows = {};
+  for (const k of arrays) rows[k] = { before: count(before, k), after: count(after, k) };
+  const b = bytes(before);
+  const a = bytes(after);
+  return {
+    rows,
+    rows_before: arrays.reduce((n, k) => n + rows[k].before, 0),
+    rows_after: arrays.reduce((n, k) => n + rows[k].after, 0),
+    bytes_before: b,
+    bytes_after: a,
+    mb_before: Math.round((b / 1048576) * 100) / 100,
+    mb_after: Math.round((a / 1048576) * 100) / 100,
+    reduction: b ? `${Math.round((1 - a / b) * 1000) / 10}%` : '0%',
+  };
+}
+
+// ============================================================
+// Season archive — the endpoint
+// ============================================================
+
+// Every (player, date) somebody held, and every player somebody held at all, derived the way the
+// scoreboard derives it: weekRosterWindows over each manager × each scheduled week. NOT from the
+// `manager` field on a stat row — that field was wrong for half of 2026 and is what the twelve-day
+// semifinal defect was made of.
+//
+// The day set is deliberately built from the stat rows' own dates rather than by walking the
+// calendar, so a row can only be kept by a date it actually carries.
+function archiveKeepSets(sd) {
+  const scheduleDates = sd.schedule_dates || [];
+  const managers = new Set([...Object.keys(sd.rosters || {}), ...Object.keys(sd.roster_dates || {})]);
+  for (const r of sd.weekly_batting || []) if (r.manager) managers.add(r.manager);
+  for (const r of sd.weekly_pitching || []) if (r.manager) managers.add(r.manager);
+
+  const keptPlayers = new Set();
+  const windowsByWeek = new Map(); // `${round}|${week}` -> player -> widest {start,end}
+
+  SEASON_SCHEDULE.forEach((schedWeek, idx) => {
+    if (!scheduleDates[idx]) return;
+    const key = `${schedWeek.round}|${schedWeek.week}`;
+    const merged = windowsByWeek.get(key) || {};
+    for (const mgr of managers) {
+      const windows = managerWeekRosterWindows(sd, mgr, schedWeek.round, schedWeek.week, idx);
+      for (const [player, w] of Object.entries(windows)) {
+        keptPlayers.add(player);
+        const prior = merged[player];
+        // Widest window any manager had. Two managers who shared a week between them must not
+        // leave a hole on the handover day.
+        merged[player] = prior
+          ? { start: prior.start < w.start ? prior.start : w.start, end: prior.end > w.end ? prior.end : w.end }
+          : { start: w.start, end: w.end };
+      }
+    }
+    windowsByWeek.set(key, merged);
+  });
+
+  const keptDays = new Set();
+  const collect = (rows, playerKey) => {
+    for (const r of rows || []) {
+      const w = (windowsByWeek.get(`${r.round}|${r.week}`) || {})[r[playerKey]];
+      if (!w) continue;
+      if ((!w.start || r.date >= w.start) && (!w.end || r.date <= w.end)) keptDays.add(dayKey(r[playerKey], r.date));
+    }
+  };
+  collect(sd.daily_batting, 'batter');
+  collect(sd.daily_pitching, 'pitcher');
+  return { keptDays, keptPlayers, managers: managers.size };
+}
+
+// The four preconditions, all of them, no exceptions. Archiving an open season is never right, and
+// freezing a season that disagrees with itself makes the disagreement permanent.
+function archivePreconditions(db, year, sd) {
+  const problems = [];
+  if (!sd.season_closed) problems.push('the season is not closed (POST /close first)');
+  if (year === activeSeason(db))
+    problems.push(`${year} is still the ACTIVE season — point active_season elsewhere first`);
+  const corrections = correctionCloseBlock(sd, false);
+  if (corrections) problems.push(`${outstandingCorrectionFlags(sd).length} refused stat correction(s) are outstanding`);
+  const drift = auditWeeklyRollupDrift(sd);
+  if (drift.length)
+    problems.push(
+      `${drift.length} manager-week(s) show rollup drift — do not freeze a season that disagrees with itself`
+    );
+  return problems;
+}
+
+// POST /api/seasons/:year/archive   { dryRun?: true, tier?: 1|2|3|4, force?: true }
+//
+// DRY RUN BY DEFAULT. Pass { dryRun: false } to write.
+//
+// The whole operation rests on one claim: every row the scoreboard can reach belongs to a rostered
+// player on a rostered day. So it PROVES it rather than asserting it — per-manager totals are
+// captured before and after with captureScoreSnapshot, and any difference at all aborts the write.
+// `force` overrides the preconditions; it does NOT override the totals check, because a compaction
+// that moves a point is not a compaction.
+app.post('/api/seasons/:year/archive', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const body = req.body || {};
+  const dryRun = body.dryRun !== false;
+  const force = !!body.force;
+  const tier = body.tier === undefined ? DEFAULT_ARCHIVE_TIER : Number(body.tier);
+  if (!ARCHIVE_TIERS.includes(tier)) {
+    return res.status(400).json({ error: `tier must be one of: ${ARCHIVE_TIERS.join(', ')}` });
+  }
+  if (sd.archived && !force) {
+    return res.status(409).json({
+      error: `${year} is already archived (${sd.archived.at}, tier ${sd.archived.tier})`,
+      archived: sd.archived,
+      force_required: true,
+    });
+  }
+
+  const problems = archivePreconditions(db, year, sd);
+  if (problems.length && !force) {
+    return res
+      .status(409)
+      .json({ error: `Refusing to archive ${year}: ${problems.join('; ')}.`, problems, force_required: true });
+  }
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const { keptDays, keptPlayers, managers } = archiveKeepSets(sd);
+  const compacted = compactSeason(sd, { tier, keptDays, keptPlayers });
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+  const after = captureScoreSnapshot(compacted, todayET).totals;
+  const totalsDelta = {};
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+    if (Math.abs(d) > 0.001) totalsDelta[m] = Math.round(d * 100) / 100;
+  }
+
+  const payload = {
+    year,
+    tier,
+    dry_run: dryRun,
+    archived: false,
+    managers,
+    kept_players: keptPlayers.size,
+    kept_player_days: keptDays.size,
+    totals_delta: totalsDelta,
+    ...archiveSummary(sd, compacted),
+  };
+
+  // The one gate force cannot open. A compaction that moves a manager's total is not a compaction,
+  // it is data loss wearing its coat.
+  if (Object.keys(totalsDelta).length) {
+    return res.status(409).json({
+      ...payload,
+      error:
+        `Refusing to archive ${year}: compaction would change ${Object.keys(totalsDelta).length} manager total(s) — ` +
+        Object.entries(totalsDelta)
+          .map(([m, d]) => `${m} ${d > 0 ? '+' : ''}${d}`)
+          .join(', ') +
+        `. Compaction is correct exactly when it is invisible, so this is a bug in the keep-set, not something ` +
+        `to force past. Nothing was written.`,
+      totals_check: 'FAILED',
+    });
+  }
+
+  if (dryRun) return res.json({ ...payload, totals_check: 'PASSED' });
+
+  compacted.archived = {
+    at: new Date().toISOString(),
+    tier,
+    kept_players: keptPlayers.size,
+    kept_player_days: keptDays.size,
+    rows_before: payload.rows_before,
+    rows_after: payload.rows_after,
+    bytes_before: payload.bytes_before,
+    bytes_after: payload.bytes_after,
+  };
+  db.seasons[year] = compacted;
+  addAuditEntry(db, 'season_archived', { year, tier, ...compacted.archived }, req.get('X-User-Email'));
+  writeDB(db);
+  console.log(
+    `[Archive] ${year} tier ${tier}: ${payload.rows_before} -> ${payload.rows_after} rows, ${payload.mb_before} -> ${payload.mb_after} MB (${payload.reduction})`
+  );
+  res.json({ ...payload, dry_run: false, archived: compacted.archived, totals_check: 'PASSED' });
+});
+
+// The hard gate. Every one of these rebuilds weekly rows or scores from the DAILY rows, and an
+// archived season's daily rows are a subset — running any of them would recompute the standings
+// from truncated data. This is the one way the archive can lose points, and this is what stops it.
+function archivedWriteBlock(sd, year) {
+  if (!sd || !sd.archived) return null;
+  return {
+    error:
+      `${year} is archived (${sd.archived.at}, tier ${sd.archived.tier}) and its per-game rows are a subset kept ` +
+      `for the players somebody rostered. Rebuilding scores or weekly rows from them would recompute the standings ` +
+      `from truncated data. Rehydrate first with POST /api/mlb/backfill, which re-fetches the season from the MLB ` +
+      `Stats API, then clear the flag with POST /api/seasons/${year}/reopen.`,
+    archived: sd.archived,
+  };
+}
+
+// ============================================================
 // Stat retention — what the sync is allowed to store
 // ============================================================
 
@@ -11208,6 +11549,8 @@ app.post('/api/mlb/rebuild-weeklies', requireCommissioner, (req, res) => {
   const db = readDB();
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+  const blocked = archivedWriteBlock(sd, year);
+  if (blocked) return res.status(409).json(blocked);
 
   try {
     syncPlayerDatesFromRosterDates(sd);
@@ -11788,6 +12131,8 @@ app.post('/api/mlb/apply-corrections', requireCommissioner, async (req, res) => 
   const db = readDB();
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: `Season ${year} not found` });
+  const blocked = archivedWriteBlock(sd, year);
+  if (blocked) return res.status(409).json(blocked);
 
   try {
     const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -12065,10 +12410,24 @@ app.post('/api/mlb/backfill', requireCommissioner, async (req, res) => {
         pitching_imported: r.pitching_imported,
       });
     }
+    // The rehydrate. This is the ONE path that clears sd.archived: it re-fetches every elapsed week
+    // from the MLB Stats API, which restores the per-game rows the archive dropped — which is what
+    // made dropping them safe in the first place. Only after that may the season be rebuilt or
+    // reopened again.
+    const wasArchived = sd.archived || null;
+    if (wasArchived) {
+      delete sd.archived;
+      console.log(`[Archive] ${year} rehydrated by backfill — archived flag cleared (was ${wasArchived.at})`);
+    }
     db.seasons[year] = sd;
-    addAuditEntry(db, 'mlbapi_sync', { year, note: 'backfill-all', weeks: results.length });
+    addAuditEntry(db, 'mlbapi_sync', {
+      year,
+      note: 'backfill-all',
+      weeks: results.length,
+      ...(wasArchived ? { rehydrated_from_archive: wasArchived.at } : {}),
+    });
     const backup = await writeDB(db, { awaitBackup: true });
-    res.json({ ok: true, results, backup });
+    res.json({ ok: true, results, backup, ...(wasArchived ? { rehydrated_from_archive: wasArchived } : {}) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -13108,6 +13467,8 @@ app.post('/api/mlb/sync', requireCommissioner, async (req, res) => {
   const ctx = resolveMLBWeek(req, true);
   if (ctx.error) return res.status(400).json({ error: ctx.error });
   const { db, sd, year, round, week, dates, schedWeek } = ctx;
+  const blocked = archivedWriteBlock(sd, year);
+  if (blocked) return res.status(409).json(blocked);
 
   try {
     const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -16808,6 +17169,8 @@ app.post('/api/seasons/:year/recompute-scores', requireCommissioner, (req, res) 
 
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
+  const blocked = archivedWriteBlock(sd, year);
+  if (blocked) return res.status(409).json(blocked);
 
   syncPlayerDatesFromRosterDates(sd);
   recomputeAllWeeklyScores(sd);
@@ -20324,6 +20687,11 @@ app.post('/api/seasons/:year/reopen', requireCommissioner, (req, res) => {
   const sd = (db.seasons || {})[year];
   if (!sd) return res.status(404).json({ error: 'Season not found' });
   if (!sd.season_closed) return res.status(409).json({ error: 'Season is not closed' });
+  // Reopening an archived season is legitimate — a stat correction arrives in November — but the
+  // per-game rows are a subset, so the sync and the recompute a live season runs would rebuild the
+  // standings from truncated data. Rehydrate first; POST /api/mlb/backfill re-fetches the season.
+  const blockedByArchive = archivedWriteBlock(sd, year);
+  if (blockedByArchive) return res.status(409).json(blockedByArchive);
 
   delete sd.season_closed;
   db.seasons[year] = sd;

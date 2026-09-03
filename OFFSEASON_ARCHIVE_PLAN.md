@@ -267,6 +267,23 @@ season.
 
 ## 8. Rollout
 
+> **Status, 2026-09-03: built and verified. Steps 1, 3 and 5 are done.**
+>
+> `POST /api/seasons/:year/archive` implements §4 exactly, including the `assert`-equal totals gate
+> that `force` cannot open, and §5's `sd.archived` hard gate on every rebuild path plus the
+> backfill rehydrate that clears it. Verified end to end against a fixture built around the
+> mid-week add, the mid-week drop, the handover and the period leak: all four tiers pass with an
+> empty `totals_delta`, and after applying tier 4 — **88% of rows and 90% of bytes removed** — the
+> rendered scoreboard is byte-identical and its screenshot hashes the same. Step 5 (R5, stat
+> retention) shipped first, so the 2027 archive should be close to a no-op.
+>
+> **Step 2 is still yours: tier 4 (the default) or tier 1.** §7 is the trade — tier 4 costs the What
+> If sandbox its full-league fidelity on archived seasons; tier 1 keeps every weekly row at 4.5 MB
+> instead of 1.82 MB. That is a league-experience call, not an engineering one.
+>
+> **Step 4 — archiving 2026 — has NOT been run.** It needs `active_season` pointed at 2027 first
+> (precondition 4), which is a decision about when the next season starts.
+
 1. **Now.** Run `scripts/season-storage-report.js` against production. Replace the estimates in §3
    with real numbers. _(Read-only, safe to run on the live disk.)_
 2. **Decide §7** — tier 2/3/4 or tier 1. It is a league-experience call, not an engineering one.
