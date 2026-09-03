@@ -289,13 +289,35 @@ app.use((req, res, next) => {
 // re-verified against db.json on every request — there is no server-side
 // session store, so a stolen token has no value beyond the password it carries.
 
+// The manager list, cached on the same fingerprint seasonsPayload uses (the in-process write counter
+// plus the file's mtime and size, so an outside rewrite invalidates it too).
+//
+// This exists because EVERY authenticated request re-parsed the whole database to read a 4 KB array.
+// db.json is 17.3 MB on production; JSON.parse of it costs ~272 ms of blocked event loop and ~45 MB
+// of heap per copy, against a 400 MB heap on a 512 MB instance. Authenticating a password should not
+// cost a copy of the season's every stat row, and now it does not: the handler still reads the
+// database when it needs one, so an authenticated request pays for one parse instead of two.
+//
+// Managers are returned as a COPY. Nothing in this file mutates req.manager today — every use is a
+// read — but a cached object handed to a request is exactly the shape that turns a future one-line
+// mutation into a cross-request leak, and a manager record is small enough that copying is free.
+let managersCache = null;
+
+function cachedManagers() {
+  const fingerprint = dbFingerprint();
+  if (managersCache && managersCache.fingerprint === fingerprint) return managersCache.managers;
+  const managers = readDB().managers || [];
+  managersCache = { fingerprint, managers };
+  return managers;
+}
+
 function loadManagerFromHeaders(req) {
   const email = (req.get('X-User-Email') || '').toLowerCase();
   const password = req.get('X-User-Password') || '';
   if (!email || !password) return null;
-  const db = readDB();
-  const manager = (db.managers || []).find((m) => m.email && m.email.toLowerCase() === email);
-  if (!manager) return null;
+  const found = cachedManagers().find((m) => m.email && m.email.toLowerCase() === email);
+  if (!found) return null;
+  const manager = { ...found };
   // The X-User-Password header carries either the login password OR a per-manager
   // auth token issued after Google sign-in (see /api/auth/google). Either proves
   // identity — there is no session store, so both are re-verified on every request.
@@ -1102,7 +1124,10 @@ function writeManagersSeed(managers, { allowShrink = false } = {}) {
     // Strip credentials (password + Google auth token) — they belong in db.json
     // only, never in the git-committed seed file.
     const seedRecords = incoming.map(({ password: _password, authToken: _authToken, ...rest }) => rest);
-    fs.writeFileSync(MANAGERS_SEED_FILE, JSON.stringify(seedRecords, null, 2), 'utf8');
+    // Trailing newline: the committed file is prettier-formatted and has one, so without it every
+    // legitimate manager change leaves the git-tracked seed showing as modified for a byte nobody
+    // edited — noise on exactly the file whose accidental rewrite has already cost this repo twice.
+    fs.writeFileSync(MANAGERS_SEED_FILE, `${JSON.stringify(seedRecords, null, 2)}\n`, 'utf8');
     return true;
   } catch (e) {
     console.error('Error writing managers_seed.json:', e.message);
