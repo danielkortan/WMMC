@@ -324,6 +324,18 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   COPY — nothing mutates `req.manager` today, but a cached object handed to a request is exactly the
   shape that turns a future one-line mutation into a cross-request leak.
 
+- **The roster-array heal is additive by default, and its PRUNE mode must keep the array-only
+  players.** `rebuildRosterArraysFromDates(sd)` only ever appends, so a player the dates say was
+  dropped stays in that week's array forever — harmless to scoring (which reads
+  `weekRosterWindows`), visible everywhere that reads an array directly. `{ prune: true }`, reached
+  only through `POST /api/seasons/:year/prune-roster-arrays`, replaces each week's array with
+  `Object.keys(managerWeekRosterWindows(...))` — **the WINDOWS, not the dates-only active set**. The
+  array is the fallback that derivation uses for a player with no date event anywhere, so a
+  dates-only keep-set deletes exactly those players and loses their points: measured at −378 for one
+  manager on a fixture, caught by the endpoint's totals gate, which refuses to write on any
+  difference at all. Taking the keep-set from the windows also makes it idempotent, because the
+  fallback players are still in the array on the next run.
+
 - `app.js` and `js/` coexist during the modularization migration. `index.html` still loads `app.js` directly. This is expected until the migration is complete.
 - `db.json` is absent from a fresh clone. The server seeds it automatically from `managers_seed.json` on first start.
 - The pre-push hook rewrites `version.json` on every push. This is intentional — it forces browsers to fetch fresh assets after a deploy.

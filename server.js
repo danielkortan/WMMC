@@ -7240,6 +7240,111 @@ function archiveSummary(before, after) {
   };
 }
 
+// POST /api/seasons/:year/prune-roster-arrays   { dryRun?: true, force?: true }
+//
+// DRY RUN BY DEFAULT.
+//
+// rebuildRosterArraysFromDates has always been purely ADDITIVE: it pushes each week's active players
+// into the array and never removes anyone, so a player the dates say was dropped stays in that
+// week's array forever. Named as an open follow-up in MEMORY.md 2026-08-18 and deliberately deferred
+// from PR #442 because nothing could vet it.
+//
+// Two things changed that make it safe now. weekRosterWindows is THE derivation the scoreboard
+// scores from, so "what should this array hold" has one answer instead of five. And the totals check
+// below is the same idiom the archive uses: capture per-manager totals before and after, and refuse
+// to write on any difference at all. `force` overrides nothing here — there is no precondition to
+// override, only the totals.
+//
+// Expect the delta to be empty. The arrays are a DERIVED CACHE that scoring stopped trusting; the
+// value of pruning them is the surfaces that read an array directly — roster listings, the Live tab,
+// findManagerForPlayerWeek — not the standings.
+app.post('/api/seasons/:year/prune-roster-arrays', requireCommissioner, (req, res) => {
+  const { year } = req.params;
+  if (!isValidYear(year)) return res.status(400).json({ error: 'Invalid year' });
+
+  const db = readDB();
+  const sd = (db.seasons || {})[year];
+  if (!sd) return res.status(404).json({ error: 'Season not found' });
+
+  const blocked = archivedWriteBlock(sd, year);
+  if (blocked) return res.status(409).json(blocked);
+
+  const dryRun = (req.body || {}).dryRun !== false;
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+  // Plan against a copy of the ROSTERS only — the arrays are the sole thing this touches, and a
+  // deep clone of the whole season is what took production down when the re-attribution dry run
+  // first ran (see #460).
+  const candidate = { ...sd, rosters: {} };
+  for (const [mgr, weeks] of Object.entries(sd.rosters || {})) {
+    candidate.rosters[mgr] = {};
+    for (const [wk, wr] of Object.entries(weeks || {})) {
+      candidate.rosters[mgr][wk] = {
+        ...wr,
+        batters: [...((wr || {}).batters || [])],
+        pitchers: [...((wr || {}).pitchers || [])],
+      };
+    }
+  }
+
+  const changes = rebuildRosterArraysFromDates(candidate, { prune: true });
+  const removals = changes.filter((c) => c.removed_batters || c.removed_pitchers);
+  const removedCount = removals.reduce(
+    (n, c) => n + (c.removed_batters || []).length + (c.removed_pitchers || []).length,
+    0
+  );
+
+  const before = captureScoreSnapshot(sd, todayET).totals;
+  const after = captureScoreSnapshot(candidate, todayET).totals;
+  const totalsDelta = {};
+  for (const m of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const d = ((after[m] || {}).total || 0) - ((before[m] || {}).total || 0);
+    if (Math.abs(d) > 0.001) totalsDelta[m] = Math.round(d * 100) / 100;
+  }
+
+  const payload = {
+    year,
+    dry_run: dryRun,
+    applied: false,
+    manager_weeks_changed: changes.length,
+    players_removed: removedCount,
+    players_added: changes.reduce((n, c) => n + (c.added_batters || []).length + (c.added_pitchers || []).length, 0),
+    totals_delta: totalsDelta,
+    removals,
+  };
+
+  if (Object.keys(totalsDelta).length) {
+    return res.status(409).json({
+      ...payload,
+      error:
+        `Refusing to prune ${year}: this would change ${Object.keys(totalsDelta).length} manager total(s) — ` +
+        Object.entries(totalsDelta)
+          .map(([m, d]) => `${m} ${d > 0 ? '+' : ''}${d}`)
+          .join(', ') +
+        `. The roster arrays are a derived cache the scoring path no longer reads, so pruning them must move ` +
+        `nothing. A totals change means the pruned set is wrong. Nothing was written.`,
+      totals_check: 'FAILED',
+    });
+  }
+
+  if (dryRun) return res.json({ ...payload, totals_check: 'PASSED' });
+
+  db.seasons[year] = candidate;
+  addAuditEntry(
+    db,
+    'prune_roster_arrays',
+    { year, manager_weeks: changes.length, removed: removedCount },
+    req.get('X-User-Email')
+  );
+  writeDB(db);
+  for (const c of removals) {
+    console.log(
+      `[Prune] ${c.manager} ${c.week}: removed ${[...(c.removed_batters || []), ...(c.removed_pitchers || [])].join(', ')}`
+    );
+  }
+  res.json({ ...payload, dry_run: false, applied: true, totals_check: 'PASSED' });
+});
+
 // ============================================================
 // Season archive — the endpoint
 // ============================================================
@@ -8089,7 +8194,21 @@ function diffScoreSnapshots(a, b) {
 // arrays + weekly rows first; pools are used only for single-type players so a
 // two-way player (Ohtani) is never forced onto a manager who didn't roster him
 // both ways. Returns a list of the additions made.
-function rebuildRosterArraysFromDates(sd) {
+// `opts.prune` makes this REPLACE each week's array with the date-windowed set instead of only
+// appending to it. Default false — every existing caller keeps the additive behaviour it has always
+// had, and the prune is reached only through POST /api/seasons/:year/prune-roster-arrays, which
+// vets it with before/after totals.
+//
+// Why the pruned set is weekRosterWindows and not "the players with a live add_date": the array is
+// the FALLBACK that derivation uses for a player who has no date event anywhere — an original-draft
+// player, or a week carried forward before dates were tracked. Replacing the array with dates-only
+// actives would delete exactly those players and lose their points. Taking the answer from
+// weekRosterWindows keeps them by construction, and makes sd.rosters a faithful cache of the one
+// derivation the scoreboard scores from rather than an additive pile that only ever grows.
+//
+// It is idempotent for the same reason: the fallback players are still in the array on the next
+// run, so the second pass computes the identical set.
+function rebuildRosterArraysFromDates(sd, opts = {}) {
   const scheduleDates = sd.schedule_dates || [];
   const weekIdxByKey = {};
   SEASON_SCHEDULE.forEach((s, i) => (weekIdxByKey[`${s.round}|${s.week}`] = i));
@@ -8157,6 +8276,20 @@ function rebuildRosterArraysFromDates(sd) {
       if (!Array.isArray(wr.pitchers)) wr.pitchers = [];
       const addedBat = [];
       const addedPit = [];
+      const removedBat = [];
+      const removedPit = [];
+
+      if (opts.prune) {
+        // The window set INCLUDES the array-only players, so filtering by it drops the players the
+        // dates say are gone without touching the ones the array is the only record of.
+        const [round, week] = weekKey.split('|');
+        const keep = new Set(Object.keys(managerWeekRosterWindows(sd, mgr, round, week, idx)));
+        for (const p of wr.batters) if (!keep.has(p)) removedBat.push(p);
+        for (const p of wr.pitchers) if (!keep.has(p)) removedPit.push(p);
+        if (removedBat.length) wr.batters = wr.batters.filter((p) => keep.has(p));
+        if (removedPit.length) wr.pitchers = wr.pitchers.filter((p) => keep.has(p));
+      }
+
       for (const p of active) {
         if (batterNames.has(p) && !wr.batters.includes(p)) {
           wr.batters.push(p);
@@ -8167,8 +8300,15 @@ function rebuildRosterArraysFromDates(sd) {
           addedPit.push(p);
         }
       }
-      if (addedBat.length || addedPit.length) {
-        changes.push({ manager: mgr, week: weekKey, added_batters: addedBat, added_pitchers: addedPit });
+      if (addedBat.length || addedPit.length || removedBat.length || removedPit.length) {
+        changes.push({
+          manager: mgr,
+          week: weekKey,
+          added_batters: addedBat,
+          added_pitchers: addedPit,
+          ...(removedBat.length ? { removed_batters: removedBat } : {}),
+          ...(removedPit.length ? { removed_pitchers: removedPit } : {}),
+        });
       }
     }
   }
