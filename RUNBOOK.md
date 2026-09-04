@@ -784,6 +784,11 @@ did this change?" than 364 identical files with the one interesting day buried a
 ran and had nothing to say"** from **"it never ran"**. The first is a quiet week; the second is a
 broken scheduler.
 
+- `unchanged_runs` counts consecutive skips. A long offseason streak is the system working.
+- `last_written_date` is when a copy was last actually captured. It falls back to the newest copy on
+  disk when there is no run record yet, so it can never report `null` while a perfectly good backup
+  sits beside it.
+
 Every copy also carries **`certified_totals`** — each season's per-manager totals from
 `captureScoreSnapshot`, the same function every before/after vet in this repo uses. That is what
 makes a restored file checkable rather than merely present.

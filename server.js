@@ -1084,13 +1084,24 @@ function recordBackupRun(dateISO, writtenDate) {
       JSON.stringify({
         last_run_at: new Date().toISOString(),
         last_run_date: dateISO,
-        last_written_date: writtenDate || prior.last_written_date || null,
+        // Falls back to the newest copy ACTUALLY ON DISK when there is no prior record. Without
+        // that, the first runs after this tracking shipped reported `last_written_date: null` while
+        // a perfectly good copy sat beside them — a wrong answer to the one question the field
+        // exists to answer, and the shape that makes someone think the backup has never worked.
+        last_written_date: writtenDate || prior.last_written_date || newestBackupDate(),
         unchanged_runs: writtenDate ? 0 : (prior.unchanged_runs || 0) + 1,
       })
     );
   } catch (e) {
     console.error('[Backup] Could not record the run:', e.message);
   }
+}
+
+// The newest dated copy on disk, or null when there are none. Distinct from the run record: this is
+// what IS, that is what was last observed.
+function newestBackupDate() {
+  const dates = listBackupDates();
+  return dates.length ? dates[dates.length - 1] : null;
 }
 
 function readBackupRun() {
