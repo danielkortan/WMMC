@@ -313,6 +313,24 @@ These are always true. Apply to every session. If a task conflicts with one, fla
   a subset. That gate is the only thing standing between the archive and losing points. `POST
 /api/mlb/backfill` is the rehydrate and the ONLY path that clears the flag — it re-fetches the
   season from the MLB Stats API, which is what made dropping the rows safe in the first place.
+  Because the flag is load-bearing it is **server-authoritative in the full-season save**, like
+  `season_closed` — preserved when the server has one, deleted when it does not, on BOTH the
+  per-year and the bulk save. A browser that loaded the season before the archive ran would
+  otherwise send a payload that lands and takes the gate with it (measured, not theorised). **When
+  the commissioner archives is not a date**: `POST /api/admin/start-next-season` does it as the last
+  of three steps — create the next season, repoint `active_season`, archive the prior one at tier 4 —
+  because "not the active season" is a precondition that cannot be met any earlier. A prior season
+  that fails a precondition skips with its reason rather than blocking the new season. The chosen
+  tier costs the What If sandbox its full-league reach on an archived season, which the tab now says
+  out loud (`hypoArchiveNotice`, app.js) rather than leaving a silent empty search
+  (`OFFSEASON_ARCHIVE_PLAN.md` §7).
+
+- **The season pointer never moves by itself.** `activeSeason(db)`'s last resort is the newest season
+  that EXISTS, not `new Date().getFullYear()` — the calendar year answers only for a database with
+  no seasons at all. With no explicit `active_season` (a db restored from an older backup is how you
+  get there) the old fallback rolled the current season over at midnight on January 1st, to a year
+  with no season object: every automation resolves `sd` to undefined and bails, and nothing errors.
+  A season stays current until the commissioner starts the next one, and that is the only writer.
 
 - **Authenticating a request used to parse the whole database.** `loadManagerFromHeaders` called
   `readDB()` to read `db.managers` — a 4 KB array out of a 17.3 MB file — so every authenticated

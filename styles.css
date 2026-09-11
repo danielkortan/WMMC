@@ -6401,6 +6401,15 @@ body::before {
   color: var(--text-light);
 }
 
+/* The archived-season note takes its own row rather than trailing the banner's one-liner: it is a
+   caveat about what the tab can reach, not part of the tab's description. */
+.hypo-banner .hypo-archived-note {
+  flex-basis: 100%;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(217, 164, 65, 0.35);
+  color: var(--text);
+}
+
 .hypo-card {
   border-left: 3px solid #d9a441;
 }
