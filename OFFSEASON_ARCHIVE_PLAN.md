@@ -259,6 +259,21 @@ Three ways to take it, in order of my preference:
    ~80 KB) so leaderboards and search stay complete while per-game detail goes. More code, and it
    only half-solves it — the sandbox needs per-week granularity to score a period.
 
+> **DECIDED, 2026-09-11: option 1, at tier 4.** The commissioner's call, in his words: _"we don't
+> need the what if anymore, just the results."_ An archived season keeps what the league actually
+> goes back to — the standings, the bracket, the rosters, the swap log, the roasts and the champion
+> card, all of it exact — and stops carrying per-game lines for the ~1,600 players nobody started.
+>
+> What that costs is stated in the UI rather than left to be discovered: the What If tab shows a
+> notice on an archived season, and the Player Explorer's copy stops promising free agents it can no
+> longer find (a search that silently returns nothing reads as a bug, which is the actual failure
+> mode this replaces). Nothing about the sandbox becomes WRONG on an archived season — the roster
+> slots come from the real scoring path either way — it just reaches fewer players.
+>
+> This is reversible, and that is the point of the tier being a decision rather than a law:
+> `POST /api/mlb/backfill` re-fetches the season from the MLB Stats API and clears `sd.archived`,
+> which restores full-league fidelity for as long as MLB serves the data.
+
 **Also gone:** the score-snapshot trail (so "what did the guard see on August 12" becomes
 unanswerable — keep the final snapshot for the certified totals), and the odds history for that
 season.
@@ -267,7 +282,8 @@ season.
 
 ## 8. Rollout
 
-> **Status, 2026-09-03: built and verified. Steps 1, 3 and 5 are done.**
+> **Status, 2026-09-11: every step of this plan is now decided or done, and the archive is no
+> longer an errand anybody has to remember.**
 >
 > `POST /api/seasons/:year/archive` implements §4 exactly, including the `assert`-equal totals gate
 > that `force` cannot open, and §5's `sd.archived` hard gate on every rebuild path plus the
@@ -277,20 +293,32 @@ season.
 > rendered scoreboard is byte-identical and its screenshot hashes the same. Step 5 (R5, stat
 > retention) shipped first, so the 2027 archive should be close to a no-op.
 >
-> **Step 2 is still yours: tier 4 (the default) or tier 1.** §7 is the trade — tier 4 costs the What
-> If sandbox its full-league fidelity on archived seasons; tier 1 keeps every weekly row at 4.5 MB
-> instead of 1.82 MB. That is a league-experience call, not an engineering one.
+> **Step 2 is decided: tier 4, the default.** See the DECIDED note in §7 for the trade and what the
+> UI now says about it.
 >
-> **Step 4 — archiving 2026 — has NOT been run.** It needs `active_season` pointed at 2027 first
-> (precondition 4), which is a decision about when the next season starts.
+> **Step 4 — WHEN — is decided too, and it is not a date.** 2026 stays the current season for as
+> long as the commissioner wants it to; nothing expires, and the closed-season flag has already
+> stood the automations down. The archive runs when the commissioner starts the next season, as the
+> last step of that one button: `POST /api/admin/start-next-season` creates 2027, repoints
+> `active_season` at it, and archives the season that was active at tier 4 — in that order, because
+> "not the active season" is one of the four preconditions and cannot be satisfied any earlier. It
+> is dry-run by default and the button shows the plan (rows and MB before and after, or the reason
+> the archive is skipped) before anything is written.
+>
+> That sequencing is the fix for how this plan nearly failed: archiving was a separate chore that
+> could only run after two other chores, which is a reliable recipe for it never running at all.
+> A prior season that cannot be archived on the day — not closed, a refused correction, rollup
+> drift — skips with its reason and still lets the new season start; it can be archived later with
+> the standalone endpoint.
 
 1. **Now.** Run `scripts/season-storage-report.js` against production. Replace the estimates in §3
    with real numbers. _(Read-only, safe to run on the live disk.)_
-2. **Decide §7** — tier 2/3/4 or tier 1. It is a league-experience call, not an engineering one.
-3. **Build the endpoint** with `dryRun` first. Ship the dry run, look at the diff, then enable the
-   write. One PR each.
-4. **Archive 2026** after a dry run comes back with a zero totals diff. Then settle the backup
-   question separately (§1) — the archive alone does not get the payload under 1 MB.
+2. ~~**Decide §7** — tier 2/3/4 or tier 1.~~ **Done: tier 4.**
+3. ~~**Build the endpoint** with `dryRun` first.~~ **Done.**
+4. ~~**Archive 2026** after a dry run comes back with a zero totals diff.~~ **Scheduled by the
+   season, not by the calendar:** it happens when the commissioner clicks "Start Next Season",
+   which does the dry run, shows it, and archives 2026 at tier 4 as its last step. Then settle the
+   backup question separately (§1) — the archive alone does not get the payload under 1 MB.
 5. **Then fix it forward** — recommendation **R5** in the review stops the app from writing 85%
    dead rows in the first place, which makes the archive a tidy-up rather than a rescue. Do this
    before the 2027 draft and the 2027 archive is nearly a no-op.

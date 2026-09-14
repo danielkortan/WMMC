@@ -9,6 +9,7 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 
 | Date       | Entry                                                                                             | Where                                                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-11 | The archive got a trigger and a tier, and two ways the flag could vanish by itself                | [MEMORY](#2026-09-11-the-archive-got-a-trigger-and-a-tier-and-two-ways-the-flag-could-vanish-by-itself)                           |
 | 2026-09-03 | Closing the season-one review: eleven PRs, and four lessons worth the space                       | [MEMORY](#2026-09-03-closing-the-season-one-review-eleven-prs-and-four-lessons-worth-the-space)                                   |
 | 2026-09-02 | R1's burn-in passed, and the third copy of the scoring function                                   | [MEMORY](#2026-09-02-r1s-burn-in-passed-and-the-third-copy-of-the-scoring-function)                                               |
 | 2026-09-02 | The two halves of the 8/31 defect, and the boot that rewrote the committed seed file              | [MEMORY](#2026-09-02-the-two-halves-of-the-831-defect-and-the-boot-that-rewrote-the-committed-seed-file)                          |
@@ -111,6 +112,74 @@ Sign-In) stay here regardless of age. **Search the archive before concluding som
 | 2026-06-04 | Deployment workflow                                                                               | [MEMORY](#deployment-workflow-established-2026-06-04-updated-2026-06-05)                                                          |
 | 2026-06-04 | Git identity — run at session start                                                               | [MEMORY](#git-identity-run-at-session-start-established-2026-06-04)                                                               |
 | 2026-06-04 | Mobile CSS patterns                                                                               | [MEMORY](#mobile-css-patterns-established-2026-06-04)                                                                             |
+
+## 2026-09-11 — The archive got a trigger and a tier, and two ways the flag could vanish by itself
+
+The commissioner closed out `OFFSEASON_ARCHIVE_PLAN.md`'s two open decisions. Both were his to make
+and neither was an engineering question, but each one turned into a code change by way of a
+follow-up nobody had asked.
+
+### The decisions
+
+**Tier 4, and the What If sandbox pays for it.** In his words: _"we don't need the what if anymore,
+just the results."_ So an archived season keeps every rostered player-day and drops the per-game
+lines for the ~1,600 players nobody started — 8.6x smaller, standings byte-identical.
+
+**WHEN is not a date.** A season stays current until the commissioner starts the next one. That is
+already one button (`POST /api/admin/start-next-season`: create, repoint, archive at tier 4, in the
+only order those can happen in), so there was nothing to build — which is the whole point of having
+built it that way. The plan's §7 and §8 now record both decisions instead of asking.
+
+### The UI has to say what it lost, or the loss reads as a bug
+
+§7's recommended option was "accept it **and say so in the UI**", and only the first half had
+shipped. The What If tab's Player Explorer promised "anyone who recorded a stat this season — they
+don't have to have been on anyone's roster", which stops being true the moment a season is archived.
+A manager searching a free agent would have got an empty result and no reason for it.
+
+The tab now shows an archived notice and the Explorer's copy changes. Nothing about the sandbox
+becomes WRONG on an archived season — the roster slots come from the real scoring path either way —
+it just reaches fewer players, and that is a sentence, not a defect.
+
+### `sd.archived` was the one unguarded field in a family of guarded ones
+
+`CLAUDE.md` says the gate is "the only thing standing between the archive and losing points". It was
+not in the full-season save's server-authoritative list, alongside `season_closed`, `correction_flags`
+and `rollup_drift` — all of which are there for the same stale-tab reason.
+
+Measured rather than argued, with an `origin/main` server running beside the patched one on another
+port: a save whose payload omits `archived` **lands, and takes the flag with it**. A browser that
+loaded the season before the commissioner archived carries exactly that payload. With the flag gone
+`rebuild-weeklies`, `recompute-scores`, `apply-corrections`, the MLB sync and `/reopen` all unlock,
+and the next one recomputes the standings from daily rows that are deliberately a subset.
+
+The bulk `POST /api/seasons` got the same treatment, where it is sharper still: that path already
+restores the stored daily rows, so dropping the flag while putting the subset back leaves a season
+that looks complete with its gate off.
+
+**The lesson is the one R4 and the seed-file clobber already taught, a third time: when a field joins
+a family that has a rule, it does not inherit the rule.** Four fields were listed in that save block
+with near-identical comments. The fifth was written eight days later and nobody looked at the list.
+
+### A pointer that moves on January 1st
+
+Chasing "the season stays current until the button", the last-resort branch of `activeSeason` was
+`new Date().getFullYear()`. With no explicit pointer — a db restored from an older backup is the
+documented way to get there — the current season would change by itself at midnight on New Year's,
+to a year with no season object. Every automation resolves `sd` to undefined and bails, and nothing
+errors.
+
+Confirmed the same way, two servers side by side with only season 2025 present and no pointer:
+`main` answers "2026", this branch answers "2025". The fallback is now the newest season that
+EXISTS; the calendar year only answers for a database with no seasons at all, which is a first boot.
+
+### Method note: `pkill -f 'node server.js'` kills the shell that runs it
+
+Three times. The pattern matches the agent's own command line, which contains the string. It also
+cost a wrong answer before it cost a shell: a control server that never bound its port (EADDRINUSE,
+silent in the background) left the PATCHED server answering the "before" test, which reported the
+bug as already fixed. **A/B against a second port and a separate directory, never against the same
+port and a `git stash`.**
 
 ## 2026-09-03 — Closing the season-one review: eleven PRs, and four lessons worth the space
 

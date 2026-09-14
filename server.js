@@ -1686,10 +1686,22 @@ app.get('/api/admin/repair-usage', requireCommissioner, (req, res) => {
 // value across on boot, but a db restored from an older Upstash backup would arrive without
 // `active_season`, and falling back keeps that instance pointing at the right season instead of
 // silently jumping to the current calendar year.
+//
+// The LAST resort used to be the calendar year, which quietly made the pointer move on its own
+// every January 1st. A season stays current until the commissioner starts the next one — that is
+// the whole contract of the "Start Next Season" button, and it is what lets a closed season sit
+// there being read all winter. A pointer that rolls over by itself breaks it in the least visible
+// way available: it names a season that does not exist, every automation resolves `sd` to undefined
+// and bails, and nothing errors. So the fall-back-of-last-resort is now the newest season that
+// actually EXISTS, and the calendar year only answers for a database with no seasons at all, which
+// is a first boot.
 function activeSeason(db) {
-  return (
-    (db && db.active_season) || ((db && db.google_sheets_config) || {}).season || new Date().getFullYear().toString()
-  );
+  const explicit = (db && db.active_season) || ((db && db.google_sheets_config) || {}).season;
+  if (explicit) return String(explicit);
+  const years = Object.keys((db && db.seasons) || {})
+    .map(Number)
+    .filter((n) => !Number.isNaN(n));
+  return years.length ? String(Math.max(...years)) : new Date().getFullYear().toString();
 }
 
 // One-shot: lift the pointer out of google_sheets_config. Idempotent — it only writes when
@@ -2065,12 +2077,19 @@ app.post('/api/seasons', requireCommissioner, (req, res) => {
   // score_snapshots and daily rows are server-authoritative (see the per-year save) — carry each
   // stored season's copies through a bulk replace too, so even a forced replace can't blind the
   // swing guard or destroy the per-game stat history the weekly rebuild derives from.
+  //
+  // `archived` rides along for a sharper reason: this loop restores the stored daily rows, and on
+  // an archived season those are deliberately a subset. Dropping the flag while putting the subset
+  // back would leave the season looking complete with the gate off, which is precisely the state
+  // that lets a later rebuild recompute the standings from truncated data.
   for (const [year, sdy] of Object.entries(seasons)) {
     const existing = (db.seasons || {})[year];
     if (existing && sdy && typeof sdy === 'object') {
       sdy.score_snapshots = existing.score_snapshots || [];
       sdy.daily_batting = existing.daily_batting || [];
       sdy.daily_pitching = existing.daily_pitching || [];
+      if (existing.archived) sdy.archived = existing.archived;
+      else delete sdy.archived;
     }
   }
   addAuditEntry(db, 'seasons_save_all', { seasonCount: Object.keys(seasons).length }, req.get('X-User-Email'));
@@ -2312,6 +2331,19 @@ app.post('/api/seasons/:year', requireAuth, (req, res) => {
     // carrying an old copy cannot undo a reopen either.
     if (existingSd.season_closed) sd.season_closed = existingSd.season_closed;
     else delete sd.season_closed;
+
+    // The archive stamp is the same family and the most load-bearing of them: `sd.archived` is the
+    // hard gate that makes rebuild-weeklies, recompute-scores, apply-corrections, the MLB sync and
+    // /reopen refuse to run. Those rebuild the standings from the daily rows, and on an archived
+    // season the daily rows are deliberately a SUBSET — every rostered player-day and nothing else.
+    // With the flag gone the gate opens and the next rebuild recomputes the season from truncated
+    // data, which is the one way the compaction can lose points (OFFSEASON_ARCHIVE_PLAN.md §5). A
+    // browser whose season was loaded before the commissioner archived would carry exactly that
+    // wipe. Written only by POST .../archive and cleared only by a successful POST /api/mlb/backfill
+    // rehydrate, so — like season_closed — the server's copy always wins, and its absence is a
+    // delete rather than a merge so a stale payload cannot un-rehydrate a backfilled season either.
+    if (existingSd.archived) sd.archived = existingSd.archived;
+    else delete sd.archived;
 
     // Elimination roasts are written server-side by /generate-roast while the client's
     // full-season save (fired at "End Pool Play") may still be in flight carrying a copy

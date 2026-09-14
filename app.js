@@ -18293,16 +18293,34 @@ function wireExplorerControls(container, snapshot) {
   });
 }
 
+// An archived season's per-game rows are a subset: every player-day somebody rostered, and nothing
+// else (OFFSEASON_ARCHIVE_PLAN.md §7). Everything the sandbox says about a roster stays exact —
+// the slots come from the real scoring path either way — but the universe it can reach shrinks to
+// players somebody actually held. Say so rather than let the Player Explorer keep promising a
+// free agent it can no longer find: a search that silently returns nothing reads as a bug.
+function hypoArchiveNotice() {
+  const sd = (getSeasons() || {})[SELECTED_SEASON] || {};
+  return sd.archived || null;
+}
+
 function renderWhatIf() {
   const container = document.getElementById('whatif-content');
   if (!container) return;
 
   const keys = scoringKeys();
+  const archived = hypoArchiveNotice();
 
   container.innerHTML = `
     <div class="hypo-banner">
       <strong>Hypothetical Zone</strong>
       <span>Nothing here touches league data. Change the numbers, see what would have happened.</span>
+      ${
+        archived
+          ? `<span class="hypo-archived-note">${esc(String(SELECTED_SEASON))} is archived &mdash; What If covers players
+             somebody rostered that season. Every roster, score and standing is exact; free agents
+             nobody started are no longer stored.</span>`
+          : ''
+      }
     </div>
 
     <div class="card hypo-card">
@@ -18348,9 +18366,15 @@ function renderWhatIf() {
         <h2>Player Explorer</h2>
       </div>
       <p class="upload-hint">
-        Look up anyone who recorded a stat this season &mdash; they don't have to have been on
-        anyone's roster. See what they were worth, what they'd be worth under your scoring, and who
-        actually had them.
+        ${
+          archived
+            ? `Look up anyone somebody rostered in ${esc(String(SELECTED_SEASON))}. See what they were worth, what
+               they'd be worth under your scoring, and who actually had them. Free agents are not
+               searchable for an archived season.`
+            : `Look up anyone who recorded a stat this season &mdash; they don't have to have been on
+               anyone's roster. See what they were worth, what they'd be worth under your scoring, and
+               who actually had them.`
+        }
       </p>
       <div id="whatif-explorer"></div>
     </div>
