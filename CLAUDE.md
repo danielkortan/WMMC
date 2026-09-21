@@ -96,6 +96,31 @@ These are always true. Apply to every session. If a task conflicts with one, fla
 - Do not merge your own PR unless explicitly told to — opening it is the deliverable; merging is the maintainer's call. **Exception: docs-only PRs** (`MEMORY.md`, `ERRORS.md`, `README.md`, `RUNBOOK.md`, the `*_PLAN.md` files — no code, no config) — merge those yourself once `check` is green, no need to ask. Anything that touches `server.js`, `app.js`, `js/`, `styles.css`, `index.html`, `render.yaml` or `package.json` still waits for the maintainer, because merging deploys it.
 - **`main` is protected.** Merging requires the **`check`** status check (the job in `.github/workflows/ci.yml` — tests + lint + format) to pass, and the PR branch must be up to date with `main` first. If `main` moves while a PR is open, merge/rebase `main` into the branch before the merge button enables. If you ever rename the CI job, update the required-check name in the branch protection rule to match, or merges will block on a check that never reports.
 
+### Watching a PR costs tokens — poll like it does
+
+Watching an open PR is a webhook subscription plus, optionally, a scheduled check-in. **The
+subscription is the part that works**; the check-in is a fallback for the events webhooks drop
+(CI success, a new push, a merge-conflict transition). Waiting for the maintainer to press merge
+is NOT one of those — that event arrives reliably, so a green PR needs no poll at all.
+
+This is written down because a session burned **~590K tokens — 6× what the change itself cost —
+on ~40 hourly check-ins of a PR that was green, mergeable and had no review threads**, and the
+merge was reported by the webhook anyway. Three things made each poll expensive and they compound:
+`pull_request_read method:get` returns the PR's whole body every time, every scheduled firing
+re-injects the full tool and skills preamble, and none of it was telling anyone anything.
+
+So:
+
+- **Green + mergeable + no open threads + waiting on a human → do not arm a check-in.** Say the PR
+  is parked on the maintainer and stop. The subscription will wake the session when it merges.
+- **Arm one only for machine state in flight** — a CI run that has not reported, a conflict to
+  resolve, a review to answer.
+- **Back off**: 1h, then 4h, 12h, daily. Never a flat hourly loop.
+- **Poll with the cheap call.** `get_status` or `get_check_runs`, or `minimal_output: true` — never
+  a full `get` whose body you wrote yourself and have already read.
+- **Stop after five no-change checks.** Tell the maintainer it is waiting on them; let them restart
+  the watch if they want it.
+
 ## Conventions and patterns
 
 - **Error handling:** Route handlers return `{ error: '...' }` JSON with an appropriate HTTP status code. Never swallow errors silently.
